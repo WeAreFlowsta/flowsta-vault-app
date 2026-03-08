@@ -55,8 +55,8 @@ jobs:
 
       - name: Build Holochain binaries
         run: |
-          cargo install holochain --version 0.6.0 --locked --features db-encryption
-          cargo install lair-keystore --version 0.6.3 --locked
+          cargo install holochain --version 0.6.0 --locked
+          cargo install lair_keystore --version 0.6.3 --locked
 
       - name: Place Holochain binaries (Unix)
         if: runner.os != 'Windows'
