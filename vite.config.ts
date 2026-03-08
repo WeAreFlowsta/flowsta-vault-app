@@ -1,4 +1,4 @@
-import { defineConfig, type UserConfig } from "vite";
+import { defineConfig, loadEnv, type UserConfig } from "vite";
 import { qwikVite } from "@builder.io/qwik/optimizer";
 import { qwikCity } from "@builder.io/qwik-city/vite";
 import tsconfigPaths from "vite-tsconfig-paths";
@@ -7,7 +7,8 @@ import tailwindcss from "@tailwindcss/vite";
 // Tauri expects a fixed port
 const TAURI_DEV_PORT = 5173;
 
-export default defineConfig((): UserConfig => {
+export default defineConfig(({ mode }): UserConfig => {
+  const env = loadEnv(mode, process.cwd(), "VITE_");
   return {
     plugins: [
       qwikCity(),
@@ -31,10 +32,10 @@ export default defineConfig((): UserConfig => {
         process.env.npm_package_version ?? "0.1.0"
       ),
       __API_URL__: JSON.stringify(
-        process.env.VITE_API_URL ?? "https://auth-api.flowsta.com"
+        env.VITE_API_URL ?? "https://auth-api.flowsta.com"
       ),
       __WEB_URL__: JSON.stringify(
-        process.env.VITE_WEB_URL ?? "https://flowsta.com"
+        env.VITE_WEB_URL ?? "https://flowsta.com"
       ),
     },
     // Tauri needs the build output to be a SPA (no SSR)

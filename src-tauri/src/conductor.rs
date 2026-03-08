@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use tauri::Emitter;
 
-/// Default admin WebSocket port for the conductor.
-/// Using a fixed port avoids the complexity of port detection from stdout.
-const ADMIN_WS_PORT: u16 = 4455;
+/// Candidate admin WebSocket ports for the conductor.
+/// Tries each in order — allows staging and production vaults to coexist.
+const ADMIN_WS_PORTS: &[u16] = &[4455, 4456, 4457];
 
 /// Handle to a running conductor + lair-keystore pair.
 /// Drop this to stop both processes.
@@ -55,6 +55,26 @@ pub enum ConductorStatus {
     Ready { admin_port: u16 },
     #[serde(rename = "error")]
     Error { message: String },
+}
+
+/// Find an available admin WS port from the candidate list.
+fn find_available_admin_port() -> Result<u16, String> {
+    for &port in ADMIN_WS_PORTS {
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(_listener) => {
+                // Port is free — listener is dropped here, freeing the port for the conductor.
+                log::info!("Using admin WS port {}", port);
+                return Ok(port);
+            }
+            Err(_) => {
+                log::info!("Admin WS port {} in use, trying next", port);
+            }
+        }
+    }
+    Err(format!(
+        "All admin WS ports ({:?}) are unavailable",
+        ADMIN_WS_PORTS
+    ))
 }
 
 /// Generate conductor-config.yaml for the desktop app.
@@ -318,7 +338,11 @@ pub async fn start_holochain(
         message: "Starting Holochain conductor...".into(),
     });
     let conductor_dir = data_dir.join("conductor");
-    let config_path = match generate_conductor_config(&conductor_dir, &connection_url, ADMIN_WS_PORT)
+    let admin_port = match find_available_admin_port() {
+        Ok(p) => p,
+        Err(e) => fail_with_lair_cleanup!(e),
+    };
+    let config_path = match generate_conductor_config(&conductor_dir, &connection_url, admin_port)
     {
         Ok(p) => p,
         Err(e) => fail_with_lair_cleanup!(e),
@@ -335,7 +359,7 @@ pub async fn start_holochain(
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
         message: "Waiting for conductor...".into(),
     });
-    if let Err(e) = wait_for_admin_ws(ADMIN_WS_PORT, 30, &mut conductor_child, &conductor_dir).await {
+    if let Err(e) = wait_for_admin_ws(admin_port, 30, &mut conductor_child, &conductor_dir).await {
         let _ = conductor_child.kill();
         let _ = conductor_child.wait();
         fail_with_lair_cleanup!(e);
@@ -354,7 +378,7 @@ pub async fn start_holochain(
             fail_with_lair_cleanup!($err);
         }};
     }
-    let installed_dnas = match dna::install_dnas(ADMIN_WS_PORT, &resource_dir, agent_pub_key).await {
+    let installed_dnas = match dna::install_dnas(admin_port, &resource_dir, agent_pub_key).await {
         Ok(d) => d,
         Err(e) => fail_with_full_cleanup!(format!("DNA installation failed: {}", e)),
     };
@@ -368,22 +392,22 @@ pub async fn start_holochain(
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
         message: "Setting up app interface...".into(),
     });
-    let app_port = match dna::setup_app_interface(ADMIN_WS_PORT).await {
+    let app_port = match dna::setup_app_interface(admin_port).await {
         Ok(p) => p,
         Err(e) => fail_with_full_cleanup!(format!("App interface setup failed: {}", e)),
     };
 
     // 10. Emit ready status.
     let _ = app_handle.emit("conductor-status", ConductorStatus::Ready {
-        admin_port: ADMIN_WS_PORT,
+        admin_port: admin_port,
     });
-    log::info!("Holochain conductor ready (admin: {}, app: {})", ADMIN_WS_PORT, app_port);
+    log::info!("Holochain conductor ready (admin: {}, app: {})", admin_port, app_port);
 
     Ok(ConductorHandle {
         lair_child,
         conductor_child,
         lair_client,
-        admin_port: ADMIN_WS_PORT,
+        admin_port: admin_port,
         app_port,
         seed_info,
     })

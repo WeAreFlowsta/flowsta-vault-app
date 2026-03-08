@@ -741,7 +741,8 @@ pub async fn verify_phrase_matches_web_key(
         .await
         .map_err(|e| format!("Failed to reach API: {}", e))?;
 
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if !status.is_success() {
         // 404 = phrase doesn't match any account
         return Ok(false);
     }
@@ -753,7 +754,7 @@ pub async fn verify_phrase_matches_web_key(
         .map_err(|e| format!("Invalid API response: {}", e))?;
 
     match body.agent_pub_key {
-        Some(key) => Ok(key == expected_web_agent_key),
+        Some(ref key) => Ok(key == &expected_web_agent_key),
         None => Ok(false),
     }
 }
