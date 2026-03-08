@@ -81,6 +81,27 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          cache-on-failure: true
+
+      - name: Build Holochain binaries
+        run: |
+          cargo install holochain --version 0.6.0 --locked --features db-encryption
+          cargo install lair-keystore --version 0.6.3 --locked
+
+      - name: Place Holochain binaries (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p src-tauri/binaries
+          cp "$(which holochain)" "src-tauri/binaries/holochain-${{ matrix.target }}"
+          cp "$(which lair-keystore)" "src-tauri/binaries/lair-keystore-${{ matrix.target }}"
+
+      - name: Place Holochain binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries
+          Copy-Item "$(Get-Command holochain).Source" "src-tauri/binaries/holochain-${{ matrix.target }}.exe"
+          Copy-Item "$(Get-Command lair-keystore).Source" "src-tauri/binaries/lair-keystore-${{ matrix.target }}.exe"
 
       - name: Install frontend dependencies
         run: npm install
@@ -89,8 +110,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Production URLs are the defaults — no env vars needed
-          # macOS signing
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
