@@ -70,8 +70,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path src-tauri/binaries
-          Copy-Item "$(Get-Command holochain).Source" "src-tauri/binaries/holochain-${{ matrix.target }}.exe"
-          Copy-Item "$(Get-Command lair-keystore).Source" "src-tauri/binaries/lair-keystore-${{ matrix.target }}.exe"
+          $hc = (Get-Command holochain).Source
+          $lair = (Get-Command lair-keystore).Source
+          Copy-Item $hc "src-tauri/binaries/holochain-${{ matrix.target }}.exe"
+          Copy-Item $lair "src-tauri/binaries/lair-keystore-${{ matrix.target }}.exe"
 
       - name: Install frontend dependencies
         run: npm install
@@ -85,12 +87,7 @@ jobs:
           FLOWSTA_SIGNAL_URL: ${{ vars.STAGING_SIGNAL_URL }}
           VITE_API_URL: ${{ vars.STAGING_API_URL }}
           VITE_WEB_URL: ${{ vars.STAGING_WEB_URL }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: "-"
         with:
           args: --target ${{ matrix.target }}
 
