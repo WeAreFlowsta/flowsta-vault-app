@@ -89,7 +89,7 @@ jobs:
           VITE_WEB_URL: ${{ vars.STAGING_WEB_URL }}
           APPLE_SIGNING_IDENTITY: "-"
         with:
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --config '{"identifier":"com.flowsta.vault.staging","productName":"Flowsta Vault (Staging)"}'
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
