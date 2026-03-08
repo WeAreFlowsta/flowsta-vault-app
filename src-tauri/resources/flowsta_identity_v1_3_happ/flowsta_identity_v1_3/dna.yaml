@@ -1,0 +1,35 @@
+manifest_version: '0'
+name: flowsta_identity_v1_3
+integrity:
+  network_seed: flowsta-identity-network-v1.3
+  properties: null
+  zomes:
+  - name: users_integrity
+    hash: null
+    path: users_integrity.wasm
+    dependencies: []
+  - name: sites_integrity
+    hash: null
+    path: sites_integrity.wasm
+    dependencies: []
+  - name: agent_linking_integrity
+    hash: null
+    path: agent_linking_integrity.wasm
+    dependencies: []
+coordinator:
+  zomes:
+  - name: users
+    hash: null
+    path: users_coordinator.wasm
+    dependencies:
+    - name: users_integrity
+  - name: sites
+    hash: null
+    path: sites_coordinator.wasm
+    dependencies:
+    - name: sites_integrity
+  - name: agent_linking
+    hash: null
+    path: agent_linking_coordinator.wasm
+    dependencies:
+    - name: agent_linking_integrity

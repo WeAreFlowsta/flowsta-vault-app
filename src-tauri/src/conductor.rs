@@ -1,0 +1,390 @@
+//! Holochain conductor lifecycle management.
+//!
+//! Manages the full startup sequence: lair-keystore → conductor → connect → install DNAs.
+//! The conductor starts on vault unlock and stops on vault lock.
+
+use crate::{dna, lair};
+use lair_keystore_api::prelude::*;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Stdio};
+use tauri::Emitter;
+
+/// Default admin WebSocket port for the conductor.
+/// Using a fixed port avoids the complexity of port detection from stdout.
+const ADMIN_WS_PORT: u16 = 4455;
+
+/// Handle to a running conductor + lair-keystore pair.
+/// Drop this to stop both processes.
+pub struct ConductorHandle {
+    pub lair_child: Child,
+    pub conductor_child: Child,
+    pub lair_client: LairClient,
+    pub admin_port: u16,
+    pub app_port: u16,
+    pub seed_info: SeedInfo,
+}
+
+impl ConductorHandle {
+    /// Graceful shutdown of conductor + lair.
+    pub fn shutdown(mut self) {
+        log::info!("Shutting down conductor...");
+        if let Err(e) = self.conductor_child.kill() {
+            log::warn!("Failed to kill conductor process: {}", e);
+        }
+        let _ = self.conductor_child.wait();
+
+        log::info!("Shutting down lair-keystore...");
+        if let Err(e) = self.lair_child.kill() {
+            log::warn!("Failed to kill lair-keystore process: {}", e);
+        }
+        let _ = self.lair_child.wait();
+
+        log::info!("Conductor and lair-keystore stopped");
+    }
+}
+
+/// Conductor status reported to the frontend.
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "status")]
+pub enum ConductorStatus {
+    #[serde(rename = "stopped")]
+    Stopped,
+    #[serde(rename = "starting")]
+    Starting { message: String },
+    #[serde(rename = "ready")]
+    Ready { admin_port: u16 },
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
+/// Generate conductor-config.yaml for the desktop app.
+///
+/// Uses the Holochain 0.6.0 config format with data_root_path, bootstrap_url, signal_url.
+/// Uses the lair connection URL for keystore integration.
+pub fn generate_conductor_config(
+    conductor_dir: &Path,
+    lair_connection_url: &str,
+    admin_port: u16,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(conductor_dir)
+        .map_err(|e| format!("Failed to create conductor directory: {}", e))?;
+
+    // Holochain 0.6.0 config format — uses data_root_path (replaces environment_path + db_dir).
+    // Bootstrap/signal URLs default to production. Override at compile time for staging/dev.
+    let bootstrap_url = option_env!("FLOWSTA_BOOTSTRAP_URL")
+        .unwrap_or("https://bootstrap.flowsta.com");
+    let signal_url = option_env!("FLOWSTA_SIGNAL_URL")
+        .unwrap_or("wss://bootstrap.flowsta.com");
+
+    let config = format!(
+        r#"data_root_path: {data_root}
+keystore:
+  type: lair_server
+  connection_url: "{lair_url}"
+admin_interfaces:
+- driver:
+    type: websocket
+    port: {admin_port}
+    allowed_origins: '*'
+network:
+  bootstrap_url: {bootstrap_url}
+  signal_url: {signal_url}
+db_sync_strategy: Resilient
+"#,
+        data_root = conductor_dir.display(),
+        admin_port = admin_port,
+        lair_url = lair_connection_url,
+        bootstrap_url = bootstrap_url,
+        signal_url = signal_url,
+    );
+
+    let config_path = conductor_dir.join("conductor-config.yaml");
+    std::fs::write(&config_path, &config)
+        .map_err(|e| format!("Failed to write conductor config: {}", e))?;
+
+    log::info!("Conductor config written to {:?}", config_path);
+    Ok(config_path)
+}
+
+/// Start the holochain conductor process.
+///
+/// Redirects stdout/stderr to log files to avoid pipe buffer deadlocks.
+/// After spawning, briefly checks if the process exited immediately (e.g. config error)
+/// and reads the log file for a useful error message.
+pub fn start_conductor_process(
+    config_path: &Path,
+    conductor_dir: &Path,
+    passphrase: &str,
+) -> Result<Child, String> {
+    log::info!("Starting holochain conductor...");
+
+    let stdout_path = conductor_dir.join("holochain-stdout.log");
+    let stderr_path = conductor_dir.join("holochain-stderr.log");
+
+    let stdout_file = std::fs::File::create(&stdout_path)
+        .map_err(|e| format!("Failed to create conductor stdout log: {}", e))?;
+    let stderr_file = std::fs::File::create(&stderr_path)
+        .map_err(|e| format!("Failed to create conductor stderr log: {}", e))?;
+
+    let mut child = std::process::Command::new("holochain")
+        .arg("-c")
+        .arg(config_path)
+        .arg("--piped")
+        .stdin(Stdio::piped())
+        .stdout(stdout_file)
+        .stderr(stderr_file)
+        .spawn()
+        .map_err(|e| format!("Failed to spawn holochain conductor: {}", e))?;
+
+    // Pipe the passphrase for lair authentication.
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin
+            .write_all(format!("{}\n", passphrase).as_bytes())
+            .map_err(|e| format!("Failed to write passphrase to conductor: {}", e))?;
+    }
+
+    log::info!("Holochain conductor started (pid {})", child.id());
+
+    // Give the process a moment to fail on config errors, then check if it's still alive.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let output = read_conductor_logs(conductor_dir);
+            Err(format!(
+                "Holochain conductor exited immediately (status {}): {}",
+                status, output.trim()
+            ))
+        }
+        Ok(None) => Ok(child), // Still running — good
+        Err(e) => Err(format!("Failed to check conductor process status: {}", e)),
+    }
+}
+
+/// Read conductor log files (stderr first, then stdout) for error diagnostics.
+/// Returns the first 500 chars of the most useful output.
+fn read_conductor_logs(conductor_dir: &Path) -> String {
+    let stderr_path = conductor_dir.join("holochain-stderr.log");
+    let stdout_path = conductor_dir.join("holochain-stdout.log");
+
+    let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    let stdout = std::fs::read_to_string(&stdout_path).unwrap_or_default();
+
+    let output = if !stderr.is_empty() { stderr } else { stdout };
+    if output.len() > 500 {
+        format!("{}...", &output[..500])
+    } else {
+        output
+    }
+}
+
+/// Wait for the conductor admin WebSocket to be ready.
+/// Also monitors the conductor process — if it exits during the wait,
+/// reads log files and returns immediately with the actual error.
+async fn wait_for_admin_ws(
+    port: u16,
+    timeout_secs: u64,
+    conductor_child: &mut Child,
+    conductor_dir: &Path,
+) -> Result<(), String> {
+    let url = format!("ws://localhost:{}", port);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut attempt = 0;
+
+    while std::time::Instant::now() < deadline {
+        attempt += 1;
+
+        // Check if conductor process is still alive.
+        match conductor_child.try_wait() {
+            Ok(Some(status)) => {
+                let output = read_conductor_logs(conductor_dir);
+                return Err(format!(
+                    "Conductor exited during startup (status {}): {}",
+                    status,
+                    output.trim()
+                ));
+            }
+            Ok(None) => {} // Still running — continue waiting
+            Err(e) => {
+                return Err(format!("Failed to check conductor process: {}", e));
+            }
+        }
+
+        match tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+            Ok(_) => {
+                log::info!(
+                    "Conductor admin WS ready on port {} (attempt {})",
+                    port,
+                    attempt
+                );
+                return Ok(());
+            }
+            Err(_) => {
+                if attempt <= 3 {
+                    log::info!(
+                        "Waiting for conductor admin WS on {} (attempt {})...",
+                        url,
+                        attempt
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+
+    // Timed out — grab whatever logs exist for diagnostics.
+    let output = read_conductor_logs(conductor_dir);
+    if !output.trim().is_empty() {
+        Err(format!(
+            "Conductor not ready after {}s (port {}). Logs: {}",
+            timeout_secs, port, output.trim()
+        ))
+    } else {
+        Err(format!(
+            "Conductor admin WS not ready after {}s on port {}",
+            timeout_secs, port
+        ))
+    }
+}
+
+/// Full startup sequence: lair → seed import → conductor → connect → install DNAs.
+///
+/// Called after vault unlock. Runs in a background task.
+/// Emits Tauri events for frontend status updates.
+pub async fn start_holochain(
+    app_handle: tauri::AppHandle,
+    data_dir: PathBuf,
+    resource_dir: PathBuf,
+    passphrase: String,
+    device_seed: [u8; 32],
+) -> Result<ConductorHandle, String> {
+    // Emit status: starting lair
+    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+        message: "Starting lair-keystore...".into(),
+    });
+
+    // 1. Start lair-keystore process.
+    let lair_dir = data_dir.join("lair");
+    let (mut lair_child, connection_url) = lair::start_lair_process(&lair_dir, &passphrase)?;
+
+    // Helper: kill lair on error so we don't leak orphan processes.
+    // Dropping a Child in Rust does NOT kill the process.
+    macro_rules! fail_with_lair_cleanup {
+        ($err:expr) => {{
+            log::warn!("Killing lair-keystore (pid {}) due to startup failure", lair_child.id());
+            let _ = lair_child.kill();
+            let _ = lair_child.wait();
+            return Err($err);
+        }};
+    }
+
+    // 2. Wait for lair socket to be ready.
+    if let Err(e) = lair::wait_for_lair_socket(&connection_url, 15).await {
+        fail_with_lair_cleanup!(e);
+    }
+
+    // 3. Connect to lair.
+    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+        message: "Connecting to lair-keystore...".into(),
+    });
+    let lair_client = match lair::connect_to_lair(&connection_url, &passphrase).await {
+        Ok(c) => c,
+        Err(e) => fail_with_lair_cleanup!(e),
+    };
+    log::info!("Connected to lair-keystore");
+
+    // 4. Import device seed (if not already imported).
+    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+        message: "Importing device key...".into(),
+    });
+    let seed_info = match lair::import_seed_to_lair(&lair_client, &device_seed, "flowsta-device-1")
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => fail_with_lair_cleanup!(format!("Failed to import device seed into lair: {}", e)),
+    };
+    let pub_key_hex = hex::encode(&*seed_info.ed25519_pub_key.0);
+    log::info!("Device seed imported, pub key: {}", pub_key_hex);
+
+    // Convert lair Ed25519 pub key → Holochain AgentPubKey for DNA installation.
+    // This ensures the conductor uses our deterministic identity (from the mnemonic)
+    // rather than a random key from generate_agent_pub_key().
+    let agent_pub_key = holochain_types::prelude::AgentPubKey::from_raw_32(
+        seed_info.ed25519_pub_key.0.to_vec(),
+    );
+
+    // 5. Generate conductor config.
+    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+        message: "Starting Holochain conductor...".into(),
+    });
+    let conductor_dir = data_dir.join("conductor");
+    let config_path = match generate_conductor_config(&conductor_dir, &connection_url, ADMIN_WS_PORT)
+    {
+        Ok(p) => p,
+        Err(e) => fail_with_lair_cleanup!(e),
+    };
+
+    // 6. Start conductor process (needs passphrase for lair authentication via --piped).
+    let mut conductor_child = match start_conductor_process(&config_path, &conductor_dir, &passphrase) {
+        Ok(c) => c,
+        Err(e) => fail_with_lair_cleanup!(e),
+    };
+
+    // 7. Wait for admin WebSocket to be ready (conductor takes 5-15s).
+    //    Also monitors the conductor process — returns immediately with log output if it dies.
+    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+        message: "Waiting for conductor...".into(),
+    });
+    if let Err(e) = wait_for_admin_ws(ADMIN_WS_PORT, 30, &mut conductor_child, &conductor_dir).await {
+        let _ = conductor_child.kill();
+        let _ = conductor_child.wait();
+        fail_with_lair_cleanup!(e);
+    }
+
+    // 8. Install Flowsta DNAs (idempotent — skips if already installed).
+    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+        message: "Installing DNAs...".into(),
+    });
+    // Helper: kill both processes on DNA install failure.
+    macro_rules! fail_with_full_cleanup {
+        ($err:expr) => {{
+            log::warn!("Killing conductor + lair due to DNA install failure");
+            let _ = conductor_child.kill();
+            let _ = conductor_child.wait();
+            fail_with_lair_cleanup!($err);
+        }};
+    }
+    let installed_dnas = match dna::install_dnas(ADMIN_WS_PORT, &resource_dir, agent_pub_key).await {
+        Ok(d) => d,
+        Err(e) => fail_with_full_cleanup!(format!("DNA installation failed: {}", e)),
+    };
+    log::info!(
+        "DNAs installed: private={}, identity={}",
+        installed_dnas.private_app_id,
+        installed_dnas.identity_app_id,
+    );
+
+    // 9. Attach app interface for zome calls (e.g. pairing code generation).
+    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+        message: "Setting up app interface...".into(),
+    });
+    let app_port = match dna::setup_app_interface(ADMIN_WS_PORT).await {
+        Ok(p) => p,
+        Err(e) => fail_with_full_cleanup!(format!("App interface setup failed: {}", e)),
+    };
+
+    // 10. Emit ready status.
+    let _ = app_handle.emit("conductor-status", ConductorStatus::Ready {
+        admin_port: ADMIN_WS_PORT,
+    });
+    log::info!("Holochain conductor ready (admin: {}, app: {})", ADMIN_WS_PORT, app_port);
+
+    Ok(ConductorHandle {
+        lair_child,
+        conductor_child,
+        lair_client,
+        admin_port: ADMIN_WS_PORT,
+        app_port,
+        seed_info,
+    })
+}

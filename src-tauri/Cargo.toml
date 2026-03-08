@@ -1,0 +1,67 @@
+[package]
+name = "flowsta-vault"
+version = "0.1.0"
+description = "Flowsta Vault - Desktop identity manager powered by Holochain"
+authors = ["Flowsta"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.4", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.10.0", features = ["tray-icon", "image-png"] }
+tauri-plugin-log = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
+tokio = { version = "1", features = ["full"] }
+
+# Key derivation (port of api/src/services/recoveryPhrase.js)
+bip39 = { version = "2", features = ["default"] }
+hmac = "0.12"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+# Master password vault encryption
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
+
+# Encoding
+hex = "0.4"
+
+# DHT location computation (matches Holochain's holo_hash crate)
+blake2 = "0.10"
+
+# MessagePack serialization (matches Holochain's verify_signature encoding)
+rmp-serde = "1.3"
+
+# HTTP client for API calls
+reqwest = { version = "0.12", features = ["json"] }
+
+# IPC server (localhost:27777 for SDK bridge)
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Lair keystore client API (seed import + signing via lair)
+lair_keystore_api = "0.6"
+
+# Holochain conductor client (AdminWebsocket for DNA install + AppWebsocket for zome calls)
+# Conductor 0.6.x → Rust client 0.8.x (matches holochain_conductor_api 0.6.0)
+holochain_client = { version = "0.8.0", default-features = false }
+holochain_types = "0.6"
+
+# Save dialog
+tauri-plugin-dialog = "2"
+
+# Error handling
+thiserror = "1.0"
