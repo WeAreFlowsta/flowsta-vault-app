@@ -1,7 +1,7 @@
 import { component$, useSignal, useStore, useVisibleTask$, useContextProvider, $, Slot } from "@builder.io/qwik";
 import { useLocation, Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { SetupWizard } from "~/components/vault/SetupWizard";
 import { UnlockScreen } from "~/components/vault/UnlockScreen";
 import { StatusIndicator } from "~/components/vault/StatusIndicator";
@@ -50,6 +50,11 @@ export default component$(() => {
     id: string;
     app_name: string;
     origin: string | null;
+    organization_name: string | null;
+    scopes: string[];
+    description: string | null;
+    logo_url: string | null;
+    replacing_existing: boolean;
   } | null>(null);
 
   // Fetch profile from unlocked vault for header display
@@ -258,6 +263,8 @@ export default component$(() => {
   // Check vault status on mount
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async () => {
+    // Signal Rust backend that the frontend has loaded (shows the window)
+    emit("frontend-ready");
     try {
       const status = await invoke<{
         initialized: boolean;
