@@ -71,7 +71,7 @@ pub struct VersionChange {
 /// so the vault can continue with its current DNAs.
 pub async fn check_and_update_dnas(
     admin_port: u16,
-    resource_dir: &Path,
+    download_dir: &Path,
     recovery_lookup_hash: &str,
     current_private_version: &str,
     current_identity_version: &str,
@@ -141,7 +141,7 @@ pub async fn check_and_update_dnas(
         );
         match update_single_dna(
             admin_port,
-            resource_dir,
+            download_dir,
             api_url,
             recovery_lookup_hash,
             "private",
@@ -151,11 +151,15 @@ pub async fn check_and_update_dnas(
         )
         .await
         {
-            Ok(()) => {
+            Ok(true) => {
                 private_updated = Some(VersionChange {
                     from: current_private_version.to_string(),
                     to: versions.private_dna.version.clone(),
                 });
+            }
+            Ok(false) => {
+                // Same DNA hash — no actual change, don't update VaultConfig version.
+                log::info!("Private DNA hash unchanged, keeping version {}", current_private_version);
             }
             Err(e) => {
                 log::error!("Private DNA update failed: {}", e);
@@ -174,7 +178,7 @@ pub async fn check_and_update_dnas(
         );
         match update_single_dna(
             admin_port,
-            resource_dir,
+            download_dir,
             api_url,
             recovery_lookup_hash,
             "identity",
@@ -184,11 +188,14 @@ pub async fn check_and_update_dnas(
         )
         .await
         {
-            Ok(()) => {
+            Ok(true) => {
                 identity_updated = Some(VersionChange {
                     from: current_identity_version.to_string(),
                     to: versions.identity_dna.version.clone(),
                 });
+            }
+            Ok(false) => {
+                log::info!("Identity DNA hash unchanged, keeping version {}", current_identity_version);
             }
             Err(e) => {
                 log::error!("Identity DNA update failed: {}", e);
@@ -197,6 +204,11 @@ pub async fn check_and_update_dnas(
                 };
             }
         }
+    }
+
+    // If nothing actually changed (all same-hash), report as up to date.
+    if private_updated.is_none() && identity_updated.is_none() {
+        return UpdateResult::UpToDate;
     }
 
     UpdateResult::Updated {
@@ -299,6 +311,9 @@ async fn download_happ_bundle(
 
 /// Update a single DNA (private or identity).
 ///
+/// Returns Ok(true) if the DNA was actually updated (new cell installed),
+/// or Ok(false) if the DNA hash was unchanged (CellAlreadyExists — no-op).
+///
 /// For now (vault doesn't author data on DNAs), this is a simple swap:
 ///   1. Download new .happ bundle
 ///   2. Install new DNA (new app ID)
@@ -309,18 +324,18 @@ async fn download_happ_bundle(
 /// export → install → import → verify → uninstall old.
 async fn update_single_dna(
     admin_port: u16,
-    resource_dir: &Path,
+    download_dir: &Path,
     api_url: &str,
     recovery_lookup_hash: &str,
     dna_type: &str,
     current_version: &str,
     new_info: &DnaVersionInfo,
     agent_key: holochain_types::prelude::AgentPubKey,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let new_version = &new_info.version;
 
-    // 1. Download the new .happ bundle to the resource directory.
-    let bundle_path = resource_dir.join(&new_info.filename);
+    // 1. Download the new .happ bundle to the app data directory.
+    let bundle_path = download_dir.join(&new_info.filename);
     download_happ_bundle(api_url, recovery_lookup_hash, dna_type, new_version, &bundle_path).await?;
 
     // 2. Connect to admin WebSocket.
@@ -338,45 +353,60 @@ async fn update_single_dna(
     // 4. Install the new DNA.
     log::info!("Installing {} (from {:?})...", new_app_id, bundle_path);
     let payload = holochain_client::InstallAppPayload {
-        source: holochain_types::app::AppBundleSource::Path(bundle_path),
-        agent_key: Some(agent_key),
+        source: holochain_types::app::AppBundleSource::Path(bundle_path.clone()),
+        agent_key: Some(agent_key.clone()),
         installed_app_id: Some(new_app_id.clone()),
         network_seed: None, // Baked into the .happ bundle
         roles_settings: None,
         ignore_genesis_failure: false,
     };
 
-    admin_ws
-        .install_app(payload)
-        .await
-        .map_err(|e| format!("Failed to install {}: {}", new_app_id, e))?;
+    match admin_ws.install_app(payload).await {
+        Ok(_) => {
+            // 5. Enable the new DNA.
+            admin_ws
+                .enable_app(new_app_id.clone())
+                .await
+                .map_err(|e| format!("Failed to enable {}: {}", new_app_id, e))?;
 
-    // 5. Enable the new DNA.
-    admin_ws
-        .enable_app(new_app_id.clone())
-        .await
-        .map_err(|e| format!("Failed to enable {}: {}", new_app_id, e))?;
+            log::info!("{} installed and enabled", new_app_id);
 
-    log::info!("{} installed and enabled", new_app_id);
+            // 6. Uninstall the old DNA.
+            log::info!("Uninstalling old {}...", old_app_id);
+            if let Err(e) = admin_ws.uninstall_app(old_app_id.clone(), false).await {
+                log::warn!("Failed to uninstall {} (non-fatal): {}", old_app_id, e);
+            }
 
-    // 6. Uninstall the old DNA.
-    //    Use force=false so Holochain cleans up properly.
-    log::info!("Uninstalling old {}...", old_app_id);
-    if let Err(e) = admin_ws.uninstall_app(old_app_id.clone(), false).await {
-        // Non-fatal — old app might already be uninstalled or not exist.
-        // Log but don't fail the update.
-        log::warn!("Failed to uninstall {} (non-fatal): {}", old_app_id, e);
+            log::info!(
+                "{} DNA updated: {} → {} (old {} uninstalled)",
+                dna_type,
+                current_version,
+                new_version,
+                old_app_id
+            );
+        }
+        Err(e) => {
+            let err_str = format!("{}", e);
+            if err_str.contains("CellAlreadyExists") {
+                // Same DNA hash — the new bundle has the same integrity zomes + network seed.
+                // The cell is already running correctly under the old app ID.
+                // No install/uninstall possible; Holochain won't allow a duplicate cell.
+                // Return false so the caller does NOT update VaultConfig version
+                // (keeping app ID consistent with what's registered in the conductor).
+                log::info!(
+                    "CellAlreadyExists — {} DNA hash unchanged between v{} and v{}, skipping",
+                    dna_type,
+                    current_version,
+                    new_version
+                );
+                return Ok(false);
+            } else {
+                return Err(format!("Failed to install {}: {}", new_app_id, e));
+            }
+        }
     }
 
-    log::info!(
-        "{} DNA updated: {} → {} (old {} uninstalled)",
-        dna_type,
-        current_version,
-        new_version,
-        old_app_id
-    );
-
-    Ok(())
+    Ok(true)
 }
 
 /// Construct a Holochain installed_app_id from DNA type and version.

@@ -414,7 +414,6 @@ fn spawn_conductor_startup(
             tauri::async_runtime::spawn(async move {
                 let app_handle_ref = app_handle.clone();
                 let passphrase_for_sync = passphrase.clone();
-                let resource_dir_clone = resource_dir.clone();
                 match crate::conductor::start_holochain(
                     app_handle,
                     data_dir.clone(),
@@ -434,11 +433,13 @@ fn spawn_conductor_startup(
 
                         // Check for DNA updates from the server.
                         // Non-fatal — if offline or update fails, continue with current DNAs.
+                        // Downloads go to data_dir (not resource_dir) to avoid triggering
+                        // Tauri dev-mode hot-reload and to use a writable location in production.
                         let identity_was_updated = check_dna_updates(
                             &state,
                             &app_handle_ref,
                             port,
-                            &resource_dir_clone,
+                            &data_dir,
                             &passphrase_for_sync,
                         ).await;
 
@@ -506,7 +507,7 @@ async fn check_dna_updates(
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
     admin_port: u16,
-    resource_dir: &std::path::Path,
+    download_dir: &std::path::Path,
     password: &str,
 ) -> bool {
     // Extract needed values from VaultConfig.
@@ -567,7 +568,7 @@ async fn check_dna_updates(
 
     let result = crate::dna_updater::check_and_update_dnas(
         admin_port,
-        resource_dir,
+        download_dir,
         &recovery_lookup_hash,
         &current_private_ver,
         &current_identity_ver,
