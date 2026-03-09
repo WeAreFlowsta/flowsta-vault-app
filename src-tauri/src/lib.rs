@@ -2,6 +2,7 @@ mod backup;
 mod commands;
 mod conductor;
 mod dna;
+mod dna_updater;
 mod ipc_server;
 mod key_derivation;
 mod lair;

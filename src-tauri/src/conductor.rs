@@ -378,7 +378,13 @@ pub async fn start_holochain(
             fail_with_lair_cleanup!($err);
         }};
     }
-    let installed_dnas = match dna::install_dnas(admin_port, &resource_dir, agent_pub_key).await {
+    let installed_dnas = match dna::install_dnas(
+        admin_port,
+        &resource_dir,
+        agent_pub_key,
+        dna::BUNDLED_PRIVATE_VERSION,
+        dna::BUNDLED_IDENTITY_VERSION,
+    ).await {
         Ok(d) => d,
         Err(e) => fail_with_full_cleanup!(format!("DNA installation failed: {}", e)),
     };

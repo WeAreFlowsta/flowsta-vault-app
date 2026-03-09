@@ -3,34 +3,73 @@
 //! After the conductor is ready, this module installs the Flowsta hApp bundles
 //! (identity + private DNAs) via the admin WebSocket. Idempotent — skips
 //! installation if the apps are already present.
+//!
+//! Version constants define what ships with this app build. The DNA updater
+//! can override these with newer versions downloaded from the API.
 
 use holochain_client::{AdminWebsocket, AllowedOrigins, AppStatusFilter, InstallAppPayload};
 use holochain_types::app::AppBundleSource;
 use holochain_types::prelude::AgentPubKey;
 use std::path::Path;
 
-/// Installed app IDs — must be stable across restarts so we can detect existing installs.
-const PRIVATE_APP_ID: &str = "flowsta_private_v1_10";
-const IDENTITY_APP_ID: &str = "flowsta_identity_v1_3";
+/// Default DNA versions bundled with this app build.
+/// Used for first-time installs and as fallback when VaultConfig has no version info.
+pub const BUNDLED_PRIVATE_VERSION: &str = "1.10";
+pub const BUNDLED_IDENTITY_VERSION: &str = "1.3";
 
-/// hApp bundle filenames (must match the files in src-tauri/resources/).
-const PRIVATE_HAPP_FILE: &str = "flowsta_private_v1_10_happ.happ";
-const IDENTITY_HAPP_FILE: &str = "flowsta_identity_v1_3_happ.happ";
+/// hApp bundle filenames bundled with this app build (in src-tauri/resources/).
+const BUNDLED_PRIVATE_HAPP_FILE: &str = "flowsta_private_v1_10_happ.happ";
+const BUNDLED_IDENTITY_HAPP_FILE: &str = "flowsta_identity_v1_3_happ.happ";
 
-/// Result of DNA installation — cell IDs and app IDs for later use.
+/// Result of DNA installation — app IDs for later use.
 pub struct InstalledDnas {
     pub private_app_id: String,
     pub identity_app_id: String,
 }
 
+/// Construct a Holochain installed_app_id from DNA type and version.
+/// e.g. ("private", "1.10") → "flowsta_private_v1_10"
+pub fn make_app_id(dna_type: &str, version: &str) -> String {
+    format!("flowsta_{}_v{}", dna_type, version.replace('.', "_"))
+}
+
+/// Construct the .happ filename for a given DNA type and version.
+/// e.g. ("private", "1.10") → "flowsta_private_v1_10_happ.happ"
+fn make_happ_filename(dna_type: &str, version: &str) -> String {
+    format!("flowsta_{}_v{}_happ.happ", dna_type, version.replace('.', "_"))
+}
+
 /// Install Flowsta DNAs into the conductor if not already present.
 ///
-/// Connects to the admin WebSocket, checks for existing installs, and installs
-/// + enables any missing apps. The hApp bundles are read from the resource_dir.
+/// Accepts dynamic versions (from VaultConfig or defaults). Checks for existing
+/// installs by app ID and verifies agent key matches. If an app with the target
+/// app ID already exists with the correct key, installation is skipped.
 ///
 /// Network seeds are baked into the .happ bundles (matching server conductors),
 /// so no seed override is needed.
-pub async fn install_dnas(admin_port: u16, resource_dir: &Path, agent_key: AgentPubKey) -> Result<InstalledDnas, String> {
+pub async fn install_dnas(
+    admin_port: u16,
+    resource_dir: &Path,
+    agent_key: AgentPubKey,
+    private_version: &str,
+    identity_version: &str,
+) -> Result<InstalledDnas, String> {
+    let private_app_id = make_app_id("private", private_version);
+    let identity_app_id = make_app_id("identity", identity_version);
+
+    // Determine .happ filenames — use bundled names if version matches bundled,
+    // otherwise construct from version (downloaded by dna_updater).
+    let private_happ_file = if private_version == BUNDLED_PRIVATE_VERSION {
+        BUNDLED_PRIVATE_HAPP_FILE.to_string()
+    } else {
+        make_happ_filename("private", private_version)
+    };
+    let identity_happ_file = if identity_version == BUNDLED_IDENTITY_VERSION {
+        BUNDLED_IDENTITY_HAPP_FILE.to_string()
+    } else {
+        make_happ_filename("identity", identity_version)
+    };
+
     // 1. Connect to admin WebSocket.
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
@@ -52,24 +91,24 @@ pub async fn install_dnas(admin_port: u16, resource_dir: &Path, agent_key: Agent
 
     for app in &existing_apps {
         let key_matches = app.agent_pub_key == agent_key;
-        if app.installed_app_id == PRIVATE_APP_ID {
+        if app.installed_app_id == private_app_id {
             if key_matches {
                 private_installed = true;
             } else {
                 log::warn!("Private app installed with wrong agent key, reinstalling...");
                 admin_ws
-                    .uninstall_app(PRIVATE_APP_ID.to_string(), false)
+                    .uninstall_app(private_app_id.clone(), false)
                     .await
                     .map_err(|e| format!("Failed to uninstall private app: {}", e))?;
             }
         }
-        if app.installed_app_id == IDENTITY_APP_ID {
+        if app.installed_app_id == identity_app_id {
             if key_matches {
                 identity_installed = true;
             } else {
                 log::warn!("Identity app installed with wrong agent key, reinstalling...");
                 admin_ws
-                    .uninstall_app(IDENTITY_APP_ID.to_string(), false)
+                    .uninstall_app(identity_app_id.clone(), false)
                     .await
                     .map_err(|e| format!("Failed to uninstall identity app: {}", e))?;
             }
@@ -79,14 +118,14 @@ pub async fn install_dnas(admin_port: u16, resource_dir: &Path, agent_key: Agent
     if private_installed && identity_installed {
         log::info!("Both DNAs already installed with correct agent key, skipping");
         return Ok(InstalledDnas {
-            private_app_id: PRIVATE_APP_ID.to_string(),
-            identity_app_id: IDENTITY_APP_ID.to_string(),
+            private_app_id,
+            identity_app_id,
         });
     }
 
     // 3. Install private DNA if needed.
     if !private_installed {
-        let happ_path = resource_dir.join(PRIVATE_HAPP_FILE);
+        let happ_path = resource_dir.join(&private_happ_file);
         if !happ_path.exists() {
             return Err(format!(
                 "Private hApp bundle not found at {:?}",
@@ -94,11 +133,11 @@ pub async fn install_dnas(admin_port: u16, resource_dir: &Path, agent_key: Agent
             ));
         }
 
-        log::info!("Installing private DNA from {:?}...", happ_path);
+        log::info!("Installing private DNA v{} from {:?}...", private_version, happ_path);
         let payload = InstallAppPayload {
             source: AppBundleSource::Path(happ_path),
             agent_key: Some(agent_key.clone()),
-            installed_app_id: Some(PRIVATE_APP_ID.to_string()),
+            installed_app_id: Some(private_app_id.clone()),
             network_seed: None,
             roles_settings: None,
             ignore_genesis_failure: false,
@@ -110,16 +149,16 @@ pub async fn install_dnas(admin_port: u16, resource_dir: &Path, agent_key: Agent
             .map_err(|e| format!("Failed to install private DNA: {}", e))?;
 
         admin_ws
-            .enable_app(PRIVATE_APP_ID.to_string())
+            .enable_app(private_app_id.clone())
             .await
             .map_err(|e| format!("Failed to enable private DNA: {}", e))?;
 
-        log::info!("Private DNA installed and enabled");
+        log::info!("Private DNA v{} installed and enabled", private_version);
     }
 
     // 4. Install identity DNA if needed.
     if !identity_installed {
-        let happ_path = resource_dir.join(IDENTITY_HAPP_FILE);
+        let happ_path = resource_dir.join(&identity_happ_file);
         if !happ_path.exists() {
             return Err(format!(
                 "Identity hApp bundle not found at {:?}",
@@ -127,11 +166,11 @@ pub async fn install_dnas(admin_port: u16, resource_dir: &Path, agent_key: Agent
             ));
         }
 
-        log::info!("Installing identity DNA from {:?}...", happ_path);
+        log::info!("Installing identity DNA v{} from {:?}...", identity_version, happ_path);
         let payload = InstallAppPayload {
             source: AppBundleSource::Path(happ_path),
             agent_key: Some(agent_key.clone()),
-            installed_app_id: Some(IDENTITY_APP_ID.to_string()),
+            installed_app_id: Some(identity_app_id.clone()),
             network_seed: None,
             roles_settings: None,
             ignore_genesis_failure: false,
@@ -143,11 +182,11 @@ pub async fn install_dnas(admin_port: u16, resource_dir: &Path, agent_key: Agent
             .map_err(|e| format!("Failed to install identity DNA: {}", e))?;
 
         admin_ws
-            .enable_app(IDENTITY_APP_ID.to_string())
+            .enable_app(identity_app_id.clone())
             .await
             .map_err(|e| format!("Failed to enable identity DNA: {}", e))?;
 
-        log::info!("Identity DNA installed and enabled");
+        log::info!("Identity DNA v{} installed and enabled", identity_version);
     }
 
     // 5. Verify both apps are enabled.
@@ -158,10 +197,10 @@ pub async fn install_dnas(admin_port: u16, resource_dir: &Path, agent_key: Agent
 
     let private_ok = enabled_apps
         .iter()
-        .any(|app| app.installed_app_id == PRIVATE_APP_ID);
+        .any(|app| app.installed_app_id == private_app_id);
     let identity_ok = enabled_apps
         .iter()
-        .any(|app| app.installed_app_id == IDENTITY_APP_ID);
+        .any(|app| app.installed_app_id == identity_app_id);
 
     if !private_ok || !identity_ok {
         return Err(format!(
@@ -176,8 +215,8 @@ pub async fn install_dnas(admin_port: u16, resource_dir: &Path, agent_key: Agent
     );
 
     Ok(InstalledDnas {
-        private_app_id: PRIVATE_APP_ID.to_string(),
-        identity_app_id: IDENTITY_APP_ID.to_string(),
+        private_app_id,
+        identity_app_id,
     })
 }
 

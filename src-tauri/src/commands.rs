@@ -266,6 +266,10 @@ pub fn setup_vault(
         web_username,
         display_name,
         profile_picture,
+        // Set initial DNA versions to the bundled defaults
+        private_dna_version: Some(crate::dna::BUNDLED_PRIVATE_VERSION.to_string()),
+        identity_dna_version: Some(crate::dna::BUNDLED_IDENTITY_VERSION.to_string()),
+        conductor_version: Some("0.6.0".to_string()),
     };
 
     // Encrypt and save (with unencrypted display identifier for unlock screen)
@@ -410,9 +414,10 @@ fn spawn_conductor_startup(
             tauri::async_runtime::spawn(async move {
                 let app_handle_ref = app_handle.clone();
                 let passphrase_for_sync = passphrase.clone();
+                let resource_dir_clone = resource_dir.clone();
                 match crate::conductor::start_holochain(
                     app_handle,
-                    data_dir,
+                    data_dir.clone(),
                     resource_dir,
                     passphrase,
                     seed,
@@ -427,7 +432,18 @@ fn spawn_conductor_startup(
                             admin_port: port,
                         };
 
-                        // Auto-link with web account if not yet linked on DHT
+                        // Check for DNA updates from the server.
+                        // Non-fatal — if offline or update fails, continue with current DNAs.
+                        let identity_was_updated = check_dna_updates(
+                            &state,
+                            &app_handle_ref,
+                            port,
+                            &resource_dir_clone,
+                            &passphrase_for_sync,
+                        ).await;
+
+                        // Auto-link with web account if not yet linked on DHT.
+                        // Always attempt after identity DNA update (attestation is on old network).
                         let should_link = {
                             let config = state.vault_config.lock().unwrap();
                             if let Some(cfg) = config.as_ref() {
@@ -440,7 +456,11 @@ fn spawn_conductor_startup(
                         };
 
                         if should_link {
-                            log::info!("Auto-linking desktop agent with web account...");
+                            if identity_was_updated {
+                                log::info!("Identity DNA was updated — re-establishing agent link on new network...");
+                            } else {
+                                log::info!("Auto-linking desktop agent with web account...");
+                            }
                             match auto_link_web_account(&state, &passphrase_for_sync).await {
                                 Ok(result) => {
                                     if result.success {
@@ -475,6 +495,146 @@ fn spawn_conductor_startup(
     } else {
         log::info!("No device seed in vault — conductor not started");
     }
+}
+
+/// Check for DNA updates from the server and apply them.
+///
+/// Called after conductor startup. Non-fatal — returns `false` on any error
+/// so the vault continues with its current DNAs.
+/// Returns `true` if the identity DNA was updated (caller should re-link).
+async fn check_dna_updates(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+    admin_port: u16,
+    resource_dir: &std::path::Path,
+    password: &str,
+) -> bool {
+    // Extract needed values from VaultConfig.
+    let (recovery_lookup_hash, current_private_ver, current_identity_ver, agent_key_raw_b64) = {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = match config.as_ref() {
+            Some(c) => c,
+            None => {
+                log::warn!("VaultConfig not available for DNA update check");
+                return false;
+            }
+        };
+        let rlh = match &cfg.recovery_lookup_hash {
+            Some(h) => h.clone(),
+            None => {
+                log::info!("No recovery_lookup_hash — skipping DNA update check");
+                return false;
+            }
+        };
+        let priv_ver = cfg
+            .private_dna_version
+            .clone()
+            .unwrap_or_else(|| crate::dna::BUNDLED_PRIVATE_VERSION.to_string());
+        let id_ver = cfg
+            .identity_dna_version
+            .clone()
+            .unwrap_or_else(|| crate::dna::BUNDLED_IDENTITY_VERSION.to_string());
+        let agent_b64 = cfg.agent_pub_key_raw_b64.clone();
+        (rlh, priv_ver, id_ver, agent_b64)
+    };
+
+    // Reconstruct AgentPubKey from the stored raw base64.
+    let agent_key = match agent_key_raw_b64 {
+        Some(b64) => match base64_standard_decode(&b64) {
+            Ok(bytes) if bytes.len() == 39 => {
+                holochain_types::prelude::AgentPubKey::from_raw_39(bytes)
+            }
+            Ok(bytes) => {
+                log::warn!("Agent key is {} bytes, expected 39", bytes.len());
+                return false;
+            }
+            Err(_) => {
+                log::warn!("Failed to decode agent_pub_key_raw_b64");
+                return false;
+            }
+        },
+        None => {
+            log::info!("No agent_pub_key_raw_b64 — skipping DNA update check");
+            return false;
+        }
+    };
+
+    // Emit update check status.
+    let _ = app_handle.emit(
+        "dna-update-status",
+        serde_json::json!({"status": "checking"}),
+    );
+
+    let result = crate::dna_updater::check_and_update_dnas(
+        admin_port,
+        resource_dir,
+        &recovery_lookup_hash,
+        &current_private_ver,
+        &current_identity_ver,
+        agent_key,
+    )
+    .await;
+
+    let mut identity_updated = false;
+
+    match &result {
+        crate::dna_updater::UpdateResult::UpToDate => {
+            log::info!("DNA update check: already up to date");
+        }
+        crate::dna_updater::UpdateResult::Offline => {
+            log::info!("DNA update check: offline, continuing with current DNAs");
+        }
+        crate::dna_updater::UpdateResult::Updated {
+            private_updated,
+            identity_updated: id_upd,
+        } => {
+            // Persist new versions to VaultConfig.
+            let mut config_guard = state.vault_config.lock().unwrap();
+            if let Some(cfg) = config_guard.as_mut() {
+                if let Some(change) = private_updated {
+                    log::info!("Private DNA updated: {} → {}", change.from, change.to);
+                    cfg.private_dna_version = Some(change.to.clone());
+                }
+                if let Some(change) = id_upd {
+                    log::info!("Identity DNA updated: {} → {}", change.from, change.to);
+                    cfg.identity_dna_version = Some(change.to.clone());
+                    identity_updated = true;
+                }
+
+                // Re-encrypt and save vault with updated versions.
+                let vault_path = state.vault_path.lock().unwrap();
+                if let Ok(mut encrypted) = encrypt_vault(cfg, password) {
+                    encrypted.display_email =
+                        cfg.web_email.clone().or(cfg.web_username.clone());
+                    let _ = save_vault(&vault_path, &encrypted);
+                    log::info!("VaultConfig saved with updated DNA versions");
+                }
+            }
+        }
+        crate::dna_updater::UpdateResult::AppUpdateRequired { min_vault_version } => {
+            log::warn!(
+                "Vault app update required (min version: {})",
+                min_vault_version
+            );
+            let _ = app_handle.emit(
+                "dna-update-status",
+                serde_json::json!({
+                    "status": "app_update_required",
+                    "min_vault_version": min_vault_version,
+                }),
+            );
+        }
+        crate::dna_updater::UpdateResult::Failed { error } => {
+            log::error!("DNA update failed: {}", error);
+        }
+    }
+
+    let _ = app_handle.emit(
+        "dna-update-status",
+        serde_json::json!({"status": "done"}),
+    );
+
+    identity_updated
 }
 
 /// Delete the vault file and clear in-memory state.

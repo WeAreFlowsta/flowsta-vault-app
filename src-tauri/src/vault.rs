@@ -69,6 +69,22 @@ pub struct VaultConfig {
     /// Profile picture URL or base64 data URI.
     #[serde(default)]
     pub profile_picture: Option<String>,
+
+    /// Currently installed private DNA version (e.g. "1.10").
+    /// Used by the DNA updater to detect when the server has a newer version.
+    /// Defaults to None for vaults created before the update system existed —
+    /// the updater treats None as the version bundled with this app build.
+    #[serde(default)]
+    pub private_dna_version: Option<String>,
+
+    /// Currently installed identity DNA version (e.g. "1.3").
+    #[serde(default)]
+    pub identity_dna_version: Option<String>,
+
+    /// Holochain conductor version this vault was last run with (e.g. "0.6.0").
+    /// Stored for future conductor upgrade detection.
+    #[serde(default)]
+    pub conductor_version: Option<String>,
 }
 
 /// Encrypted vault on disk (serialized as JSON).
@@ -292,6 +308,9 @@ mod tests {
             web_username: Some("testuser".to_string()),
             display_name: Some("Test User".to_string()),
             profile_picture: Some("https://example.com/pic.jpg".to_string()),
+            private_dna_version: Some("1.10".to_string()),
+            identity_dna_version: Some("1.3".to_string()),
+            conductor_version: Some("0.6.0".to_string()),
         };
 
         let encrypted = encrypt_vault(&config, "test-password-123").unwrap();
@@ -309,6 +328,9 @@ mod tests {
         assert_eq!(config.web_username, decrypted.web_username);
         assert_eq!(config.display_name, decrypted.display_name);
         assert_eq!(config.profile_picture, decrypted.profile_picture);
+        assert_eq!(config.private_dna_version, decrypted.private_dna_version);
+        assert_eq!(config.identity_dna_version, decrypted.identity_dna_version);
+        assert_eq!(config.conductor_version, decrypted.conductor_version);
     }
 
     #[test]
@@ -326,6 +348,9 @@ mod tests {
             web_username: None,
             display_name: None,
             profile_picture: None,
+            private_dna_version: None,
+            identity_dna_version: None,
+            conductor_version: None,
         };
 
         let encrypted = encrypt_vault(&config, "correct-password").unwrap();
