@@ -5,7 +5,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
 import tailwindcss from "@tailwindcss/vite";
 
 // Tauri expects a fixed port
-const TAURI_DEV_PORT = 5173;
+const TAURI_DEV_PORT = 1421;
 
 export default defineConfig(({ mode }): UserConfig => {
   const env = loadEnv(mode, process.cwd(), "VITE_");
