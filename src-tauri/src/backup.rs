@@ -479,8 +479,10 @@ pub fn delete_backup(data_dir: &Path, client_id: &str, label: Option<&str>) -> R
     Ok(())
 }
 
-/// Export all vault data (identity + backups) as a single JSON blob.
-/// The backup data is decrypted for the export.
+/// Export all vault data (identity + keys + backups) as a single JSON blob.
+/// Includes cryptographic key material for CAL (Cryptographic Autonomy License)
+/// compliance — users must be able to independently recreate their identity
+/// and use their data without depending on Flowsta.
 pub fn export_all_data(app_state: &AppState) -> Result<serde_json::Value, String> {
     let config = {
         let config = app_state.vault_config.lock().unwrap();
@@ -493,7 +495,7 @@ pub fn export_all_data(app_state: &AppState) -> Result<serde_json::Value, String
     let mut app_data = Vec::new();
     for app_summary in &stats.apps {
         let metas = list_app_backups(&app_state.data_dir, &app_summary.client_id)?;
-        let mut backups_json = Vec::new();
+        let mut snapshots = Vec::new();
 
         for meta in &metas {
             let label = meta.label.as_deref().unwrap_or("latest");
@@ -508,10 +510,10 @@ pub fn export_all_data(app_state: &AppState) -> Result<serde_json::Value, String
                         serde_json::Value::String(hex::encode(&data))
                     };
 
-                    backups_json.push(serde_json::json!({
+                    snapshots.push(serde_json::json!({
                         "label": meta.label,
-                        "created_at": meta.created_at,
-                        "data_size": meta.data_size,
+                        "saved_at": meta.created_at,
+                        "size_bytes": meta.data_size,
                         "content_type": meta.content_type,
                         "data": data_value,
                     }));
@@ -523,43 +525,111 @@ pub fn export_all_data(app_state: &AppState) -> Result<serde_json::Value, String
         }
 
         app_data.push(serde_json::json!({
-            "client_id": app_summary.client_id,
             "app_name": app_summary.app_name,
-            "backups": backups_json,
+            "client_id": app_summary.client_id,
+            "snapshot_count": snapshots.len(),
+            "snapshots": snapshots,
         }));
     }
 
     // Build the linked apps list
     let linked_apps = app_state.linked_third_party_apps.lock().unwrap().clone();
 
-    let export = serde_json::json!({
-        "export_version": "1.0",
-        "exported_at": iso_now(),
+    // Format the device seed as hex (if present)
+    let device_seed_hex = config.device_seed.as_ref().map(|s| hex::encode(s));
 
-        "identity": {
-            "did": config.did,
-            "agent_pub_key": config.agent_pub_key,
-            "web_email": config.web_email,
-            "web_agent_pub_key": config.web_agent_pub_key,
-            "display_name": config.display_name,
-            "created_at": config.created_at,
+    let export = serde_json::json!({
+        "_readme": concat!(
+            "This file contains your complete Flowsta Vault export. ",
+            "It includes your cryptographic keys and all app data — ",
+            "everything you need to recreate your identity independently. ",
+            "KEEP THIS FILE SAFE. Anyone with your device_seed can sign ",
+            "as you on the Holochain network.",
+        ),
+
+        "format": {
+            "version": "2.0",
+            "exported_at": iso_now(),
+            "license": "Cryptographic Autonomy License v1.0 (CAL-1.0)",
         },
 
-        "linked_apps": linked_apps.iter().map(|app| {
-            serde_json::json!({
-                "app_name": app.app_name,
-                "app_agent_pub_key": app.app_agent_pub_key,
-                "linked_at": app.linked_at,
-                "client_id": app.client_id,
-            })
-        }).collect::<Vec<_>>(),
+        // ── Who you are ───────────────────────────────────────────
+        "you": {
+            "_readme": concat!(
+                "Your Flowsta identity. The DID is your decentralised ",
+                "identifier. The agent_pub_key is your Holochain network ",
+                "address.",
+            ),
+            "display_name": config.display_name,
+            "email": config.web_email,
+            "did": config.did,
+            "agent_pub_key": config.agent_pub_key,
+            "vault_created_at": config.created_at,
+        },
 
-        "app_backups": app_data,
+        // ── Your cryptographic keys ───────────────────────────────
+        "keys": {
+            "_readme": concat!(
+                "These are the private cryptographic keys that prove you ",
+                "are you on the Holochain network. Your device_seed is used ",
+                "to derive your Ed25519 signing keypair. With this seed you ",
+                "can recreate your identity on any Holochain conductor. ",
+                "NEVER share these with anyone.",
+            ),
+            "device_seed_hex": device_seed_hex,
+            "agent_pub_key_full_b64": config.agent_pub_key_raw_b64,
+            "recovery_lookup_hash": config.recovery_lookup_hash,
+        },
 
-        "backup_stats": {
-            "app_count": stats.app_count,
-            "total_backups": stats.total_backups,
+        // ── Web account link ──────────────────────────────────────
+        "web_account": {
+            "_readme": "Your linked Flowsta web account, if any.",
+            "linked": config.web_agent_pub_key.is_some(),
+            "web_agent_pub_key": config.web_agent_pub_key,
+            "username": config.web_username,
+        },
+
+        // ── Holochain setup ──────────────────────────────────────
+        "holochain": {
+            "_readme": concat!(
+                "The DNA versions and app IDs installed on your local ",
+                "Holochain conductor. You need these to recreate your ",
+                "conductor setup.",
+            ),
+            "conductor_version": config.conductor_version,
+            "installed_app_ids": config.installed_app_ids,
+            "private_dna_version": config.private_dna_version,
+            "identity_dna_version": config.identity_dna_version,
+        },
+
+        // ── Connected third-party apps ────────────────────────────
+        "connected_apps": {
+            "_readme": concat!(
+                "Apps that have linked their Holochain identity to your ",
+                "vault. Each app has its own agent key on the network.",
+            ),
+            "count": linked_apps.len(),
+            "apps": linked_apps.iter().map(|app| {
+                serde_json::json!({
+                    "app_name": app.app_name,
+                    "client_id": app.client_id,
+                    "app_agent_pub_key": app.app_agent_pub_key,
+                    "linked_at": app.linked_at,
+                })
+            }).collect::<Vec<_>>(),
+        },
+
+        // ── App data backups ──────────────────────────────────────
+        "app_data": {
+            "_readme": concat!(
+                "Decrypted data backups stored by connected Holochain apps. ",
+                "Each app can store multiple snapshots. The data is yours — ",
+                "you can import it into any compatible app.",
+            ),
+            "total_apps": stats.app_count,
+            "total_snapshots": stats.total_backups,
             "total_size_bytes": stats.total_size,
+            "apps": app_data,
         },
     });
 

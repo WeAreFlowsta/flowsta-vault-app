@@ -498,14 +498,26 @@ export default component$(() => {
       <div class="rounded-lg border border-gray-700 bg-gray-900 p-6">
         <h3 class="mb-2 text-lg font-semibold text-white">Export All Data</h3>
         <p class="mb-4 text-sm text-gray-400">
-          Download a complete copy of your vault data including your identity,
-          linked apps, and all app backups as a JSON file.
+          Download a complete copy of your vault — your identity, cryptographic
+          keys, connected apps, and all app data backups. This gives you
+          everything you need to recreate your Flowsta identity independently.
         </p>
+
+        <div class="mb-4 rounded-lg border border-yellow-700/50 bg-yellow-900/20 p-3">
+          <p class="text-sm text-yellow-400 font-medium mb-1">
+            This file will contain your private keys
+          </p>
+          <p class="text-xs text-yellow-400/70">
+            Your export includes the cryptographic seed that proves your
+            identity on the network. Store it somewhere safe and never share
+            it — anyone with this file could sign as you.
+          </p>
+        </div>
 
         {exportSuccess.value && (
           <div class="mb-4 rounded-lg border border-green-700/50 bg-green-900/20 p-3">
             <p class="text-sm text-green-400">
-              Export downloaded successfully. Keep it secure!
+              Export downloaded successfully. Keep it somewhere safe!
             </p>
           </div>
         )}

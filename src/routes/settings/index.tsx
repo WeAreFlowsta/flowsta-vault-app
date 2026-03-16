@@ -361,11 +361,26 @@ export default component$(() => {
             </div>
           </div>
 
-          <div class="mt-6 rounded-lg bg-blue-900/20 border border-blue-800 p-4">
-            <p class="text-sm text-sky-300">
-              Flowsta Vault keeps your identity keys on your device. Your
-              recovery phrase is never stored — only the encrypted derived key
-              persists in the vault.
+          <div class="mt-6 space-y-3 rounded-lg border border-sky-800/50 bg-sky-900/10 p-5">
+            <h4 class="text-sm font-semibold text-sky-300">
+              How your identity stays safe
+            </h4>
+            <p class="text-sm leading-relaxed text-gray-300">
+              Your <span class="text-white font-medium">recovery phrase</span> is
+              like a master key that can create other keys. During setup, your
+              Vault used it to generate a unique{" "}
+              <span class="text-white font-medium">device key</span> — a
+              cryptographic identity that only your device holds.
+            </p>
+            <p class="text-sm leading-relaxed text-gray-300">
+              Once that device key was created, your recovery phrase was
+              discarded from memory. It is never saved to disk. Only the device
+              key remains, locked behind your password using strong encryption.
+            </p>
+            <p class="text-sm leading-relaxed text-gray-300">
+              This means even if someone accessed your computer, they would
+              need your password to unlock the key — and they would never find
+              your recovery phrase, because it simply isn't here.
             </p>
           </div>
         </div>
