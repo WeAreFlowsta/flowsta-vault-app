@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import url("https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@300;400;500;700&display=swap");
 
 @theme {
   --color-primary-50: oklch(0.977 0.014 307.247);
@@ -25,10 +26,126 @@
   --color-secondary-900: oklch(0.391 0.09 240.876);
   --color-secondary-950: oklch(0.293 0.066 243.157);
 
-  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "M PLUS Rounded 1c", "Inter Variable", ui-sans-serif, system-ui, sans-serif;
 }
 
 body {
   @apply bg-gray-900 text-white antialiased;
   font-family: var(--font-sans);
+}
+
+/* Gradient text effects — consistent with Website */
+.gradient-text {
+  background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 50%, #d97706 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-text-blue {
+  background: linear-gradient(135deg, #38bdf8 0%, #0284c7 50%, #6366f1 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Glass card — consistent with Website */
+.glass-card {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 20px;
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.glass-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(251, 191, 36, 0.2);
+  box-shadow: 0 0 40px rgba(251, 191, 36, 0.08),
+    0 20px 60px rgba(0, 0, 0, 0.3);
+  transform: translateY(-4px);
+}
+
+/* Loading spinner — amber accent (consistent with Website + login) */
+.spinner {
+  @apply animate-spin rounded-full border-4 border-slate-600 border-t-amber-400;
+}
+
+/* Glow pulse — for status indicators */
+.glow-ring {
+  border: 1px solid rgba(251, 191, 36, 0.2);
+  animation: glow-pulse 3s ease-in-out infinite;
+}
+
+@keyframes glow-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.4;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 0.8;
+  }
+}
+
+/* Icon glow — for identity/connection status */
+.icon-pulse {
+  animation: icon-glow 3s ease-in-out infinite alternate;
+}
+
+@keyframes icon-glow {
+  0% {
+    filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.2));
+  }
+  100% {
+    filter: drop-shadow(0 0 12px rgba(251, 191, 36, 0.5));
+  }
+}
+
+/* Scroll reveal — staggered fade-in for dashboard content */
+.scroll-reveal {
+  opacity: 0;
+  transform: translateY(32px);
+  transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.scroll-reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.scroll-reveal-d1 {
+  transition-delay: 0.1s;
+}
+.scroll-reveal-d2 {
+  transition-delay: 0.2s;
+}
+.scroll-reveal-d3 {
+  transition-delay: 0.3s;
+}
+.scroll-reveal-d4 {
+  transition-delay: 0.4s;
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  .glow-ring {
+    animation: none;
+    opacity: 0.4;
+  }
+  .icon-pulse {
+    animation: none;
+    filter: none;
+  }
+  .scroll-reveal {
+    transition: none;
+    opacity: 1;
+    transform: none;
+  }
+  .glass-card {
+    transition: none;
+  }
 }

@@ -199,7 +199,7 @@ export default component$(() => {
             </button>
           </div>
           <div class="flex items-center gap-2">
-            <code class="flex-1 font-mono text-sm text-blue-400 break-all">
+            <code class="flex-1 font-mono text-sm text-sky-400 break-all">
               {showFullDid.value
                 ? id.did
                 : id.did.length > 50
@@ -311,7 +311,7 @@ export default component$(() => {
               return (
                 <div class="flex items-center gap-3">
                   <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-900/30">
-                    <svg class="h-4 w-4 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                    <svg class="h-4 w-4 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
                       <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                     </svg>
                   </div>

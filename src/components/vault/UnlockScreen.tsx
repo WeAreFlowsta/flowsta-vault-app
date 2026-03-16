@@ -119,7 +119,7 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
             <form preventdefault:submit onSubmit$={handleUnlock}>
               <input
                 type="password"
-                class="mb-4 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
+                class="mb-4 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                 placeholder="Password"
                 value={password.value}
                 autoFocus
@@ -150,7 +150,7 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
             /* Sync mode: password was changed on web */
             <form preventdefault:submit onSubmit$={handleSync}>
               <div class="mb-4 rounded-lg border border-blue-800 bg-blue-900/20 p-3">
-                <p class="text-sm text-blue-300">
+                <p class="text-sm text-sky-300">
                   Your password was changed on the web. Enter your previous
                   vault password to sync.
                 </p>
@@ -158,7 +158,7 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
 
               <input
                 type="password"
-                class="mb-4 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
+                class="mb-4 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                 placeholder="Previous vault password"
                 value={oldPassword.value}
                 autoFocus

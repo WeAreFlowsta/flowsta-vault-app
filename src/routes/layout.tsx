@@ -294,7 +294,7 @@ export default component$(() => {
         <div class="text-center">
           <div class="mb-4 inline-flex h-12 w-12 items-center justify-center">
             <svg
-              class="h-8 w-8 animate-spin text-primary-500"
+              class="h-8 w-8 animate-spin text-amber-400"
               fill="none"
               viewBox="0 0 24 24"
             >
@@ -578,7 +578,7 @@ export default component$(() => {
             <div class="mb-4 flex items-center gap-3">
               <div class="flex h-10 w-10 items-center justify-center rounded-full bg-blue-500/20">
                 <svg
-                  class="h-5 w-5 text-blue-400"
+                  class="h-5 w-5 text-sky-400"
                   fill="none"
                   viewBox="0 0 24 24"
                   stroke="currentColor"

@@ -31,7 +31,7 @@ export const IdentityCard = component$<IdentityCardProps>((props) => {
       <div class="mb-4">
         <label class="mb-1 block text-xs font-medium text-gray-400">DID</label>
         <div class="flex items-center gap-2">
-          <code class="flex-1 rounded bg-gray-900 px-3 py-2 text-sm text-blue-400 font-mono break-all">
+          <code class="flex-1 rounded bg-gray-900 px-3 py-2 text-sm text-sky-400 font-mono break-all">
             {showFull.value ? props.did : truncate(props.did)}
           </code>
           <CopyButton text={props.did} label="Copy DID" />

@@ -282,7 +282,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   class={[
                     "flex h-8 w-8 items-center justify-center rounded-full text-sm font-semibold transition-colors",
                     currentCircle === i
-                      ? "bg-primary-600 text-white"
+                      ? "bg-sky-500 text-white"
                       : currentCircle > i
                         ? "bg-green-600 text-white"
                         : "bg-gray-700 text-gray-400",
@@ -321,7 +321,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 </label>
                 <input
                   type="text"
-                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
+                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                   placeholder="you@example.com"
                   value={email.value}
                   autoFocus
@@ -338,7 +338,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 </label>
                 <input
                   type="password"
-                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
+                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                   placeholder="Your Flowsta password"
                   value={loginPassword.value}
                   onInput$={(e) => {
@@ -360,7 +360,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 <button
                   type="button"
                   onClick$={() => open("https://flowsta.com")}
-                  class="text-xs text-primary-400 hover:text-primary-300"
+                  class="text-xs text-amber-400 hover:text-amber-300 transition-colors"
                 >
                   Don't have an account?
                 </button>
@@ -395,7 +395,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   type="text"
                   inputMode="numeric"
                   maxLength={6}
-                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-center text-lg font-mono tracking-[0.5em] text-white placeholder-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
+                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-center text-lg font-mono tracking-[0.5em] text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                   placeholder="000000"
                   value={tfaCode.value}
                   autoFocus
@@ -491,7 +491,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </p>
 
             <textarea
-              class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 resize-none"
+              class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-none"
               rows={4}
               placeholder="word1 word2 word3 ... word24"
               value={mnemonic.value}
@@ -507,7 +507,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               <button
                 type="button"
                 onClick$={() => open(WEB_PHRASE_URL)}
-                class="text-primary-400 hover:text-primary-300"
+                class="text-amber-400 hover:text-amber-300 transition-colors"
               >
                 Flowsta web dashboard
               </button>
@@ -544,7 +544,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {step.value === "progress" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8 text-center">
             <div class="mb-4 inline-flex h-12 w-12 items-center justify-center">
-              <svg class="h-8 w-8 animate-spin text-primary-500" fill="none" viewBox="0 0 24 24">
+              <svg class="h-8 w-8 animate-spin text-amber-400" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
               </svg>
@@ -594,7 +594,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 <div class="mt-3 space-y-3 border-t border-gray-800 pt-3">
                   <div>
                     <span class="text-xs font-medium text-gray-400">DID</span>
-                    <p class="font-mono text-sm text-blue-400 break-all">
+                    <p class="font-mono text-sm text-sky-400 break-all">
                       {result.did}
                     </p>
                   </div>

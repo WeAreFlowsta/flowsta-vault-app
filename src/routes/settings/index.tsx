@@ -180,7 +180,7 @@ export default component$(() => {
                       ).value;
                       changeError.value = "";
                     }}
-                    class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 disabled:opacity-50"
+                    class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:opacity-50"
                   />
                 </div>
               )}
@@ -194,7 +194,7 @@ export default component$(() => {
                   changeError.value = "";
                   changeSuccess.value = "";
                 }}
-                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 disabled:opacity-50"
+                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:opacity-50"
               />
               <input
                 type="password"
@@ -206,7 +206,7 @@ export default component$(() => {
                   changeError.value = "";
                   changeSuccess.value = "";
                 }}
-                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 disabled:opacity-50"
+                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:opacity-50"
               />
               <input
                 type="password"
@@ -218,7 +218,7 @@ export default component$(() => {
                   changeError.value = "";
                   changeSuccess.value = "";
                 }}
-                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 disabled:opacity-50"
+                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:opacity-50"
               />
 
               {/* Validation hints — only show once user starts typing new password */}
@@ -280,7 +280,7 @@ export default component$(() => {
                 }
               }}
               style={{ colorScheme: "dark" }}
-              class="rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
+              class="rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
             >
               <option value="5" selected={autoLockMinutes.value === 5}>5 minutes</option>
               <option value="15" selected={autoLockMinutes.value === 15}>15 minutes</option>
@@ -362,7 +362,7 @@ export default component$(() => {
           </div>
 
           <div class="mt-6 rounded-lg bg-blue-900/20 border border-blue-800 p-4">
-            <p class="text-sm text-blue-300">
+            <p class="text-sm text-sky-300">
               Flowsta Vault keeps your identity keys on your device. Your
               recovery phrase is never stored — only the encrypted derived key
               persists in the vault.
