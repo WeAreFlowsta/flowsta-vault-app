@@ -602,43 +602,28 @@ async fn link_identity_handler(
         ));
     }
 
-    let verified_app = {
-        // Check local cache first (enables offline re-linking)
-        let cache = state.app_state.verified_apps.lock().unwrap();
-        cache.get(&req.client_id).cloned()
-    };
+    // Always fetch fresh app info from the API so changes made in Website-dev
+    // (scopes, org name, description) are reflected immediately. Fall back to
+    // the local cache only if the API is unreachable (offline re-linking).
+    let api_url = option_env!("FLOWSTA_API_URL")
+        .unwrap_or("https://auth-api.flowsta.com");
+    let verify_url = format!(
+        "{}/api/v1/apps/verify?client_id={}",
+        api_url.trim_end_matches('/'),
+        req.client_id
+    );
 
-    let app_info = if let Some(cached) = verified_app {
-        log::debug!("Using cached app info for client_id: {}", req.client_id);
-        cached
-    } else {
-        // Not cached — call the API to verify
-        let api_url = option_env!("FLOWSTA_API_URL")
-            .unwrap_or("https://auth-api.flowsta.com");
-        let verify_url = format!(
-            "{}/api/v1/apps/verify?client_id={}",
-            api_url.trim_end_matches('/'),
-            req.client_id
-        );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .unwrap_or_default();
+    let api_result = client.get(&verify_url).send().await;
 
-        let api_resp = client.get(&verify_url).send().await.map_err(|e| {
-            log::debug!("API verification failed for {}: {}", req.client_id, e);
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(IpcError {
-                    error: "api_unreachable".into(),
-                    description: Some(
-                        "Could not verify app with Flowsta. Check your internet connection."
-                            .into(),
-                    ),
-                }),
-            )
-        })?;
+    let app_info = match api_result {
+      Ok(api_resp) => {
+        let api_resp = api_resp; // keep binding
+        // API reachable — parse and use fresh data
 
         let body: serde_json::Value =
             api_resp.json().await.map_err(|_| {
@@ -714,7 +699,7 @@ async fn link_identity_handler(
                 .map(String::from),
         };
 
-        // Cache for offline use
+        // Update cache with fresh data
         {
             let mut cache = state.app_state.verified_apps.lock().unwrap();
             cache.insert(req.client_id.clone(), info.clone());
@@ -722,6 +707,28 @@ async fn link_identity_handler(
         state.app_state.save_verified_apps();
 
         info
+      }
+      Err(e) => {
+        // API unreachable — fall back to local cache for offline re-linking
+        log::debug!("API verification failed for {}: {}", req.client_id, e);
+        let cache = state.app_state.verified_apps.lock().unwrap();
+        match cache.get(&req.client_id).cloned() {
+            Some(cached) => {
+                log::debug!("Falling back to cached app info for client_id: {}", req.client_id);
+                cached
+            }
+            None => return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(IpcError {
+                    error: "api_unreachable".into(),
+                    description: Some(
+                        "Could not verify app with Flowsta. Check your internet connection."
+                            .into(),
+                    ),
+                }),
+            )),
+        }
+      }
     };
 
     // Check for existing link with different client_id (app registration changed)
