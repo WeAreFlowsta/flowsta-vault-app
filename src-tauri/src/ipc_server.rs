@@ -446,7 +446,7 @@ async fn authenticate_handler(
                     Json(IpcError {
                         error: "timeout".into(),
                         description: Some(
-                            "User did not respond within 60 seconds.".into(),
+                            "No response in Flowsta Vault — request timed out. Please try again.".into(),
                         ),
                     }),
                 ));
