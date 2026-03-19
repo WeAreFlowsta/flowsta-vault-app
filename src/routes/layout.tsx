@@ -615,9 +615,8 @@ export default component$(() => {
                   This app will be able to access:
                 </p>
                 <ul class="space-y-1.5">
-                  {pendingLinkIdentity.value.scopes.map((scope) => {
+                  {pendingLinkIdentity.value.scopes.filter((s) => s !== "openid").map((scope) => {
                     const labels: Record<string, { label: string; elevated?: boolean }> = {
-                      openid: { label: "Basic identity" },
                       did: { label: "Decentralized ID (DID)" },
                       public_key: { label: "Public key" },
                       email: { label: "Email address" },
