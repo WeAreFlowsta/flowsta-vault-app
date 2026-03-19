@@ -95,26 +95,75 @@ struct StatusResponse {
     agent_pub_key: Option<String>,
     did: Option<String>,
     version: String,
+    /// Only populated when the requesting app has the "display_name" scope.
     display_name: Option<String>,
+    /// Only populated when the requesting app has the "profile_picture" scope.
     profile_picture: Option<String>,
+    /// Only populated when the requesting app has the "username" scope.
+    web_username: Option<String>,
+}
+
+/// Look up the scopes granted to the app at the given origin.
+///
+/// Finds the origin in `linked_third_party_apps`, retrieves its `client_id`,
+/// then looks up the scopes stored in `linked_app_scopes`. Returns an empty
+/// vec if the origin has not been linked or has no stored scopes.
+fn get_scopes_for_origin(state: &AppState, origin: Option<&str>) -> Vec<String> {
+    let orig = match origin {
+        Some(o) if !o.is_empty() => o,
+        _ => return vec![],
+    };
+    let client_id = {
+        let linked = state.linked_third_party_apps.lock().unwrap();
+        linked
+            .iter()
+            .find(|a| a.origin.as_deref() == Some(orig))
+            .and_then(|a| a.client_id.clone())
+    };
+    match client_id {
+        Some(cid) => state
+            .linked_app_scopes
+            .lock()
+            .unwrap()
+            .get(&cid)
+            .cloned()
+            .unwrap_or_default(),
+        None => vec![],
+    }
 }
 
 async fn status_handler(
     State(state): State<Arc<IpcState>>,
     headers: HeaderMap,
 ) -> Json<StatusResponse> {
-    let config = state.app_state.vault_config.lock().unwrap();
+    // Phase 1: extract vault fields, then drop the lock before any other locks.
+    let (unlocked, agent_pub_key, did, display_name_raw, profile_picture_raw, web_username_raw) = {
+        let config = state.app_state.vault_config.lock().unwrap();
+        (
+            config.is_some(),
+            config.as_ref().map(|c| c.agent_pub_key.clone()),
+            config.as_ref().map(|c| c.did.clone()),
+            config.as_ref().and_then(|c| c.display_name.clone()),
+            config.as_ref().and_then(|c| c.profile_picture.clone()),
+            config.as_ref().and_then(|c| c.web_username.clone()),
+        )
+    };
 
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "status");
 
+    // Phase 2: look up granted scopes for this origin (vault_config lock released).
+    let scopes = get_scopes_for_origin(&state.app_state, origin.as_deref());
+
+    // Phase 3: return only fields the app was granted at link time.
     Json(StatusResponse {
-        unlocked: config.is_some(),
-        agent_pub_key: config.as_ref().map(|c| c.agent_pub_key.clone()),
-        did: config.as_ref().map(|c| c.did.clone()),
+        unlocked,
+        agent_pub_key,
+        did,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        display_name: config.as_ref().and_then(|c| c.display_name.clone()),
-        profile_picture: config.as_ref().and_then(|c| c.profile_picture.clone()),
+        display_name: scopes.contains(&"display_name".to_string()).then_some(display_name_raw).flatten(),
+        profile_picture: scopes.contains(&"profile_picture".to_string()).then_some(profile_picture_raw).flatten(),
+        web_username: scopes.contains(&"username".to_string()).then_some(web_username_raw).flatten(),
     })
 }
 
@@ -808,9 +857,10 @@ async fn link_identity_handler(
     {
         let mut linked = state.app_state.linked_third_party_apps.lock().unwrap();
         if let Some(existing) = linked.iter_mut().find(|a| a.app_agent_pub_key == req.app_agent_pub_key) {
-            // Update existing link (client_id or app name may have changed)
+            // Update existing link (client_id, app name, or origin may have changed)
             existing.client_id = Some(req.client_id.clone());
             existing.app_name = req.app_name.clone();
+            existing.origin = origin.clone();
             existing.linked_at = unix_now();
         } else {
             linked.push(crate::commands::LinkedThirdPartyApp {
@@ -818,10 +868,18 @@ async fn link_identity_handler(
                 app_agent_pub_key: req.app_agent_pub_key.clone(),
                 linked_at: unix_now(),
                 client_id: Some(req.client_id.clone()),
+                origin: origin.clone(),
             });
         }
     }
     state.app_state.save_linked_apps();
+
+    // Persist the scopes the user accepted for this app.
+    {
+        let mut scopes_store = state.app_state.linked_app_scopes.lock().unwrap();
+        scopes_store.insert(req.client_id.clone(), app_info.scopes.clone());
+    }
+    state.app_state.save_linked_app_scopes();
 
     // Record MAU event for this app (first IPC interaction this month)
     crate::mau::record_mau_event_if_needed(&state.app_state, &req.client_id);
@@ -870,12 +928,26 @@ async fn revoke_identity_handler(
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "revoke-identity");
 
+    // Capture client_id before removing the entry so we can purge its scopes.
+    let client_id_to_remove = {
+        let apps = state.app_state.linked_third_party_apps.lock().unwrap();
+        apps.iter()
+            .find(|a| a.app_agent_pub_key == req.app_agent_pub_key)
+            .and_then(|a| a.client_id.clone())
+    };
+
     // Remove the matching linked app
     {
         let mut apps = state.app_state.linked_third_party_apps.lock().unwrap();
         apps.retain(|a| a.app_agent_pub_key != req.app_agent_pub_key);
     }
     state.app_state.save_linked_apps();
+
+    // Purge granted scopes for this app.
+    if let Some(cid) = client_id_to_remove {
+        state.app_state.linked_app_scopes.lock().unwrap().remove(&cid);
+        state.app_state.save_linked_app_scopes();
+    }
 
     // Emit event for real-time Vault UI update
     let _ = state.app_handle.emit(

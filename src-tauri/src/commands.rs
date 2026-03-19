@@ -81,6 +81,10 @@ pub struct LinkedThirdPartyApp {
     /// Developer client_id from dev.flowsta.com (for MAU tracking).
     #[serde(default)]
     pub client_id: Option<String>,
+    /// The HTTP origin that made the /link-identity request.
+    /// Used by /status to match caller origin → client_id → granted scopes.
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 /// Application state shared across commands.
@@ -109,15 +113,19 @@ pub struct AppState {
     pub mau_state: crate::mau::MauState,
     /// Cache of API-verified apps (client_id → app info). Enables offline re-linking.
     pub verified_apps: Mutex<HashMap<String, VerifiedAppInfo>>,
+    /// Scopes granted to each linked app at link time (client_id → scopes).
+    /// Persisted to linked-app-scopes.json. Used by /status for scope-filtered responses.
+    pub linked_app_scopes: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl AppState {
     pub fn new(data_dir: std::path::PathBuf) -> Self {
         let vault_path = data_dir.join("vault.enc");
 
-        // Load persisted linked apps and verified apps cache
+        // Load persisted linked apps, verified apps cache, and granted scopes
         let linked_apps = load_linked_apps(&data_dir);
         let verified_apps = load_verified_apps(&data_dir);
+        let linked_app_scopes = load_linked_app_scopes(&data_dir);
 
         Self {
             vault_config: Mutex::new(None),
@@ -132,6 +140,7 @@ impl AppState {
             conductor_status: Mutex::new(ConductorStatus::Stopped),
             mau_state: crate::mau::MauState::new(),
             verified_apps: Mutex::new(verified_apps),
+            linked_app_scopes: Mutex::new(linked_app_scopes),
         }
     }
 
@@ -152,6 +161,15 @@ impl AppState {
             let _ = std::fs::write(path, json);
         }
     }
+
+    /// Persist the granted scopes store to disk.
+    pub fn save_linked_app_scopes(&self) {
+        let scopes = self.linked_app_scopes.lock().unwrap();
+        let path = self.data_dir.join("linked-app-scopes.json");
+        if let Ok(json) = serde_json::to_string_pretty(&*scopes) {
+            let _ = std::fs::write(path, json);
+        }
+    }
 }
 
 fn load_linked_apps(data_dir: &std::path::Path) -> Vec<LinkedThirdPartyApp> {
@@ -159,6 +177,14 @@ fn load_linked_apps(data_dir: &std::path::Path) -> Vec<LinkedThirdPartyApp> {
     match std::fs::read_to_string(&path) {
         Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
         Err(_) => Vec::new(),
+    }
+}
+
+fn load_linked_app_scopes(data_dir: &std::path::Path) -> HashMap<String, Vec<String>> {
+    let path = data_dir.join("linked-app-scopes.json");
+    match std::fs::read_to_string(&path) {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(_) => HashMap::new(),
     }
 }
 
@@ -1768,6 +1794,14 @@ pub fn revoke_linked_third_party_app(
     app_agent_pub_key: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    // Capture client_id before removing the entry so we can purge its scopes.
+    let client_id_to_remove = {
+        let apps = state.linked_third_party_apps.lock().unwrap();
+        apps.iter()
+            .find(|a| a.app_agent_pub_key == app_agent_pub_key)
+            .and_then(|a| a.client_id.clone())
+    };
+
     {
         let mut apps = state.linked_third_party_apps.lock().unwrap();
         let before = apps.len();
@@ -1777,6 +1811,12 @@ pub fn revoke_linked_third_party_app(
         }
     }
     state.save_linked_apps();
+
+    if let Some(cid) = client_id_to_remove {
+        state.linked_app_scopes.lock().unwrap().remove(&cid);
+        state.save_linked_app_scopes();
+    }
+
     Ok(())
 }
 
