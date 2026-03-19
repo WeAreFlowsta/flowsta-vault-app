@@ -1788,6 +1788,15 @@ pub fn get_linked_third_party_apps(
     state.linked_third_party_apps.lock().unwrap().clone()
 }
 
+/// Get all granted scopes for linked apps (client_id → scopes).
+/// Used by the Vault UI to display what data each app can access.
+#[tauri::command]
+pub fn get_all_linked_app_scopes(
+    state: State<'_, Arc<AppState>>,
+) -> HashMap<String, Vec<String>> {
+    state.linked_app_scopes.lock().unwrap().clone()
+}
+
 /// Remove a linked third-party app by its agent public key.
 #[tauri::command]
 pub fn revoke_linked_third_party_app(

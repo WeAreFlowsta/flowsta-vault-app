@@ -44,8 +44,10 @@ export default component$(() => {
 
   // Linked third-party apps
   const linkedApps = useSignal<
-    { app_name: string; app_agent_pub_key: string; linked_at: number }[]
+    { app_name: string; app_agent_pub_key: string; linked_at: number; client_id: string | null }[]
   >([]);
+  // Granted scopes per app, keyed by client_id
+  const appScopes = useSignal<Record<string, string[]>>({});
 
   // Connected sites (IPC origins)
   const connectedSites = useSignal<ConnectedSite[]>([]);
@@ -56,7 +58,7 @@ export default component$(() => {
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async () => {
     try {
-      const [identity, apps, sites] = await Promise.all([
+      const [identity, apps, sites, scopes] = await Promise.all([
         invoke<{
           agent_pub_key: string;
           did: string;
@@ -64,10 +66,11 @@ export default component$(() => {
           created_at: number;
           web_agent_pub_key: string | null;
         }>("get_identity"),
-        invoke<{ app_name: string; app_agent_pub_key: string; linked_at: number }[]>(
+        invoke<{ app_name: string; app_agent_pub_key: string; linked_at: number; client_id: string | null }[]>(
           "get_linked_third_party_apps"
         ),
         invoke<ConnectedSite[]>("get_connected_sites"),
+        invoke<Record<string, string[]>>("get_all_linked_app_scopes"),
       ]);
 
       if (identity.web_agent_pub_key) {
@@ -76,6 +79,7 @@ export default component$(() => {
       }
 
       linkedApps.value = apps;
+      appScopes.value = scopes;
       connectedSites.value = sites.filter((s) => !isInternalOrigin(s.origin));
     } catch {
       // Vault might be locked
@@ -99,15 +103,18 @@ export default component$(() => {
   // Listen for real-time linked app changes
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async () => {
-    const unlistenAdd = await listen<{
-      app_name: string;
-      app_agent_pub_key: string;
-      linked_at: number;
-    }>("linked-app-added", (event) => {
-      const app = event.payload;
-      if (!linkedApps.value.some((a) => a.app_agent_pub_key === app.app_agent_pub_key)) {
-        linkedApps.value = [...linkedApps.value, app];
-      }
+    const unlistenAdd = await listen("linked-app-added", async () => {
+      // Re-fetch the full list so we get client_id and fresh scopes
+      try {
+        const [apps, scopes] = await Promise.all([
+          invoke<{ app_name: string; app_agent_pub_key: string; linked_at: number; client_id: string | null }[]>(
+            "get_linked_third_party_apps"
+          ),
+          invoke<Record<string, string[]>>("get_all_linked_app_scopes"),
+        ]);
+        linkedApps.value = apps;
+        appScopes.value = scopes;
+      } catch { /* ignore */ }
     });
 
     const unlistenRevoke = await listen<{
@@ -285,36 +292,64 @@ export default component$(() => {
         ) : (
           <div class="space-y-2">
             {/* Identity-linked apps first */}
-            {linkedApps.value.map((app) => (
-              <div
-                key={`app-${app.app_agent_pub_key}`}
-                class="flex items-center justify-between rounded-lg border border-blue-800/50 bg-blue-900/10 px-4 py-3"
-              >
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2">
-                    <div class="flex h-6 w-6 items-center justify-center rounded bg-blue-900/50 text-xs text-sky-400">
-                      {app.app_name.charAt(0).toUpperCase()}
+            {linkedApps.value.map((app) => {
+              const scopes = (app.client_id ? appScopes.value[app.client_id] : null) ?? [];
+              const scopeLabels: Record<string, string> = {
+                openid: "Identity",
+                display_name: "Display name",
+                username: "Username",
+                profile_picture: "Profile picture",
+                email: "Email",
+                did: "DID",
+                public_key: "Public key",
+                holochain: "Holochain",
+              };
+              const visibleScopes = scopes.filter((s) => s !== "openid");
+              return (
+                <div
+                  key={`app-${app.app_agent_pub_key}`}
+                  class="rounded-lg border border-blue-800/50 bg-blue-900/10 px-4 py-3"
+                >
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center gap-2">
+                        <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-blue-900/50 text-xs text-sky-400">
+                          {app.app_name.charAt(0).toUpperCase()}
+                        </div>
+                        <span class="text-sm font-medium text-white">{app.app_name}</span>
+                        <span class="rounded-full bg-blue-900/30 px-2 py-0.5 text-[10px] font-medium text-sky-400">
+                          Identity linked
+                        </span>
+                      </div>
+                      <div class="mt-1 flex items-center gap-3 text-xs text-gray-500">
+                        <span>Linked {new Date(app.linked_at * 1000).toLocaleDateString()}</span>
+                        <code class="truncate font-mono">
+                          {app.app_agent_pub_key.substring(0, 8)}...{app.app_agent_pub_key.substring(app.app_agent_pub_key.length - 6)}
+                        </code>
+                      </div>
+                      {visibleScopes.length > 0 && (
+                        <div class="mt-2 flex flex-wrap gap-1">
+                          {visibleScopes.map((scope) => (
+                            <span
+                              key={scope}
+                              class="rounded-full border border-gray-700 bg-gray-800/80 px-2 py-0.5 text-[10px] text-gray-400"
+                            >
+                              {scopeLabels[scope] ?? scope}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    <span class="text-sm font-medium text-white">{app.app_name}</span>
-                    <span class="rounded-full bg-blue-900/30 px-2 py-0.5 text-[10px] font-medium text-sky-400">
-                      Identity linked
-                    </span>
-                  </div>
-                  <div class="mt-1 flex items-center gap-3 text-xs text-gray-500">
-                    <span>Linked {new Date(app.linked_at * 1000).toLocaleDateString()}</span>
-                    <code class="truncate font-mono text-gray-500">
-                      {app.app_agent_pub_key.substring(0, 8)}...{app.app_agent_pub_key.substring(app.app_agent_pub_key.length - 6)}
-                    </code>
+                    <GlassButton
+                      variant="danger"
+                      onClick$={() => handleRevokeLinkedApp(app.app_agent_pub_key)}
+                    >
+                      Revoke
+                    </GlassButton>
                   </div>
                 </div>
-                <GlassButton
-                  variant="danger"
-                  onClick$={() => handleRevokeLinkedApp(app.app_agent_pub_key)}
-                >
-                  Revoke
-                </GlassButton>
-              </div>
-            ))}
+              );
+            })}
 
             {/* Connected sites */}
             {connectedSites.value.map((site) => (

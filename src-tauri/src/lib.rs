@@ -186,6 +186,7 @@ pub fn run() {
             commands::get_pending_link_identity,
             commands::respond_link_identity_request,
             commands::get_linked_third_party_apps,
+            commands::get_all_linked_app_scopes,
             commands::revoke_linked_third_party_app,
             commands::get_backup_stats,
             commands::delete_app_backup,
