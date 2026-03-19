@@ -14,6 +14,7 @@ interface VaultIdentity {
   display_name: string | null;
   profile_picture: string | null;
   web_email: string | null;
+  web_username: string | null;
   web_agent_pub_key: string | null;
 }
 
@@ -169,6 +170,9 @@ export default component$(() => {
               )}
               {id.web_email && (
                 <p class="text-sm text-gray-400">{id.web_email}</p>
+              )}
+              {id.web_username && (
+                <p class="text-sm text-gray-600">@{id.web_username}</p>
               )}
               {!hasDisplayName && !id.web_email && (
                 <h2 class="text-lg font-semibold text-white">Your Vault</h2>

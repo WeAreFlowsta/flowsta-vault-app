@@ -87,6 +87,10 @@ export default component$(() => {
 
   const handleUnlockPassword = $(async (password: string) => {
     await invoke("unlock_vault", { password });
+    // Refresh profile data (username, display name, picture) from the API so that
+    // changes made on the website are reflected without requiring a vault reset.
+    // Awaited so the overview page sees the updated data on first load.
+    await invoke("refresh_cached_profile", { apiUrl: __API_URL__, password }).catch(() => {});
     await fetchProfile();
     screen.value = "dashboard";
     checkConnectivity();

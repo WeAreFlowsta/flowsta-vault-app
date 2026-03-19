@@ -697,6 +697,7 @@ pub fn get_identity(state: State<'_, Arc<AppState>>) -> Result<VaultIdentity, St
         display_name: config.display_name.clone(),
         profile_picture: config.profile_picture.clone(),
         web_email: config.web_email.clone(),
+        web_username: config.web_username.clone(),
         web_agent_pub_key: config.web_agent_pub_key.clone(),
     })
 }
@@ -710,6 +711,7 @@ pub struct VaultIdentity {
     pub display_name: Option<String>,
     pub profile_picture: Option<String>,
     pub web_email: Option<String>,
+    pub web_username: Option<String>,
     pub web_agent_pub_key: Option<String>,
 }
 
@@ -989,6 +991,94 @@ pub async fn fetch_web_profile(
             .and_then(|v| v.as_str())
             .map(String::from),
     })
+}
+
+/// Refresh profile fields (username, display_name, profile_picture) from the API
+/// using the user's current password. Called silently after vault unlock so that
+/// changes made on the website are reflected without requiring a vault reset.
+///
+/// Fails silently — any error is non-fatal.
+#[tauri::command]
+pub async fn refresh_cached_profile(
+    api_url: String,
+    password: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    // Get the login identifier (email or username) from the current in-memory config.
+    let (identifier, vault_path) = {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config.as_ref().ok_or("Vault is locked")?;
+        let id = cfg
+            .web_email
+            .clone()
+            .or_else(|| cfg.web_username.clone())
+            .ok_or("No web account linked")?;
+        let path = state.vault_path.lock().unwrap().clone();
+        (id, path)
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .post(format!("{}/auth/login", api_url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "emailOrUsername": identifier,
+            "password": password,
+        }))
+        .send()
+        .await
+        .map_err(|_| "offline")?;
+
+    // 2FA accounts return 200 with requires2FA — treat as non-fatal skip.
+    if !resp.status().is_success() {
+        return Ok(());
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if body.get("requires2FA").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Ok(());
+    }
+
+    let user = match body.get("user") {
+        Some(u) => u,
+        None => return Ok(()),
+    };
+
+    let new_username = user.get("username").and_then(|v| v.as_str()).map(String::from);
+    let new_display_name = user
+        .get("displayName")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let new_profile_picture = user
+        .get("profilePicture")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // Update in-memory config and re-save to disk (re-encrypted with the same password).
+    {
+        let mut config = state.vault_config.lock().unwrap();
+        if let Some(cfg) = config.as_mut() {
+            if new_username.is_some() {
+                cfg.web_username = new_username;
+            }
+            if new_display_name.is_some() {
+                cfg.display_name = new_display_name;
+            }
+            if new_profile_picture.is_some() {
+                cfg.profile_picture = new_profile_picture;
+            }
+
+            if let Ok(mut encrypted) = encrypt_vault(cfg, &password) {
+                encrypted.display_email = cfg.web_email.clone().or_else(|| cfg.web_username.clone());
+                let _ = save_vault(&vault_path, &encrypted);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Get unencrypted vault metadata (email) for the unlock screen.

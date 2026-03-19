@@ -166,6 +166,7 @@ pub fn run() {
             commands::authenticate_2fa,
             commands::check_recovery_phrase_status,
             commands::fetch_web_profile,
+            commands::refresh_cached_profile,
             commands::verify_phrase_matches_web_key,
             commands::get_vault_display_info,
             commands::check_web_password,
@@ -196,6 +197,16 @@ pub fn run() {
             commands::delete_single_backup,
             commands::write_json_file,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                let state: Arc<AppState> = app_handle.state::<Arc<AppState>>().inner().clone();
+                if let Ok(mut lock) = state.conductor_handle.lock() {
+                    if let Some(handle) = lock.take() {
+                        handle.shutdown();
+                    }
+                };
+            }
+        });
 }
