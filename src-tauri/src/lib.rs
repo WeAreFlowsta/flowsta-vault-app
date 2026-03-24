@@ -123,26 +123,9 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Show the window once the frontend signals it's ready.
-            // The window starts hidden (visible: false in tauri.conf.json) to avoid
-            // a white flash on first launch caused by WebKitGTK initialization.
-            // Fallback: show after 3 seconds in case JS doesn't load (first-launch issue).
-            let main_window = app.get_webview_window("main").expect("main window not found");
-            let show_window = main_window.clone();
-            let shown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let shown_clone = shown.clone();
-            main_window.once("frontend-ready", move |_| {
-                if !shown_clone.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    let _ = show_window.show();
-                }
-            });
-            let fallback_window = main_window.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(3));
-                if !shown.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    let _ = fallback_window.show();
-                }
-            });
+            // Window starts visible (required for Tauri #11856 — decoration buttons
+            // are unresponsive on Linux Wayland when starting with visible:false).
+            // The dark bg-gray-900 body style in global.css prevents white flash.
 
             Ok(())
         })
