@@ -1115,7 +1115,8 @@ fn base64_standard_decode(input: &str) -> Result<Vec<u8>, ()> {
 struct BackupRequest {
     client_id: String,
     app_name: String,
-    /// Optional label for versioned backups (default: "latest").
+    /// Optional label for named backups. If omitted, auto-generates a
+    /// timestamped label so each call creates a new snapshot.
     label: Option<String>,
     /// The data to back up (JSON value — will be serialized to bytes).
     data: serde_json::Value,
@@ -1139,15 +1140,15 @@ async fn backup_handler(
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "backup");
 
-    // Vault must be unlocked
+    // Backup key must be available (set on first unlock, persists through lock)
     {
-        let config = state.app_state.vault_config.lock().unwrap();
-        if config.is_none() {
+        let bk = state.app_state.backup_key.lock().unwrap();
+        if bk.is_none() {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(IpcError {
-                    error: "vault_locked".into(),
-                    description: Some("Vault is locked. Unlock it first.".into()),
+                    error: "vault_never_unlocked".into(),
+                    description: Some("Vault has never been unlocked in this session. Unlock it first.".into()),
                 }),
             ));
         }
@@ -1236,13 +1237,13 @@ async fn backup_retrieve_handler(
     track_request(&state.app_state, origin.as_deref(), "backup_retrieve");
 
     {
-        let config = state.app_state.vault_config.lock().unwrap();
-        if config.is_none() {
+        let bk = state.app_state.backup_key.lock().unwrap();
+        if bk.is_none() {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(IpcError {
-                    error: "vault_locked".into(),
-                    description: Some("Vault is locked.".into()),
+                    error: "vault_never_unlocked".into(),
+                    description: Some("Vault has never been unlocked in this session.".into()),
                 }),
             ));
         }

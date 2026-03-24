@@ -133,6 +133,12 @@ struct EncryptedBackup {
 
 // ── Key derivation ─────────────────────────────────────────────────
 
+/// Derive the backup encryption key from a device seed.
+/// Exposed so AppState can cache it across lock/unlock.
+pub fn derive_backup_key_from_seed(device_seed: &[u8; 32]) -> [u8; 32] {
+    derive_backup_key(device_seed)
+}
+
 fn derive_backup_key(device_seed: &[u8; 32]) -> [u8; 32] {
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(BACKUP_STORAGE_CONSTANT.as_bytes())
         .expect("HMAC can take key of any size");
@@ -168,13 +174,12 @@ fn backup_file_path(data_dir: &Path, client_id: &str, label: &str) -> PathBuf {
 
 // ── Encrypt / Decrypt ──────────────────────────────────────────────
 
-fn encrypt_data(data: &[u8], device_seed: &[u8; 32]) -> Result<(Vec<u8>, [u8; 12]), String> {
-    let key = derive_backup_key(device_seed);
+fn encrypt_with_key(data: &[u8], key: &[u8; 32]) -> Result<(Vec<u8>, [u8; 12]), String> {
     let mut nonce_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let cipher = <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(&key)
+    let cipher = <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(key)
         .map_err(|e| format!("Backup cipher init failed: {}", e))?;
     let ciphertext = cipher
         .encrypt(nonce, data)
@@ -183,11 +188,10 @@ fn encrypt_data(data: &[u8], device_seed: &[u8; 32]) -> Result<(Vec<u8>, [u8; 12
     Ok((ciphertext, nonce_bytes))
 }
 
-fn decrypt_data(ciphertext: &[u8], nonce_bytes: &[u8], device_seed: &[u8; 32]) -> Result<Vec<u8>, String> {
-    let key = derive_backup_key(device_seed);
+fn decrypt_with_key(ciphertext: &[u8], nonce_bytes: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    let cipher = <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(&key)
+    let cipher = <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(key)
         .map_err(|e| format!("Backup cipher init failed: {}", e))?;
     cipher
         .decrypt(nonce, ciphertext)
@@ -197,6 +201,9 @@ fn decrypt_data(ciphertext: &[u8], nonce_bytes: &[u8], device_seed: &[u8; 32]) -
 // ── Public API ─────────────────────────────────────────────────────
 
 /// Save a backup for an app. Encrypts the data and writes to disk.
+/// When no label is provided, auto-generates a timestamped label so each
+/// backup is a separate snapshot. Apps can pass an explicit label to
+/// overwrite a specific named backup (e.g. "latest" or "pre-migration").
 pub fn save_backup(
     app_state: &AppState,
     client_id: &str,
@@ -213,17 +220,30 @@ pub fn save_backup(
         ));
     }
 
-    let device_seed = {
+    // Use device seed if unlocked, otherwise fall back to cached backup key
+    let backup_key = {
         let config = app_state.vault_config.lock().unwrap();
-        let config = config.as_ref().ok_or("Vault is locked")?;
-        let seed = config.device_seed.as_ref().ok_or("No device seed")?;
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(seed);
-        arr
+        if let Some(ref cfg) = *config {
+            if let Some(ref seed) = cfg.device_seed {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(seed);
+                derive_backup_key(&arr)
+            } else {
+                *app_state.backup_key.lock().unwrap()
+                    .as_ref()
+                    .ok_or("Vault has never been unlocked")?
+            }
+        } else {
+            *app_state.backup_key.lock().unwrap()
+                .as_ref()
+                .ok_or("Vault has never been unlocked")?
+        }
     };
 
-    // Auto-rotate: if at the limit, delete the oldest backup to make room
-    let label_str = label.unwrap_or("latest");
+    // Auto-generate a timestamped label when none is provided, so each
+    // backup is a separate snapshot rather than overwriting "latest".
+    let auto_label = format!("backup-{}", unix_now());
+    let label_str = label.unwrap_or(&auto_label);
     let app_dir = app_backup_dir(&app_state.data_dir, client_id);
     if app_dir.exists() {
         let target_path = backup_file_path(&app_state.data_dir, client_id, label_str);
@@ -259,7 +279,7 @@ pub fn save_backup(
     }
 
     // Encrypt
-    let (ciphertext, nonce_bytes) = encrypt_data(data, &device_seed)?;
+    let (ciphertext, nonce_bytes) = encrypt_with_key(data, &backup_key)?;
 
     let meta = BackupMeta {
         client_id: client_id.to_string(),
@@ -302,21 +322,44 @@ pub fn retrieve_backup(
     client_id: &str,
     label: Option<&str>,
 ) -> Result<(Vec<u8>, BackupMeta), String> {
-    let device_seed = {
+    // Use device seed if unlocked, otherwise fall back to cached backup key
+    let backup_key = {
         let config = app_state.vault_config.lock().unwrap();
-        let config = config.as_ref().ok_or("Vault is locked")?;
-        let seed = config.device_seed.as_ref().ok_or("No device seed")?;
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(seed);
-        arr
+        if let Some(ref cfg) = *config {
+            if let Some(ref seed) = cfg.device_seed {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(seed);
+                derive_backup_key(&arr)
+            } else {
+                *app_state.backup_key.lock().unwrap()
+                    .as_ref()
+                    .ok_or("Vault has never been unlocked")?
+            }
+        } else {
+            *app_state.backup_key.lock().unwrap()
+                .as_ref()
+                .ok_or("Vault has never been unlocked")?
+        }
     };
 
-    let label_str = label.unwrap_or("latest");
-    let path = backup_file_path(&app_state.data_dir, client_id, label_str);
-
-    if !path.exists() {
-        return Err(format!("No backup found for label '{}'", label_str));
-    }
+    // If no label given, find the most recent backup for this app
+    let path = if let Some(l) = label {
+        let p = backup_file_path(&app_state.data_dir, client_id, l);
+        if !p.exists() {
+            return Err(format!("No backup found for label '{}'", l));
+        }
+        p
+    } else {
+        // Try "latest" first for backwards compat, then fall back to newest
+        let latest_path = backup_file_path(&app_state.data_dir, client_id, "latest");
+        if latest_path.exists() {
+            latest_path
+        } else {
+            let metas = list_app_backups(&app_state.data_dir, client_id)?;
+            let newest = metas.first().ok_or("No backups found for this app")?;
+            backup_file_path(&app_state.data_dir, client_id, newest.label.as_deref().unwrap_or("latest"))
+        }
+    };
 
     let json = std::fs::read_to_string(&path)
         .map_err(|e| format!("Backup read failed: {}", e))?;
@@ -328,7 +371,7 @@ pub fn retrieve_backup(
     let ciphertext = hex::decode(&encrypted.ciphertext)
         .map_err(|_| "Backup bad ciphertext hex".to_string())?;
 
-    let plaintext = decrypt_data(&ciphertext, &nonce_bytes, &device_seed)?;
+    let plaintext = decrypt_with_key(&ciphertext, &nonce_bytes, &backup_key)?;
 
     Ok((plaintext, encrypted.meta))
 }

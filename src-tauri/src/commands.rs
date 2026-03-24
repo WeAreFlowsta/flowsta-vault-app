@@ -116,6 +116,10 @@ pub struct AppState {
     /// Scopes granted to each linked app at link time (client_id → scopes).
     /// Persisted to linked-app-scopes.json. Used by /status for scope-filtered responses.
     pub linked_app_scopes: Mutex<HashMap<String, Vec<String>>>,
+    /// Derived backup encryption key — persists through vault lock so apps
+    /// can store backups while the vault is locked. Derived from device_seed
+    /// via HMAC (cannot recover seed or sign).
+    pub backup_key: Mutex<Option<[u8; 32]>>,
 }
 
 impl AppState {
@@ -141,6 +145,7 @@ impl AppState {
             mau_state: crate::mau::MauState::new(),
             verified_apps: Mutex::new(verified_apps),
             linked_app_scopes: Mutex::new(linked_app_scopes),
+            backup_key: Mutex::new(None),
         }
     }
 
@@ -315,6 +320,12 @@ pub fn setup_vault(
         *state_config = Some(config);
     }
 
+    // Derive and cache backup encryption key (persists through lock)
+    {
+        let mut bk = state.backup_key.lock().unwrap();
+        *bk = Some(crate::backup::derive_backup_key_from_seed(&device_seed));
+    }
+
     log::info!("Vault created and unlocked. Agent: {}", &agent_pub_key);
 
     // Load MAU state (fresh store for new vault)
@@ -369,6 +380,16 @@ pub fn unlock_vault(
     {
         let mut state_config = state.vault_config.lock().unwrap();
         *state_config = Some(config);
+    }
+
+    // Derive and cache backup encryption key (persists through lock)
+    if let Some(ref seed_vec) = device_seed {
+        if seed_vec.len() == 32 {
+            let mut seed_arr = [0u8; 32];
+            seed_arr.copy_from_slice(seed_vec);
+            let mut bk = state.backup_key.lock().unwrap();
+            *bk = Some(crate::backup::derive_backup_key_from_seed(&seed_arr));
+        }
     }
 
     log::info!("Vault unlocked.");
