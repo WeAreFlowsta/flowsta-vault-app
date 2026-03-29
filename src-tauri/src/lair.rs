@@ -10,6 +10,7 @@
 
 use lair_keystore_api::dependencies::sodoken;
 use lair_keystore_api::prelude::*;
+use percent_encoding::percent_decode_str;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -226,7 +227,10 @@ pub async fn wait_for_lair_socket(connection_url: &str, timeout_secs: u64) -> Re
     // Extract socket path from URL like "unix:///path/to/socket?k=..."
     let url = lair_keystore_api::dependencies::url::Url::parse(connection_url)
         .map_err(|e| format!("Invalid connection URL: {}", e))?;
-    let socket_path = std::path::PathBuf::from(url.path());
+    // url.path() returns percent-encoded path (e.g. %20 for spaces).
+    // Decode it so we match the actual filesystem path.
+    let decoded_path = percent_decode_str(url.path()).decode_utf8_lossy();
+    let socket_path = std::path::PathBuf::from(decoded_path.as_ref());
 
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
