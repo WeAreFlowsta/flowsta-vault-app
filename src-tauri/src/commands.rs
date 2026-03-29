@@ -456,6 +456,7 @@ fn spawn_conductor_startup(
             let resource_dir = app_handle
                 .path()
                 .resource_dir()
+                .map(|d| d.join("resources"))
                 .unwrap_or_else(|_| data_dir.clone());
 
             tauri::async_runtime::spawn(async move {
