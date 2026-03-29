@@ -26,7 +26,12 @@ pub fn resolve_sidecar_bin(name: &str) -> PathBuf {
     // Production: binary is next to our executable
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join(name);
+            // On Windows, binaries have .exe extension
+            let candidate = if cfg!(target_os = "windows") {
+                dir.join(format!("{}.exe", name))
+            } else {
+                dir.join(name)
+            };
             if candidate.exists() {
                 return candidate;
             }

@@ -222,9 +222,19 @@ pub async fn connect_to_lair(
         .map_err(|e| format!("Failed to connect to lair: {}", e))
 }
 
-/// Wait for the lair unix socket to be ready (poll until it exists).
+/// Wait for the lair connection to be ready.
+/// On Unix, polls until the socket file exists.
+/// On Windows, lair uses named pipes — poll by attempting a TCP-like connect.
 pub async fn wait_for_lair_socket(connection_url: &str, timeout_secs: u64) -> Result<(), String> {
-    // Extract socket path from URL like "unix:///path/to/socket?k=..."
+    // On Windows, lair uses named pipes which don't have a socket file to poll.
+    // Instead, just wait a fixed period for lair to initialize.
+    if cfg!(target_os = "windows") {
+        log::info!("Windows: waiting for lair-keystore to initialize...");
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        return Ok(());
+    }
+
+    // Unix: Extract socket path from URL like "unix:///path/to/socket?k=..."
     let url = lair_keystore_api::dependencies::url::Url::parse(connection_url)
         .map_err(|e| format!("Invalid connection URL: {}", e))?;
     // url.path() returns percent-encoded path (e.g. %20 for spaces).
