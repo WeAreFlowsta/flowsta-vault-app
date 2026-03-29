@@ -1536,14 +1536,21 @@ async fn auto_link_web_account(state: &Arc<AppState>, password: &str) -> Result<
         .agent_pub_key
         .ok_or("API response missing agent_pub_key")?;
 
-    // Decode keys, build sorted payload, sign
+    // Decode web agent key — API returns raw 32-byte key as base64.
+    // Construct the 39-byte AgentPubKey (3-byte header + 32-byte key + 4-byte DHT location).
     let web_agent_bytes = base64_standard_decode(&web_agent_key_b64)
         .map_err(|_| "Failed to decode web agent key")?;
-    if web_agent_bytes.len() != 39 {
-        return Err(format!("Web agent key is {} bytes, expected 39", web_agent_bytes.len()));
-    }
-    let mut web_39 = [0u8; 39];
-    web_39.copy_from_slice(&web_agent_bytes);
+    let web_39 = if web_agent_bytes.len() == 32 {
+        let mut key_32 = [0u8; 32];
+        key_32.copy_from_slice(&web_agent_bytes);
+        construct_agent_pub_key_bytes(&key_32)
+    } else if web_agent_bytes.len() == 39 {
+        let mut key_39 = [0u8; 39];
+        key_39.copy_from_slice(&web_agent_bytes);
+        key_39
+    } else {
+        return Err(format!("Web agent key is {} bytes, expected 32 or 39", web_agent_bytes.len()));
+    };
 
     let desktop_bytes = base64_standard_decode(&agent_pub_key_raw_b64)
         .map_err(|_| "Failed to decode desktop agent key")?;
@@ -1665,19 +1672,22 @@ pub async fn link_web_account(
         .agent_pub_key
         .ok_or("API response missing agent_pub_key")?;
 
-    // Step 2: Decode web agent's 39-byte key from base64
+    // Step 2: Decode web agent key — API returns raw 32-byte key as base64.
+    // Construct the 39-byte AgentPubKey if needed.
     let web_agent_bytes = base64_standard_decode(&web_agent_key_b64)
         .map_err(|_| "Failed to decode web agent key from base64")?;
 
-    if web_agent_bytes.len() != 39 {
-        return Err(format!(
-            "Web agent key is {} bytes, expected 39",
-            web_agent_bytes.len()
-        ));
-    }
-
-    let mut web_39 = [0u8; 39];
-    web_39.copy_from_slice(&web_agent_bytes);
+    let web_39 = if web_agent_bytes.len() == 32 {
+        let mut key_32 = [0u8; 32];
+        key_32.copy_from_slice(&web_agent_bytes);
+        construct_agent_pub_key_bytes(&key_32)
+    } else if web_agent_bytes.len() == 39 {
+        let mut key_39 = [0u8; 39];
+        key_39.copy_from_slice(&web_agent_bytes);
+        key_39
+    } else {
+        return Err(format!("Web agent key is {} bytes, expected 32 or 39", web_agent_bytes.len()));
+    };
 
     // Step 3: Decode desktop's own 39-byte key
     let desktop_bytes = base64_standard_decode(&agent_pub_key_raw_b64)
