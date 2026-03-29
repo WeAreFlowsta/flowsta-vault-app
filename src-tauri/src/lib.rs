@@ -10,7 +10,31 @@ mod mau;
 mod vault;
 
 use commands::AppState;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Resolve a sidecar binary path.
+///
+/// In production (bundled app), binaries are next to the main executable
+/// (e.g. Contents/MacOS/holochain on macOS). In development, they're on PATH
+/// via cargo install.
+pub fn resolve_sidecar_bin(name: &str) -> PathBuf {
+    if cfg!(debug_assertions) {
+        // Dev mode: use PATH (cargo-installed binary)
+        return PathBuf::from(name);
+    }
+    // Production: binary is next to our executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    // Fallback to PATH
+    PathBuf::from(name)
+}
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},

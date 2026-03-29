@@ -146,7 +146,10 @@ pub fn start_conductor_process(
     let stderr_file = std::fs::File::create(&stderr_path)
         .map_err(|e| format!("Failed to create conductor stderr log: {}", e))?;
 
-    let mut child = std::process::Command::new("holochain")
+    let holochain_bin = crate::resolve_sidecar_bin("holochain");
+    log::info!("Using holochain binary: {:?}", holochain_bin);
+
+    let mut child = std::process::Command::new(&holochain_bin)
         .arg("-c")
         .arg(config_path)
         .arg("--piped")

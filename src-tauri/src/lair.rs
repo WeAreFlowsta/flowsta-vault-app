@@ -116,9 +116,12 @@ pub fn start_lair_process(
     let config_path = lair_dir.join("lair-keystore-config.yaml");
     let is_first_run = !config_path.exists();
 
+    let lair_bin = crate::resolve_sidecar_bin("lair-keystore");
+    log::info!("Using lair-keystore binary: {:?}", lair_bin);
+
     if is_first_run {
         log::info!("First run: initializing lair-keystore...");
-        let mut child = Command::new("lair-keystore")
+        let mut child = Command::new(&lair_bin)
             .arg("init")
             .arg("--piped")
             .current_dir(lair_dir)
@@ -156,7 +159,7 @@ pub fn start_lair_process(
 
     // Start the lair server.
     log::info!("Starting lair-keystore server...");
-    let mut child = Command::new("lair-keystore")
+    let mut child = Command::new(&lair_bin)
         .arg("server")
         .arg("--piped")
         .current_dir(lair_dir)
