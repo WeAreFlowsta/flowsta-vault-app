@@ -97,7 +97,7 @@ pub fn generate_conductor_config(
         .unwrap_or("wss://bootstrap.flowsta.com");
 
     let config = format!(
-        r#"data_root_path: {data_root}
+        r#"data_root_path: "{data_root}"
 keystore:
   type: lair_server
   connection_url: "{lair_url}"
