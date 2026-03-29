@@ -150,6 +150,49 @@ jobs:
     needs: [create-release, build]
     runs-on: ubuntu-latest
     steps:
+      - name: Rename release assets
+        uses: actions/github-script@v8
+        env:
+          release_id: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const releaseId = process.env.release_id;
+            const { data: assets } = await github.rest.repos.listReleaseAssets({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+            });
+
+            const renames = {
+              '_aarch64.dmg': '-macOS-Apple-Silicon.dmg',
+              '_x64.dmg': '-macOS-Intel.dmg',
+              '_amd64.AppImage': '-Linux.AppImage',
+              '_amd64.deb': '-Linux.deb',
+              '-1.x86_64.rpm': '-Linux.rpm',
+              '_x64-setup.exe': '-Windows-Setup.exe',
+              '_x64_en-US.msi': '-Windows.msi',
+              '_aarch64.app.tar.gz': '-macOS-Apple-Silicon.app.tar.gz',
+              '_x64.app.tar.gz': '-macOS-Intel.app.tar.gz',
+              '_aarch64.app.tar.gz.sig': '-macOS-Apple-Silicon.app.tar.gz.sig',
+              '_x64.app.tar.gz.sig': '-macOS-Intel.app.tar.gz.sig',
+            };
+
+            for (const asset of assets) {
+              for (const [oldSuffix, newSuffix] of Object.entries(renames)) {
+                if (asset.name.endsWith(oldSuffix)) {
+                  const newName = asset.name.replace(oldSuffix, newSuffix);
+                  console.log(`Renaming: ${asset.name} → ${newName}`);
+                  await github.rest.repos.updateReleaseAsset({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    asset_id: asset.id,
+                    name: newName,
+                  });
+                  break;
+                }
+              }
+            }
+
       - name: Publish release
         uses: actions/github-script@v8
         env:

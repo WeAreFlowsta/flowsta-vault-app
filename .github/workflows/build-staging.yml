@@ -14,12 +14,16 @@ jobs:
         include:
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            label: Linux
           - platform: macos-latest
             target: aarch64-apple-darwin
+            label: macOS-Apple-Silicon
           - platform: macos-latest
             target: x86_64-apple-darwin
+            label: macOS-Intel
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
+            label: Windows
 
     runs-on: ${{ matrix.platform }}
 
@@ -123,7 +127,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: flowsta-vault-staging-${{ matrix.target }}
+          name: Flowsta-Vault-Staging-${{ matrix.label }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
             src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
