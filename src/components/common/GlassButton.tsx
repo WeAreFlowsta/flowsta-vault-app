@@ -56,14 +56,15 @@ export const GlassButton = component$<GlassButtonProps>(
     `;
 
     const secondaryClasses = `
-      bg-white/10
+      bg-gray-800/60
       backdrop-blur-xl
       text-white
-      border-2 border-white/70
-      shadow-[0_8px_32px_rgba(255,255,255,0.15),inset_0_1px_0_rgba(255,255,255,0.3)]
-      hover:bg-white/20
-      hover:border-amber-200/90
-      hover:shadow-[0_8px_32px_rgba(251,191,36,0.4),0_0_24px_rgba(251,191,36,0.3),inset_0_1px_0_rgba(255,255,255,0.5)]
+      border-2 border-white/40
+      shadow-[0_8px_32px_rgba(255,255,255,0.1),inset_0_1px_0_rgba(255,255,255,0.15)]
+      [text-shadow:_0_1px_3px_rgba(0,0,0,0.5)]
+      hover:bg-gray-700/60
+      hover:border-amber-200/70
+      hover:shadow-[0_8px_32px_rgba(251,191,36,0.3),0_0_24px_rgba(251,191,36,0.2),inset_0_1px_0_rgba(255,255,255,0.3)]
       hover:scale-[1.03]
       active:scale-[0.97]
       active:shadow-[0_4px_16px_rgba(251,191,36,0.5)]
