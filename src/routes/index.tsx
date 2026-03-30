@@ -2,6 +2,7 @@ import { component$, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { CopyButton } from "~/components/ui/CopyButton";
 
 declare const __API_URL__: string;
@@ -61,7 +62,7 @@ export default component$(() => {
   const linkError = useSignal("");
 
   // eslint-disable-next-line qwik/no-use-visible-task
-  useVisibleTask$(async () => {
+  useVisibleTask$(async ({ cleanup }) => {
     try {
       const [id, stats, apps] = await Promise.all([
         invoke<VaultIdentity>("get_identity"),
@@ -76,6 +77,14 @@ export default component$(() => {
     } finally {
       loading.value = false;
     }
+
+    // Refresh identity when profile is synced from web account
+    const unlisten = await listen("profile-synced", async () => {
+      try {
+        identity.value = await invoke<VaultIdentity>("get_identity");
+      } catch { /* ignore */ }
+    });
+    cleanup(() => unlisten());
   });
 
   const handleLinkWebAccount = $(async () => {
