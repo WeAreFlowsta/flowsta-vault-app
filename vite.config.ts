@@ -1,3 +1,4 @@
+import fs from "fs";
 import { defineConfig, loadEnv, type UserConfig } from "vite";
 import { qwikVite } from "@builder.io/qwik/optimizer";
 import { qwikCity } from "@builder.io/qwik-city/vite";
@@ -29,7 +30,7 @@ export default defineConfig(({ mode }): UserConfig => {
     },
     define: {
       __APP_VERSION__: JSON.stringify(
-        process.env.npm_package_version ?? "0.1.0"
+        JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf-8")).version
       ),
       __API_URL__: JSON.stringify(
         env.VITE_API_URL ?? "https://auth-api.flowsta.com"
