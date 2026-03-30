@@ -517,6 +517,8 @@ fn spawn_conductor_startup(
                                     } else {
                                         log::warn!("Auto-link returned failure: {}", result.message);
                                     }
+                                    // Notify frontend to refresh profile (profile data synced during auto-link)
+                                    let _ = app_handle_ref.emit("profile-synced", ());
                                 }
                                 Err(e) => {
                                     // Non-fatal — user can retry manually from Identities page

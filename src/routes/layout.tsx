@@ -235,8 +235,14 @@ export default component$(() => {
       },
     );
 
+    // Listen for profile sync (profile picture/name updated from web account)
+    const unlistenProfilePromise = listen("profile-synced", () => {
+      fetchProfile();
+    });
+
     cleanup(() => {
       unlistenPromise.then((unlisten) => unlisten());
+      unlistenProfilePromise.then((unlisten) => unlisten());
     });
   });
 
