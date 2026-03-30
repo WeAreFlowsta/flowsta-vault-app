@@ -387,7 +387,31 @@ async fn update_single_dna(
         }
         Err(e) => {
             let err_str = format!("{}", e);
-            if err_str.contains("CellAlreadyExists") {
+            if err_str.contains("AppAlreadyInstalled") {
+                // App was installed by a previous attempt that failed before completing.
+                // Just enable it and uninstall the old one.
+                log::info!(
+                    "AppAlreadyInstalled — {} already registered, enabling and cleaning up",
+                    new_app_id
+                );
+                admin_ws
+                    .enable_app(new_app_id.clone())
+                    .await
+                    .map_err(|e| format!("Failed to enable {}: {}", new_app_id, e))?;
+
+                log::info!("Uninstalling old {}...", old_app_id);
+                if let Err(e) = admin_ws.uninstall_app(old_app_id.clone(), false).await {
+                    log::warn!("Failed to uninstall {} (non-fatal): {}", old_app_id, e);
+                }
+
+                log::info!(
+                    "{} DNA updated (recovered): {} → {} (old {} uninstalled)",
+                    dna_type,
+                    current_version,
+                    new_version,
+                    old_app_id
+                );
+            } else if err_str.contains("CellAlreadyExists") {
                 // Same DNA hash — the new bundle has the same integrity zomes + network seed.
                 // The cell is already running correctly under the old app ID.
                 // No install/uninstall possible; Holochain won't allow a duplicate cell.
