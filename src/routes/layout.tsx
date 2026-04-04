@@ -16,6 +16,7 @@ declare const __APP_VERSION__: string;
 
 const navItems = [
   { label: "Overview", href: "/", icon: "home" },
+  { label: "Sign It", href: "/sign-it/", icon: "pencil" },
   { label: "Your Data", href: "/your-data/", icon: "database" },
   { label: "Connected Apps", href: "/identities/", icon: "link" },
   { label: "Settings", href: "/settings/", icon: "cog" },
@@ -55,6 +56,15 @@ export default component$(() => {
     description: string | null;
     logo_url: string | null;
     replacing_existing: boolean;
+  } | null>(null);
+
+  // Document-sign approval dialog state (Sign It)
+  const pendingDocumentSign = useSignal<{
+    id: string;
+    app_name: string;
+    file_hash: string;
+    label: string | null;
+    origin: string | null;
   } | null>(null);
 
   // Fetch profile from unlocked vault for header display
@@ -195,6 +205,24 @@ export default component$(() => {
     });
   });
 
+  // Listen for document-sign-request from IPC server (Sign It)
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ cleanup }) => {
+    const unlistenPromise = listen<{
+      id: string;
+      app_name: string;
+      file_hash: string;
+      label: string | null;
+      origin: string | null;
+    }>("document-sign-request", (event) => {
+      pendingDocumentSign.value = event.payload;
+    });
+
+    cleanup(() => {
+      unlistenPromise.then((unlisten) => unlisten());
+    });
+  });
+
   // Listen for vault-lock-requested from system tray
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ cleanup }) => {
@@ -267,6 +295,16 @@ export default component$(() => {
       console.error("Failed to respond to link-identity request:", e);
     } finally {
       pendingLinkIdentity.value = null;
+    }
+  });
+
+  const handleDocumentSignResponse = $(async (approved: boolean) => {
+    try {
+      await invoke("respond_document_sign_request", { approved });
+    } catch (e) {
+      console.error("Failed to respond to document-sign request:", e);
+    } finally {
+      pendingDocumentSign.value = null;
     }
   });
 
@@ -677,6 +715,72 @@ export default component$(() => {
           </div>
         </div>
       )}
+
+      {/* Document sign approval dialog (Sign It) */}
+      {pendingDocumentSign.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
+            <div class="mb-4 flex items-center gap-3">
+              <div class="flex h-10 w-10 items-center justify-center rounded-full bg-amber-500/20">
+                <svg class="h-5 w-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
+                </svg>
+              </div>
+              <div>
+                <h3 class="text-base font-semibold text-white">Sign Document</h3>
+                <p class="text-xs text-gray-400">
+                  {pendingDocumentSign.value.app_name}
+                </p>
+              </div>
+            </div>
+
+            <div class="mb-4 space-y-2 rounded-lg border border-gray-700 bg-gray-900 p-3">
+              {pendingDocumentSign.value.label && (
+                <div class="flex justify-between">
+                  <span class="text-xs text-gray-500">File</span>
+                  <span class="text-xs text-white truncate max-w-[200px]">
+                    {pendingDocumentSign.value.label}
+                  </span>
+                </div>
+              )}
+              <div class="flex justify-between">
+                <span class="text-xs text-gray-500">Hash</span>
+                <span class="text-xs font-mono text-gray-300 truncate max-w-[200px]">
+                  {pendingDocumentSign.value.file_hash.slice(0, 16)}...
+                </span>
+              </div>
+              {pendingDocumentSign.value.origin && (
+                <div class="flex justify-between">
+                  <span class="text-xs text-gray-500">From</span>
+                  <span class="text-xs text-gray-300 truncate max-w-[200px]">
+                    {pendingDocumentSign.value.origin}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <p class="mb-4 text-xs text-gray-400">
+              This app wants you to cryptographically sign a file. Your signature will be publicly verifiable on the DHT.
+            </p>
+
+            <div class="flex gap-3">
+              <GlassButton
+                variant="secondary"
+                class="flex-1"
+                onClick$={() => handleDocumentSignResponse(false)}
+              >
+                Deny
+              </GlassButton>
+              <GlassButton
+                class="flex-1"
+                onClick$={() => handleDocumentSignResponse(true)}
+              >
+                Sign
+              </GlassButton>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 });
@@ -687,6 +791,7 @@ const NavIcon = component$<{ name: string }>(({ name }) => {
     home: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6",
     link: "M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1",
     database: "M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4",
+    pencil: "M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10",
     cog: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z",
   };
 

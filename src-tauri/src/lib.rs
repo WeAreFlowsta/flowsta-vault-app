@@ -3,6 +3,7 @@ mod commands;
 mod conductor;
 mod dna;
 mod dna_updater;
+pub mod file_analyzer;
 mod ipc_server;
 mod key_derivation;
 mod lair;
@@ -196,6 +197,12 @@ pub fn run() {
             commands::revoke_approved_app,
             commands::get_pending_link_identity,
             commands::respond_link_identity_request,
+            commands::respond_document_sign_request,
+            commands::get_pending_document_sign,
+            commands::hash_file,
+            commands::analyze_file,
+            commands::sign_file,
+            commands::get_my_signatures,
             commands::get_linked_third_party_apps,
             commands::get_all_linked_app_scopes,
             commands::revoke_linked_third_party_app,

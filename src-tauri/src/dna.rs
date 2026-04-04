@@ -16,15 +16,18 @@ use std::path::Path;
 /// Used for first-time installs and as fallback when VaultConfig has no version info.
 pub const BUNDLED_PRIVATE_VERSION: &str = "1.10";
 pub const BUNDLED_IDENTITY_VERSION: &str = "1.3";
+pub const BUNDLED_SIGNING_VERSION: &str = "1.0";
 
 /// hApp bundle filenames bundled with this app build (in src-tauri/resources/).
 const BUNDLED_PRIVATE_HAPP_FILE: &str = "flowsta_private_v1_10_happ.happ";
 const BUNDLED_IDENTITY_HAPP_FILE: &str = "flowsta_identity_v1_3_happ.happ";
+const BUNDLED_SIGNING_HAPP_FILE: &str = "flowsta_signing_v1_0_happ.happ";
 
 /// Result of DNA installation — app IDs for later use.
 pub struct InstalledDnas {
     pub private_app_id: String,
     pub identity_app_id: String,
+    pub signing_app_id: String,
 }
 
 /// Construct a Holochain installed_app_id from DNA type and version.
@@ -53,9 +56,11 @@ pub async fn install_dnas(
     agent_key: AgentPubKey,
     private_version: &str,
     identity_version: &str,
+    signing_version: &str,
 ) -> Result<InstalledDnas, String> {
     let private_app_id = make_app_id("private", private_version);
     let identity_app_id = make_app_id("identity", identity_version);
+    let signing_app_id = make_app_id("signing", signing_version);
 
     // Determine .happ filenames — use bundled names if version matches bundled,
     // otherwise construct from version (downloaded by dna_updater).
@@ -68,6 +73,11 @@ pub async fn install_dnas(
         BUNDLED_IDENTITY_HAPP_FILE.to_string()
     } else {
         make_happ_filename("identity", identity_version)
+    };
+    let signing_happ_file = if signing_version == BUNDLED_SIGNING_VERSION {
+        BUNDLED_SIGNING_HAPP_FILE.to_string()
+    } else {
+        make_happ_filename("signing", signing_version)
     };
 
     // 1. Connect to admin WebSocket.
@@ -88,6 +98,7 @@ pub async fn install_dnas(
 
     let mut private_installed = false;
     let mut identity_installed = false;
+    let mut signing_installed = false;
 
     for app in &existing_apps {
         let key_matches = app.agent_pub_key == agent_key;
@@ -113,13 +124,25 @@ pub async fn install_dnas(
                     .map_err(|e| format!("Failed to uninstall identity app: {}", e))?;
             }
         }
+        if app.installed_app_id == signing_app_id {
+            if key_matches {
+                signing_installed = true;
+            } else {
+                log::warn!("Signing app installed with wrong agent key, reinstalling...");
+                admin_ws
+                    .uninstall_app(signing_app_id.clone(), false)
+                    .await
+                    .map_err(|e| format!("Failed to uninstall signing app: {}", e))?;
+            }
+        }
     }
 
-    if private_installed && identity_installed {
-        log::info!("Both DNAs already installed with correct agent key, skipping");
+    if private_installed && identity_installed && signing_installed {
+        log::info!("All DNAs already installed with correct agent key, skipping");
         return Ok(InstalledDnas {
             private_app_id,
             identity_app_id,
+            signing_app_id,
         });
     }
 
@@ -189,7 +212,43 @@ pub async fn install_dnas(
         log::info!("Identity DNA v{} installed and enabled", identity_version);
     }
 
-    // 5. Verify both apps are enabled.
+    // 5. Install signing DNA if needed.
+    if !signing_installed {
+        let happ_path = resource_dir.join(&signing_happ_file);
+        if !happ_path.exists() {
+            // Signing DNA is optional for backwards compatibility — log warning but don't fail.
+            // Vault can function without it; Sign It features will be unavailable.
+            log::warn!(
+                "Signing hApp bundle not found at {:?} — Sign It features will be unavailable",
+                happ_path
+            );
+        } else {
+            log::info!("Installing signing DNA v{} from {:?}...", signing_version, happ_path);
+            let payload = InstallAppPayload {
+                source: AppBundleSource::Path(happ_path),
+                agent_key: Some(agent_key.clone()),
+                installed_app_id: Some(signing_app_id.clone()),
+                network_seed: None,
+                roles_settings: None,
+                ignore_genesis_failure: false,
+            };
+
+            admin_ws
+                .install_app(payload)
+                .await
+                .map_err(|e| format!("Failed to install signing DNA: {}", e))?;
+
+            admin_ws
+                .enable_app(signing_app_id.clone())
+                .await
+                .map_err(|e| format!("Failed to enable signing DNA: {}", e))?;
+
+            log::info!("Signing DNA v{} installed and enabled", signing_version);
+            signing_installed = true;
+        }
+    }
+
+    // 6. Verify apps are enabled.
     let enabled_apps = admin_ws
         .list_apps(Some(AppStatusFilter::Enabled))
         .await
@@ -201,6 +260,9 @@ pub async fn install_dnas(
     let identity_ok = enabled_apps
         .iter()
         .any(|app| app.installed_app_id == identity_app_id);
+    let signing_ok = enabled_apps
+        .iter()
+        .any(|app| app.installed_app_id == signing_app_id);
 
     if !private_ok || !identity_ok {
         return Err(format!(
@@ -209,14 +271,20 @@ pub async fn install_dnas(
         ));
     }
 
+    if !signing_ok {
+        log::warn!("Signing DNA not enabled — Sign It features will be unavailable");
+    }
+
     log::info!(
-        "DNA installation complete: {} enabled apps",
-        enabled_apps.len()
+        "DNA installation complete: {} enabled apps (signing={})",
+        enabled_apps.len(),
+        signing_ok,
     );
 
     Ok(InstalledDnas {
         private_app_id,
         identity_app_id,
+        signing_app_id,
     })
 }
 

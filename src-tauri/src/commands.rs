@@ -72,6 +72,17 @@ pub struct PendingLinkIdentityRequest {
     pub responder: tokio::sync::oneshot::Sender<bool>,
 }
 
+/// A pending document sign request awaiting user approval.
+/// Used by the POST /sign-document endpoint for Sign It.
+pub struct PendingDocumentSignRequest {
+    pub id: String,
+    pub app_name: String,
+    pub file_hash: String,
+    pub label: Option<String>,
+    pub origin: Option<String>,
+    pub responder: tokio::sync::oneshot::Sender<bool>,
+}
+
 /// A third-party app that has been linked via /link-identity.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LinkedThirdPartyApp {
@@ -101,6 +112,8 @@ pub struct AppState {
     pub pending_auth: Mutex<Option<PendingAuthRequest>>,
     /// A pending /link-identity request waiting for user approval.
     pub pending_link_identity: Mutex<Option<PendingLinkIdentityRequest>>,
+    /// A pending /sign-document request waiting for user approval.
+    pub pending_document_sign: Mutex<Option<PendingDocumentSignRequest>>,
     /// Origins the user has chosen to auto-approve for /authenticate.
     pub approved_apps: Mutex<Vec<String>>,
     /// Third-party apps linked via /link-identity.
@@ -138,6 +151,7 @@ impl AppState {
             connected_sites: Mutex::new(HashMap::new()),
             pending_auth: Mutex::new(None),
             pending_link_identity: Mutex::new(None),
+            pending_document_sign: Mutex::new(None),
             approved_apps: Mutex::new(Vec::new()),
             linked_third_party_apps: Mutex::new(linked_apps),
             conductor_handle: Mutex::new(None),
@@ -1904,6 +1918,44 @@ pub fn respond_link_identity_request(
     Ok(())
 }
 
+/// Respond to a pending document-sign request (approve or deny).
+#[tauri::command]
+pub fn respond_document_sign_request(
+    approved: bool,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let mut pending = state.pending_document_sign.lock().unwrap();
+    let req = pending.take().ok_or("No pending document-sign request")?;
+
+    let _ = req.responder.send(approved);
+    Ok(())
+}
+
+/// Get the pending document-sign request info (for the approval dialog).
+#[tauri::command]
+pub fn get_pending_document_sign(
+    state: State<'_, Arc<AppState>>,
+) -> Option<DocumentSignRequestInfo> {
+    let pending = state.pending_document_sign.lock().unwrap();
+    pending.as_ref().map(|p| DocumentSignRequestInfo {
+        id: p.id.clone(),
+        app_name: p.app_name.clone(),
+        file_hash: p.file_hash.clone(),
+        label: p.label.clone(),
+        origin: p.origin.clone(),
+    })
+}
+
+/// Serializable info about a pending document-sign request (for frontend).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DocumentSignRequestInfo {
+    pub id: String,
+    pub app_name: String,
+    pub file_hash: String,
+    pub label: Option<String>,
+    pub origin: Option<String>,
+}
+
 /// Get all third-party apps that have been linked via /link-identity.
 #[tauri::command]
 pub fn get_linked_third_party_apps(
@@ -2103,4 +2155,494 @@ fn base64_standard_decode(input: &str) -> Result<Vec<u8>, ()> {
         }
     }
     Ok(out)
+}
+
+// ── Sign It commands ────────────────────────────────────────────────
+
+/// Hash a file using SHA-256. Returns hex-encoded hash string.
+#[tauri::command]
+pub fn hash_file(path: String) -> Result<String, String> {
+    crate::file_analyzer::hash_file(std::path::Path::new(&path))
+}
+
+/// Run integrity checks on a file. Returns an IntegrityReport.
+#[tauri::command]
+pub fn analyze_file(path: String) -> Result<crate::file_analyzer::IntegrityReport, String> {
+    crate::file_analyzer::analyze_file(std::path::Path::new(&path))
+}
+
+/// Sign a file hash and commit the SignatureRecord to the signing DNA.
+///
+/// This command:
+/// 1. Signs the SHA-256 hash with the device Ed25519 key
+/// 2. Commits a SignatureRecord entry to the signing DNA via the local conductor
+/// 3. Returns the signature, agent key, and DHT action hash
+#[tauri::command]
+pub async fn sign_file(
+    file_hash: String,
+    intent: Option<String>,
+    ai_generation: Option<String>,
+    content_rights: Option<serde_json::Value>,
+    integrity_report: Option<serde_json::Value>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    // 1. Decode and validate file hash
+    let hash_bytes =
+        hex::decode(&file_hash).map_err(|_| "file_hash must be valid hex".to_string())?;
+    if hash_bytes.len() != 32 {
+        return Err("file_hash must be exactly 64 hex characters (32 bytes)".to_string());
+    }
+
+    // 2. Sign with device seed
+    let (signature_bytes, agent_pub_key_str) = {
+        let config = state.vault_config.lock().unwrap();
+        let config = config.as_ref().ok_or("Vault is locked")?;
+        let device_seed = config
+            .device_seed
+            .as_ref()
+            .ok_or("No device seed available")?;
+
+        let mut seed_arr = [0u8; 32];
+        seed_arr.copy_from_slice(device_seed);
+
+        let signature =
+            crate::key_derivation::sign_with_device_seed(&seed_arr, &hash_bytes);
+        let pub_key = {
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_arr);
+            *signing_key.verifying_key().as_bytes()
+        };
+        let agent_key = crate::key_derivation::construct_agent_pub_key_string(&pub_key);
+        (signature, agent_key)
+    };
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    let signature_b64 = crate::key_derivation::base64_standard_encode(&signature_bytes);
+
+    // 3. Commit SignatureRecord to signing DNA via conductor zome call
+    // Extract ports from conductor handle (drop MutexGuard before any await)
+    let conductor_ports = {
+        let conductor = state.conductor_handle.lock().unwrap();
+        conductor.as_ref().map(|h| (h.admin_port, h.app_port))
+    };
+
+    let action_hash = if let Some((admin_port, app_port)) = conductor_ports {
+        match commit_signature_to_dht(
+            admin_port,
+            app_port,
+            &hash_bytes,
+            &signature_bytes,
+            now_ms,
+            intent.as_deref(),
+            ai_generation.as_deref(),
+            content_rights.as_ref(),
+            integrity_report.as_ref(),
+        )
+        .await
+        {
+            Ok(hash) => Some(hash),
+            Err(e) => {
+                log::error!("Failed to commit signature to DHT: {}", e);
+                None
+            }
+        }
+    } else {
+        log::warn!("Conductor not running — signature created locally only");
+        None
+    };
+
+    Ok(serde_json::json!({
+        "success": true,
+        "file_hash": file_hash,
+        "signature": signature_b64,
+        "agent_pub_key": agent_pub_key_str,
+        "signed_at": now_ms,
+        "action_hash": action_hash,
+        "intent": intent,
+        "ai_generation": ai_generation,
+        "content_rights": content_rights,
+        "integrity_report": integrity_report,
+    }))
+}
+
+/// Get all signatures created by the current agent from the signing DNA.
+#[tauri::command]
+pub async fn get_my_signatures(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
+        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    use holochain_types::prelude::ExternIO;
+
+    let conductor_ports = {
+        let conductor = state.conductor_handle.lock().unwrap();
+        conductor.as_ref().map(|h| (h.admin_port, h.app_port))
+    };
+
+    let (admin_port, app_port) = conductor_ports
+        .ok_or("Conductor not running")?;
+
+    let signing_app_id = crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION);
+
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", admin_port),
+        Some("flowsta-vault-read".to_string()),
+    )
+    .await
+    .map_err(|e| format!("Admin WS: {}", e))?;
+
+    let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
+    let signing_app = apps.iter().find(|a| a.installed_app_id == signing_app_id)
+        .ok_or("Signing DNA not installed")?;
+
+    let role_name = signing_app.cell_info.keys()
+        .find(|k| k.starts_with("flowsta_signing"))
+        .ok_or("No signing role")?.clone();
+
+    let cell_id = signing_app.cell_info[&role_name].iter()
+        .find_map(|c| match c {
+            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        })
+        .ok_or("No provisioned signing cell")?;
+
+    let credentials = admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+        cell_id: cell_id.clone(), functions: None,
+    }).await.map_err(|e| format!("auth creds: {}", e))?;
+
+    let issued = admin_ws.issue_app_auth_token(
+        IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app_id),
+    ).await.map_err(|e| format!("auth token: {}", e))?;
+
+    let signer = ClientAgentSigner::default();
+    signer.add_credentials(cell_id, credentials);
+    let app_ws = AppWebsocket::connect(
+        format!("localhost:{}", app_port),
+        issued.token, signer.into(),
+        Some("flowsta-vault-read".into()),
+    ).await.map_err(|e| format!("App WS: {}", e))?;
+
+    // Call get_my_signatures — payload is () (unit)
+    let payload_mp = rmp_serde::to_vec_named(&())
+        .map_err(|e| format!("msgpack: {}", e))?;
+
+    let result = app_ws.call_zome(
+        ZomeCallTarget::RoleName(role_name.into()),
+        "signing".into(),
+        "get_my_signatures".into(),
+        ExternIO::from(payload_mp),
+    ).await.map_err(|e| format!("get_my_signatures zome call: {}", e))?;
+
+    // Deserialize Vec<Record> from the zome call result
+    use holochain_types::prelude::Record;
+
+    log::info!("get_my_signatures raw result: {} bytes", result.as_bytes().len());
+
+    let records: Vec<Record> = rmp_serde::from_slice(result.as_bytes())
+        .map_err(|e| {
+            log::error!("Failed to deserialize records: {}. Raw hex: {}", e, hex::encode(&result.as_bytes()[..result.as_bytes().len().min(200)]));
+            format!("Failed to deserialize records: {}", e)
+        })?;
+
+    log::info!("Deserialized {} records from signing DNA", records.len());
+
+    // Extract SignatureRecord entry data from each Record.
+    // Entry contains the app entry as SerializedBytes (MessagePack).
+    // We decode it to our mirror struct then convert to JSON.
+    use holochain_types::prelude::Entry;
+
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct SignatureEntry {
+        file_hash: Vec<u8>,
+        signature: Vec<u8>,
+        signer: holochain_types::prelude::AgentPubKey,
+        signed_at: i64,
+        intent: Option<String>,
+        ai_generation: Option<String>,
+        content_rights: Option<serde_json::Value>,
+        integrity_report: Option<serde_json::Value>,
+    }
+
+    let mut signatures = Vec::new();
+    for record in &records {
+        if let Some(Entry::App(entry_bytes)) = record.entry().as_option() {
+            // entry_bytes is AppEntryBytes — contains the MessagePack of our struct
+            match rmp_serde::from_slice::<SignatureEntry>(entry_bytes.bytes()) {
+                Ok(entry) => {
+                    let action_hash = hex::encode(record.action_hashed().hash.get_raw_39());
+                    let raw_32 = entry.signer.get_raw_32();
+                    let pub_key_arr: [u8; 32] = raw_32.try_into().unwrap_or([0u8; 32]);
+                    let signer_str = crate::key_derivation::construct_agent_pub_key_string(
+                        &pub_key_arr,
+                    );
+                    signatures.push(serde_json::json!({
+                        "file_hash": hex::encode(&entry.file_hash),
+                        "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
+                        "agent_pub_key": signer_str,
+                        "signed_at": entry.signed_at,
+                        "action_hash": action_hash,
+                        "intent": entry.intent,
+                        "ai_generation": entry.ai_generation,
+                        "content_rights": entry.content_rights,
+                        "integrity_report": entry.integrity_report,
+                    }));
+                }
+                Err(e) => {
+                    log::warn!("Failed to deserialize signature entry: {}", e);
+                }
+            }
+        }
+    }
+
+    log::info!("Loaded {} signatures from signing DNA", signatures.len());
+    Ok(signatures)
+}
+
+/// Commit a SignatureRecord to the signing DNA via the local conductor.
+/// Returns the ActionHash as a base64-encoded string.
+async fn commit_signature_to_dht(
+    admin_port: u16,
+    app_port: u16,
+    file_hash: &[u8],
+    signature: &[u8],
+    signed_at: i64,
+    intent: Option<&str>,
+    ai_generation: Option<&str>,
+    content_rights: Option<&serde_json::Value>,
+    integrity_report: Option<&serde_json::Value>,
+) -> Result<String, String> {
+    use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
+        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    use holochain_types::prelude::ExternIO;
+
+    let signing_app_id = crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION);
+
+    // Connect to admin WS
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", admin_port),
+        Some("flowsta-vault-sign".to_string()),
+    )
+    .await
+    .map_err(|e| format!("Admin WS connect failed: {}", e))?;
+
+    // Find the signing app and its provisioned cell
+    let apps = admin_ws
+        .list_apps(None)
+        .await
+        .map_err(|e| format!("list_apps failed: {}", e))?;
+
+    let signing_app = apps
+        .iter()
+        .find(|a| a.installed_app_id == signing_app_id)
+        .ok_or_else(|| format!("Signing DNA not installed ({})", signing_app_id))?;
+
+    let role_name = signing_app
+        .cell_info
+        .keys()
+        .find(|k| k.starts_with("flowsta_signing"))
+        .ok_or("No flowsta_signing role found")?
+        .clone();
+
+    let cell_info_list = &signing_app.cell_info[&role_name];
+    let cell_id = cell_info_list
+        .iter()
+        .find_map(|c| match c {
+            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        })
+        .ok_or("No provisioned signing cell")?;
+
+    // Authorize signing credentials for this cell
+    let credentials = admin_ws
+        .authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+            cell_id: cell_id.clone(),
+            functions: None,
+        })
+        .await
+        .map_err(|e| format!("authorize_signing_credentials failed: {}", e))?;
+
+    // Issue auth token
+    let issued = admin_ws
+        .issue_app_auth_token(
+            IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app_id),
+        )
+        .await
+        .map_err(|e| format!("issue_app_auth_token failed: {}", e))?;
+
+    // Connect app WS with a ClientAgentSigner (must have credentials loaded)
+    let signer = ClientAgentSigner::default();
+    signer.add_credentials(cell_id, credentials);
+    let app_ws = AppWebsocket::connect(
+        format!("localhost:{}", app_port),
+        issued.token,
+        signer.into(),
+        Some("flowsta-vault-sign".into()),
+    )
+    .await
+    .map_err(|e| format!("App WS connect failed: {}", e))?;
+
+    // Build the SignatureRecord payload.
+    // Must match the DNA's Rust struct exactly for MessagePack deserialization.
+    // We use holochain_types::prelude::SerializedBytes to properly encode
+    // the AgentPubKey and other Holochain types.
+    let agent_key = signing_app.agent_pub_key.clone();
+
+    // Build a struct that mirrors the DNA's SignatureRecord
+    // Mirror structs matching the signing DNA's types exactly (PascalCase enum variants)
+    #[derive(serde::Serialize)]
+    struct SignaturePayload {
+        file_hash: Vec<u8>,
+        signature: Vec<u8>,
+        signer: holochain_types::prelude::AgentPubKey,
+        signed_at: i64,
+        intent: Option<String>,
+        ai_generation: Option<String>,
+        content_rights: Option<ContentRightsPayload>,
+        integrity_report: Option<IntegrityReportPayload>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct ContentRightsPayload {
+        license: Option<String>,
+        commercial_licensing: Option<String>,
+        ai_training: Option<String>,
+        contact_preference: Option<String>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct IntegrityReportPayload {
+        checks_performed: Vec<String>,
+        issues_found: Vec<IntegrityIssuePayload>,
+        checked_at: i64,
+    }
+
+    #[derive(serde::Serialize)]
+    struct IntegrityIssuePayload {
+        check_type: String,
+        severity: String,
+        description: String,
+    }
+
+    // Map frontend kebab/snake_case values to DNA PascalCase enum variants
+    fn map_license(v: &str) -> String {
+        match v {
+            "all-rights-reserved" => "AllRightsReserved",
+            "cc0" => "CC0",
+            "cc-by" => "CCBY",
+            "cc-by-sa" => "CCBYSA",
+            "cc-by-nc" => "CCBYNC",
+            "cc-by-nc-sa" => "CCBYNCSA",
+            "mit" => "MIT",
+            "apache-2" => "Apache2",
+            "gpl-3" => "GPL3",
+            other => other,
+        }.to_string()
+    }
+
+    fn map_commercial(v: &str) -> String {
+        match v {
+            "not_available" => "NotAvailable",
+            "open_to_licensing" => "OpenToLicensing",
+            other => other,
+        }.to_string()
+    }
+
+    fn map_ai_training(v: &str) -> String {
+        match v {
+            "allowed" => "Allowed",
+            "allowed_with_attribution" => "AllowedWithAttribution",
+            "requires_license" => "RequiresLicense",
+            "not_allowed" => "NotAllowed",
+            other => other,
+        }.to_string()
+    }
+
+    fn map_contact(v: &str) -> String {
+        match v {
+            "no_contact" => "NoContact",
+            "allow_contact_requests" => "AllowContactRequests",
+            other => other,
+        }.to_string()
+    }
+
+    // Parse content_rights from the frontend JSON value
+    let cr_payload = content_rights.and_then(|cr| {
+        let obj = cr.as_object()?;
+        Some(ContentRightsPayload {
+            license: obj.get("license").and_then(|v| v.as_str()).map(map_license),
+            commercial_licensing: obj.get("commercial_licensing").and_then(|v| v.as_str()).map(map_commercial),
+            ai_training: obj.get("ai_training").and_then(|v| v.as_str()).map(map_ai_training),
+            contact_preference: obj.get("contact_preference").and_then(|v| v.as_str()).map(map_contact),
+        })
+    });
+
+    // Parse integrity_report from the frontend JSON value
+    let ir_payload = integrity_report.and_then(|ir| {
+        let obj = ir.as_object()?;
+        Some(IntegrityReportPayload {
+            checks_performed: obj.get("checks_performed")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            issues_found: obj.get("issues_found")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| {
+                    let o = v.as_object()?;
+                    Some(IntegrityIssuePayload {
+                        check_type: o.get("check_type")?.as_str()?.to_string(),
+                        severity: o.get("severity")?.as_str()?.to_string(),
+                        description: o.get("description")?.as_str()?.to_string(),
+                    })
+                }).collect())
+                .unwrap_or_default(),
+            checked_at: obj.get("checked_at").and_then(|v| v.as_i64()).unwrap_or(0),
+        })
+    });
+
+    let payload = SignaturePayload {
+        file_hash: file_hash.to_vec(),
+        signature: signature.to_vec(),
+        signer: agent_key,
+        signed_at,
+        intent: intent.map(|i| match i {
+            "authorship" => "Authorship",
+            "approval" => "Approval",
+            "witness" => "Witness",
+            "receipt" => "Receipt",
+            "agreement" => "Agreement",
+            other => other,
+        }.to_string()),
+        ai_generation: ai_generation.map(|a| match a {
+            "none" => "None",
+            "assisted" => "Assisted",
+            "generated" => "Generated",
+            other => other,
+        }.to_string()),
+        content_rights: cr_payload,
+        integrity_report: ir_payload,
+    };
+
+    // Encode with MessagePack using the same encoder Holochain uses
+    let payload_mp = rmp_serde::to_vec_named(&payload)
+        .map_err(|e| format!("MessagePack serialization failed: {}", e))?;
+
+    let result = app_ws
+        .call_zome(
+            ZomeCallTarget::RoleName(role_name.into()),
+            "signing".into(),
+            "create_signature".into(),
+            ExternIO::from(payload_mp),
+        )
+        .await
+        .map_err(|e| format!("Zome call create_signature failed: {}", e))?;
+
+    // Result is MessagePack-encoded ActionHash — encode as hex for readability
+    let result_bytes = result.as_bytes();
+    let action_hash_hex = hex::encode(result_bytes);
+    log::info!("Signature committed to DHT, action_hash: {}", action_hash_hex);
+
+    Ok(action_hash_hex)
 }

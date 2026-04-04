@@ -109,6 +109,12 @@ admin_interfaces:
 network:
   bootstrap_url: {bootstrap_url}
   signal_url: {signal_url}
+  enable_mdns: false
+  enable_relaying: true
+  webrtc_config:
+    ice_servers:
+      - urls: ["stun:stun.cloudflare.com:3478"]
+      - urls: ["stun:stun.l.google.com:19302"]
 db_sync_strategy: Resilient
 "#,
         data_root = conductor_dir.display(),
@@ -387,14 +393,16 @@ pub async fn start_holochain(
         agent_pub_key,
         dna::BUNDLED_PRIVATE_VERSION,
         dna::BUNDLED_IDENTITY_VERSION,
+        dna::BUNDLED_SIGNING_VERSION,
     ).await {
         Ok(d) => d,
         Err(e) => fail_with_full_cleanup!(format!("DNA installation failed: {}", e)),
     };
     log::info!(
-        "DNAs installed: private={}, identity={}",
+        "DNAs installed: private={}, identity={}, signing={}",
         installed_dnas.private_app_id,
         installed_dnas.identity_app_id,
+        installed_dnas.signing_app_id,
     );
 
     // 9. Attach app interface for zome calls (e.g. pairing code generation).

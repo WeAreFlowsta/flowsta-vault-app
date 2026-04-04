@@ -64,5 +64,8 @@ holochain_types = "0.6"
 # Save dialog
 tauri-plugin-dialog = "2"
 
+# Image analysis (Sign It file integrity checks — LSB steganography detection)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
+
 # Error handling
 thiserror = "1.0"

@@ -8,6 +8,7 @@
 //! - POST /sign             → signs bytes or actions with the device Ed25519 key
 //! - POST /authenticate     → identity proof via challenge-response with user approval
 //! - POST /link-identity    → agent-linking signature for third-party Holochain apps (with approval)
+//! - POST /sign-document    → Sign It: sign a file hash and commit to signing DNA (with approval)
 //! - POST /revoke-identity  → notification from third-party app that identity link was revoked
 //! - GET  /link-status      → check if a third-party app is still linked
 //! - POST /backup           → store encrypted app data backup
@@ -16,7 +17,8 @@
 //! - POST /backup/delete    → delete a specific app's backup
 
 use crate::commands::{
-    AppState, AuthRequestInfo, ConnectedSite, PendingAuthRequest, PendingLinkIdentityRequest,
+    AppState, AuthRequestInfo, ConnectedSite, PendingAuthRequest, PendingDocumentSignRequest,
+    PendingLinkIdentityRequest,
 };
 use crate::key_derivation::{
     base64_standard_encode, build_sorted_agent_pair_payload, construct_agent_pub_key_bytes,
@@ -1358,6 +1360,256 @@ async fn backup_delete_handler(
 
 // ── Server startup ──────────────────────────────────────────────────
 
+// ── POST /sign-document — Sign It document signing ──────────────────
+
+#[derive(Deserialize)]
+struct SignDocumentRequest {
+    /// SHA-256 hex string of the file
+    file_hash: String,
+    /// Human-readable label for the approval dialog
+    #[serde(default)]
+    label: Option<String>,
+    /// Why this file is being signed
+    #[serde(default)]
+    intent: Option<String>,
+    /// AI generation disclosure
+    #[serde(default)]
+    ai_generation: Option<String>,
+    /// Content rights manifest
+    #[serde(default)]
+    content_rights: Option<serde_json::Value>,
+    /// App name (shown in approval dialog)
+    #[serde(default)]
+    app_name: Option<String>,
+    /// Developer client_id from dev.flowsta.com
+    #[serde(default)]
+    client_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SignDocumentResponse {
+    success: bool,
+    file_hash: String,
+    signature: String,
+    agent_pub_key: String,
+    signed_at: String,
+    /// Placeholder for DHT action hash — will be populated once
+    /// conductor zome call integration is added in task 1.4
+    action_hash: Option<String>,
+}
+
+async fn sign_document_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+    Json(req): Json<SignDocumentRequest>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    let origin = extract_origin(&headers);
+    track_request(&state.app_state, origin.as_deref(), "sign-document");
+
+    // 1. Verify vault is unlocked
+    {
+        let config = state.app_state.vault_config.lock().unwrap();
+        if config.is_none() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "vault_locked".into(),
+                    description: Some("Vault is locked. Unlock it first.".into()),
+                }),
+            ));
+        }
+    }
+
+    // 2. Validate file_hash is valid hex and 32 bytes
+    let hash_bytes = hex::decode(&req.file_hash).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(IpcError {
+                error: "invalid_file_hash".into(),
+                description: Some("file_hash must be a valid hex string".into()),
+            }),
+        )
+    })?;
+    if hash_bytes.len() != 32 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(IpcError {
+                error: "invalid_file_hash".into(),
+                description: Some("file_hash must be exactly 64 hex characters (32 bytes SHA-256)".into()),
+            }),
+        ));
+    }
+
+    // 3. Resolve app name for the approval dialog
+    let app_name = req.app_name.clone().unwrap_or_else(|| {
+        origin.clone().unwrap_or_else(|| "Unknown app".to_string())
+    });
+
+    // 4. Create oneshot channel for user approval
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    let request_id = format!("sign-{}", unix_now());
+    let pending = PendingDocumentSignRequest {
+        id: request_id.clone(),
+        app_name: app_name.clone(),
+        file_hash: req.file_hash.clone(),
+        label: req.label.clone(),
+        origin: origin.clone(),
+        responder: tx,
+    };
+
+    // 5. Store pending request
+    {
+        let mut pending_sign = state.app_state.pending_document_sign.lock().unwrap();
+        *pending_sign = Some(pending);
+    }
+
+    // 6. Emit Tauri event to show approval dialog
+    let event_payload = serde_json::json!({
+        "id": request_id,
+        "app_name": app_name,
+        "file_hash": req.file_hash,
+        "label": req.label,
+        "origin": origin,
+    });
+    let _ = state.app_handle.emit("document-sign-request", event_payload);
+
+    // 7. Wait for user response with 60s timeout
+    let approved = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(IpcError {
+                    error: "internal_error".into(),
+                    description: Some("Approval channel closed unexpectedly.".into()),
+                }),
+            ));
+        }
+        Err(_) => {
+            // Timeout — clean up
+            let mut pending_sign = state.app_state.pending_document_sign.lock().unwrap();
+            *pending_sign = None;
+            return Err((
+                StatusCode::REQUEST_TIMEOUT,
+                Json(IpcError {
+                    error: "timeout".into(),
+                    description: Some("User did not respond within 60 seconds.".into()),
+                }),
+            ));
+        }
+    };
+
+    if !approved {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "user_denied".into(),
+                description: Some("User rejected the document signing request.".into()),
+            }),
+        ));
+    }
+
+    // 8. Sign the file hash with the device Ed25519 key
+    let (signature_bytes, vault_agent_pub_key) = {
+        let config = state.app_state.vault_config.lock().unwrap();
+        let config = config.as_ref().ok_or_else(|| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "vault_locked".into(),
+                    description: Some("Vault was locked during approval.".into()),
+                }),
+            )
+        })?;
+
+        let device_seed = config.device_seed.as_ref().ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(IpcError {
+                    error: "no_device_seed".into(),
+                    description: Some(
+                        "Vault was created before signing support. Please re-create it.".into(),
+                    ),
+                }),
+            )
+        })?;
+
+        let mut seed_arr = [0u8; 32];
+        seed_arr.copy_from_slice(device_seed);
+
+        // Sign the raw file hash bytes (NOT MessagePack-encoded)
+        let signature = sign_with_device_seed(&seed_arr, &hash_bytes);
+
+        let pub_key = {
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_arr);
+            *signing_key.verifying_key().as_bytes()
+        };
+        let agent_pub_key = construct_agent_pub_key_string(&pub_key);
+
+        (signature, agent_pub_key)
+    }; // vault_config lock dropped
+
+    let now_iso = {
+        let secs = unix_now();
+        // Simple ISO 8601 without external dep
+        format!("{}Z", chrono_lite(secs))
+    };
+
+    // 9. Record MAU event if client_id provided
+    if let Some(ref client_id) = req.client_id {
+        crate::mau::record_mau_event_if_needed(&state.app_state, client_id);
+    }
+
+    // 10. Return signature
+    // NOTE: DHT commit (action_hash) is added in task 1.4 when conductor
+    // zome call integration is built. For now, we return the signature
+    // which the calling app can use.
+    let resp = SignDocumentResponse {
+        success: true,
+        file_hash: req.file_hash,
+        signature: base64_standard_encode(&signature_bytes),
+        agent_pub_key: vault_agent_pub_key,
+        signed_at: now_iso,
+        action_hash: None,
+    };
+
+    Ok(axum::response::IntoResponse::into_response(Json(resp)))
+}
+
+/// Simple timestamp to ISO 8601 string (avoids adding chrono dependency).
+fn chrono_lite(unix_secs: i64) -> String {
+    let secs = unix_secs as u64;
+    // Days since epoch
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Simple year/month/day from days since 1970-01-01 (Rata Die algorithm)
+    let (year, month, day) = days_to_ymd(days);
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
 /// Start the IPC server on localhost.
 /// Tries ports 27777, 27778, 27779 in order.
 pub async fn start_ipc_server(
@@ -1384,6 +1636,7 @@ pub async fn start_ipc_server(
         .route("/sign", post(sign_handler))
         .route("/authenticate", post(authenticate_handler))
         .route("/link-identity", post(link_identity_handler))
+        .route("/sign-document", post(sign_document_handler))
         .route("/revoke-identity", post(revoke_identity_handler))
         .route("/link-status", get(link_status_handler))
         .route("/backup", post(backup_handler))
