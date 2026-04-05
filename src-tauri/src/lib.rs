@@ -201,6 +201,7 @@ pub fn run() {
             commands::get_pending_document_sign,
             commands::hash_file,
             commands::analyze_file,
+            commands::generate_perceptual_hash,
             commands::sign_file,
             commands::get_my_signatures,
             commands::get_linked_third_party_apps,

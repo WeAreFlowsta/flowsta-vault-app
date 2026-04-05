@@ -1,9 +1,8 @@
-//! File integrity analyzer for Sign It.
+//! File integrity analyzer and perceptual hasher for Sign It.
 //!
 //! Checks files for hidden content (steganography) before signing.
+//! Generates perceptual hashes for fuzzy file matching.
 //! All techniques are well-known academic methods, implemented clean-room.
-//!
-//! Returns an IntegrityReport matching the signing DNA entry type.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -54,8 +53,236 @@ pub enum FileType {
     Gif,
     Pdf,
     Zip,
+    Mp3,
+    Wav,
+    Flac,
+    Ogg,
+    Mp4,
+    Mkv,
+    Avi,
+    Webm,
     Text,
     Unknown,
+}
+
+// ── Perceptual Hash Types ───────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PerceptualHash {
+    pub hash_type: String,
+    pub hash_value: Vec<u8>,
+    pub bands: Vec<Vec<u8>>,
+}
+
+/// Generate a perceptual hash for the given file data.
+/// Returns None for file types that don't support perceptual hashing.
+pub fn generate_perceptual_hash(data: &[u8]) -> Option<PerceptualHash> {
+    let file_type = detect_file_type(data);
+    match file_type {
+        FileType::Png | FileType::Jpeg | FileType::Bmp | FileType::Tiff | FileType::Gif => {
+            generate_image_phash(data)
+        }
+        FileType::Mp3 | FileType::Wav | FileType::Flac | FileType::Ogg => {
+            generate_audio_fingerprint(data)
+        }
+        FileType::Mp4 | FileType::Mkv | FileType::Avi | FileType::Webm => {
+            // For video, fingerprint the audio track (most robust against re-encode/resize)
+            generate_audio_fingerprint(data)
+        }
+        _ => None,
+    }
+}
+
+/// Generate a DCT-based perceptual hash for an image.
+/// Uses img_hash crate with pHash algorithm (8x8 = 64 bits).
+/// Returns the hash value and 4 LSH bands for DHT fuzzy lookup.
+fn generate_image_phash(data: &[u8]) -> Option<PerceptualHash> {
+    let img = image::load_from_memory(data).ok()?;
+
+    // Resize to 9x8 using Triangle (bilinear) filter — matches browser canvas resize
+    // Do NOT use Lanczos3 (image_hasher default) as it produces different results from browsers
+    let resized = img.resize_exact(9, 8, image::imageops::FilterType::Triangle);
+    let gray = resized.to_luma8();
+
+    // Compute gradient hash: compare each pixel to its right neighbour
+    // 8 rows × 8 comparisons = 64 bits = 8 bytes
+    let mut hash_bits = Vec::with_capacity(64);
+    for y in 0..8u32 {
+        for x in 0..8u32 {
+            let left = gray.get_pixel(x, y).0[0];
+            let right = gray.get_pixel(x + 1, y).0[0];
+            hash_bits.push(if left > right { 1u8 } else { 0u8 });
+        }
+    }
+
+    // Pack bits into bytes
+    let mut hash_bytes = Vec::with_capacity(8);
+    for chunk in hash_bits.chunks(8) {
+        let mut byte = 0u8;
+        for (j, &bit) in chunk.iter().enumerate() {
+            byte |= bit << (7 - j);
+        }
+        hash_bytes.push(byte);
+    }
+
+    if hash_bytes.is_empty() {
+        return None;
+    }
+
+    // Split into 8 bands of 1 byte each.
+    // More bands = more DHT links but much higher chance of fuzzy match.
+    // A 1-byte band means any hash that shares the same byte at the same position
+    // will be found as a candidate. With 8 bands, even a significant edit
+    // (different resize, compression) will likely share at least 1-2 matching bytes.
+    let bands: Vec<Vec<u8>> = hash_bytes
+        .iter()
+        .map(|&byte| vec![byte])
+        .collect();
+
+    Some(PerceptualHash {
+        hash_type: "ImagePHash".to_string(),
+        hash_value: hash_bytes,
+        bands,
+    })
+}
+
+/// Generate a Chromaprint audio fingerprint.
+/// Decodes audio via symphonia, fingerprints via rusty-chromaprint.
+/// Returns a compact hash (first 8 fingerprint integers = 32 bytes)
+/// with 8 bands of 4 bytes each for DHT lookup.
+fn generate_audio_fingerprint(data: &[u8]) -> Option<PerceptualHash> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    // Create a media source from the data
+    let cursor = std::io::Cursor::new(data.to_vec());
+    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+
+    // Probe the format
+    let hint = Hint::new();
+    let format_opts = FormatOptions::default();
+    let metadata_opts = MetadataOptions::default();
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &format_opts, &metadata_opts)
+        .ok()?;
+
+    let mut format = probed.format;
+
+    // Find the first audio track
+    let track = format.tracks().iter().find(|t| {
+        t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL
+    })?;
+
+    let track_id = track.id;
+    let codec_params = track.codec_params.clone();
+    let sample_rate = codec_params.sample_rate.unwrap_or(44100);
+    let channels = codec_params.channels.map(|c| c.count()).unwrap_or(2) as u32;
+
+    // Create decoder
+    let decoder_opts = DecoderOptions::default();
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&codec_params, &decoder_opts)
+        .ok()?;
+
+    // Collect PCM samples (first 30 seconds max — enough for fingerprinting)
+    let max_samples = sample_rate as usize * 30 * channels as usize;
+    let mut all_samples: Vec<i16> = Vec::new();
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let spec = *decoded.spec();
+        let mut sample_buf = SampleBuffer::<i16>::new(decoded.capacity() as u64, spec);
+        sample_buf.copy_interleaved_ref(decoded);
+
+        all_samples.extend_from_slice(sample_buf.samples());
+
+        if all_samples.len() >= max_samples {
+            all_samples.truncate(max_samples);
+            break;
+        }
+    }
+
+    if all_samples.len() < sample_rate as usize {
+        return None; // Too short for fingerprinting
+    }
+
+    // Generate Chromaprint fingerprint
+    let config = rusty_chromaprint::Configuration::preset_test2();
+    let mut fingerprinter = rusty_chromaprint::Fingerprinter::new(&config);
+
+    // Feed samples to fingerprinter (handles stereo natively)
+    fingerprinter.start(sample_rate, channels).ok()?;
+    fingerprinter.consume(&all_samples);
+    fingerprinter.finish();
+
+    let fingerprint = fingerprinter.fingerprint();
+    if fingerprint.is_empty() {
+        return None;
+    }
+
+    // Take first 8 fingerprint integers (32 bytes) as our hash
+    let hash_ints: Vec<u32> = fingerprint.iter().take(8).copied().collect();
+    let mut hash_bytes = Vec::with_capacity(32);
+    for &fp_int in &hash_ints {
+        hash_bytes.extend_from_slice(&fp_int.to_le_bytes());
+    }
+
+    // 8 bands of 4 bytes each (one fingerprint integer per band)
+    let bands: Vec<Vec<u8>> = hash_ints
+        .iter()
+        .map(|&fp_int| fp_int.to_le_bytes().to_vec())
+        .collect();
+
+    Some(PerceptualHash {
+        hash_type: "AudioChromaprint".to_string(),
+        hash_value: hash_bytes,
+        bands,
+    })
+}
+
+/// Compute the Hamming distance between two perceptual hashes.
+/// Returns the number of differing bits.
+pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
+    let min_len = a.len().min(b.len());
+    let mut distance: u32 = 0;
+    for i in 0..min_len {
+        distance += (a[i] ^ b[i]).count_ones();
+    }
+    // Count remaining bytes as all different
+    for byte in a.iter().skip(min_len) {
+        distance += byte.count_ones();
+    }
+    for byte in b.iter().skip(min_len) {
+        distance += byte.count_ones();
+    }
+    distance
+}
+
+/// Convert Hamming distance to a similarity percentage (0-100).
+/// Based on the total number of bits in the hash.
+pub fn similarity_percentage(distance: u32, total_bits: u32) -> u32 {
+    if total_bits == 0 {
+        return 0;
+    }
+    ((total_bits - distance.min(total_bits)) * 100 / total_bits) as u32
 }
 
 fn detect_file_type(data: &[u8]) -> FileType {
@@ -78,6 +305,28 @@ fn detect_file_type(data: &[u8]) -> FileType {
         FileType::Pdf
     } else if data.starts_with(b"PK\x03\x04") {
         FileType::Zip
+    } else if data.starts_with(&[0xFF, 0xFB]) || data.starts_with(&[0xFF, 0xF3])
+        || data.starts_with(&[0xFF, 0xF2]) || data.starts_with(b"ID3")
+    {
+        FileType::Mp3
+    } else if data.starts_with(b"RIFF") && data.len() >= 12 && &data[8..12] == b"WAVE" {
+        FileType::Wav
+    } else if data.starts_with(b"fLaC") {
+        FileType::Flac
+    } else if data.starts_with(b"OggS") {
+        FileType::Ogg
+    } else if data.len() >= 12 && &data[4..8] == b"ftyp" {
+        // MP4/M4A/MOV — ftyp box at offset 4
+        FileType::Mp4
+    } else if data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        // Matroska/WebM (EBML header)
+        if find_bytes(&data[..data.len().min(64)], b"webm").is_some() {
+            FileType::Webm
+        } else {
+            FileType::Mkv
+        }
+    } else if data.starts_with(b"RIFF") && data.len() >= 12 && &data[8..12] == b"AVI " {
+        FileType::Avi
     } else if is_likely_text(data) {
         FileType::Text
     } else {
@@ -194,7 +443,7 @@ fn check_post_eof(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
                         check_type: CheckType::PostEofData,
                         severity: Severity::Warning,
                         description: format!(
-                            "{} bytes found after PNG IEND marker",
+                            "This image has {} bytes of extra data hidden after the image content ends. This could contain concealed information.",
                             extra
                         ),
                     });
@@ -211,7 +460,7 @@ fn check_post_eof(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
                         check_type: CheckType::PostEofData,
                         severity: Severity::Warning,
                         description: format!(
-                            "{} bytes found after JPEG EOI marker",
+                            "This image has {} bytes of extra data hidden after the image content ends. This could contain concealed information.",
                             extra
                         ),
                     });
@@ -230,7 +479,7 @@ fn check_post_eof(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
                         check_type: CheckType::PostEofData,
                         severity: Severity::Warning,
                         description: format!(
-                            "{} non-whitespace bytes found after PDF %%EOF marker",
+                            "This PDF has {} bytes of extra data hidden after the document ends. This could contain concealed information.",
                             non_ws
                         ),
                     });
@@ -251,7 +500,7 @@ fn check_post_eof(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
                             check_type: CheckType::PostEofData,
                             severity: Severity::Warning,
                             description: format!(
-                                "{} bytes found after ZIP end-of-central-directory",
+                                "This archive has {} bytes of extra data hidden after the archive content ends. This could contain concealed information.",
                                 extra
                             ),
                         });
@@ -334,8 +583,8 @@ fn check_lsb_chi_square(data: &[u8]) -> Vec<IntegrityIssue> {
                 check_type: CheckType::LsbAnalysis,
                 severity: Severity::Warning,
                 description: format!(
-                    "{} channel: pixel value pairs are unusually uniform (chi/pair: {:.2}), may indicate LSB steganography",
-                    channel_name, chi_per_pair
+                    "The {} colour channel of this image has unusual pixel patterns that may indicate hidden data embedded in the image.",
+                    channel_name.to_lowercase()
                 ),
             });
         }
@@ -395,9 +644,8 @@ fn check_unicode_steg(data: &[u8]) -> Vec<IntegrityIssue> {
                 Severity::Warning
             },
             description: format!(
-                "{} invisible Unicode characters found: {}",
-                total_zero_width,
-                found_types.join(", ")
+                "This file contains {} invisible characters that are hidden from view but present in the data. These can be used to conceal secret messages.",
+                total_zero_width
             ),
         });
     }
@@ -433,7 +681,7 @@ fn check_unicode_steg(data: &[u8]) -> Vec<IntegrityIssue> {
             check_type: CheckType::UnicodeSteg,
             severity: Severity::Warning,
             description: format!(
-                "{} Cyrillic homoglyph characters found (look like Latin but are Cyrillic — may be used for steganography)",
+                "This file contains {} characters that look like normal letters but are actually from a different alphabet. These lookalike characters can be used to hide information.",
                 homoglyph_count
             ),
         });
@@ -455,20 +703,16 @@ fn check_metadata(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
             for chunk_type in &text_chunks {
                 let count = count_occurrences(data, *chunk_type);
                 if count > 0 {
-                    // tEXt is normal for metadata (e.g., "Software: Adobe Photoshop")
-                    // Report as Info unless there are many
-                    let severity = if count > 5 {
-                        Severity::Warning
-                    } else {
-                        Severity::Info
-                    };
                     issues.push(IntegrityIssue {
                         check_type: CheckType::MetadataInspection,
-                        severity,
+                        severity: if count > 10 { Severity::Warning } else { Severity::Info },
                         description: format!(
-                            "{} PNG {} chunk(s) found",
+                            "Contains {} text metadata section{}{}",
                             count,
-                            std::str::from_utf8(*chunk_type).unwrap_or("???")
+                            if count > 1 { "s" } else { "" },
+                            if count <= 5 { " (e.g. author, software, copyright)." }
+                            else if count <= 10 { ". This is common for professional images with detailed metadata." }
+                            else { ". This is an unusually high number which could indicate extra data stored in metadata." }
                         ),
                     });
                 }
@@ -487,12 +731,14 @@ fn check_metadata(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
             if comment_count > 0 {
                 issues.push(IntegrityIssue {
                     check_type: CheckType::MetadataInspection,
-                    severity: if comment_count > 3 {
-                        Severity::Warning
-                    } else {
-                        Severity::Info
-                    },
-                    description: format!("{} JPEG comment marker(s) found", comment_count),
+                    severity: if comment_count > 5 { Severity::Warning } else { Severity::Info },
+                    description: format!(
+                        "Contains {} embedded comment{}{}",
+                        comment_count,
+                        if comment_count > 1 { "s" } else { "" },
+                        if comment_count <= 3 { ". This is normal for most images." }
+                        else { ". A high number of comments could indicate extra data." }
+                    ),
                 });
             }
         }
@@ -504,7 +750,7 @@ fn check_metadata(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
                     issues.push(IntegrityIssue {
                         check_type: CheckType::MetadataInspection,
                         severity: Severity::Critical,
-                        description: "PDF contains JavaScript — may execute code when opened"
+                        description: "This PDF contains embedded code (JavaScript) that may run when opened. This could be a security risk."
                             .to_string(),
                     });
                     break;
@@ -536,10 +782,7 @@ fn check_entropy(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
             issues.push(IntegrityIssue {
                 check_type: CheckType::EntropyAnalysis,
                 severity: Severity::Info,
-                description: format!(
-                    "Overall entropy is {:.3} bits/byte (near-maximum — expected for compressed format)",
-                    overall
-                ),
+                description: "This file is highly compressed or encrypted, which is expected for this file type.".to_string(),
             });
         }
         return issues;
@@ -554,10 +797,7 @@ fn check_entropy(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
             issues.push(IntegrityIssue {
                 check_type: CheckType::EntropyAnalysis,
                 severity: Severity::Warning,
-                description: format!(
-                    "File has high entropy ({:.3} bits/byte) — may contain encrypted or compressed hidden data",
-                    overall
-                ),
+                description: "This file has unusually random-looking data throughout, which could indicate encrypted or hidden content.".to_string(),
             });
         }
         return issues;
@@ -586,8 +826,8 @@ fn check_entropy(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
             check_type: CheckType::EntropyAnalysis,
             severity: Severity::Warning,
             description: format!(
-                "{:.0}% of file has high entropy (> 7.5 bits/byte) while overall is {:.2} — may contain embedded encrypted data",
-                high_ratio * 100.0, overall
+                "About {:.0}% of this file contains sections of unusually random-looking data, which could indicate hidden encrypted content within an otherwise normal file.",
+                high_ratio * 100.0
             ),
         });
     }
@@ -637,20 +877,55 @@ fn check_appended_files(data: &[u8]) -> Vec<IntegrityIssue> {
 
     for &(magic, name) in signatures {
         // Skip the first occurrence (that's the file itself)
-        let mut search_start = magic.len(); // Start after the header
+        let search_start = magic.len();
         if search_start >= data.len() {
             continue;
         }
 
-        if let Some(offset) = find_bytes(&data[search_start..], magic) {
-            let absolute_offset = search_start + offset;
+        // Count all occurrences after the header
+        let mut count = 0;
+        let mut pos = search_start;
+        while pos + magic.len() <= data.len() {
+            if let Some(offset) = find_bytes(&data[pos..], magic) {
+                count += 1;
+                pos += offset + magic.len();
+            } else {
+                break;
+            }
+        }
+
+        if count > 0 {
+            let desc = match name {
+                "JPEG" => format!(
+                    "Contains {} embedded JPEG image{}. This is common — most image formats store thumbnails and previews as JPEG.",
+                    count, if count > 1 { "s" } else { "" }
+                ),
+                "GZIP" => format!(
+                    "Contains {} compressed (GZIP) data section{}. This is normal — many file formats use compression internally.",
+                    count, if count > 1 { "s" } else { "" }
+                ),
+                "PNG" => format!(
+                    "Contains {} embedded PNG image{}.",
+                    count, if count > 1 { "s" } else { "" }
+                ),
+                "PDF" => format!(
+                    "Contains {} embedded PDF document{}.",
+                    count, if count > 1 { "s" } else { "" }
+                ),
+                "ZIP" => format!(
+                    "Contains {} embedded archive{}. Some file formats (e.g. DOCX, XLSX) are archives internally.",
+                    count, if count > 1 { "s" } else { "" }
+                ),
+                _ => format!(
+                    "Contains {} embedded {} file{}.",
+                    count, name, if count > 1 { "s" } else { "" }
+                ),
+            };
+
             issues.push(IntegrityIssue {
                 check_type: CheckType::AppendedFileDetection,
-                severity: Severity::Warning,
-                description: format!(
-                    "Embedded {} file signature found at byte offset {}",
-                    name, absolute_offset
-                ),
+                severity: Severity::Info,
+                description: desc,
             });
         }
     }

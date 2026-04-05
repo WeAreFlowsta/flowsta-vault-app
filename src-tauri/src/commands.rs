@@ -2171,6 +2171,15 @@ pub fn analyze_file(path: String) -> Result<crate::file_analyzer::IntegrityRepor
     crate::file_analyzer::analyze_file(std::path::Path::new(&path))
 }
 
+/// Generate a perceptual hash for a file (for fuzzy matching).
+/// Returns None for file types that don't support perceptual hashing.
+#[tauri::command]
+pub fn generate_perceptual_hash(path: String) -> Result<Option<crate::file_analyzer::PerceptualHash>, String> {
+    let data = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
+    let result = crate::file_analyzer::generate_perceptual_hash(&data);
+    Ok(result)
+}
+
 /// Sign a file hash and commit the SignatureRecord to the signing DNA.
 ///
 /// This command:
@@ -2184,6 +2193,7 @@ pub async fn sign_file(
     ai_generation: Option<String>,
     content_rights: Option<serde_json::Value>,
     integrity_report: Option<serde_json::Value>,
+    perceptual_hash: Option<serde_json::Value>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
     // 1. Decode and validate file hash
@@ -2240,6 +2250,7 @@ pub async fn sign_file(
             ai_generation.as_deref(),
             content_rights.as_ref(),
             integrity_report.as_ref(),
+            perceptual_hash.as_ref(),
         )
         .await
         {
@@ -2339,15 +2350,8 @@ pub async fn get_my_signatures(
     // Deserialize Vec<Record> from the zome call result
     use holochain_types::prelude::Record;
 
-    log::info!("get_my_signatures raw result: {} bytes", result.as_bytes().len());
-
     let records: Vec<Record> = rmp_serde::from_slice(result.as_bytes())
-        .map_err(|e| {
-            log::error!("Failed to deserialize records: {}. Raw hex: {}", e, hex::encode(&result.as_bytes()[..result.as_bytes().len().min(200)]));
-            format!("Failed to deserialize records: {}", e)
-        })?;
-
-    log::info!("Deserialized {} records from signing DNA", records.len());
+        .map_err(|e| format!("Failed to deserialize records: {}", e))?;
 
     // Extract SignatureRecord entry data from each Record.
     // Entry contains the app entry as SerializedBytes (MessagePack).
@@ -2413,6 +2417,7 @@ async fn commit_signature_to_dht(
     ai_generation: Option<&str>,
     content_rights: Option<&serde_json::Value>,
     integrity_report: Option<&serde_json::Value>,
+    perceptual_hash: Option<&serde_json::Value>,
 ) -> Result<String, String> {
     use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
         ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
@@ -2502,6 +2507,14 @@ async fn commit_signature_to_dht(
         ai_generation: Option<String>,
         content_rights: Option<ContentRightsPayload>,
         integrity_report: Option<IntegrityReportPayload>,
+        perceptual_hash: Option<PerceptualHashPayload>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct PerceptualHashPayload {
+        hash_type: String,
+        hash_value: Vec<u8>,
+        bands: Vec<Vec<u8>>,
     }
 
     #[derive(serde::Serialize)]
@@ -2623,6 +2636,20 @@ async fn commit_signature_to_dht(
         }.to_string()),
         content_rights: cr_payload,
         integrity_report: ir_payload,
+        perceptual_hash: perceptual_hash.and_then(|ph| {
+            let obj = ph.as_object()?;
+            Some(PerceptualHashPayload {
+                hash_type: obj.get("hash_type")?.as_str()?.to_string(),
+                hash_value: obj.get("hash_value")?.as_array()?
+                    .iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect(),
+                bands: obj.get("bands")?.as_array()?
+                    .iter().filter_map(|band| {
+                        Some(band.as_array()?.iter()
+                            .filter_map(|v| v.as_u64().map(|n| n as u8))
+                            .collect())
+                    }).collect(),
+            })
+        }),
     };
 
     // Encode with MessagePack using the same encoder Holochain uses

@@ -67,5 +67,9 @@ tauri-plugin-dialog = "2"
 # Image analysis (Sign It file integrity checks — LSB steganography detection)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
 
+# Audio decoding for perceptual hashing (Sign It)
+symphonia = { version = "0.5", features = ["mp3", "wav", "flac", "ogg", "aac"] }
+rusty-chromaprint = "0.3"
+
 # Error handling
 thiserror = "1.0"

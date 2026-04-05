@@ -37,7 +37,7 @@
     "resources": [
       "resources/flowsta_private_v1_10_happ.happ",
       "resources/flowsta_identity_v1_3_happ.happ",
-      "resources/flowsta_signing_v1_0_happ.happ"
+      "resources/flowsta_signing_v1_1_happ.happ"
     ],
     "icon": [
       "icons/32x32.png",
