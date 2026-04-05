@@ -15,6 +15,19 @@ import { GlassButton } from "~/components/common/GlassButton";
 const selectClass =
   "w-full rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400";
 
+function formatRelativeTime(timestampMs: number): string {
+  const now = Date.now();
+  const diff = now - timestampMs;
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(timestampMs).toLocaleDateString();
+}
+
 interface IntegrityIssue {
   check_type: string;
   severity: string;
@@ -52,6 +65,11 @@ export default component$(() => {
   const recentSignatures = useSignal<SignResult[]>([]);
   const signaturesLoaded = useSignal(false);
   const existingSignatures = useSignal<any[]>([]);
+
+  // Revocation dialog state
+  const revokeTarget = useSignal<any | null>(null);
+  const revokeReason = useSignal("");
+  const revoking = useSignal(false);
 
   // Signal to receive file path from Tauri drag-drop (bridges native event → Qwik reactivity)
   const droppedFilePath = useSignal<string | null>(null);
@@ -275,8 +293,9 @@ export default component$(() => {
       signResult.value = result;
       step.value = "done";
 
-      // Add to recent signatures (prepend)
-      recentSignatures.value = [result, ...recentSignatures.value.slice(0, 9)];
+      // Add to recent signatures with filename (prepend, newest first)
+      const enrichedResult = { ...result, fileName: fileName.value };
+      recentSignatures.value = [enrichedResult, ...recentSignatures.value.slice(0, 9)];
     } catch (e) {
       error.value = `Signing failed: ${e}`;
       step.value = "ready";
@@ -294,6 +313,27 @@ export default component$(() => {
     signResult.value = null;
     existingSignatures.value = [];
     error.value = "";
+  });
+
+  const handleRevoke = $(async () => {
+    if (!revokeTarget.value?.action_hash) return;
+    revoking.value = true;
+    try {
+      await invoke("revoke_signature", {
+        actionHashHex: revokeTarget.value.action_hash,
+        reason: revokeReason.value || null,
+      });
+      // Remove from local list
+      recentSignatures.value = recentSignatures.value.filter(
+        (s) => s.action_hash !== revokeTarget.value?.action_hash
+      );
+      revokeTarget.value = null;
+      revokeReason.value = "";
+    } catch (e) {
+      error.value = `Revocation failed: ${e}`;
+    } finally {
+      revoking.value = false;
+    }
   });
 
   return (
@@ -703,7 +743,11 @@ export default component$(() => {
           </p>
         ) : (
           <div class="space-y-3">
-            {recentSignatures.value.slice(0, 5).map((sig, i) => (
+            {recentSignatures.value
+              .filter((s) => !s.revoked)
+              .sort((a, b) => (b.signed_at || 0) - (a.signed_at || 0))
+              .slice(0, 5)
+              .map((sig, i) => (
               <div
                 key={i}
                 class="flex items-center gap-3 rounded-lg border border-gray-700 bg-gray-800 p-3"
@@ -714,21 +758,85 @@ export default component$(() => {
                   </svg>
                 </div>
                 <div class="min-w-0 flex-1">
-                  <p class="truncate text-xs font-mono text-gray-300">
-                    {sig.file_hash.slice(0, 24)}...
-                  </p>
+                  {(sig as any).fileName ? (
+                    <p class="truncate text-sm text-white">
+                      {(sig as any).fileName}
+                    </p>
+                  ) : (
+                    <p class="truncate text-xs font-mono text-gray-400">
+                      {sig.file_hash?.slice(0, 16)}...
+                    </p>
+                  )}
                   <p class="text-xs text-gray-500">
-                    {new Date(sig.signed_at).toLocaleDateString()}
+                    {sig.signed_at ? formatRelativeTime(sig.signed_at) : ""}
+                    {sig.intent ? ` · ${sig.intent}` : ""}
                   </p>
                 </div>
-                <span class="rounded-full bg-gray-700 px-2 py-0.5 text-xs text-gray-300">
-                  {sig.action_hash ? "On DHT" : "Local"}
-                </span>
+                {sig.action_hash && (
+                  <button
+                    class="shrink-0 text-xs text-gray-500 hover:text-red-400 transition-colors"
+                    onClick$={() => {
+                      revokeTarget.value = sig;
+                      revokeReason.value = "";
+                    }}
+                  >
+                    Revoke
+                  </button>
+                )}
               </div>
             ))}
           </div>
         )}
       </div>
+
+      {/* Revocation confirmation dialog */}
+      {revokeTarget.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
+            <h3 class="mb-2 text-base font-semibold text-white">Revoke Signature</h3>
+            <p class="mb-4 text-xs text-gray-400">
+              This will publicly mark this signature as revoked. The original record stays on the DHT but verifiers will see it as revoked.
+            </p>
+
+            <div class="mb-4 rounded-lg border border-gray-700 bg-gray-900 p-3">
+              <p class="truncate text-xs font-mono text-gray-400">
+                {(revokeTarget.value as any).fileName || revokeTarget.value.file_hash?.slice(0, 24) + "..."}
+              </p>
+            </div>
+
+            <div class="mb-4">
+              <label class="mb-1 block text-xs text-gray-500">Reason (optional)</label>
+              <input
+                type="text"
+                maxLength={280}
+                placeholder="e.g. Replaced with updated version"
+                class="w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-amber-400 focus:outline-none"
+                style={{ colorScheme: "dark" }}
+                value={revokeReason.value}
+                onInput$={(e) => { revokeReason.value = (e.target as HTMLInputElement).value; }}
+              />
+            </div>
+
+            <div class="flex gap-3">
+              <GlassButton
+                variant="secondary"
+                class="flex-1"
+                onClick$={() => { revokeTarget.value = null; }}
+              >
+                Cancel
+              </GlassButton>
+              <GlassButton
+                variant="danger"
+                class="flex-1"
+                disabled={revoking.value}
+                onClick$={handleRevoke}
+              >
+                {revoking.value ? "Revoking..." : "Revoke"}
+              </GlassButton>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 });

@@ -2341,7 +2341,7 @@ pub async fn get_my_signatures(
         .map_err(|e| format!("msgpack: {}", e))?;
 
     let result = app_ws.call_zome(
-        ZomeCallTarget::RoleName(role_name.into()),
+        ZomeCallTarget::RoleName(role_name.clone().into()),
         "signing".into(),
         "get_my_signatures".into(),
         ExternIO::from(payload_mp),
@@ -2382,6 +2382,37 @@ pub async fn get_my_signatures(
                     let signer_str = crate::key_derivation::construct_agent_pub_key_string(
                         &pub_key_arr,
                     );
+                    // Check if this signature has been revoked
+                    let mut revoked = false;
+                    let mut revoked_at: Option<i64> = None;
+                    let mut revocation_reason: Option<String> = None;
+                    {
+                        let rev_payload = rmp_serde::to_vec_named(
+                            &record.action_hashed().hash
+                        ).unwrap_or_default();
+                        if let Ok(rev_result) = app_ws.call_zome(
+                            ZomeCallTarget::RoleName(role_name.clone().into()),
+                            "signing".into(),
+                            "get_revocations_for_signature".into(),
+                            ExternIO::from(rev_payload),
+                        ).await {
+                            if let Ok(rev_records) = rmp_serde::from_slice::<Vec<Record>>(rev_result.as_bytes()) {
+                                if !rev_records.is_empty() {
+                                    revoked = true;
+                                    // Try to extract revocation details
+                                    if let Some(Entry::App(rev_entry)) = rev_records[0].entry().as_option() {
+                                        #[derive(serde::Deserialize)]
+                                        struct RevEntry { revoked_at: i64, reason: Option<String> }
+                                        if let Ok(rev) = rmp_serde::from_slice::<RevEntry>(rev_entry.bytes()) {
+                                            revoked_at = Some(rev.revoked_at);
+                                            revocation_reason = rev.reason;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     signatures.push(serde_json::json!({
                         "file_hash": hex::encode(&entry.file_hash),
                         "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
@@ -2392,6 +2423,9 @@ pub async fn get_my_signatures(
                         "ai_generation": entry.ai_generation,
                         "content_rights": entry.content_rights,
                         "integrity_report": entry.integrity_report,
+                        "revoked": revoked,
+                        "revoked_at": revoked_at,
+                        "revocation_reason": revocation_reason,
                     }));
                 }
                 Err(e) => {
@@ -2403,6 +2437,94 @@ pub async fn get_my_signatures(
 
     log::info!("Loaded {} signatures from signing DNA", signatures.len());
     Ok(signatures)
+}
+
+/// Revoke a signature by action hash. Creates a RevocationEntry on the DHT.
+#[tauri::command]
+pub async fn revoke_signature(
+    action_hash_hex: String,
+    reason: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
+        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    use holochain_types::prelude::ExternIO;
+
+    let conductor_ports = {
+        let conductor = state.conductor_handle.lock().unwrap();
+        conductor.as_ref().map(|h| (h.admin_port, h.app_port))
+    };
+
+    let (admin_port, app_port) = conductor_ports.ok_or("Conductor not running")?;
+    let signing_app_id = crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION);
+
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", admin_port),
+        Some("flowsta-vault-revoke".to_string()),
+    ).await.map_err(|e| format!("Admin WS: {}", e))?;
+
+    let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
+    let signing_app = apps.iter().find(|a| a.installed_app_id == signing_app_id)
+        .ok_or("Signing DNA not installed")?;
+
+    let role_name = signing_app.cell_info.keys()
+        .find(|k| k.starts_with("flowsta_signing"))
+        .ok_or("No signing role")?.clone();
+
+    let cell_id = signing_app.cell_info[&role_name].iter()
+        .find_map(|c| match c {
+            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        })
+        .ok_or("No provisioned signing cell")?;
+
+    let credentials = admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+        cell_id: cell_id.clone(), functions: None,
+    }).await.map_err(|e| format!("auth creds: {}", e))?;
+
+    let issued = admin_ws.issue_app_auth_token(
+        IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app_id),
+    ).await.map_err(|e| format!("auth token: {}", e))?;
+
+    let signer = ClientAgentSigner::default();
+    signer.add_credentials(cell_id, credentials);
+    let app_ws = AppWebsocket::connect(
+        format!("localhost:{}", app_port),
+        issued.token, signer.into(),
+        Some("flowsta-vault-revoke".into()),
+    ).await.map_err(|e| format!("App WS: {}", e))?;
+
+    // Build the RevokeInput payload — must use ActionHash type (not raw bytes)
+    #[derive(serde::Serialize)]
+    struct RevokeInput {
+        signature_action: holochain_types::prelude::ActionHash,
+        reason: Option<String>,
+    }
+
+    let action_bytes = hex::decode(&action_hash_hex)
+        .map_err(|_| "Invalid action hash hex".to_string())?;
+
+    let action_hash = holochain_types::prelude::ActionHash::from_raw_39(action_bytes.clone());
+
+    let payload = RevokeInput {
+        signature_action: action_hash,
+        reason,
+    };
+
+    let payload_mp = rmp_serde::to_vec_named(&payload)
+        .map_err(|e| format!("MessagePack: {}", e))?;
+
+    let result = app_ws.call_zome(
+        ZomeCallTarget::RoleName(role_name.into()),
+        "signing".into(),
+        "revoke_signature".into(),
+        ExternIO::from(payload_mp),
+    ).await.map_err(|e| format!("revoke_signature zome call: {}", e))?;
+
+    let revocation_hash = hex::encode(result.as_bytes());
+    log::info!("Signature revoked, revocation_hash: {}", revocation_hash);
+
+    Ok(revocation_hash)
 }
 
 /// Commit a SignatureRecord to the signing DNA via the local conductor.

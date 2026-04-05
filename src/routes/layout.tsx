@@ -17,8 +17,8 @@ declare const __APP_VERSION__: string;
 const navItems = [
   { label: "Overview", href: "/", icon: "home" },
   { label: "Sign It", href: "/sign-it/", icon: "pencil" },
-  { label: "Your Data", href: "/your-data/", icon: "database" },
   { label: "Connected Apps", href: "/identities/", icon: "link" },
+  { label: "Your Data", href: "/your-data/", icon: "database" },
   { label: "Settings", href: "/settings/", icon: "cog" },
 ];
 
