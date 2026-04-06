@@ -133,6 +133,10 @@ pub struct AppState {
     /// can store backups while the vault is locked. Derived from device_seed
     /// via HMAC (cannot recover seed or sign).
     pub backup_key: Mutex<Option<[u8; 32]>>,
+    /// Web agent key from auto-link (base64 39-byte AgentPubKey).
+    /// Cached here so get_my_signatures can query linked agent's signatures
+    /// without waiting for identity DNA gossip.
+    pub linked_web_agent_key: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -160,6 +164,7 @@ impl AppState {
             verified_apps: Mutex::new(verified_apps),
             linked_app_scopes: Mutex::new(linked_app_scopes),
             backup_key: Mutex::new(None),
+            linked_web_agent_key: Mutex::new(None),
         }
     }
 
@@ -528,6 +533,12 @@ fn spawn_conductor_startup(
                                 Ok(result) => {
                                     if result.success {
                                         log::info!("Auto-link succeeded: {}", result.message);
+                                        // Cache the web agent key for cross-agent signature lookup
+                                        if let Some(ref key) = result.web_agent_key {
+                                            let mut cached = state.linked_web_agent_key.lock().unwrap();
+                                            *cached = Some(key.clone());
+                                            log::info!("Cached web agent key for cross-agent signatures");
+                                        }
                                     } else {
                                         log::warn!("Auto-link returned failure: {}", result.message);
                                     }
@@ -1609,9 +1620,13 @@ async fn auto_link_web_account(state: &Arc<AppState>, password: &str) -> Result<
         return Err(format!("Link error: {}", err));
     }
 
+    // Always include the web agent key (base64 of 39-byte AgentPubKey)
+    // so it can be cached for cross-agent signature lookup.
+    let web_key_str = base64_standard_encode(&web_39);
+
     Ok(LinkResult {
         success: link_resp.success.unwrap_or(false),
-        web_agent_key: link_resp.web_agent_key,
+        web_agent_key: Some(web_key_str),
         message: link_resp
             .message
             .unwrap_or_else(|| "Linked successfully".to_string()),
@@ -2279,7 +2294,10 @@ pub async fn sign_file(
     }))
 }
 
-/// Get all signatures created by the current agent from the signing DNA.
+/// Get all signatures from the signing DNA.
+/// Queries all installed signing DNA versions locally for own signatures,
+/// then queries linked agents' signatures via the identity + signing DNAs.
+/// Everything runs on the local conductor — no API dependency.
 #[tauri::command]
 pub async fn get_my_signatures(
     state: State<'_, Arc<AppState>>,
@@ -2296,8 +2314,6 @@ pub async fn get_my_signatures(
     let (admin_port, app_port) = conductor_ports
         .ok_or("Conductor not running")?;
 
-    let signing_app_id = crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION);
-
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
         Some("flowsta-vault-read".to_string()),
@@ -2306,57 +2322,17 @@ pub async fn get_my_signatures(
     .map_err(|e| format!("Admin WS: {}", e))?;
 
     let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
-    let signing_app = apps.iter().find(|a| a.installed_app_id == signing_app_id)
-        .ok_or("Signing DNA not installed")?;
 
-    let role_name = signing_app.cell_info.keys()
-        .find(|k| k.starts_with("flowsta_signing"))
-        .ok_or("No signing role")?.clone();
+    // Find ALL installed signing DNA apps (current + old versions kept for history)
+    let signing_apps: Vec<_> = apps.iter()
+        .filter(|a| a.installed_app_id.starts_with("flowsta_signing_v"))
+        .collect();
 
-    let cell_id = signing_app.cell_info[&role_name].iter()
-        .find_map(|c| match c {
-            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-            _ => None,
-        })
-        .ok_or("No provisioned signing cell")?;
+    if signing_apps.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    let credentials = admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-        cell_id: cell_id.clone(), functions: None,
-    }).await.map_err(|e| format!("auth creds: {}", e))?;
-
-    let issued = admin_ws.issue_app_auth_token(
-        IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app_id),
-    ).await.map_err(|e| format!("auth token: {}", e))?;
-
-    let signer = ClientAgentSigner::default();
-    signer.add_credentials(cell_id, credentials);
-    let app_ws = AppWebsocket::connect(
-        format!("localhost:{}", app_port),
-        issued.token, signer.into(),
-        Some("flowsta-vault-read".into()),
-    ).await.map_err(|e| format!("App WS: {}", e))?;
-
-    // Call get_my_signatures — payload is () (unit)
-    let payload_mp = rmp_serde::to_vec_named(&())
-        .map_err(|e| format!("msgpack: {}", e))?;
-
-    let result = app_ws.call_zome(
-        ZomeCallTarget::RoleName(role_name.clone().into()),
-        "signing".into(),
-        "get_my_signatures".into(),
-        ExternIO::from(payload_mp),
-    ).await.map_err(|e| format!("get_my_signatures zome call: {}", e))?;
-
-    // Deserialize Vec<Record> from the zome call result
-    use holochain_types::prelude::Record;
-
-    let records: Vec<Record> = rmp_serde::from_slice(result.as_bytes())
-        .map_err(|e| format!("Failed to deserialize records: {}", e))?;
-
-    // Extract SignatureRecord entry data from each Record.
-    // Entry contains the app entry as SerializedBytes (MessagePack).
-    // We decode it to our mirror struct then convert to JSON.
-    use holochain_types::prelude::Entry;
+    use holochain_types::prelude::{Record, Entry};
 
     #[derive(serde::Deserialize, serde::Serialize)]
     struct SignatureEntry {
@@ -2371,72 +2347,403 @@ pub async fn get_my_signatures(
     }
 
     let mut signatures = Vec::new();
-    for record in &records {
-        if let Some(Entry::App(entry_bytes)) = record.entry().as_option() {
-            // entry_bytes is AppEntryBytes — contains the MessagePack of our struct
-            match rmp_serde::from_slice::<SignatureEntry>(entry_bytes.bytes()) {
-                Ok(entry) => {
-                    let action_hash = hex::encode(record.action_hashed().hash.get_raw_39());
-                    let raw_32 = entry.signer.get_raw_32();
-                    let pub_key_arr: [u8; 32] = raw_32.try_into().unwrap_or([0u8; 32]);
-                    let signer_str = crate::key_derivation::construct_agent_pub_key_string(
-                        &pub_key_arr,
-                    );
-                    // Check if this signature has been revoked
-                    let mut revoked = false;
-                    let mut revoked_at: Option<i64> = None;
-                    let mut revocation_reason: Option<String> = None;
-                    {
-                        let rev_payload = rmp_serde::to_vec_named(
-                            &record.action_hashed().hash
-                        ).unwrap_or_default();
-                        if let Ok(rev_result) = app_ws.call_zome(
-                            ZomeCallTarget::RoleName(role_name.clone().into()),
-                            "signing".into(),
-                            "get_revocations_for_signature".into(),
-                            ExternIO::from(rev_payload),
-                        ).await {
-                            if let Ok(rev_records) = rmp_serde::from_slice::<Vec<Record>>(rev_result.as_bytes()) {
-                                if !rev_records.is_empty() {
-                                    revoked = true;
-                                    // Try to extract revocation details
-                                    if let Some(Entry::App(rev_entry)) = rev_records[0].entry().as_option() {
-                                        #[derive(serde::Deserialize)]
-                                        struct RevEntry { revoked_at: i64, reason: Option<String> }
-                                        if let Ok(rev) = rmp_serde::from_slice::<RevEntry>(rev_entry.bytes()) {
-                                            revoked_at = Some(rev.revoked_at);
-                                            revocation_reason = rev.reason;
+
+    // Query signatures from each installed signing DNA version
+    for signing_app in &signing_apps {
+        let role_name = match signing_app.cell_info.keys()
+            .find(|k| k.starts_with("flowsta_signing")) {
+            Some(r) => r.clone(),
+            None => continue,
+        };
+
+        let cell_id = match signing_app.cell_info[&role_name].iter()
+            .find_map(|c| match c {
+                CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+                _ => None,
+            }) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let credentials = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+            cell_id: cell_id.clone(), functions: None,
+        }).await {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("Failed to auth creds for {}: {}", signing_app.installed_app_id, e);
+                continue;
+            }
+        };
+
+        let issued = match admin_ws.issue_app_auth_token(
+            IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app.installed_app_id.clone()),
+        ).await {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("Failed to get token for {}: {}", signing_app.installed_app_id, e);
+                continue;
+            }
+        };
+
+        let signer = ClientAgentSigner::default();
+        signer.add_credentials(cell_id, credentials);
+        let app_ws = match AppWebsocket::connect(
+            format!("localhost:{}", app_port),
+            issued.token, signer.into(),
+            Some("flowsta-vault-read".into()),
+        ).await {
+            Ok(ws) => ws,
+            Err(e) => {
+                log::warn!("Failed to connect app WS for {}: {}", signing_app.installed_app_id, e);
+                continue;
+            }
+        };
+
+        let payload_mp = rmp_serde::to_vec_named(&())
+            .map_err(|e| format!("msgpack: {}", e))?;
+
+        match app_ws.call_zome(
+            ZomeCallTarget::RoleName(role_name.clone().into()),
+            "signing".into(),
+            "get_my_signatures".into(),
+            ExternIO::from(payload_mp),
+        ).await {
+            Ok(result) => {
+                if let Ok(records) = rmp_serde::from_slice::<Vec<Record>>(result.as_bytes()) {
+                    log::info!("Got {} signatures from {}", records.len(), signing_app.installed_app_id);
+
+                    // Process each record while we still have the app_ws for this version
+                    for record in &records {
+                        if let Some(Entry::App(entry_bytes)) = record.entry().as_option() {
+                            match rmp_serde::from_slice::<SignatureEntry>(entry_bytes.bytes()) {
+                                Ok(entry) => {
+                                    let action_hash = hex::encode(record.action_hashed().hash.get_raw_39());
+                                    let raw_32 = entry.signer.get_raw_32();
+                                    let pub_key_arr: [u8; 32] = raw_32.try_into().unwrap_or([0u8; 32]);
+                                    let signer_str = crate::key_derivation::construct_agent_pub_key_string(
+                                        &pub_key_arr,
+                                    );
+
+                                    // Check revocation on same app connection (same DHT)
+                                    let mut revoked = false;
+                                    let mut revoked_at: Option<i64> = None;
+                                    let mut revocation_reason: Option<String> = None;
+                                    {
+                                        let rev_payload = rmp_serde::to_vec_named(
+                                            &record.action_hashed().hash
+                                        ).unwrap_or_default();
+                                        if let Ok(rev_result) = app_ws.call_zome(
+                                            ZomeCallTarget::RoleName(role_name.clone().into()),
+                                            "signing".into(),
+                                            "get_revocations_for_signature".into(),
+                                            ExternIO::from(rev_payload),
+                                        ).await {
+                                            if let Ok(rev_records) = rmp_serde::from_slice::<Vec<Record>>(rev_result.as_bytes()) {
+                                                if !rev_records.is_empty() {
+                                                    revoked = true;
+                                                    if let Some(Entry::App(rev_entry)) = rev_records[0].entry().as_option() {
+                                                        #[derive(serde::Deserialize)]
+                                                        struct RevEntry { revoked_at: i64, reason: Option<String> }
+                                                        if let Ok(rev) = rmp_serde::from_slice::<RevEntry>(rev_entry.bytes()) {
+                                                            revoked_at = Some(rev.revoked_at);
+                                                            revocation_reason = rev.reason;
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
+
+                                    signatures.push(serde_json::json!({
+                                        "file_hash": hex::encode(&entry.file_hash),
+                                        "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
+                                        "agent_pub_key": signer_str,
+                                        "signed_at": entry.signed_at,
+                                        "action_hash": action_hash,
+                                        "intent": entry.intent,
+                                        "ai_generation": entry.ai_generation,
+                                        "content_rights": entry.content_rights,
+                                        "integrity_report": entry.integrity_report,
+                                        "revoked": revoked,
+                                        "revoked_at": revoked_at,
+                                        "revocation_reason": revocation_reason,
+                                    }));
+                                }
+                                Err(e) => {
+                                    log::warn!("Failed to deserialize signature entry: {}", e);
                                 }
                             }
                         }
                     }
-
-                    signatures.push(serde_json::json!({
-                        "file_hash": hex::encode(&entry.file_hash),
-                        "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
-                        "agent_pub_key": signer_str,
-                        "signed_at": entry.signed_at,
-                        "action_hash": action_hash,
-                        "intent": entry.intent,
-                        "ai_generation": entry.ai_generation,
-                        "content_rights": entry.content_rights,
-                        "integrity_report": entry.integrity_report,
-                        "revoked": revoked,
-                        "revoked_at": revoked_at,
-                        "revocation_reason": revocation_reason,
-                    }));
                 }
-                Err(e) => {
-                    log::warn!("Failed to deserialize signature entry: {}", e);
-                }
+            }
+            Err(e) => {
+                log::warn!("get_my_signatures failed for {}: {}", signing_app.installed_app_id, e);
             }
         }
     }
 
-    log::info!("Loaded {} signatures from signing DNA", signatures.len());
+    log::info!("Loaded {} own signatures from {} signing DNA version(s)", signatures.len(), signing_apps.len());
+
+    // Query linked agents from the identity DNA, then fetch their signatures
+    // from the signing DNA. Everything on the local conductor — no API needed.
+    // Get cached web agent key (set during auto-link on unlock)
+    let cached_web_key = {
+        let key = state.linked_web_agent_key.lock().unwrap();
+        key.clone()
+    };
+    let linked_sigs = fetch_linked_agent_signatures(&admin_ws, &apps, admin_port, app_port, cached_web_key).await;
+    if !linked_sigs.is_empty() {
+        log::info!("Found {} signatures from linked agents", linked_sigs.len());
+        // Deduplicate by action_hash
+        let existing_hashes: std::collections::HashSet<String> = signatures.iter()
+            .filter_map(|s| s.get("action_hash").and_then(|h| h.as_str()).map(|s| s.to_string()))
+            .collect();
+        for sig in linked_sigs {
+            let hash = sig.get("action_hash").and_then(|h| h.as_str()).unwrap_or("");
+            if !hash.is_empty() && !existing_hashes.contains(hash) {
+                signatures.push(sig);
+            }
+        }
+    }
+
+    log::info!("Total signatures (own + linked): {}", signatures.len());
     Ok(signatures)
+}
+
+/// Fetch signatures from linked agents via the local signing DNA.
+/// First tries the identity DNA for linked agents. If that returns empty
+/// (gossip may not have synced yet), falls back to the cached web agent key
+/// from auto-link on unlock.
+async fn fetch_linked_agent_signatures(
+    admin_ws: &holochain_client::AdminWebsocket,
+    apps: &[holochain_client::AppInfo],
+    admin_port: u16,
+    app_port: u16,
+    cached_web_agent_key: Option<String>,
+) -> Vec<serde_json::Value> {
+    use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
+        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    use holochain_types::prelude::{ExternIO, Record, Entry, AgentPubKey};
+
+    // 1. Find the identity DNA app with agent_linking zome (v1.3+).
+    // Prefer the highest version — sort by app ID descending.
+    let mut identity_apps: Vec<_> = apps.iter()
+        .filter(|a| a.installed_app_id.starts_with("flowsta_identity_v"))
+        .collect();
+    identity_apps.sort_by(|a, b| b.installed_app_id.cmp(&a.installed_app_id));
+    let identity_app = identity_apps.into_iter().next();
+    let identity_app = match identity_app {
+        Some(app) => app,
+        None => {
+            log::info!("No identity DNA with agent_linking found — skipping cross-agent lookup");
+            return Vec::new();
+        }
+    };
+
+    // 2. Connect to identity DNA and call get_linked_agents
+    let identity_role = match identity_app.cell_info.keys()
+        .find(|k| k.starts_with("flowsta_identity")) {
+        Some(r) => r.clone(),
+        None => return Vec::new(),
+    };
+
+    let identity_cell_id = match identity_app.cell_info[&identity_role].iter()
+        .find_map(|c| match c {
+            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        }) {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    // Get our own agent key to pass to get_linked_agents
+    let my_agent_key = identity_cell_id.agent_pubkey().clone();
+
+    let identity_creds = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+        cell_id: identity_cell_id.clone(), functions: None,
+    }).await {
+        Ok(c) => c,
+        Err(e) => { log::warn!("Failed to authorize identity creds: {}", e); return Vec::new(); }
+    };
+
+    let issued = match admin_ws.issue_app_auth_token(
+        IssueAppAuthenticationTokenPayload::for_installed_app_id(identity_app.installed_app_id.clone()),
+    ).await {
+        Ok(t) => t,
+        Err(e) => { log::warn!("Failed to get identity token: {}", e); return Vec::new(); }
+    };
+
+    let signer = ClientAgentSigner::default();
+    signer.add_credentials(identity_cell_id, identity_creds);
+    let identity_ws = match AppWebsocket::connect(
+        format!("localhost:{}", app_port),
+        issued.token, signer.into(),
+        Some("flowsta-vault-linked".into()),
+    ).await {
+        Ok(ws) => ws,
+        Err(e) => { log::warn!("Failed to connect identity app WS: {}", e); return Vec::new(); }
+    };
+
+    // Call get_linked_agents(my_agent_key)
+    let payload_mp = match rmp_serde::to_vec_named(&my_agent_key) {
+        Ok(p) => p,
+        Err(e) => { log::warn!("Failed to serialize agent key: {}", e); return Vec::new(); }
+    };
+
+    let mut linked_keys: Vec<AgentPubKey> = match identity_ws.call_zome(
+        ZomeCallTarget::RoleName(identity_role.into()),
+        "agent_linking".into(),
+        "get_linked_agents".into(),
+        ExternIO::from(payload_mp),
+    ).await {
+        Ok(result) => {
+            match rmp_serde::from_slice(result.as_bytes()) {
+                Ok(keys) => keys,
+                Err(e) => { log::warn!("Failed to deserialize linked agents: {}", e); return Vec::new(); }
+            }
+        }
+        Err(e) => { log::warn!("get_linked_agents failed: {}", e); return Vec::new(); }
+    };
+
+    if linked_keys.is_empty() {
+        // Identity DNA gossip may not have synced yet — use cached web agent key
+        if let Some(ref cached_key) = cached_web_agent_key {
+            log::info!("Identity DNA returned no linked agents, using cached web agent key");
+            match base64_standard_decode(cached_key) {
+                Ok(key_bytes) => {
+                    if key_bytes.len() == 39 {
+                        let mut arr = [0u8; 39];
+                        arr.copy_from_slice(&key_bytes);
+                        linked_keys.push(AgentPubKey::from_raw_39(arr.to_vec()));
+                    } else {
+                        log::warn!("Cached web agent key is {} bytes, expected 39", key_bytes.len());
+                    }
+                }
+                Err(_) => log::warn!("Failed to decode cached web agent key"),
+            }
+        }
+
+        if linked_keys.is_empty() {
+            log::info!("No linked agents found (no cache available)");
+            return Vec::new();
+        }
+    }
+
+    log::info!("Found {} linked agent(s), querying their signatures", linked_keys.len());
+
+    // 3. For each linked agent, query get_signatures_for_agent on the current signing DNA
+    let signing_app = apps.iter().find(|a|
+        a.installed_app_id == crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION)
+    );
+    let signing_app = match signing_app {
+        Some(app) => app,
+        None => { log::warn!("Current signing DNA not installed"); return Vec::new(); }
+    };
+
+    let signing_role = match signing_app.cell_info.keys()
+        .find(|k| k.starts_with("flowsta_signing")) {
+        Some(r) => r.clone(),
+        None => return Vec::new(),
+    };
+
+    let signing_cell_id = match signing_app.cell_info[&signing_role].iter()
+        .find_map(|c| match c {
+            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        }) {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    let signing_creds = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+        cell_id: signing_cell_id.clone(), functions: None,
+    }).await {
+        Ok(c) => c,
+        Err(e) => { log::warn!("Failed to authorize signing creds: {}", e); return Vec::new(); }
+    };
+
+    let issued2 = match admin_ws.issue_app_auth_token(
+        IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app.installed_app_id.clone()),
+    ).await {
+        Ok(t) => t,
+        Err(e) => { log::warn!("Failed to get signing token: {}", e); return Vec::new(); }
+    };
+
+    let signer2 = ClientAgentSigner::default();
+    signer2.add_credentials(signing_cell_id, signing_creds);
+    let signing_ws = match AppWebsocket::connect(
+        format!("localhost:{}", app_port),
+        issued2.token, signer2.into(),
+        Some("flowsta-vault-linked-sign".into()),
+    ).await {
+        Ok(ws) => ws,
+        Err(e) => { log::warn!("Failed to connect signing app WS: {}", e); return Vec::new(); }
+    };
+
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct SignatureEntry {
+        file_hash: Vec<u8>,
+        signature: Vec<u8>,
+        signer: AgentPubKey,
+        signed_at: i64,
+        intent: Option<String>,
+        ai_generation: Option<String>,
+        content_rights: Option<serde_json::Value>,
+        integrity_report: Option<serde_json::Value>,
+    }
+
+    let mut linked_signatures = Vec::new();
+
+    for linked_key in &linked_keys {
+        let payload = match rmp_serde::to_vec_named(linked_key) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        match signing_ws.call_zome(
+            ZomeCallTarget::RoleName(signing_role.clone().into()),
+            "signing".into(),
+            "get_signatures_for_agent".into(),
+            ExternIO::from(payload),
+        ).await {
+            Ok(result) => {
+                if let Ok(records) = rmp_serde::from_slice::<Vec<Record>>(result.as_bytes()) {
+                    log::info!("Got {} signatures for linked agent", records.len());
+                    for record in &records {
+                        if let Some(Entry::App(entry_bytes)) = record.entry().as_option() {
+                            if let Ok(entry) = rmp_serde::from_slice::<SignatureEntry>(entry_bytes.bytes()) {
+                                let action_hash = hex::encode(record.action_hashed().hash.get_raw_39());
+                                let raw_32 = entry.signer.get_raw_32();
+                                let pub_key_arr: [u8; 32] = raw_32.try_into().unwrap_or([0u8; 32]);
+                                let signer_str = crate::key_derivation::construct_agent_pub_key_string(&pub_key_arr);
+
+                                linked_signatures.push(serde_json::json!({
+                                    "file_hash": hex::encode(&entry.file_hash),
+                                    "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
+                                    "agent_pub_key": signer_str,
+                                    "signed_at": entry.signed_at,
+                                    "action_hash": action_hash,
+                                    "intent": entry.intent,
+                                    "ai_generation": entry.ai_generation,
+                                    "content_rights": entry.content_rights,
+                                    "integrity_report": entry.integrity_report,
+                                    "revoked": false,
+                                    "revoked_at": null,
+                                    "revocation_reason": null,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("get_signatures_for_agent failed for linked agent: {}", e);
+            }
+        }
+    }
+
+    linked_signatures
 }
 
 /// Revoke a signature by action hash. Creates a RevocationEntry on the DHT.

@@ -5,7 +5,8 @@
 //!   1. Up to date — no action needed.
 //!   2. Coordinator-only update — hot-swap via `admin.updateCoordinators()`.
 //!   3. Full DNA upgrade (new integrity/seed) — download new .happ, install,
-//!      uninstall old, update VaultConfig.
+//!      uninstall old (except signing DNA — kept for signature history),
+//!      update VaultConfig.
 //!
 //! Future: when the vault starts writing data to DNAs (cross-device sync),
 //! step 3 will also include export → import → verify.
@@ -371,19 +372,32 @@ async fn update_single_dna(
 
             log::info!("{} installed and enabled", new_app_id);
 
-            // 6. Uninstall the old DNA.
-            log::info!("Uninstalling old {}...", old_app_id);
-            if let Err(e) = admin_ws.uninstall_app(old_app_id.clone(), false).await {
-                log::warn!("Failed to uninstall {} (non-fatal): {}", old_app_id, e);
-            }
+            // 6. Uninstall the old DNA — EXCEPT signing DNA.
+            // Signing DNA holds user signatures that must remain queryable
+            // across version upgrades. Old versions are kept installed as
+            // read-only so get_my_signatures can combine results.
+            if dna_type == "signing" {
+                log::info!(
+                    "{} DNA updated: {} → {} (old {} kept for signature history)",
+                    dna_type,
+                    current_version,
+                    new_version,
+                    old_app_id
+                );
+            } else {
+                log::info!("Uninstalling old {}...", old_app_id);
+                if let Err(e) = admin_ws.uninstall_app(old_app_id.clone(), false).await {
+                    log::warn!("Failed to uninstall {} (non-fatal): {}", old_app_id, e);
+                }
 
-            log::info!(
-                "{} DNA updated: {} → {} (old {} uninstalled)",
-                dna_type,
-                current_version,
-                new_version,
-                old_app_id
-            );
+                log::info!(
+                    "{} DNA updated: {} → {} (old {} uninstalled)",
+                    dna_type,
+                    current_version,
+                    new_version,
+                    old_app_id
+                );
+            }
         }
         Err(e) => {
             let err_str = format!("{}", e);
@@ -399,18 +413,28 @@ async fn update_single_dna(
                     .await
                     .map_err(|e| format!("Failed to enable {}: {}", new_app_id, e))?;
 
-                log::info!("Uninstalling old {}...", old_app_id);
-                if let Err(e) = admin_ws.uninstall_app(old_app_id.clone(), false).await {
-                    log::warn!("Failed to uninstall {} (non-fatal): {}", old_app_id, e);
-                }
+                if dna_type == "signing" {
+                    log::info!(
+                        "{} DNA updated (recovered): {} → {} (old {} kept for signature history)",
+                        dna_type,
+                        current_version,
+                        new_version,
+                        old_app_id
+                    );
+                } else {
+                    log::info!("Uninstalling old {}...", old_app_id);
+                    if let Err(e) = admin_ws.uninstall_app(old_app_id.clone(), false).await {
+                        log::warn!("Failed to uninstall {} (non-fatal): {}", old_app_id, e);
+                    }
 
-                log::info!(
-                    "{} DNA updated (recovered): {} → {} (old {} uninstalled)",
-                    dna_type,
-                    current_version,
-                    new_version,
-                    old_app_id
-                );
+                    log::info!(
+                        "{} DNA updated (recovered): {} → {} (old {} uninstalled)",
+                        dna_type,
+                        current_version,
+                        new_version,
+                        old_app_id
+                    );
+                }
             } else if err_str.contains("CellAlreadyExists") {
                 // Same DNA hash — the new bundle has the same integrity zomes + network seed.
                 // The cell is already running correctly under the old app ID.
