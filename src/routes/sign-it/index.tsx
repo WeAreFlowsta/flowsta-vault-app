@@ -49,6 +49,14 @@ interface SignResult {
   action_hash: string | null;
 }
 
+interface FileEntry {
+  path: string;
+  name: string;
+  hash: string;
+  integrityReport: IntegrityReport | null;
+  perceptualHash: any | null;
+}
+
 type SigningStep = "idle" | "selected" | "analyzing" | "ready" | "signing" | "done";
 
 export default component$(() => {
@@ -66,13 +74,21 @@ export default component$(() => {
   const signaturesLoaded = useSignal(false);
   const existingSignatures = useSignal<any[]>([]);
 
+  // Multi-file state
+  const fileEntries = useSignal<FileEntry[]>([]);
+  const hashingProgress = useSignal("");
+  const signingProgress = useSignal(0);
+  const signResults = useSignal<any[]>([]);
+  const isBatch = useSignal(false);
+
   // Revocation dialog state
   const revokeTarget = useSignal<any | null>(null);
   const revokeReason = useSignal("");
   const revoking = useSignal(false);
 
-  // Signal to receive file path from Tauri drag-drop (bridges native event → Qwik reactivity)
+  // Signals to receive file paths from Tauri drag-drop (bridges native event → Qwik reactivity)
   const droppedFilePath = useSignal<string | null>(null);
+  const droppedFilePaths = useSignal<string[] | null>(null);
 
   // Listen for Tauri native drag-and-drop
   // eslint-disable-next-line qwik/no-use-visible-task
@@ -84,7 +100,12 @@ export default component$(() => {
         isDragOver.value = false;
         const paths = (event.payload as any).paths as string[];
         if (paths?.length > 0 && step.value === "idle") {
-          droppedFilePath.value = paths[0];
+          if (paths.length === 1) {
+            droppedFilePath.value = paths[0];
+          } else {
+            // Multi-file drop — use batch flow
+            droppedFilePaths.value = paths;
+          }
         }
       } else {
         isDragOver.value = false;
@@ -139,6 +160,45 @@ export default component$(() => {
         } catch { /* offline, no check available */ }
       }
 
+      step.value = "ready";
+    } catch (e: any) {
+      error.value = `Analysis failed: ${e}`;
+      step.value = "idle";
+    }
+  });
+
+  // React to multi-file drop — batch hash and analyze
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(async ({ track }) => {
+    const paths = track(() => droppedFilePaths.value);
+    if (!paths || paths.length === 0) return;
+    droppedFilePaths.value = null;
+
+    error.value = "";
+    isBatch.value = true;
+    step.value = "analyzing";
+    hashingProgress.value = `0 of ${paths.length}`;
+
+    try {
+      const { invoke: inv } = await import("@tauri-apps/api/core");
+      const entries: FileEntry[] = [];
+
+      for (let i = 0; i < paths.length; i++) {
+        const filePath = paths[i];
+        const parts = filePath.replace(/\\/g, "/").split("/");
+        const name = parts[parts.length - 1];
+        hashingProgress.value = `${i + 1} of ${paths.length}`;
+
+        const hash = await inv<string>("hash_file", { path: filePath });
+        const report = await inv<IntegrityReport>("analyze_file", { path: filePath });
+
+        let phash = null;
+        try { phash = await inv<any>("generate_perceptual_hash", { path: filePath }); } catch {}
+
+        entries.push({ path: filePath, name, hash, integrityReport: report, perceptualHash: phash });
+      }
+
+      fileEntries.value = entries;
       step.value = "ready";
     } catch (e: any) {
       error.value = `Analysis failed: ${e}`;
@@ -244,61 +304,96 @@ export default component$(() => {
 
   const handleFilePick = $(async () => {
     const selected = await open({
-      multiple: false,
-      title: "Select a file to sign",
+      multiple: true,
+      title: "Select files to sign",
     });
     if (selected) {
-      await processFile(selected as string);
+      if (Array.isArray(selected)) {
+        if (selected.length === 1) {
+          await processFile(selected[0]);
+        } else if (selected.length > 1) {
+          droppedFilePaths.value = selected;
+        }
+      } else {
+        await processFile(selected as string);
+      }
     }
   });
 
-  const handleSign = $(async () => {
-    if (!fileHash.value) return;
+  const buildContentRights = $(() => {
+    const cr: Record<string, string> = {};
+    if (metadata.license) cr.license = metadata.license;
+    if (metadata.commercialLicensing) cr.commercial_licensing = metadata.commercialLicensing;
+    if (metadata.aiTraining) cr.ai_training = metadata.aiTraining;
+    if (metadata.contactPreference) cr.contact_preference = metadata.contactPreference;
+    return Object.keys(cr).length > 0 ? cr : null;
+  });
 
+  const filterReport = (report: IntegrityReport | null) => {
+    if (!report) return null;
+    const concerns = report.issues_found.filter(
+      (i) => i.severity === "Warning" || i.severity === "Critical"
+    );
+    return {
+      checks_performed: report.checks_performed,
+      issues_found: concerns,
+      checked_at: report.checked_at,
+    };
+  };
+
+  const handleSign = $(async () => {
     step.value = "signing";
     error.value = "";
 
-    try {
-      // Only include content rights if at least one field was declared
-      const cr: Record<string, string> = {};
-      if (metadata.license) cr.license = metadata.license;
-      if (metadata.commercialLicensing) cr.commercial_licensing = metadata.commercialLicensing;
-      if (metadata.aiTraining) cr.ai_training = metadata.aiTraining;
-      if (metadata.contactPreference) cr.contact_preference = metadata.contactPreference;
-      const contentRights = Object.keys(cr).length > 0 ? cr : null;
+    const contentRights = await buildContentRights();
 
-      // Filter integrity report for DHT: keep checks performed,
-      // but only include Warning/Critical issues (not Info items)
-      let dhtReport = null;
-      if (integrityReport.value) {
-        const concerns = integrityReport.value.issues_found.filter(
-          (i) => i.severity === "Warning" || i.severity === "Critical"
-        );
-        dhtReport = {
-          checks_performed: integrityReport.value.checks_performed,
-          issues_found: concerns,
-          checked_at: integrityReport.value.checked_at,
-        };
+    if (isBatch.value && fileEntries.value.length > 0) {
+      // Batch signing
+      signingProgress.value = 0;
+      const results: any[] = [];
+
+      for (let i = 0; i < fileEntries.value.length; i++) {
+        const entry = fileEntries.value[i];
+        signingProgress.value = i + 1;
+        try {
+          const result = await invoke<SignResult>("sign_file", {
+            fileHash: entry.hash,
+            intent: metadata.intent,
+            aiGeneration: metadata.aiGeneration || null,
+            contentRights: contentRights,
+            integrityReport: filterReport(entry.integrityReport),
+            perceptualHash: entry.perceptualHash || null,
+          });
+          results.push({ ...result, fileName: entry.name, success: true });
+        } catch (e) {
+          results.push({ fileName: entry.name, file_hash: entry.hash, success: false, error: `${e}` });
+        }
       }
 
-      const result = await invoke<SignResult>("sign_file", {
-        fileHash: fileHash.value,
-        intent: metadata.intent,
-        aiGeneration: metadata.aiGeneration || null,
-        contentRights: contentRights,
-        integrityReport: dhtReport,
-        perceptualHash: perceptualHash.value || null,
-      });
-
-      signResult.value = result;
+      signResults.value = results;
+      const successful = results.filter(r => r.success);
+      recentSignatures.value = [...successful, ...recentSignatures.value.slice(0, Math.max(0, 10 - successful.length))];
       step.value = "done";
+    } else if (fileHash.value) {
+      // Single file signing
+      try {
+        const result = await invoke<SignResult>("sign_file", {
+          fileHash: fileHash.value,
+          intent: metadata.intent,
+          aiGeneration: metadata.aiGeneration || null,
+          contentRights: contentRights,
+          integrityReport: filterReport(integrityReport.value),
+          perceptualHash: perceptualHash.value || null,
+        });
 
-      // Add to recent signatures with filename (prepend, newest first)
-      const enrichedResult = { ...result, fileName: fileName.value };
-      recentSignatures.value = [enrichedResult, ...recentSignatures.value.slice(0, 9)];
-    } catch (e) {
-      error.value = `Signing failed: ${e}`;
-      step.value = "ready";
+        signResult.value = result;
+        step.value = "done";
+        const enrichedResult = { ...result, fileName: fileName.value };
+        recentSignatures.value = [enrichedResult, ...recentSignatures.value.slice(0, 9)];
+      } catch (e) {
+        error.value = `Signing failed: ${e}`;
+        step.value = "ready";
+      }
     }
   });
 
@@ -313,6 +408,12 @@ export default component$(() => {
     signResult.value = null;
     existingSignatures.value = [];
     error.value = "";
+    // Batch state
+    fileEntries.value = [];
+    signResults.value = [];
+    isBatch.value = false;
+    signingProgress.value = 0;
+    hashingProgress.value = "";
   });
 
   const handleRevoke = $(async () => {
@@ -343,7 +444,7 @@ export default component$(() => {
       {/* ── Sign a File section ────────────────────────────────── */}
       <div class="mb-6 rounded-lg border border-gray-700 bg-gray-900 p-6">
         <h3 class="mb-4 text-sm font-semibold uppercase tracking-wider text-gray-500">
-          Sign a File
+          Sign Files
         </h3>
 
         {step.value === "idle" && (
@@ -372,15 +473,15 @@ export default component$(() => {
                 />
               </svg>
               <p class="mb-1 text-sm text-gray-300">
-                Drag and drop a file here
+                Drag and drop files here
               </p>
-              <p class="text-xs text-gray-500">or click to select a file</p>
+              <p class="text-xs text-gray-500">or click to select files</p>
             </div>
 
             {/* File picker button (alternative) */}
             <div class="mt-3 flex justify-center">
               <GlassButton variant="secondary" onClick$={handleFilePick}>
-                Choose File
+                Choose Files
               </GlassButton>
             </div>
           </div>
@@ -390,14 +491,136 @@ export default component$(() => {
           <div class="flex flex-col items-center py-8">
             <div class="mb-3 h-8 w-8 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
             <p class="text-sm text-gray-300">
-              Analyzing <span class="font-medium text-white">{fileName.value}</span>...
+              {isBatch.value
+                ? <>Analyzing files... <span class="font-medium text-white">{hashingProgress.value}</span></>
+                : <>Analyzing <span class="font-medium text-white">{fileName.value}</span>...</>}
             </p>
           </div>
         )}
 
-        {(step.value === "ready" || step.value === "signing") && (
+        {(step.value === "ready" || step.value === "signing") && isBatch.value && (
           <div>
-            {/* File info */}
+            {/* Batch file list */}
+            <div class="mb-4 rounded-lg border border-gray-700 bg-gray-800 p-4">
+              <div class="flex items-center justify-between mb-3">
+                <p class="text-sm font-medium text-white">
+                  {fileEntries.value.length} file{fileEntries.value.length !== 1 ? "s" : ""} ready to sign
+                </p>
+                <button class="text-xs text-gray-500 hover:text-gray-300" onClick$={resetForm}>Change</button>
+              </div>
+              <div class="space-y-2 max-h-48 overflow-y-auto">
+                {fileEntries.value.map((entry, i) => (
+                  <div key={i} class="flex items-center gap-3">
+                    <div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-500/20">
+                      <svg class="h-3.5 w-3.5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                      </svg>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate text-sm text-white">{entry.name}</p>
+                      <p class="truncate text-xs font-mono text-gray-500">{entry.hash.slice(0, 16)}...</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Content Rights for batch */}
+            <div class="mb-4">
+              <details class="rounded-lg border border-gray-700 bg-gray-800">
+                <summary class="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
+                  Content Rights (applied to all files)
+                </summary>
+                <div class="space-y-3 px-4 pb-4 pt-2">
+                  <div>
+                    <label class="mb-1 block text-xs text-gray-500">AI Generation</label>
+                    <select style={{ colorScheme: "dark" }} class={selectClass} value={metadata.aiGeneration}
+                      onChange$={(e) => { metadata.aiGeneration = (e.target as HTMLSelectElement).value; }}>
+                      <option value="">-- Not declared --</option>
+                      <option value="none">No AI</option>
+                      <option value="generated">AI Generated</option>
+                      <option value="assisted">Part AI Generated</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="mb-1 block text-xs text-gray-500">License</label>
+                    <select style={{ colorScheme: "dark" }} class={selectClass} value={metadata.license}
+                      onChange$={(e) => { metadata.license = (e.target as HTMLSelectElement).value; }}>
+                      <option value="">-- Not declared --</option>
+                      <option value="all-rights-reserved">Copyright protected</option>
+                      <option value="cc0">Public domain (CC0)</option>
+                      <option value="cc-by">Free to share with credit (CC BY)</option>
+                      <option value="cc-by-sa">Free to share with credit, same license (CC BY-SA)</option>
+                      <option value="cc-by-nc">Free for non-commercial use with credit (CC BY-NC)</option>
+                      <option value="cc-by-nc-sa">Non-commercial, credit, same license (CC BY-NC-SA)</option>
+                      <option value="mit">MIT License</option>
+                      <option value="apache-2">Apache 2.0 License</option>
+                      <option value="gpl-3">GPL 3.0 License</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="mb-1 block text-xs text-gray-500">Commercial Licensing</label>
+                    <select style={{ colorScheme: "dark" }} class={selectClass} value={metadata.commercialLicensing}
+                      onChange$={(e) => {
+                        metadata.commercialLicensing = (e.target as HTMLSelectElement).value;
+                        if ((e.target as HTMLSelectElement).value === "open_to_licensing") metadata.contactPreference = "allow_contact_requests";
+                      }}>
+                      <option value="">-- Not declared --</option>
+                      <option value="not_available">Not available for licensing</option>
+                      <option value="open_to_licensing">Open to licensing enquiries</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="mb-1 block text-xs text-gray-500">AI Training</label>
+                    <select style={{ colorScheme: "dark" }} class={selectClass} value={metadata.aiTraining}
+                      onChange$={(e) => {
+                        metadata.aiTraining = (e.target as HTMLSelectElement).value;
+                        if ((e.target as HTMLSelectElement).value === "requires_license") metadata.contactPreference = "allow_contact_requests";
+                      }}>
+                      <option value="">-- Not declared --</option>
+                      <option value="not_allowed">Do not use to train AI</option>
+                      <option value="requires_license">Get permission before training AI</option>
+                      <option value="allowed_with_attribution">Can train AI if they credit me</option>
+                      <option value="allowed">Anyone can use this to train AI</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="mb-1 block text-xs text-gray-500">Contact Preference</label>
+                    <select style={{ colorScheme: "dark" }} class={selectClass} value={metadata.contactPreference}
+                      onChange$={(e) => { metadata.contactPreference = (e.target as HTMLSelectElement).value; }}>
+                      <option value="">-- Not declared --</option>
+                      <option value="no_contact">Do not contact me</option>
+                      <option value="allow_contact_requests">Allow contact requests</option>
+                    </select>
+                    {metadata.contactPreference === "allow_contact_requests" && (
+                      <p class="mt-1.5 text-xs text-gray-500">
+                        Your email and contact details are never shared. Messages are relayed privately through Flowsta.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </details>
+            </div>
+
+            {/* Sign button */}
+            <div class="flex gap-3">
+              <GlassButton variant="secondary" onClick$={resetForm}>Cancel</GlassButton>
+              <GlassButton
+                class="flex-1"
+                onClick$={handleSign}
+                disabled={step.value === "signing"}
+              >
+                {step.value === "signing"
+                  ? `Signing ${signingProgress.value} of ${fileEntries.value.length}...`
+                  : `Sign ${fileEntries.value.length} Files`}
+              </GlassButton>
+            </div>
+          </div>
+        )}
+
+        {(step.value === "ready" || step.value === "signing") && !isBatch.value && (
+          <div>
+            {/* Single file info */}
             <div class="mb-4 rounded-lg border border-gray-700 bg-gray-800 p-4">
               <div class="flex items-center gap-3">
                 <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-500/20">
@@ -638,7 +861,42 @@ export default component$(() => {
           </div>
         )}
 
-        {step.value === "done" && signResult.value && (
+        {step.value === "done" && isBatch.value && signResults.value.length > 0 && (
+          <div>
+            <div class="mb-4 flex flex-col items-center py-4">
+              <div class="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-green-500/20">
+                <svg class="h-6 w-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                </svg>
+              </div>
+              <p class="text-lg font-semibold text-white">
+                {signResults.value.filter((r: any) => r.success).length} of {signResults.value.length} files signed
+              </p>
+              {signResults.value.some((r: any) => !r.success) && (
+                <p class="text-xs text-red-400">{signResults.value.filter((r: any) => !r.success).length} failed</p>
+              )}
+            </div>
+
+            <div class="mb-4 max-h-48 overflow-y-auto space-y-2 rounded-lg border border-gray-700 bg-gray-800 p-4">
+              {signResults.value.map((r: any, i: number) => (
+                <div key={i} class="flex items-center gap-2 text-xs">
+                  {r.success ? (
+                    <span class="h-2 w-2 shrink-0 rounded-full bg-green-400" />
+                  ) : (
+                    <span class="h-2 w-2 shrink-0 rounded-full bg-red-400" />
+                  )}
+                  <span class="truncate text-gray-300">{r.fileName || r.file_hash?.slice(0, 16) + "..."}</span>
+                </div>
+              ))}
+            </div>
+
+            <GlassButton class="w-full" onClick$={resetForm}>
+              Sign More Files
+            </GlassButton>
+          </div>
+        )}
+
+        {step.value === "done" && !isBatch.value && signResult.value && (
           <div>
             <div class="mb-4 flex flex-col items-center py-4">
               <div class="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-green-500/20">
