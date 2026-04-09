@@ -38,6 +38,7 @@ rand = "0.8"
 
 # Encoding
 hex = "0.4"
+base64 = "0.22"
 percent-encoding = "2"
 
 # DHT location computation (matches Holochain's holo_hash crate)

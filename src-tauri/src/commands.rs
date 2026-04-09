@@ -2195,6 +2195,14 @@ pub fn generate_perceptual_hash(path: String) -> Result<Option<crate::file_analy
     Ok(result)
 }
 
+/// Generate a thumbnail for an image file.
+/// Returns a base64 JPEG data URI for images, None for other file types.
+#[tauri::command]
+pub fn generate_thumbnail(path: String) -> Result<Option<String>, String> {
+    let data = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
+    Ok(crate::file_analyzer::generate_image_thumbnail(&data))
+}
+
 /// Sign a file hash and commit the SignatureRecord to the signing DNA.
 ///
 /// This command:

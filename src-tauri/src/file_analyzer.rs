@@ -285,6 +285,31 @@ pub fn similarity_percentage(distance: u32, total_bits: u32) -> u32 {
     ((total_bits - distance.min(total_bits)) * 100 / total_bits) as u32
 }
 
+/// Generate a thumbnail for an image file as a base64 JPEG data URI.
+/// Returns None for non-image files or if generation fails.
+/// Output: 128x128 JPEG at quality 60, typically 3-5KB.
+pub fn generate_image_thumbnail(data: &[u8]) -> Option<String> {
+    let img = image::load_from_memory(data).ok()?;
+
+    // Resize to 128x128, preserving aspect ratio with cover crop
+    let thumb = img.resize_to_fill(128, 128, image::imageops::FilterType::Triangle);
+
+    // Encode as JPEG
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 60);
+    thumb.write_with_encoder(encoder).ok()?;
+
+    let jpeg_bytes = buf.into_inner();
+    if jpeg_bytes.len() > 14_000 {
+        // Too large — skip (validation limit is 15KB)
+        return None;
+    }
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
+    Some(format!("data:image/jpeg;base64,{}", b64))
+}
+
 fn detect_file_type(data: &[u8]) -> FileType {
     if data.len() < 4 {
         return FileType::Unknown;
