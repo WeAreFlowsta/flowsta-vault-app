@@ -2842,6 +2842,94 @@ pub async fn revoke_signature(
     Ok(revocation_hash)
 }
 
+/// Store a thumbnail for a signature on the DHT.
+/// Called after signing an image file with the auto-generated thumbnail.
+#[tauri::command]
+pub async fn set_thumbnail(
+    action_hash_hex: String,
+    thumbnail: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
+        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    use holochain_types::prelude::ExternIO;
+
+    let conductor_ports = {
+        let conductor = state.conductor_handle.lock().unwrap();
+        conductor.as_ref().map(|h| (h.admin_port, h.app_port))
+    };
+
+    let (admin_port, app_port) = conductor_ports.ok_or("Conductor not running")?;
+    let signing_app_id = crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION);
+
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", admin_port),
+        Some("flowsta-vault-thumb".to_string()),
+    ).await.map_err(|e| format!("Admin WS: {}", e))?;
+
+    let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
+    let signing_app = apps.iter().find(|a| a.installed_app_id == signing_app_id)
+        .ok_or("Signing DNA not installed")?;
+
+    let role_name = signing_app.cell_info.keys()
+        .find(|k| k.starts_with("flowsta_signing"))
+        .ok_or("No signing role")?.clone();
+
+    let cell_id = signing_app.cell_info[&role_name].iter()
+        .find_map(|c| match c {
+            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        })
+        .ok_or("No provisioned signing cell")?;
+
+    let credentials = admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+        cell_id: cell_id.clone(), functions: None,
+    }).await.map_err(|e| format!("auth creds: {}", e))?;
+
+    let issued = admin_ws.issue_app_auth_token(
+        IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app_id),
+    ).await.map_err(|e| format!("auth token: {}", e))?;
+
+    let signer = ClientAgentSigner::default();
+    signer.add_credentials(cell_id, credentials);
+    let app_ws = AppWebsocket::connect(
+        format!("localhost:{}", app_port),
+        issued.token, signer.into(),
+        Some("flowsta-vault-thumb".into()),
+    ).await.map_err(|e| format!("App WS: {}", e))?;
+
+    // Build SetThumbnailInput
+    let action_hash_bytes = hex::decode(&action_hash_hex)
+        .map_err(|e| format!("Invalid action hash hex: {}", e))?;
+    let action_hash = holochain_types::prelude::ActionHash::from_raw_39(action_hash_bytes);
+
+    #[derive(serde::Serialize)]
+    struct SetThumbnailInput {
+        signature_action: holochain_types::prelude::ActionHash,
+        thumbnail: String,
+    }
+
+    let payload = SetThumbnailInput {
+        signature_action: action_hash,
+        thumbnail,
+    };
+
+    let payload_mp = rmp_serde::to_vec_named(&payload)
+        .map_err(|e| format!("MessagePack: {}", e))?;
+
+    let result = app_ws.call_zome(
+        ZomeCallTarget::RoleName(role_name.into()),
+        "signing".into(),
+        "set_thumbnail".into(),
+        ExternIO::from(payload_mp),
+    ).await.map_err(|e| format!("set_thumbnail zome call: {}", e))?;
+
+    let thumb_hash = hex::encode(result.as_bytes());
+    log::info!("Thumbnail set, hash: {}", thumb_hash);
+
+    Ok(thumb_hash)
+}
+
 /// Commit a SignatureRecord to the signing DNA via the local conductor.
 /// Returns the ActionHash as a base64-encoded string.
 async fn commit_signature_to_dht(

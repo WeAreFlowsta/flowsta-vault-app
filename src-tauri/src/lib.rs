@@ -203,6 +203,7 @@ pub fn run() {
             commands::analyze_file,
             commands::generate_perceptual_hash,
             commands::generate_thumbnail,
+            commands::set_thumbnail,
             commands::sign_file,
             commands::get_my_signatures,
             commands::revoke_signature,

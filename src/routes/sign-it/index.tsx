@@ -74,6 +74,9 @@ export default component$(() => {
   const signaturesLoaded = useSignal(false);
   const existingSignatures = useSignal<any[]>([]);
 
+  // Thumbnail state (auto-generated for images)
+  const thumbnailData = useSignal<string | null>(null);
+
   // Multi-file state
   const fileEntries = useSignal<FileEntry[]>([]);
   const hashingProgress = useSignal("");
@@ -143,6 +146,12 @@ export default component$(() => {
         const phash = await inv<any>("generate_perceptual_hash", { path: filePath });
         perceptualHash.value = phash;
       } catch { perceptualHash.value = null; }
+
+      // Generate thumbnail (images only)
+      try {
+        const thumb = await inv<string | null>("generate_thumbnail", { path: filePath });
+        thumbnailData.value = thumb;
+      } catch { thumbnailData.value = null; }
 
       // Check existing signatures (API first, local conductor fallback)
       existingSignatures.value = [];
@@ -272,6 +281,14 @@ export default component$(() => {
         perceptualHash.value = null;
       }
 
+      // Generate thumbnail (images only)
+      try {
+        const thumb = await invoke<string | null>("generate_thumbnail", { path: filePath });
+        thumbnailData.value = thumb;
+      } catch {
+        thumbnailData.value = null;
+      }
+
       // Check for existing signatures (API first, fall back to local conductor)
       existingSignatures.value = [];
       try {
@@ -388,8 +405,16 @@ export default component$(() => {
 
         signResult.value = result;
         step.value = "done";
-        const enrichedResult = { ...result, fileName: fileName.value };
+        const enrichedResult = { ...result, fileName: fileName.value, thumbnail: thumbnailData.value };
         recentSignatures.value = [enrichedResult, ...recentSignatures.value.slice(0, 9)];
+
+        // Store thumbnail on DHT (non-blocking, best-effort)
+        if (thumbnailData.value && result.action_hash) {
+          invoke("set_thumbnail", {
+            actionHashHex: result.action_hash,
+            thumbnail: thumbnailData.value,
+          }).catch(() => { /* non-blocking — thumbnail is cosmetic */ });
+        }
       } catch (e) {
         error.value = `Signing failed: ${e}`;
         step.value = "ready";
@@ -408,6 +433,7 @@ export default component$(() => {
     signResult.value = null;
     existingSignatures.value = [];
     error.value = "";
+    thumbnailData.value = null;
     // Batch state
     fileEntries.value = [];
     signResults.value = [];
