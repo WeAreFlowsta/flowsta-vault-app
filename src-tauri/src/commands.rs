@@ -2352,6 +2352,7 @@ pub async fn get_my_signatures(
         ai_generation: Option<String>,
         content_rights: Option<serde_json::Value>,
         integrity_report: Option<serde_json::Value>,
+        perceptual_hash: Option<serde_json::Value>,
     }
 
     let mut signatures = Vec::new();
@@ -2498,6 +2499,7 @@ pub async fn get_my_signatures(
                                         "ai_generation": entry.ai_generation,
                                         "content_rights": entry.content_rights,
                                         "integrity_report": entry.integrity_report,
+                                        "perceptual_hash": entry.perceptual_hash,
                                         "revoked": revoked,
                                         "revoked_at": revoked_at,
                                         "revocation_reason": revocation_reason,
@@ -2726,6 +2728,7 @@ async fn fetch_linked_agent_signatures(
         ai_generation: Option<String>,
         content_rights: Option<serde_json::Value>,
         integrity_report: Option<serde_json::Value>,
+        perceptual_hash: Option<serde_json::Value>,
     }
 
     let mut linked_signatures = Vec::new();
@@ -2789,6 +2792,7 @@ async fn fetch_linked_agent_signatures(
                                     "ai_generation": entry.ai_generation,
                                     "content_rights": entry.content_rights,
                                     "integrity_report": entry.integrity_report,
+                                    "perceptual_hash": entry.perceptual_hash,
                                     "revoked": false,
                                     "revoked_at": null,
                                     "revocation_reason": null,
