@@ -83,11 +83,11 @@ pub fn generate_perceptual_hash(data: &[u8]) -> Option<PerceptualHash> {
             generate_image_phash(data)
         }
         FileType::Mp3 | FileType::Wav | FileType::Flac | FileType::Ogg => {
-            generate_audio_fingerprint(data)
+            generate_audio_fingerprint(data, "AudioChromaprint")
         }
         FileType::Mp4 | FileType::Mkv | FileType::Avi | FileType::Webm => {
             // For video, fingerprint the audio track (most robust against re-encode/resize)
-            generate_audio_fingerprint(data)
+            generate_audio_fingerprint(data, "VideoPHash")
         }
         _ => None,
     }
@@ -150,7 +150,7 @@ fn generate_image_phash(data: &[u8]) -> Option<PerceptualHash> {
 /// Decodes audio via symphonia, fingerprints via rusty-chromaprint.
 /// Returns a compact hash (first 8 fingerprint integers = 32 bytes)
 /// with 8 bands of 4 bytes each for DHT lookup.
-fn generate_audio_fingerprint(data: &[u8]) -> Option<PerceptualHash> {
+fn generate_audio_fingerprint(data: &[u8], hash_type_name: &str) -> Option<PerceptualHash> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
@@ -252,7 +252,7 @@ fn generate_audio_fingerprint(data: &[u8]) -> Option<PerceptualHash> {
         .collect();
 
     Some(PerceptualHash {
-        hash_type: "AudioChromaprint".to_string(),
+        hash_type: hash_type_name.to_string(),
         hash_value: hash_bytes,
         bands,
     })
