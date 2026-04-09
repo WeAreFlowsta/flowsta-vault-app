@@ -2753,6 +2753,32 @@ async fn fetch_linked_agent_signatures(
                                 let pub_key_arr: [u8; 32] = raw_32.try_into().unwrap_or([0u8; 32]);
                                 let signer_str = crate::key_derivation::construct_agent_pub_key_string(&pub_key_arr);
 
+                                // Fetch thumbnail (best-effort)
+                                let mut thumbnail: Option<String> = None;
+                                {
+                                    let thumb_payload = rmp_serde::to_vec_named(
+                                        &record.action_hashed().hash
+                                    ).unwrap_or_default();
+                                    if let Ok(thumb_result) = signing_ws.call_zome(
+                                        ZomeCallTarget::RoleName(signing_role.clone().into()),
+                                        "signing".into(),
+                                        "get_thumbnail".into(),
+                                        ExternIO::from(thumb_payload),
+                                    ).await {
+                                        if let Ok(thumb_records) = rmp_serde::from_slice::<Option<Record>>(thumb_result.as_bytes()) {
+                                            if let Some(thumb_record) = thumb_records {
+                                                if let Some(Entry::App(thumb_entry)) = thumb_record.entry().as_option() {
+                                                    #[derive(serde::Deserialize)]
+                                                    struct ThumbEntry { thumbnail: String }
+                                                    if let Ok(te) = rmp_serde::from_slice::<ThumbEntry>(thumb_entry.bytes()) {
+                                                        thumbnail = Some(te.thumbnail);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 linked_signatures.push(serde_json::json!({
                                     "file_hash": hex::encode(&entry.file_hash),
                                     "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
@@ -2766,6 +2792,7 @@ async fn fetch_linked_agent_signatures(
                                     "revoked": false,
                                     "revoked_at": null,
                                     "revocation_reason": null,
+                                    "thumbnail": thumbnail,
                                 }));
                             }
                         }
