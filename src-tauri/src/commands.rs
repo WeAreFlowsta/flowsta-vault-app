@@ -2462,6 +2462,32 @@ pub async fn get_my_signatures(
                                         }
                                     }
 
+                                    // Fetch thumbnail (best-effort, non-fatal)
+                                    let mut thumbnail: Option<String> = None;
+                                    {
+                                        let thumb_payload = rmp_serde::to_vec_named(
+                                            &record.action_hashed().hash
+                                        ).unwrap_or_default();
+                                        if let Ok(thumb_result) = app_ws.call_zome(
+                                            ZomeCallTarget::RoleName(role_name.clone().into()),
+                                            "signing".into(),
+                                            "get_thumbnail".into(),
+                                            ExternIO::from(thumb_payload),
+                                        ).await {
+                                            if let Ok(thumb_records) = rmp_serde::from_slice::<Option<Record>>(thumb_result.as_bytes()) {
+                                                if let Some(thumb_record) = thumb_records {
+                                                    if let Some(Entry::App(thumb_entry)) = thumb_record.entry().as_option() {
+                                                        #[derive(serde::Deserialize)]
+                                                        struct ThumbEntry { thumbnail: String }
+                                                        if let Ok(te) = rmp_serde::from_slice::<ThumbEntry>(thumb_entry.bytes()) {
+                                                            thumbnail = Some(te.thumbnail);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     signatures.push(serde_json::json!({
                                         "file_hash": hex::encode(&entry.file_hash),
                                         "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
@@ -2475,6 +2501,7 @@ pub async fn get_my_signatures(
                                         "revoked": revoked,
                                         "revoked_at": revoked_at,
                                         "revocation_reason": revocation_reason,
+                                        "thumbnail": thumbnail,
                                     }));
                                 }
                                 Err(e) => {

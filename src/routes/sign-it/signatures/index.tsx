@@ -3,6 +3,21 @@ import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
 
+function getDefaultThumbnail(sig: any): string {
+  const hashType = sig.perceptual_hash?.hash_type;
+  if (hashType === "ImagePHash") return "/sign-it/thumbnails/image.svg";
+  if (hashType === "AudioChromaprint") return "/sign-it/thumbnails/audio.svg";
+  if (hashType === "VideoPHash") return "/sign-it/thumbnails/video.svg";
+  const name = (sig.fileName || "").toLowerCase();
+  if (/\.(png|jpe?g|gif|bmp|tiff?|webp|svg)$/i.test(name)) return "/sign-it/thumbnails/image.svg";
+  if (/\.(mp3|wav|flac|ogg|aac|m4a)$/i.test(name)) return "/sign-it/thumbnails/audio.svg";
+  if (/\.(mp4|mkv|avi|webm|mov)$/i.test(name)) return "/sign-it/thumbnails/video.svg";
+  if (/\.(pdf|doc|docx|odt|rtf|txt)$/i.test(name)) return "/sign-it/thumbnails/document.svg";
+  if (/\.(js|ts|py|rs|go|java|c|cpp|css|html|json|xml|yaml|sh)$/i.test(name)) return "/sign-it/thumbnails/code.svg";
+  if (/\.(zip|tar|gz|bz2|7z|rar)$/i.test(name)) return "/sign-it/thumbnails/archive.svg";
+  return "/sign-it/thumbnails/file.svg";
+}
+
 function formatRelativeTime(timestampMs: number): string {
   const now = Date.now();
   const diff = now - timestampMs;
@@ -108,8 +123,15 @@ export default component$(() => {
               <div class="space-y-3">
                 {active.map((sig: any, i: number) => (
                   <div key={i} class="rounded-lg border border-gray-700 bg-gray-800 p-4">
-                    <div class="flex items-center justify-between mb-2">
-                      <span class="truncate text-sm font-mono text-gray-400">
+                    <div class="flex items-center gap-3 mb-2">
+                      <img
+                        src={sig.thumbnail || getDefaultThumbnail(sig)}
+                        alt=""
+                        width={48}
+                        height={48}
+                        class="h-12 w-12 shrink-0 rounded-lg object-cover"
+                      />
+                      <span class="truncate text-sm font-mono text-gray-400 flex-1">
                         {sig.file_hash?.slice(0, 16)}...
                       </span>
                       <div class="ml-3 flex shrink-0 items-center gap-2">

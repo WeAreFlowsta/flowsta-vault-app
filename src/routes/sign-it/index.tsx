@@ -57,6 +57,26 @@ interface FileEntry {
   perceptualHash: any | null;
 }
 
+/** Get the default thumbnail SVG path based on available signature data. */
+function getDefaultThumbnail(sig: any): string {
+  // Check perceptual hash type first (most reliable)
+  const hashType = sig.perceptual_hash?.hash_type;
+  if (hashType === "ImagePHash") return "/sign-it/thumbnails/image.svg";
+  if (hashType === "AudioChromaprint") return "/sign-it/thumbnails/audio.svg";
+  if (hashType === "VideoPHash") return "/sign-it/thumbnails/video.svg";
+
+  // Fall back to file extension from fileName
+  const name = (sig.fileName || "").toLowerCase();
+  if (/\.(png|jpe?g|gif|bmp|tiff?|webp|svg)$/i.test(name)) return "/sign-it/thumbnails/image.svg";
+  if (/\.(mp3|wav|flac|ogg|aac|m4a|wma)$/i.test(name)) return "/sign-it/thumbnails/audio.svg";
+  if (/\.(mp4|mkv|avi|webm|mov|wmv)$/i.test(name)) return "/sign-it/thumbnails/video.svg";
+  if (/\.(pdf|doc|docx|odt|rtf|txt|pages)$/i.test(name)) return "/sign-it/thumbnails/document.svg";
+  if (/\.(js|ts|py|rs|go|java|c|cpp|h|css|html|json|xml|yaml|yml|sh|rb|php)$/i.test(name)) return "/sign-it/thumbnails/code.svg";
+  if (/\.(zip|tar|gz|bz2|7z|rar|xz)$/i.test(name)) return "/sign-it/thumbnails/archive.svg";
+
+  return "/sign-it/thumbnails/file.svg";
+}
+
 type SigningStep = "idle" | "selected" | "analyzing" | "ready" | "signing" | "done";
 
 export default component$(() => {
@@ -1036,11 +1056,13 @@ export default component$(() => {
                 key={i}
                 class="flex items-center gap-3 rounded-lg border border-gray-700 bg-gray-800 p-3"
               >
-                <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/20">
-                  <svg class="h-4 w-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                  </svg>
-                </div>
+                <img
+                  src={(sig as any).thumbnail || getDefaultThumbnail(sig)}
+                  alt=""
+                  width={40}
+                  height={40}
+                  class="h-10 w-10 shrink-0 rounded-lg object-cover"
+                />
                 <div class="min-w-0 flex-1">
                   {(sig as any).fileName ? (
                     <p class="truncate text-sm text-white">
