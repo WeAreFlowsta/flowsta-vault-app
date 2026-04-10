@@ -2684,54 +2684,11 @@ async fn fetch_linked_agent_signatures(
 
     log::info!("Found {} linked agent(s), querying their signatures", linked_keys.len());
 
-    // 3. For each linked agent, query get_signatures_for_agent on the current signing DNA
-    let signing_app = apps.iter().find(|a|
-        a.installed_app_id == crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION)
-    );
-    let signing_app = match signing_app {
-        Some(app) => app,
-        None => { log::warn!("Current signing DNA not installed"); return Vec::new(); }
-    };
-
-    let signing_role = match signing_app.cell_info.keys()
-        .find(|k| k.starts_with("flowsta_signing")) {
-        Some(r) => r.clone(),
-        None => return Vec::new(),
-    };
-
-    let signing_cell_id = match signing_app.cell_info[&signing_role].iter()
-        .find_map(|c| match c {
-            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-            _ => None,
-        }) {
-        Some(c) => c,
-        None => return Vec::new(),
-    };
-
-    let signing_creds = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-        cell_id: signing_cell_id.clone(), functions: None,
-    }).await {
-        Ok(c) => c,
-        Err(e) => { log::warn!("Failed to authorize signing creds: {}", e); return Vec::new(); }
-    };
-
-    let issued2 = match admin_ws.issue_app_auth_token(
-        IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app.installed_app_id.clone()),
-    ).await {
-        Ok(t) => t,
-        Err(e) => { log::warn!("Failed to get signing token: {}", e); return Vec::new(); }
-    };
-
-    let signer2 = ClientAgentSigner::default();
-    signer2.add_credentials(signing_cell_id, signing_creds);
-    let signing_ws = match AppWebsocket::connect(
-        format!("localhost:{}", app_port),
-        issued2.token, signer2.into(),
-        Some("flowsta-vault-linked-sign".into()),
-    ).await {
-        Ok(ws) => ws,
-        Err(e) => { log::warn!("Failed to connect signing app WS: {}", e); return Vec::new(); }
-    };
+    // 3. For each linked agent, query get_signatures_for_agent on ALL signing DNA versions.
+    // Linked agents' signatures may be on any version (e.g. web agent on v1.3, vault on v1.4).
+    let signing_apps: Vec<_> = apps.iter()
+        .filter(|a| a.installed_app_id.starts_with("flowsta_signing_v"))
+        .collect();
 
     #[derive(serde::Deserialize, serde::Serialize)]
     struct SignatureEntry {
@@ -2748,79 +2705,123 @@ async fn fetch_linked_agent_signatures(
 
     let mut linked_signatures = Vec::new();
 
-    for linked_key in &linked_keys {
-        let payload = match rmp_serde::to_vec_named(linked_key) {
-            Ok(p) => p,
-            Err(_) => continue,
+    for signing_app in &signing_apps {
+        let signing_role = match signing_app.cell_info.keys()
+            .find(|k| k.starts_with("flowsta_signing")) {
+            Some(r) => r.clone(),
+            None => continue,
         };
 
-        match signing_ws.call_zome(
-            ZomeCallTarget::RoleName(signing_role.clone().into()),
-            "signing".into(),
-            "get_signatures_for_agent".into(),
-            ExternIO::from(payload),
-        ).await {
-            Ok(result) => {
-                if let Ok(records) = rmp_serde::from_slice::<Vec<Record>>(result.as_bytes()) {
-                    log::info!("Got {} signatures for linked agent", records.len());
-                    for record in &records {
-                        if let Some(Entry::App(entry_bytes)) = record.entry().as_option() {
-                            if let Ok(entry) = rmp_serde::from_slice::<SignatureEntry>(entry_bytes.bytes()) {
-                                let action_hash = hex::encode(record.action_hashed().hash.get_raw_39());
-                                let raw_32 = entry.signer.get_raw_32();
-                                let pub_key_arr: [u8; 32] = raw_32.try_into().unwrap_or([0u8; 32]);
-                                let signer_str = crate::key_derivation::construct_agent_pub_key_string(&pub_key_arr);
+        let signing_cell_id = match signing_app.cell_info[&signing_role].iter()
+            .find_map(|c| match c {
+                CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+                _ => None,
+            }) {
+            Some(c) => c,
+            None => continue,
+        };
 
-                                // Fetch thumbnail (best-effort)
-                                let mut thumbnail: Option<String> = None;
-                                {
-                                    let thumb_payload = rmp_serde::to_vec_named(
-                                        &record.action_hashed().hash
-                                    ).unwrap_or_default();
-                                    if let Ok(thumb_result) = signing_ws.call_zome(
-                                        ZomeCallTarget::RoleName(signing_role.clone().into()),
-                                        "signing".into(),
-                                        "get_thumbnail".into(),
-                                        ExternIO::from(thumb_payload),
-                                    ).await {
-                                        if let Ok(thumb_records) = rmp_serde::from_slice::<Option<Record>>(thumb_result.as_bytes()) {
-                                            if let Some(thumb_record) = thumb_records {
-                                                if let Some(Entry::App(thumb_entry)) = thumb_record.entry().as_option() {
-                                                    #[derive(serde::Deserialize)]
-                                                    struct ThumbEntry { thumbnail: String }
-                                                    if let Ok(te) = rmp_serde::from_slice::<ThumbEntry>(thumb_entry.bytes()) {
-                                                        thumbnail = Some(te.thumbnail);
+        let signing_creds = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+            cell_id: signing_cell_id.clone(), functions: None,
+        }).await {
+            Ok(c) => c,
+            Err(e) => { log::warn!("Failed to authorize signing creds for {}: {}", signing_app.installed_app_id, e); continue; }
+        };
+
+        let issued2 = match admin_ws.issue_app_auth_token(
+            IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app.installed_app_id.clone()),
+        ).await {
+            Ok(t) => t,
+            Err(e) => { log::warn!("Failed to get signing token for {}: {}", signing_app.installed_app_id, e); continue; }
+        };
+
+        let signer2 = ClientAgentSigner::default();
+        signer2.add_credentials(signing_cell_id, signing_creds);
+        let signing_ws = match AppWebsocket::connect(
+            format!("localhost:{}", app_port),
+            issued2.token, signer2.into(),
+            Some("flowsta-vault-linked-sign".into()),
+        ).await {
+            Ok(ws) => ws,
+            Err(e) => { log::warn!("Failed to connect signing app WS for {}: {}", signing_app.installed_app_id, e); continue; }
+        };
+
+        for linked_key in &linked_keys {
+            let payload = match rmp_serde::to_vec_named(linked_key) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            match signing_ws.call_zome(
+                ZomeCallTarget::RoleName(signing_role.clone().into()),
+                "signing".into(),
+                "get_signatures_for_agent".into(),
+                ExternIO::from(payload),
+            ).await {
+                Ok(result) => {
+                    if let Ok(records) = rmp_serde::from_slice::<Vec<Record>>(result.as_bytes()) {
+                        if !records.is_empty() {
+                            log::info!("Got {} signatures for linked agent from {}", records.len(), signing_app.installed_app_id);
+                        }
+                        for record in &records {
+                            if let Some(Entry::App(entry_bytes)) = record.entry().as_option() {
+                                if let Ok(entry) = rmp_serde::from_slice::<SignatureEntry>(entry_bytes.bytes()) {
+                                    let action_hash = hex::encode(record.action_hashed().hash.get_raw_39());
+                                    let raw_32 = entry.signer.get_raw_32();
+                                    let pub_key_arr: [u8; 32] = raw_32.try_into().unwrap_or([0u8; 32]);
+                                    let signer_str = crate::key_derivation::construct_agent_pub_key_string(&pub_key_arr);
+
+                                    // Fetch thumbnail (best-effort)
+                                    let mut thumbnail: Option<String> = None;
+                                    {
+                                        let thumb_payload = rmp_serde::to_vec_named(
+                                            &record.action_hashed().hash
+                                        ).unwrap_or_default();
+                                        if let Ok(thumb_result) = signing_ws.call_zome(
+                                            ZomeCallTarget::RoleName(signing_role.clone().into()),
+                                            "signing".into(),
+                                            "get_thumbnail".into(),
+                                            ExternIO::from(thumb_payload),
+                                        ).await {
+                                            if let Ok(thumb_records) = rmp_serde::from_slice::<Option<Record>>(thumb_result.as_bytes()) {
+                                                if let Some(thumb_record) = thumb_records {
+                                                    if let Some(Entry::App(thumb_entry)) = thumb_record.entry().as_option() {
+                                                        #[derive(serde::Deserialize)]
+                                                        struct ThumbEntry { thumbnail: String }
+                                                        if let Ok(te) = rmp_serde::from_slice::<ThumbEntry>(thumb_entry.bytes()) {
+                                                            thumbnail = Some(te.thumbnail);
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                }
 
-                                linked_signatures.push(serde_json::json!({
-                                    "file_hash": hex::encode(&entry.file_hash),
-                                    "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
-                                    "agent_pub_key": signer_str,
-                                    "signed_at": entry.signed_at,
-                                    "action_hash": action_hash,
-                                    "signing_app_id": signing_app.installed_app_id,
-                                    "intent": entry.intent,
-                                    "ai_generation": entry.ai_generation,
-                                    "content_rights": entry.content_rights,
-                                    "integrity_report": entry.integrity_report,
-                                    "perceptual_hash": entry.perceptual_hash,
-                                    "revoked": false,
-                                    "revoked_at": null,
-                                    "revocation_reason": null,
-                                    "thumbnail": thumbnail,
-                                }));
+                                    linked_signatures.push(serde_json::json!({
+                                        "file_hash": hex::encode(&entry.file_hash),
+                                        "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
+                                        "agent_pub_key": signer_str,
+                                        "signed_at": entry.signed_at,
+                                        "action_hash": action_hash,
+                                        "signing_app_id": signing_app.installed_app_id,
+                                        "intent": entry.intent,
+                                        "ai_generation": entry.ai_generation,
+                                        "content_rights": entry.content_rights,
+                                        "integrity_report": entry.integrity_report,
+                                        "perceptual_hash": entry.perceptual_hash,
+                                        "revoked": false,
+                                        "revoked_at": null,
+                                        "revocation_reason": null,
+                                        "thumbnail": thumbnail,
+                                    }));
+                                }
                             }
                         }
                     }
                 }
-            }
-            Err(e) => {
-                log::warn!("get_signatures_for_agent failed for linked agent: {}", e);
+                Err(e) => {
+                    log::warn!("get_signatures_for_agent failed on {}: {}", signing_app.installed_app_id, e);
+                }
             }
         }
     }
@@ -3273,9 +3274,11 @@ async fn commit_signature_to_dht(
         .await
         .map_err(|e| format!("Zome call create_signature failed: {}", e))?;
 
-    // Result is MessagePack-encoded ActionHash — encode as hex for readability
-    let result_bytes = result.as_bytes();
-    let action_hash_hex = hex::encode(result_bytes);
+    // Result is MessagePack-encoded ActionHash — deserialize to get raw 39 bytes
+    let action_hash: holochain_types::prelude::ActionHash =
+        rmp_serde::from_slice(result.as_bytes())
+            .map_err(|e| format!("Failed to decode ActionHash from zome result: {}", e))?;
+    let action_hash_hex = hex::encode(action_hash.get_raw_39());
     log::info!("Signature committed to DHT, action_hash: {}", action_hash_hex);
 
     Ok(action_hash_hex)
