@@ -340,6 +340,11 @@ export default component$(() => {
                       if (sel) {
                         sel.aspectRatio = 1;
                         sel.initialAspectRatio = 1;
+                        sel.initialCoverage = 0.9;
+                      }
+                      const cropperImage = cropper.getCropperImage();
+                      if (cropperImage) {
+                        cropperImage.$center("contain");
                       }
                     }, 100);
                     editThumbCropper.value = cropper;
