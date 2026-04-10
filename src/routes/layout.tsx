@@ -246,13 +246,20 @@ export default component$(() => {
     const s = track(() => screen.value);
     if (s !== "dashboard") return;
 
-    // Initial poll
-    invoke<{ status: string; message?: string }>("get_conductor_status")
-      .then((result) => {
-        conductorStatus.value = result.status as typeof conductorStatus.value;
-        if (result.message) conductorMessage.value = result.message;
-      })
-      .catch(() => {});
+    // Poll until ready — the conductor-status event may fire before this
+    // listener is registered, so keep polling while status isn't "ready".
+    const pollStatus = () => {
+      invoke<{ status: string; message?: string }>("get_conductor_status")
+        .then((result) => {
+          conductorStatus.value = result.status as typeof conductorStatus.value;
+          if (result.message) conductorMessage.value = result.message;
+          if (result.status !== "ready" && result.status !== "error" && result.status !== "stopped") {
+            setTimeout(pollStatus, 2000);
+          }
+        })
+        .catch(() => {});
+    };
+    pollStatus();
 
     // Listen for real-time updates from conductor startup sequence
     const unlistenPromise = listen<{ status: string; message?: string }>(

@@ -98,7 +98,8 @@ export default component$(() => {
       editThumbImage.value = null;
       editThumbCropper.value = null;
     } catch (e: any) {
-      editError.value = e.message || "Failed to save thumbnail";
+      console.error("Thumbnail save error:", e);
+      editError.value = (typeof e === "string" ? e : e.message) || "Failed to save thumbnail";
     } finally {
       editThumbSaving.value = false;
     }
@@ -201,26 +202,26 @@ export default component$(() => {
                       </span>
                       <div class="ml-3 flex shrink-0 items-center gap-2">
                         <span class="rounded-full bg-green-900/30 px-2 py-0.5 text-xs text-green-400">Active</span>
+                        {sig.action_hash && sig.signing_app_id === "flowsta_signing_v1_3" && (
+                          <button
+                            class="text-xs text-gray-500 hover:text-amber-400 transition-colors"
+                            onClick$={() => {
+                              editThumbTarget.value = sig;
+                              editThumbImage.value = null;
+                              editThumbCropper.value = null;
+                              editError.value = "";
+                            }}
+                          >
+                            Edit thumbnail
+                          </button>
+                        )}
                         {sig.action_hash && (
-                          <>
-                            <button
-                              class="text-xs text-gray-500 hover:text-amber-400 transition-colors"
-                              onClick$={() => {
-                                editThumbTarget.value = sig;
-                                editThumbImage.value = null;
-                                editThumbCropper.value = null;
-                                editError.value = "";
-                              }}
-                            >
-                              Edit thumbnail
-                            </button>
-                            <button
-                              class="text-xs text-gray-500 hover:text-red-400 transition-colors"
-                              onClick$={() => { revokeTarget.value = sig; revokeReason.value = ""; }}
-                            >
-                              Revoke
-                            </button>
-                          </>
+                          <button
+                            class="text-xs text-gray-500 hover:text-red-400 transition-colors"
+                            onClick$={() => { revokeTarget.value = sig; revokeReason.value = ""; }}
+                          >
+                            Revoke
+                          </button>
                         )}
                       </div>
                     </div>
@@ -294,39 +295,61 @@ export default component$(() => {
             <h3 class="mb-4 text-base font-semibold text-white">Edit Thumbnail</h3>
 
             {!editThumbImage.value ? (
-              <div
+              <label
                 class="flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-600 p-10 transition-colors cursor-pointer hover:border-gray-500 hover:bg-gray-700/30"
-                onClick$={handleThumbPick}
               >
                 <svg class="mb-3 h-10 w-10 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
                   <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z" />
                 </svg>
                 <p class="text-sm text-gray-400">Click to choose a thumbnail image</p>
-              </div>
+                <input
+                  type="file"
+                  accept="image/*"
+                  class="hidden"
+                  onChange$={(e) => {
+                    const file = (e.target as HTMLInputElement).files?.[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = (ev) => {
+                      editThumbImage.value = ev.target?.result as string;
+                    };
+                    reader.readAsDataURL(file);
+                  }}
+                />
+              </label>
             ) : (
               <div>
                 {/* Cropperjs container */}
-                <div class="relative bg-gray-900 rounded-lg overflow-hidden" style={{ height: "320px" }}>
+                <div id="vault-thumb-crop-container" class="relative bg-gray-900 rounded-lg overflow-hidden" style={{ height: "320px" }}>
                   <img
                     id="vault-thumb-crop-img"
                     src={editThumbImage.value}
                     alt="Crop preview"
-                    style={{ display: "block", width: "100%", height: "100%", objectFit: "contain" }}
+                    style={{ display: "block", maxWidth: "100%", maxHeight: "100%" }}
                   />
                 </div>
                 <p class="mt-2 text-xs text-gray-500 text-center">
                   Drag to position • Scroll to zoom
                 </p>
-                <button
-                  class="mt-1 text-xs text-amber-400 hover:text-amber-300 transition-colors"
-                  onClick$={() => {
-                    if (editThumbCropper.value) editThumbCropper.value.destroy();
-                    editThumbImage.value = null;
-                    editThumbCropper.value = null;
-                  }}
-                >
+                <label class="mt-1 inline-block text-xs text-amber-400 hover:text-amber-300 transition-colors cursor-pointer">
                   Choose a different image
-                </button>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    class="hidden"
+                    onChange$={(e) => {
+                      const file = (e.target as HTMLInputElement).files?.[0];
+                      if (!file) return;
+                      if (editThumbCropper.value) editThumbCropper.value.destroy();
+                      editThumbCropper.value = null;
+                      const reader = new FileReader();
+                      reader.onload = (ev) => {
+                        editThumbImage.value = ev.target?.result as string;
+                      };
+                      reader.readAsDataURL(file);
+                    }}
+                  />
+                </label>
                 {/* Initialize cropperjs when image loads */}
                 {(() => {
                   setTimeout(async () => {
@@ -334,19 +357,29 @@ export default component$(() => {
                     if (!img || editThumbCropper.value) return;
                     const CropperModule = await import("cropperjs");
                     const Cropper = CropperModule.default;
-                    const cropper = new Cropper(img, {});
-                    setTimeout(() => {
+                    const containerEl = document.getElementById("vault-thumb-crop-img")?.parentElement;
+                    const cropper = new Cropper(img, containerEl ? { container: containerEl } : {});
+                    const waitForCropper = setInterval(() => {
                       const sel = cropper.getCropperSelection();
-                      if (sel) {
-                        sel.aspectRatio = 1;
-                        sel.initialAspectRatio = 1;
-                        sel.initialCoverage = 0.9;
-                      }
                       const cropperImage = cropper.getCropperImage();
-                      if (cropperImage) {
-                        cropperImage.$center("contain");
+                      if (!sel || !cropperImage) return;
+                      clearInterval(waitForCropper);
+
+                      sel.aspectRatio = 1;
+                      sel.initialAspectRatio = 1;
+                      sel.initialCoverage = 0.9;
+
+                      // Make cropper-canvas fill the container
+                      const cropperCanvas = cropper.getCropperCanvas();
+                      if (cropperCanvas) {
+                        (cropperCanvas as any).style.width = "100%";
+                        (cropperCanvas as any).style.height = "100%";
                       }
-                    }, 100);
+
+                      cropperImage.$ready(() => {
+                        cropperImage.$center("contain");
+                      });
+                    }, 50);
                     editThumbCropper.value = cropper;
                   }, 50);
                   return null;

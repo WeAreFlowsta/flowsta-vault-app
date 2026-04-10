@@ -494,9 +494,13 @@ fn spawn_conductor_startup(
                         let port = handle.admin_port;
                         log::info!("Conductor started successfully on port {}", port);
                         *state.conductor_handle.lock().unwrap() = Some(handle);
-                        *state.conductor_status.lock().unwrap() = ConductorStatus::Ready {
+                        let ready_status = ConductorStatus::Ready {
                             admin_port: port,
                         };
+                        *state.conductor_status.lock().unwrap() = ready_status.clone();
+                        // Emit ready event — conductor.rs also emits this, but the
+                        // frontend listener may not be registered yet if startup is fast.
+                        let _ = app_handle_ref.emit("conductor-status", ready_status);
 
                         // Check for DNA updates from the server.
                         // Non-fatal — if offline or update fails, continue with current DNAs.
@@ -2329,6 +2333,9 @@ pub async fn get_my_signatures(
     .await
     .map_err(|e| format!("Admin WS: {}", e))?;
 
+    // Ensure all apps are enabled — conductor may disable cells on restart
+    crate::dna::ensure_apps_enabled(&admin_ws).await;
+
     let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
 
     // Find ALL installed signing DNA apps (current + old versions kept for history)
@@ -2495,6 +2502,7 @@ pub async fn get_my_signatures(
                                         "agent_pub_key": signer_str,
                                         "signed_at": entry.signed_at,
                                         "action_hash": action_hash,
+                                        "signing_app_id": signing_app.installed_app_id,
                                         "intent": entry.intent,
                                         "ai_generation": entry.ai_generation,
                                         "content_rights": entry.content_rights,
@@ -2836,6 +2844,8 @@ pub async fn revoke_signature(
         Some("flowsta-vault-revoke".to_string()),
     ).await.map_err(|e| format!("Admin WS: {}", e))?;
 
+    crate::dna::ensure_apps_enabled(&admin_ws).await;
+
     let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
     let signing_app = apps.iter().find(|a| a.installed_app_id == signing_app_id)
         .ok_or("Signing DNA not installed")?;
@@ -2900,8 +2910,10 @@ pub async fn revoke_signature(
     Ok(revocation_hash)
 }
 
-/// Store a thumbnail for a signature on the DHT.
-/// Called after signing an image file with the auto-generated thumbnail.
+/// Store a thumbnail for a signature on the local signing DNA.
+/// Always targets v1.3 which has the set_thumbnail zome function.
+/// The v1.3 coordinator doesn't require the signature to exist locally,
+/// so thumbnails can be set for signatures from any DNA version.
 #[tauri::command]
 pub async fn set_thumbnail(
     action_hash_hex: String,
@@ -2924,6 +2936,8 @@ pub async fn set_thumbnail(
         format!("localhost:{}", admin_port),
         Some("flowsta-vault-thumb".to_string()),
     ).await.map_err(|e| format!("Admin WS: {}", e))?;
+
+    crate::dna::ensure_apps_enabled(&admin_ws).await;
 
     let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
     let signing_app = apps.iter().find(|a| a.installed_app_id == signing_app_id)
@@ -2956,7 +2970,6 @@ pub async fn set_thumbnail(
         Some("flowsta-vault-thumb".into()),
     ).await.map_err(|e| format!("App WS: {}", e))?;
 
-    // Build SetThumbnailInput
     let action_hash_bytes = hex::decode(&action_hash_hex)
         .map_err(|e| format!("Invalid action hash hex: {}", e))?;
     let action_hash = holochain_types::prelude::ActionHash::from_raw_39(action_hash_bytes);
@@ -2983,7 +2996,7 @@ pub async fn set_thumbnail(
     ).await.map_err(|e| format!("set_thumbnail zome call: {}", e))?;
 
     let thumb_hash = hex::encode(result.as_bytes());
-    log::info!("Thumbnail set, hash: {}", thumb_hash);
+    log::info!("Thumbnail set on DHT, hash: {}", thumb_hash);
 
     Ok(thumb_hash)
 }
@@ -3015,6 +3028,9 @@ async fn commit_signature_to_dht(
     )
     .await
     .map_err(|e| format!("Admin WS connect failed: {}", e))?;
+
+    // Ensure all apps are enabled — conductor may disable cells on restart
+    crate::dna::ensure_apps_enabled(&admin_ws).await;
 
     // Find the signing app and its provisioned cell
     let apps = admin_ws

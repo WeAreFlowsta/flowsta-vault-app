@@ -96,6 +96,15 @@ pub async fn install_dnas(
         .await
         .map_err(|e| format!("Failed to list apps: {}", e))?;
 
+    // Log all existing apps and their status for debugging CellDisabled issues
+    for app in &existing_apps {
+        log::info!(
+            "Existing app: {} status={:?}",
+            app.installed_app_id,
+            app.status,
+        );
+    }
+
     let mut private_installed = false;
     let mut identity_installed = false;
     let mut signing_installed = false;
@@ -141,16 +150,10 @@ pub async fn install_dnas(
         log::info!("All DNAs already installed with correct agent key, skipping");
 
         // Ensure all apps are enabled — conductor may disable cells on restart
-        let _ = admin_ws.enable_app(private_app_id.clone()).await;
-        let _ = admin_ws.enable_app(identity_app_id.clone()).await;
-        let _ = admin_ws.enable_app(signing_app_id.clone()).await;
-
-        // Also enable old signing DNA versions (kept for signature history)
         for app in &existing_apps {
-            if app.installed_app_id.starts_with("flowsta_signing_v")
-                && app.installed_app_id != signing_app_id
-            {
-                let _ = admin_ws.enable_app(app.installed_app_id.clone()).await;
+            match admin_ws.enable_app(app.installed_app_id.clone()).await {
+                Ok(_) => log::info!("Enabled {}", app.installed_app_id),
+                Err(e) => log::warn!("Failed to enable {}: {}", app.installed_app_id, e),
             }
         }
 
@@ -322,4 +325,81 @@ pub async fn setup_app_interface(admin_port: u16) -> Result<u16, String> {
 
     log::info!("App interface attached on port {}", app_port);
     Ok(app_port)
+}
+
+/// Ensure all installed apps are enabled.
+///
+/// Holochain conductor can disable cells on restart. This function
+/// enables all apps and should be called before making zome calls
+/// if there's any chance cells are disabled.
+pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
+    use holochain_client::{AuthorizeSigningCredentialsPayload, CellInfo};
+
+    let apps = match admin_ws.list_apps(None).await {
+        Ok(a) => a,
+        Err(e) => {
+            log::warn!("ensure_apps_enabled: list_apps failed: {}", e);
+            return;
+        }
+    };
+
+    for app in &apps {
+        match admin_ws.enable_app(app.installed_app_id.clone()).await {
+            Ok(_) => {}
+            Err(e) => log::warn!(
+                "ensure_apps_enabled: failed to enable {}: {}",
+                app.installed_app_id,
+                e,
+            ),
+        }
+    }
+
+    // Verify cells are actually ready — conductor can report Enabled status
+    // while cells are still initializing after a restart.
+    // Pick the first signing app to test cell readiness.
+    let test_app = apps.iter().find(|a| a.installed_app_id.starts_with("flowsta_signing_v"));
+    if let Some(app) = test_app {
+        let cell_id = app.cell_info.values()
+            .flat_map(|cells| cells.iter())
+            .find_map(|c| match c {
+                CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+                _ => None,
+            });
+
+        if let Some(cell_id) = cell_id {
+            // Try to authorize credentials — this will fail with CellDisabled if cells aren't ready
+            for attempt in 1..=6 {
+                match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+                    cell_id: cell_id.clone(),
+                    functions: None,
+                }).await {
+                    Ok(_) => {
+                        if attempt > 1 {
+                            log::info!("ensure_apps_enabled: cells ready after {}s wait", (attempt - 1) * 3);
+                        } else {
+                            log::info!("ensure_apps_enabled: cells ready");
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        let err_str = format!("{}", e);
+                        if err_str.contains("CellDisabled") && attempt < 6 {
+                            log::info!(
+                                "ensure_apps_enabled: cells not ready yet (attempt {}), waiting 3s...",
+                                attempt,
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            // Re-enable all apps before retrying
+                            for app in &apps {
+                                let _ = admin_ws.enable_app(app.installed_app_id.clone()).await;
+                            }
+                        } else {
+                            log::warn!("ensure_apps_enabled: cell readiness check failed: {}", e);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
