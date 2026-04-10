@@ -46,21 +46,6 @@ export default component$(() => {
   const editThumbSaving = useSignal(false);
   const editError = useSignal("");
 
-  const handleThumbPick = $(() => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = "image/*";
-    input.onchange = () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        editThumbImage.value = e.target?.result as string;
-      };
-      reader.readAsDataURL(file);
-    };
-    input.click();
-  });
 
   const handleThumbSave = $(async () => {
     if (!editThumbTarget.value?.action_hash) return;
@@ -202,7 +187,7 @@ export default component$(() => {
                       </span>
                       <div class="ml-3 flex shrink-0 items-center gap-2">
                         <span class="rounded-full bg-green-900/30 px-2 py-0.5 text-xs text-green-400">Active</span>
-                        {sig.action_hash && sig.signing_app_id === "flowsta_signing_v1_3" && (
+                        {sig.action_hash && (sig.signing_app_id === "flowsta_signing_v1_3" || sig.signing_app_id === "flowsta_signing_v1_4") && (
                           <button
                             class="text-xs text-gray-500 hover:text-amber-400 transition-colors"
                             onClick$={() => {

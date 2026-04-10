@@ -19,6 +19,7 @@ use std::path::Path;
 pub struct DnaVersionsResponse {
     pub private_dna: DnaVersionInfo,
     pub identity_dna: DnaVersionInfo,
+    pub signing_dna: Option<DnaVersionInfo>,
     pub conductor: ConductorInfo,
 }
 
@@ -46,6 +47,7 @@ pub enum UpdateResult {
     Updated {
         private_updated: Option<VersionChange>,
         identity_updated: Option<VersionChange>,
+        signing_updated: Option<VersionChange>,
     },
     /// Vault app version is too old for the latest DNA — user must update the app.
     AppUpdateRequired {
@@ -76,6 +78,7 @@ pub async fn check_and_update_dnas(
     recovery_lookup_hash: &str,
     current_private_version: &str,
     current_identity_version: &str,
+    current_signing_version: &str,
     agent_key: holochain_types::prelude::AgentPubKey,
 ) -> UpdateResult {
     let api_url = option_env!("FLOWSTA_API_URL")
@@ -90,12 +93,18 @@ pub async fn check_and_update_dnas(
         }
     };
 
+    let signing_ver_str = versions.signing_dna.as_ref()
+        .map(|s| s.version.as_str())
+        .unwrap_or("none");
+
     log::info!(
-        "Server DNA versions: private={}, identity={} | Local: private={}, identity={}",
+        "Server DNA versions: private={}, identity={}, signing={} | Local: private={}, identity={}, signing={}",
         versions.private_dna.version,
         versions.identity_dna.version,
+        signing_ver_str,
         current_private_version,
         current_identity_version,
+        current_signing_version,
     );
 
     // 2. Check if vault version is sufficient.
@@ -124,8 +133,11 @@ pub async fn check_and_update_dnas(
     // 3. Determine what needs updating.
     let private_needs_update = current_private_version != versions.private_dna.version;
     let identity_needs_update = current_identity_version != versions.identity_dna.version;
+    let signing_needs_update = versions.signing_dna.as_ref()
+        .map(|s| current_signing_version != s.version)
+        .unwrap_or(false);
 
-    if !private_needs_update && !identity_needs_update {
+    if !private_needs_update && !identity_needs_update && !signing_needs_update {
         log::info!("DNAs are up to date");
         return UpdateResult::UpToDate;
     }
@@ -133,6 +145,7 @@ pub async fn check_and_update_dnas(
     // 4. Apply updates.
     let mut private_updated = None;
     let mut identity_updated = None;
+    let mut signing_updated = None;
 
     if private_needs_update {
         log::info!(
@@ -207,14 +220,51 @@ pub async fn check_and_update_dnas(
         }
     }
 
+    if signing_needs_update {
+        if let Some(ref signing_info) = versions.signing_dna {
+            log::info!(
+                "Updating signing DNA: {} → {}",
+                current_signing_version,
+                signing_info.version
+            );
+            match update_single_dna(
+                admin_port,
+                download_dir,
+                api_url,
+                recovery_lookup_hash,
+                "signing",
+                current_signing_version,
+                signing_info,
+                agent_key.clone(),
+            )
+            .await
+            {
+                Ok(true) => {
+                    signing_updated = Some(VersionChange {
+                        from: current_signing_version.to_string(),
+                        to: signing_info.version.clone(),
+                    });
+                }
+                Ok(false) => {
+                    log::info!("Signing DNA hash unchanged, keeping version {}", current_signing_version);
+                }
+                Err(e) => {
+                    // Non-fatal for signing DNA — don't block other updates
+                    log::error!("Signing DNA update failed (non-fatal): {}", e);
+                }
+            }
+        }
+    }
+
     // If nothing actually changed (all same-hash), report as up to date.
-    if private_updated.is_none() && identity_updated.is_none() {
+    if private_updated.is_none() && identity_updated.is_none() && signing_updated.is_none() {
         return UpdateResult::UpToDate;
     }
 
     UpdateResult::Updated {
         private_updated,
         identity_updated,
+        signing_updated,
     }
 }
 

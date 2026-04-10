@@ -16,12 +16,12 @@ use std::path::Path;
 /// Used for first-time installs and as fallback when VaultConfig has no version info.
 pub const BUNDLED_PRIVATE_VERSION: &str = "1.10";
 pub const BUNDLED_IDENTITY_VERSION: &str = "1.4";
-pub const BUNDLED_SIGNING_VERSION: &str = "1.3";
+pub const BUNDLED_SIGNING_VERSION: &str = "1.4";
 
 /// hApp bundle filenames bundled with this app build (in src-tauri/resources/).
 const BUNDLED_PRIVATE_HAPP_FILE: &str = "flowsta_private_v1_10_happ.happ";
 const BUNDLED_IDENTITY_HAPP_FILE: &str = "flowsta_identity_v1_4_happ.happ";
-const BUNDLED_SIGNING_HAPP_FILE: &str = "flowsta_signing_v1_3_happ.happ";
+const BUNDLED_SIGNING_HAPP_FILE: &str = "flowsta_signing_v1_4_happ.happ";
 
 /// Result of DNA installation — app IDs for later use.
 pub struct InstalledDnas {

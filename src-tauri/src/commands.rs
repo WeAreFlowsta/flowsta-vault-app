@@ -645,12 +645,15 @@ async fn check_dna_updates(
         serde_json::json!({"status": "checking"}),
     );
 
+    let current_signing_ver = crate::dna::BUNDLED_SIGNING_VERSION.to_string();
+
     let result = crate::dna_updater::check_and_update_dnas(
         admin_port,
         download_dir,
         &recovery_lookup_hash,
         &current_private_ver,
         &current_identity_ver,
+        &current_signing_ver,
         agent_key,
     )
     .await;
@@ -667,6 +670,7 @@ async fn check_dna_updates(
         crate::dna_updater::UpdateResult::Updated {
             private_updated,
             identity_updated: id_upd,
+            signing_updated,
         } => {
             // Persist new versions to VaultConfig.
             let mut config_guard = state.vault_config.lock().unwrap();
@@ -679,6 +683,9 @@ async fn check_dna_updates(
                     log::info!("Identity DNA updated: {} → {}", change.from, change.to);
                     cfg.identity_dna_version = Some(change.to.clone());
                     identity_updated = true;
+                }
+                if let Some(change) = signing_updated {
+                    log::info!("Signing DNA updated: {} → {}", change.from, change.to);
                 }
 
                 // Re-encrypt and save vault with updated versions.
@@ -2796,6 +2803,7 @@ async fn fetch_linked_agent_signatures(
                                     "agent_pub_key": signer_str,
                                     "signed_at": entry.signed_at,
                                     "action_hash": action_hash,
+                                    "signing_app_id": signing_app.installed_app_id,
                                     "intent": entry.intent,
                                     "ai_generation": entry.ai_generation,
                                     "content_rights": entry.content_rights,
