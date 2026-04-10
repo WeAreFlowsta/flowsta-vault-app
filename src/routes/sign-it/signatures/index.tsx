@@ -301,12 +301,12 @@ export default component$(() => {
             ) : (
               <div>
                 {/* Cropperjs container */}
-                <div class="relative bg-gray-900 rounded-lg overflow-hidden" style={{ minHeight: "280px" }}>
+                <div class="relative bg-gray-900 rounded-lg overflow-hidden" style={{ height: "320px" }}>
                   <img
                     id="vault-thumb-crop-img"
                     src={editThumbImage.value}
                     alt="Crop preview"
-                    style={{ display: "block", maxWidth: "100%" }}
+                    style={{ display: "block", width: "100%", height: "100%", objectFit: "contain" }}
                   />
                 </div>
                 <p class="mt-2 text-xs text-gray-500 text-center">
