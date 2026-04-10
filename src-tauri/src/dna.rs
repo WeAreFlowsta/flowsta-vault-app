@@ -139,6 +139,21 @@ pub async fn install_dnas(
 
     if private_installed && identity_installed && signing_installed {
         log::info!("All DNAs already installed with correct agent key, skipping");
+
+        // Ensure all apps are enabled — conductor may disable cells on restart
+        let _ = admin_ws.enable_app(private_app_id.clone()).await;
+        let _ = admin_ws.enable_app(identity_app_id.clone()).await;
+        let _ = admin_ws.enable_app(signing_app_id.clone()).await;
+
+        // Also enable old signing DNA versions (kept for signature history)
+        for app in &existing_apps {
+            if app.installed_app_id.starts_with("flowsta_signing_v")
+                && app.installed_app_id != signing_app_id
+            {
+                let _ = admin_ws.enable_app(app.installed_app_id.clone()).await;
+            }
+        }
+
         return Ok(InstalledDnas {
             private_app_id,
             identity_app_id,
