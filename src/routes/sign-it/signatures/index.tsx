@@ -39,6 +39,71 @@ export default component$(() => {
   const revokeReason = useSignal("");
   const revoking = useSignal(false);
 
+  // Thumbnail edit state
+  const editThumbTarget = useSignal<any | null>(null);
+  const editThumbImage = useSignal<string | null>(null);
+  const editThumbCropper = useSignal<any>(null);
+  const editThumbSaving = useSignal(false);
+  const editError = useSignal("");
+
+  const handleThumbPick = $(() => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        editThumbImage.value = e.target?.result as string;
+      };
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  });
+
+  const handleThumbSave = $(async () => {
+    if (!editThumbTarget.value?.action_hash) return;
+    editThumbSaving.value = true;
+    editError.value = "";
+
+    try {
+      const cropper = editThumbCropper.value;
+      if (!cropper) throw new Error("Cropper not ready");
+
+      const selection = cropper.getCropperSelection();
+      if (!selection) throw new Error("No crop selection");
+
+      const canvas = await selection.$toCanvas({ width: 128, height: 128 });
+      const thumbnail = canvas.toDataURL("image/jpeg", 0.7);
+
+      if (thumbnail.length > 15000) {
+        editError.value = "Thumbnail too large. Try a simpler image.";
+        editThumbSaving.value = false;
+        return;
+      }
+
+      await invoke("set_thumbnail", {
+        actionHashHex: editThumbTarget.value.action_hash,
+        thumbnail,
+      });
+
+      // Update local state
+      signatures.value = signatures.value.map((s) =>
+        s.action_hash === editThumbTarget.value?.action_hash
+          ? { ...s, thumbnail }
+          : s
+      );
+      editThumbTarget.value = null;
+      editThumbImage.value = null;
+      editThumbCropper.value = null;
+    } catch (e: any) {
+      editError.value = e.message || "Failed to save thumbnail";
+    } finally {
+      editThumbSaving.value = false;
+    }
+  });
+
   const handleRevoke = $(async () => {
     if (!revokeTarget.value?.action_hash) return;
     revoking.value = true;
@@ -137,12 +202,25 @@ export default component$(() => {
                       <div class="ml-3 flex shrink-0 items-center gap-2">
                         <span class="rounded-full bg-green-900/30 px-2 py-0.5 text-xs text-green-400">Active</span>
                         {sig.action_hash && (
-                          <button
-                            class="text-xs text-gray-500 hover:text-red-400 transition-colors"
-                            onClick$={() => { revokeTarget.value = sig; revokeReason.value = ""; }}
-                          >
-                            Revoke
-                          </button>
+                          <>
+                            <button
+                              class="text-xs text-gray-500 hover:text-amber-400 transition-colors"
+                              onClick$={() => {
+                                editThumbTarget.value = sig;
+                                editThumbImage.value = null;
+                                editThumbCropper.value = null;
+                                editError.value = "";
+                              }}
+                            >
+                              Edit thumbnail
+                            </button>
+                            <button
+                              class="text-xs text-gray-500 hover:text-red-400 transition-colors"
+                              onClick$={() => { revokeTarget.value = sig; revokeReason.value = ""; }}
+                            >
+                              Revoke
+                            </button>
+                          </>
                         )}
                       </div>
                     </div>
@@ -208,6 +286,87 @@ export default component$(() => {
           );
         })()}
       </div>
+
+      {/* Thumbnail edit modal */}
+      {editThumbTarget.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div class="mx-4 w-full max-w-md rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
+            <h3 class="mb-4 text-base font-semibold text-white">Edit Thumbnail</h3>
+
+            {!editThumbImage.value ? (
+              <div class="py-8 text-center">
+                <p class="mb-4 text-sm text-gray-400">Choose an image to use as the thumbnail for this signature.</p>
+                <GlassButton onClick$={handleThumbPick}>Choose Image</GlassButton>
+              </div>
+            ) : (
+              <div>
+                {/* Cropperjs container */}
+                <div class="relative bg-gray-900 rounded-lg overflow-hidden" style={{ minHeight: "280px" }}>
+                  <img
+                    id="vault-thumb-crop-img"
+                    src={editThumbImage.value}
+                    alt="Crop preview"
+                    style={{ display: "block", maxWidth: "100%" }}
+                  />
+                </div>
+                <p class="mt-2 text-xs text-gray-500 text-center">
+                  Drag to position • Scroll to zoom
+                </p>
+                {/* Initialize cropperjs when image loads */}
+                {(() => {
+                  setTimeout(async () => {
+                    const img = document.getElementById("vault-thumb-crop-img") as HTMLImageElement;
+                    if (!img || editThumbCropper.value) return;
+                    const CropperModule = await import("cropperjs");
+                    const Cropper = CropperModule.default;
+                    const cropper = new Cropper(img, {});
+                    setTimeout(() => {
+                      const sel = cropper.getCropperSelection();
+                      if (sel) {
+                        sel.aspectRatio = 1;
+                        sel.initialAspectRatio = 1;
+                      }
+                    }, 100);
+                    editThumbCropper.value = cropper;
+                  }, 50);
+                  return null;
+                })()}
+              </div>
+            )}
+
+            {editError.value && (
+              <div class="mt-3 rounded-lg border border-red-800/50 bg-red-900/20 p-2">
+                <p class="text-xs text-red-400">{editError.value}</p>
+              </div>
+            )}
+
+            <div class="mt-4 flex gap-3">
+              <GlassButton
+                variant="secondary"
+                class="flex-1"
+                onClick$={() => {
+                  if (editThumbCropper.value) editThumbCropper.value.destroy();
+                  editThumbTarget.value = null;
+                  editThumbImage.value = null;
+                  editThumbCropper.value = null;
+                  editError.value = "";
+                }}
+              >
+                Cancel
+              </GlassButton>
+              {editThumbImage.value && (
+                <GlassButton
+                  class="flex-1"
+                  disabled={editThumbSaving.value}
+                  onClick$={handleThumbSave}
+                >
+                  {editThumbSaving.value ? "Saving..." : "Save Thumbnail"}
+                </GlassButton>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Revocation confirmation dialog */}
       {revokeTarget.value && (
