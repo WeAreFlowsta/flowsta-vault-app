@@ -749,6 +749,14 @@ pub fn get_identity(state: State<'_, Arc<AppState>>) -> Result<VaultIdentity, St
     let config = state.vault_config.lock().unwrap();
     let config = config.as_ref().ok_or("Vault is locked")?;
 
+    // Prefer the in-memory linked_web_agent_key (populated by auto-link on unlock)
+    // over the config field, which is often stale or None for users who linked
+    // after vault setup.
+    let web_agent_pub_key = {
+        let cached = state.linked_web_agent_key.lock().unwrap();
+        cached.clone().or_else(|| config.web_agent_pub_key.clone())
+    };
+
     Ok(VaultIdentity {
         agent_pub_key: config.agent_pub_key.clone(),
         did: config.did.clone(),
@@ -758,7 +766,7 @@ pub fn get_identity(state: State<'_, Arc<AppState>>) -> Result<VaultIdentity, St
         profile_picture: config.profile_picture.clone(),
         web_email: config.web_email.clone(),
         web_username: config.web_username.clone(),
-        web_agent_pub_key: config.web_agent_pub_key.clone(),
+        web_agent_pub_key,
     })
 }
 
