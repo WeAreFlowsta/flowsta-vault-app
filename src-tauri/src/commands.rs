@@ -3312,12 +3312,15 @@ pub async fn sync_quota_to_server(
 ) -> Result<bool, String> {
     if count == 0 { return Ok(false); }
 
+    log::info!("[quota-sync] starting, count={}", count);
+
     // Need a linked web agent to know which user's quota to sync against
     let web_agent_pub_key = {
         let cached = state.linked_web_agent_key.lock().unwrap();
         cached.clone()
     };
     let Some(agent_b64) = web_agent_pub_key else {
+        log::warn!("[quota-sync] skipped: no linked web agent");
         return Ok(false);
     };
 
@@ -3354,12 +3357,14 @@ pub async fn sync_quota_to_server(
         .await
         .map_err(|e| format!("Failed to reach API: {}", e))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
+    let status = resp.status();
+    if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        log::error!("[quota-sync] failed ({}): {}", status, body);
         return Err(format!("Sync failed ({}): {}", status, body));
     }
 
+    log::info!("[quota-sync] success: synced {} signatures", count);
     Ok(true)
 }
 

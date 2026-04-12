@@ -468,11 +468,16 @@ export default component$(() => {
             perceptualHash: entry.perceptualHash || null,
           });
           results.push({ ...result, fileName: entry.name, success: true });
-          // Phase 8: decrement local quota cache after each success
-          await invoke("increment_quota_used").catch(() => {});
-          // Sync to server (signed request — silently no-ops if unlinked / offline)
+          // Phase 8: increment local cache + update meter from cache (authoritative for display)
+          const updatedCache = await invoke<SignQuotaState | null>("increment_quota_used").catch(() => null);
+          if (updatedCache) {
+            quota.value = { ...(updatedCache as any), source: quota.value?.source || "cache" };
+          }
+          // Sync to server in background — meter already updated from cache
           const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
-          invoke("sync_quota_to_server", { apiUrl, count: 1 }).catch(() => {});
+          invoke("sync_quota_to_server", { apiUrl, count: 1 }).catch((err) => {
+            console.warn("quota sync failed:", err);
+          });
         } catch (e) {
           results.push({ fileName: entry.name, file_hash: entry.hash, success: false, error: `${e}` });
         }
@@ -482,8 +487,6 @@ export default component$(() => {
       const successful = results.filter(r => r.success);
       recentSignatures.value = [...successful, ...recentSignatures.value.slice(0, Math.max(0, 10 - successful.length))];
       step.value = "done";
-      // Phase 8: refresh meter from cache after batch
-      await refreshQuota();
     } else if (fileHash.value) {
       // Single file signing
       try {
@@ -498,11 +501,16 @@ export default component$(() => {
 
         signResult.value = result;
         step.value = "done";
-        // Phase 8: decrement local quota cache + sync server + refresh display
-        await invoke("increment_quota_used").catch(() => {});
+        // Phase 8: increment local cache + update meter from cache
+        const updatedCache = await invoke<SignQuotaState | null>("increment_quota_used").catch(() => null);
+        if (updatedCache) {
+          quota.value = { ...(updatedCache as any), source: quota.value?.source || "cache" };
+        }
+        // Sync to server in background — meter already updated from cache
         const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
-        invoke("sync_quota_to_server", { apiUrl, count: 1 }).catch(() => {});
-        await refreshQuota();
+        invoke("sync_quota_to_server", { apiUrl, count: 1 }).catch((err) => {
+          console.warn("quota sync failed:", err);
+        });
         const enrichedResult = { ...result, fileName: fileName.value, thumbnail: thumbnailData.value };
         recentSignatures.value = [enrichedResult, ...recentSignatures.value.slice(0, 9)];
 
