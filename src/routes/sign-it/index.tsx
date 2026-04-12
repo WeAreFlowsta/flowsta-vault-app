@@ -283,6 +283,23 @@ export default component$(() => {
     }
   });
 
+  // Phase 8: refresh quota when the Vault window regains focus.
+  // Covers the case where a user signs on Website → switches to Vault:
+  // the meter updates to reflect the server-side change.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ cleanup }) => {
+    const onFocus = () => { refreshQuota(); };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refreshQuota();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    cleanup(() => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    });
+  });
+
   // Load recent signatures from the signing DNA on mount.
   // Retries a few times since the conductor may still be starting up.
   // eslint-disable-next-line qwik/no-use-visible-task
