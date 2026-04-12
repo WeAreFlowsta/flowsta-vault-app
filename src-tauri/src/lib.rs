@@ -8,6 +8,7 @@ mod ipc_server;
 mod key_derivation;
 mod lair;
 mod mau;
+mod quota_cache;
 mod vault;
 
 use commands::AppState;
@@ -205,6 +206,9 @@ pub fn run() {
             commands::generate_thumbnail,
             commands::set_thumbnail,
             commands::sign_file,
+            commands::read_quota_cache,
+            commands::write_quota_cache,
+            commands::increment_quota_used,
             commands::get_my_signatures,
             commands::revoke_signature,
             commands::get_linked_third_party_apps,

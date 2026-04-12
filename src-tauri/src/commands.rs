@@ -3283,3 +3283,26 @@ async fn commit_signature_to_dht(
 
     Ok(action_hash_hex)
 }
+
+// ============================================
+// Phase 8 — Sign quota cache (HMAC-signed local persistence)
+// ============================================
+
+#[tauri::command]
+pub fn read_quota_cache(state: State<'_, Arc<AppState>>) -> Result<Option<crate::quota_cache::QuotaCache>, String> {
+    crate::quota_cache::read(&state.data_dir)
+}
+
+#[tauri::command]
+pub fn write_quota_cache(
+    state: State<'_, Arc<AppState>>,
+    cache: crate::quota_cache::QuotaCache,
+) -> Result<crate::quota_cache::QuotaCache, String> {
+    crate::quota_cache::write(&state.data_dir, cache)
+}
+
+#[tauri::command]
+pub fn increment_quota_used(state: State<'_, Arc<AppState>>) -> Result<Option<crate::quota_cache::QuotaCache>, String> {
+    crate::quota_cache::increment_used(&state.data_dir)
+}
+

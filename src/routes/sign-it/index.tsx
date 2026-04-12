@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { GlassButton } from "~/components/common/GlassButton";
+import { SignQuotaMeter, type SignQuotaState } from "~/components/sign-it/SignQuotaMeter";
 
 // Shared select styling matching Settings auto-lock dropdown
 const selectClass =
@@ -108,6 +109,50 @@ export default component$(() => {
   const revokeTarget = useSignal<any | null>(null);
   const revokeReason = useSignal("");
   const revoking = useSignal(false);
+
+  // Phase 8: Sign quota (HMAC-signed local cache + online refresh)
+  const quota = useSignal<SignQuotaState | null>(null);
+  const quotaLoading = useSignal(true);
+
+  const refreshQuota = $(async () => {
+    // Try online first via the public quota-by-agent endpoint
+    try {
+      const id = await invoke<{ agent_pub_key: string }>("get_identity");
+      if (id?.agent_pub_key) {
+        const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
+        const resp = await fetch(
+          `${apiUrl}/api/v1/sign-it/quota/by-agent?agent_pub_key=${encodeURIComponent(id.agent_pub_key)}`,
+          { cache: "no-store" }
+        );
+        if (resp.ok) {
+          const fresh = await resp.json();
+          // Sync to HMAC-signed local cache
+          const cached = await invoke<SignQuotaState | null>("write_quota_cache", {
+            cache: {
+              tier: fresh.tier,
+              used: fresh.used,
+              limit: Number.isFinite(fresh.limit) ? fresh.limit : 0,
+              period_end: fresh.resets_at || null,
+              last_synced_at: Date.now(),
+              write_counter: 0,
+            },
+          });
+          quota.value = { ...(cached as any), source: "online" };
+          quotaLoading.value = false;
+          return;
+        }
+      }
+    } catch { /* offline — fall through to cache */ }
+
+    // Offline fallback: use HMAC-signed cache
+    try {
+      const cached = await invoke<SignQuotaState | null>("read_quota_cache");
+      if (cached) {
+        quota.value = { ...(cached as any), source: "cache" };
+      }
+    } catch { /* no cache yet */ }
+    quotaLoading.value = false;
+  });
 
   // Signals to receive file paths from Tauri drag-drop (bridges native event → Qwik reactivity)
   const droppedFilePath = useSignal<string | null>(null);
@@ -240,6 +285,8 @@ export default component$(() => {
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async () => {
     const { invoke: inv } = await import("@tauri-apps/api/core");
+    // Phase 8: load sign quota in parallel (don't block signature loading)
+    refreshQuota();
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
         const sigs = await inv<any[]>("get_my_signatures");
@@ -379,6 +426,22 @@ export default component$(() => {
   };
 
   const handleSign = $(async () => {
+    // Phase 8: refresh quota first (online preferred, fallback to cache)
+    await refreshQuota();
+    const q = quota.value;
+
+    const requested = isBatch.value ? fileEntries.value.length : 1;
+    if (q && Number.isFinite(q.limit)) {
+      const remaining = Math.max(0, q.limit - q.used);
+      if (requested > remaining) {
+        error.value = remaining === 0
+          ? `You've used all ${q.limit} signature${q.limit === 1 ? '' : 's'} for this period (${q.tier}). Upgrade at flowsta.com/dashboard/premium to keep signing.`
+          : `Batch of ${requested} exceeds your remaining quota (${remaining} of ${q.limit} on ${q.tier}). Upgrade or sign fewer files.`;
+        step.value = "ready";
+        return;
+      }
+    }
+
     step.value = "signing";
     error.value = "";
 
@@ -402,6 +465,8 @@ export default component$(() => {
             perceptualHash: entry.perceptualHash || null,
           });
           results.push({ ...result, fileName: entry.name, success: true });
+          // Phase 8: decrement local quota cache after each success
+          await invoke("increment_quota_used").catch(() => {});
         } catch (e) {
           results.push({ fileName: entry.name, file_hash: entry.hash, success: false, error: `${e}` });
         }
@@ -411,6 +476,8 @@ export default component$(() => {
       const successful = results.filter(r => r.success);
       recentSignatures.value = [...successful, ...recentSignatures.value.slice(0, Math.max(0, 10 - successful.length))];
       step.value = "done";
+      // Phase 8: refresh meter from cache after batch
+      await refreshQuota();
     } else if (fileHash.value) {
       // Single file signing
       try {
@@ -425,6 +492,9 @@ export default component$(() => {
 
         signResult.value = result;
         step.value = "done";
+        // Phase 8: decrement local quota cache + refresh display
+        await invoke("increment_quota_used").catch(() => {});
+        await refreshQuota();
         const enrichedResult = { ...result, fileName: fileName.value, thumbnail: thumbnailData.value };
         recentSignatures.value = [enrichedResult, ...recentSignatures.value.slice(0, 9)];
 
@@ -486,6 +556,11 @@ export default component$(() => {
   return (
     <div>
       <h1 class="mb-6 text-2xl font-bold text-white">Sign It</h1>
+
+      {/* Phase 8: Sign quota meter (HMAC-signed local cache + online refresh) */}
+      <div class="mb-6">
+        <SignQuotaMeter quota={quota.value} loading={quotaLoading.value} />
+      </div>
 
       {/* ── Sign a File section ────────────────────────────────── */}
       <div class="mb-6 rounded-lg border border-gray-700 bg-gray-900 p-6">
