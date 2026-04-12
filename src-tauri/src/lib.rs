@@ -209,6 +209,7 @@ pub fn run() {
             commands::read_quota_cache,
             commands::write_quota_cache,
             commands::increment_quota_used,
+            commands::sync_quota_to_server,
             commands::get_my_signatures,
             commands::revoke_signature,
             commands::get_linked_third_party_apps,

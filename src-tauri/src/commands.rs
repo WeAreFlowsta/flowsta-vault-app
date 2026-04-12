@@ -3301,6 +3301,68 @@ pub fn read_quota_cache(state: State<'_, Arc<AppState>>) -> Result<Option<crate:
     crate::quota_cache::read(&state.data_dir)
 }
 
+/// POST to the API's /quota/sync-by-agent with an Ed25519 signature.
+/// Called after each successful local sign so server-side quota stays accurate.
+/// Silently returns Ok(false) if the user hasn't linked a web account yet.
+#[tauri::command]
+pub async fn sync_quota_to_server(
+    state: State<'_, Arc<AppState>>,
+    api_url: String,
+    count: u32,
+) -> Result<bool, String> {
+    if count == 0 { return Ok(false); }
+
+    // Need a linked web agent to know which user's quota to sync against
+    let web_agent_pub_key = {
+        let cached = state.linked_web_agent_key.lock().unwrap();
+        cached.clone()
+    };
+    let Some(agent_b64) = web_agent_pub_key else {
+        return Ok(false);
+    };
+
+    // Get the device seed (user's signing authority, same key that signed their web account)
+    let device_seed: [u8; 32] = {
+        let config = state.vault_config.lock().unwrap();
+        let config = config.as_ref().ok_or("Vault is locked")?;
+        let seed = config.device_seed.as_ref().ok_or("No device seed")?;
+        let mut arr = [0u8; 32];
+        if seed.len() != 32 { return Err("Device seed has wrong length".into()); }
+        arr.copy_from_slice(seed);
+        arr
+    };
+
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let canonical = format!("flowsta-quota-sync:{}:{}:{}", agent_b64, timestamp_ms, count);
+    let signature = crate::key_derivation::sign_with_device_seed(&device_seed, canonical.as_bytes());
+    let sig_hex = hex::encode(signature);
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/v1/sign-it/quota/sync-by-agent", api_url))
+        .json(&serde_json::json!({
+            "agent_pub_key": agent_b64,
+            "count": count,
+            "timestamp": timestamp_ms,
+            "signature": sig_hex,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach API: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Sync failed ({}): {}", status, body));
+    }
+
+    Ok(true)
+}
+
 #[tauri::command]
 pub fn write_quota_cache(
     state: State<'_, Arc<AppState>>,

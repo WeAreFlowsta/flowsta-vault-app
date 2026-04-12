@@ -470,6 +470,9 @@ export default component$(() => {
           results.push({ ...result, fileName: entry.name, success: true });
           // Phase 8: decrement local quota cache after each success
           await invoke("increment_quota_used").catch(() => {});
+          // Sync to server (signed request — silently no-ops if unlinked / offline)
+          const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
+          invoke("sync_quota_to_server", { apiUrl, count: 1 }).catch(() => {});
         } catch (e) {
           results.push({ fileName: entry.name, file_hash: entry.hash, success: false, error: `${e}` });
         }
@@ -495,8 +498,10 @@ export default component$(() => {
 
         signResult.value = result;
         step.value = "done";
-        // Phase 8: decrement local quota cache + refresh display
+        // Phase 8: decrement local quota cache + sync server + refresh display
         await invoke("increment_quota_used").catch(() => {});
+        const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
+        invoke("sync_quota_to_server", { apiUrl, count: 1 }).catch(() => {});
         await refreshQuota();
         const enrichedResult = { ...result, fileName: fileName.value, thumbnail: thumbnailData.value };
         recentSignatures.value = [enrichedResult, ...recentSignatures.value.slice(0, 9)];
