@@ -115,13 +115,16 @@ export default component$(() => {
   const quotaLoading = useSignal(true);
 
   const refreshQuota = $(async () => {
-    // Try online first via the public quota-by-agent endpoint
+    // Try online first via the public quota-by-agent endpoint.
+    // Prefer web_agent_pub_key (the linked Flowsta account) over the local
+    // Vault agent — that's the one the user's subscription is attached to.
     try {
-      const id = await invoke<{ agent_pub_key: string }>("get_identity");
-      if (id?.agent_pub_key) {
+      const id = await invoke<{ agent_pub_key: string; web_agent_pub_key: string | null }>("get_identity");
+      const agentKey = id?.web_agent_pub_key || id?.agent_pub_key;
+      if (agentKey) {
         const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
         const resp = await fetch(
-          `${apiUrl}/api/v1/sign-it/quota/by-agent?agent_pub_key=${encodeURIComponent(id.agent_pub_key)}`,
+          `${apiUrl}/api/v1/sign-it/quota/by-agent?agent_pub_key=${encodeURIComponent(agentKey)}`,
           { cache: "no-store" }
         );
         if (resp.ok) {
