@@ -590,11 +590,6 @@ export default component$(() => {
     <div>
       <h1 class="mb-6 text-2xl font-bold text-white">Sign It</h1>
 
-      {/* Phase 8: Sign quota meter (HMAC-signed local cache + online refresh) */}
-      <div class="mb-6">
-        <SignQuotaMeter quota={quota.value} loading={quotaLoading.value} />
-      </div>
-
       {/* ── Sign a File section ────────────────────────────────── */}
       <div class="mb-6 rounded-lg border border-gray-700 bg-gray-900 p-6">
         <h3 class="mb-4 text-sm font-semibold uppercase tracking-wider text-gray-500">
@@ -1126,6 +1121,11 @@ export default component$(() => {
             <p class="text-xs text-red-400">{error.value}</p>
           </div>
         )}
+      </div>
+
+      {/* Phase 8: Sign quota meter — below the sign box so users see action first */}
+      <div class="mb-6">
+        <SignQuotaMeter quota={quota.value} loading={quotaLoading.value} />
       </div>
 
       {/* ── Recent Signatures section ─────────────────────────── */}
