@@ -3314,25 +3314,25 @@ pub async fn sync_quota_to_server(
 
     log::info!("[quota-sync] starting, count={}", count);
 
-    // Need a linked web agent to know which user's quota to sync against
-    let web_agent_pub_key = {
-        let cached = state.linked_web_agent_key.lock().unwrap();
-        cached.clone()
-    };
-    let Some(agent_b64) = web_agent_pub_key else {
-        log::warn!("[quota-sync] skipped: no linked web agent");
-        return Ok(false);
-    };
-
-    // Get the device seed (user's signing authority, same key that signed their web account)
-    let device_seed: [u8; 32] = {
+    // Pull everything we need from the vault config. Uses the same auth shape
+    // as /auth/link-desktop-agent: sign with device_seed, identify user via
+    // recovery_lookup_hash.
+    let (desktop_agent_key, recovery_lookup_hash, device_seed) = {
         let config = state.vault_config.lock().unwrap();
         let config = config.as_ref().ok_or("Vault is locked")?;
-        let seed = config.device_seed.as_ref().ok_or("No device seed")?;
-        let mut arr = [0u8; 32];
-        if seed.len() != 32 { return Err("Device seed has wrong length".into()); }
-        arr.copy_from_slice(seed);
-        arr
+
+        let agent_b64 = config.agent_pub_key_raw_b64.clone()
+            .ok_or("No desktop agent pub key in config")?;
+        let hash = config.recovery_lookup_hash.clone()
+            .ok_or("No recovery lookup hash in config")?;
+        let seed_bytes = config.device_seed.as_ref()
+            .ok_or("No device seed in config")?;
+        if seed_bytes.len() != 32 {
+            return Err("Device seed has wrong length".into());
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(seed_bytes);
+        (agent_b64, hash, seed)
     };
 
     let timestamp_ms = std::time::SystemTime::now()
@@ -3340,7 +3340,8 @@ pub async fn sync_quota_to_server(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    let canonical = format!("flowsta-quota-sync:{}:{}:{}", agent_b64, timestamp_ms, count);
+    // Canonical payload matches the API's verification string
+    let canonical = format!("flowsta-quota-sync:{}:{}:{}", desktop_agent_key, timestamp_ms, count);
     let signature = crate::key_derivation::sign_with_device_seed(&device_seed, canonical.as_bytes());
     let sig_hex = hex::encode(signature);
 
@@ -3348,7 +3349,8 @@ pub async fn sync_quota_to_server(
     let resp = client
         .post(format!("{}/api/v1/sign-it/quota/sync-by-agent", api_url))
         .json(&serde_json::json!({
-            "agent_pub_key": agent_b64,
+            "desktop_agent_key": desktop_agent_key,
+            "recovery_lookup_hash": recovery_lookup_hash,
             "count": count,
             "timestamp": timestamp_ms,
             "signature": sig_hex,
