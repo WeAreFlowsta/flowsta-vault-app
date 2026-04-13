@@ -43,6 +43,7 @@ export default component$(() => {
   const editThumbTarget = useSignal<any | null>(null);
   const editThumbImage = useSignal<string | null>(null);
   const editThumbCropper = useSignal<any>(null);
+  const editThumbAspect = useSignal<number>(1);
   const editThumbSaving = useSignal(false);
   const editError = useSignal("");
 
@@ -304,12 +305,17 @@ export default component$(() => {
               </label>
             ) : (
               <div>
-                {/* Cropperjs container */}
-                <div id="vault-thumb-crop-container" class="relative bg-gray-900 rounded-lg overflow-hidden" style={{ height: "320px" }}>
+                {/* Cropperjs container — aspect ratio matches source image so no transparent letterbox */}
+                <div id="vault-thumb-crop-container" class="relative bg-gray-900 rounded-lg overflow-hidden mx-auto" style={{ aspectRatio: String(editThumbAspect.value), maxHeight: "500px", width: "100%" }}>
                   <img
                     id="vault-thumb-crop-img"
                     src={editThumbImage.value}
                     alt="Crop preview"
+                    onLoad$={(_, el) => {
+                      if (el.naturalWidth && el.naturalHeight) {
+                        editThumbAspect.value = el.naturalWidth / el.naturalHeight;
+                      }
+                    }}
                     style={{ display: "block", maxWidth: "100%", maxHeight: "100%" }}
                   />
                 </div>
