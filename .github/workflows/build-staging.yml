@@ -136,3 +136,4 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
           if-no-files-found: ignore
+          retention-days: 7
