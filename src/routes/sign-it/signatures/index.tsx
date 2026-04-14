@@ -175,7 +175,7 @@ export default component$(() => {
               <div class="space-y-3">
                 {active.map((sig: any, i: number) => (
                   <div key={i} class="rounded-lg border border-gray-700 bg-gray-800 p-4">
-                    <div class="flex items-center gap-3 mb-2">
+                    <div class="flex items-center gap-3 mb-3 min-w-0">
                       <img
                         src={sig.thumbnail || getDefaultThumbnail(sig)}
                         alt=""
@@ -183,35 +183,12 @@ export default component$(() => {
                         height={48}
                         class="h-12 w-12 shrink-0 rounded-lg object-cover"
                       />
-                      <span class="truncate text-sm font-mono text-gray-400 flex-1">
+                      <span class="truncate text-sm font-mono text-gray-400 flex-1 min-w-0">
                         {sig.file_hash?.slice(0, 16)}...
                       </span>
-                      <div class="ml-3 flex shrink-0 items-center gap-2">
-                        <span class="rounded-full bg-green-900/30 px-2 py-0.5 text-xs text-green-400">Active</span>
-                        {sig.action_hash && (sig.signing_app_id === "flowsta_signing_v1_3" || sig.signing_app_id === "flowsta_signing_v1_4") && (
-                          <button
-                            class="text-xs text-gray-500 hover:text-amber-400 transition-colors"
-                            onClick$={() => {
-                              editThumbTarget.value = sig;
-                              editThumbImage.value = null;
-                              editThumbCropper.value = null;
-                              editError.value = "";
-                            }}
-                          >
-                            Edit thumbnail
-                          </button>
-                        )}
-                        {sig.action_hash && (
-                          <button
-                            class="text-xs text-gray-500 hover:text-red-400 transition-colors"
-                            onClick$={() => { revokeTarget.value = sig; revokeReason.value = ""; }}
-                          >
-                            Revoke
-                          </button>
-                        )}
-                      </div>
+                      <span class="ml-2 shrink-0 rounded-full bg-green-900/30 px-2 py-0.5 text-xs text-green-400">Active</span>
                     </div>
-                    <div class="flex flex-wrap gap-3 text-xs text-gray-500">
+                    <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500">
                       {sig.intent && (
                         <span class="rounded-full bg-gray-700/50 px-2 py-0.5">{sig.intent}</span>
                       )}
@@ -226,7 +203,30 @@ export default component$(() => {
                         </span>
                       )}
                       {sig.signed_at && (
-                        <span>{formatRelativeTime(sig.signed_at)}</span>
+                        <span class="px-1">{formatRelativeTime(sig.signed_at)}</span>
+                      )}
+                      {sig.action_hash && (
+                        <div class="ml-auto flex flex-wrap gap-2">
+                          {(sig.signing_app_id === "flowsta_signing_v1_3" || sig.signing_app_id === "flowsta_signing_v1_4") && (
+                            <button
+                              class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-amber-400 hover:text-amber-300 transition-colors"
+                              onClick$={() => {
+                                editThumbTarget.value = sig;
+                                editThumbImage.value = null;
+                                editThumbCropper.value = null;
+                                editError.value = "";
+                              }}
+                            >
+                              Edit thumbnail
+                            </button>
+                          )}
+                          <button
+                            class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-red-400 hover:text-red-400 transition-colors"
+                            onClick$={() => { revokeTarget.value = sig; revokeReason.value = ""; }}
+                          >
+                            Revoke
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>

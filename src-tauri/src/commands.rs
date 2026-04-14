@@ -2095,12 +2095,23 @@ pub fn delete_app_backup(
     crate::backup::delete_app_backups(&state.data_dir, &client_id)
 }
 
-/// Export all vault data (identity + backups) as JSON.
+/// Export all vault data (identity + backups + signatures) as JSON.
+/// CAL-compliant export: everything needed to recreate the user's identity,
+/// data, and signature history independently.
 #[tauri::command]
-pub fn export_all_data(
+pub async fn export_all_data(
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
-    crate::backup::export_all_data(&state)
+    // Fetch the user's Sign It signatures from the local signing DNAs.
+    // Non-fatal if it fails — export without signatures rather than blocking.
+    let signatures = match get_my_signatures(state.clone()).await {
+        Ok(sigs) => Some(sigs),
+        Err(e) => {
+            log::warn!("export_all_data: failed to fetch signatures: {}", e);
+            None
+        }
+    };
+    crate::backup::export_all_data(&state, signatures)
 }
 
 /// List individual backup metadata for a specific app.

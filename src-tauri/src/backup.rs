@@ -526,7 +526,10 @@ pub fn delete_backup(data_dir: &Path, client_id: &str, label: Option<&str>) -> R
 /// Includes cryptographic key material for CAL (Cryptographic Autonomy License)
 /// compliance — users must be able to independently recreate their identity
 /// and use their data without depending on Flowsta.
-pub fn export_all_data(app_state: &AppState) -> Result<serde_json::Value, String> {
+pub fn export_all_data(
+    app_state: &AppState,
+    signatures: Option<Vec<serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
     let config = {
         let config = app_state.vault_config.lock().unwrap();
         config.as_ref().ok_or("Vault is locked")?.clone()
@@ -673,6 +676,21 @@ pub fn export_all_data(app_state: &AppState) -> Result<serde_json::Value, String
             "total_snapshots": stats.total_backups,
             "total_size_bytes": stats.total_size,
             "apps": app_data,
+        },
+
+        // ── Sign It signatures ──────────────────────────────────────
+        "sign_it": {
+            "_readme": concat!(
+                "Every cryptographic signature you've created with Sign It, ",
+                "across every installed signing DNA version. Each signature ",
+                "includes the file hash, your Ed25519 signature (base64), the ",
+                "signing intent, content rights, AI disclosure, perceptual ",
+                "hash bands (for fuzzy matching), any thumbnail, and ",
+                "revocation status. Anyone with the file and your agent ",
+                "public key can verify these signatures independently.",
+            ),
+            "count": signatures.as_ref().map(|s| s.len()).unwrap_or(0),
+            "signatures": signatures.unwrap_or_default(),
         },
     });
 
