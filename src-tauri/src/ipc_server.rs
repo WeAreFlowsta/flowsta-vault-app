@@ -1755,7 +1755,11 @@ pub async fn start_ipc_server(
         app_handle,
     });
 
-    // CORS: allow browser-based SDK to call from any origin on localhost
+    // CORS: deliberately permissive. Third-party desktop apps use varied
+    // Tauri/Electron custom origins and we can't enumerate them ahead of time.
+    // Security relies on the in-handler `origin_to_client_id` check that gates
+    // sensitive operations on the caller being a user-approved linked app.
+    // CORS here is defense-in-depth, not the primary control.
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])

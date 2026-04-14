@@ -2,6 +2,7 @@ import { component$, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
 import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
+import ImageCropper from "~/components/sign-it/ImageCropper";
 
 function getDefaultThumbnail(sig: any): string {
   const hashType = sig.perceptual_hash?.hash_type;
@@ -42,26 +43,22 @@ export default component$(() => {
   // Thumbnail edit state
   const editThumbTarget = useSignal<any | null>(null);
   const editThumbImage = useSignal<string | null>(null);
-  const editThumbCropper = useSignal<any>(null);
-  const editThumbAspect = useSignal<number>(1);
+  const editThumbCanvas = useSignal<HTMLCanvasElement | null>(null);
   const editThumbSaving = useSignal(false);
   const editError = useSignal("");
 
 
   const handleThumbSave = $(async () => {
     if (!editThumbTarget.value?.action_hash) return;
+    if (!editThumbCanvas.value) {
+      editError.value = "Pick an image first.";
+      return;
+    }
     editThumbSaving.value = true;
     editError.value = "";
 
     try {
-      const cropper = editThumbCropper.value;
-      if (!cropper) throw new Error("Cropper not ready");
-
-      const selection = cropper.getCropperSelection();
-      if (!selection) throw new Error("No crop selection");
-
-      const canvas = await selection.$toCanvas({ width: 128, height: 128 });
-      const thumbnail = canvas.toDataURL("image/jpeg", 0.7);
+      const thumbnail = editThumbCanvas.value.toDataURL("image/jpeg", 0.7);
 
       if (thumbnail.length > 15000) {
         editError.value = "Thumbnail too large. Try a simpler image.";
@@ -82,7 +79,7 @@ export default component$(() => {
       );
       editThumbTarget.value = null;
       editThumbImage.value = null;
-      editThumbCropper.value = null;
+      editThumbCanvas.value = null;
     } catch (e: any) {
       console.error("Thumbnail save error:", e);
       editError.value = (typeof e === "string" ? e : e.message) || "Failed to save thumbnail";
@@ -213,7 +210,7 @@ export default component$(() => {
                               onClick$={() => {
                                 editThumbTarget.value = sig;
                                 editThumbImage.value = null;
-                                editThumbCropper.value = null;
+                                editThumbCanvas.value = null;
                                 editError.value = "";
                               }}
                             >
@@ -305,23 +302,14 @@ export default component$(() => {
               </label>
             ) : (
               <div>
-                {/* Cropperjs container — aspect ratio matches source image so no transparent letterbox */}
-                <div id="vault-thumb-crop-container" class="relative bg-gray-900 rounded-lg overflow-hidden mx-auto" style={{ aspectRatio: String(editThumbAspect.value), maxHeight: "500px", width: "100%" }}>
-                  <img
-                    id="vault-thumb-crop-img"
-                    src={editThumbImage.value}
-                    alt="Crop preview"
-                    onLoad$={(_, el) => {
-                      if (el.naturalWidth && el.naturalHeight) {
-                        editThumbAspect.value = el.naturalWidth / el.naturalHeight;
-                      }
-                    }}
-                    style={{ display: "block", maxWidth: "100%", maxHeight: "100%" }}
-                  />
-                </div>
-                <p class="mt-2 text-xs text-gray-500 text-center">
-                  Drag to position • Scroll to zoom
-                </p>
+                <ImageCropper
+                  imageSrc={editThumbImage.value}
+                  cropShape="square"
+                  outputSize={128}
+                  onCropComplete$={(canvas) => {
+                    editThumbCanvas.value = canvas;
+                  }}
+                />
                 <label class="mt-1 inline-block text-xs text-amber-400 hover:text-amber-300 transition-colors cursor-pointer">
                   Choose a different image
                   <input
@@ -331,8 +319,7 @@ export default component$(() => {
                     onChange$={(e) => {
                       const file = (e.target as HTMLInputElement).files?.[0];
                       if (!file) return;
-                      if (editThumbCropper.value) editThumbCropper.value.destroy();
-                      editThumbCropper.value = null;
+                      editThumbCanvas.value = null;
                       const reader = new FileReader();
                       reader.onload = (ev) => {
                         editThumbImage.value = ev.target?.result as string;
@@ -341,40 +328,6 @@ export default component$(() => {
                     }}
                   />
                 </label>
-                {/* Initialize cropperjs when image loads */}
-                {(() => {
-                  setTimeout(async () => {
-                    const img = document.getElementById("vault-thumb-crop-img") as HTMLImageElement;
-                    if (!img || editThumbCropper.value) return;
-                    const CropperModule = await import("cropperjs");
-                    const Cropper = CropperModule.default;
-                    const containerEl = document.getElementById("vault-thumb-crop-img")?.parentElement;
-                    const cropper = new Cropper(img, containerEl ? { container: containerEl } : {});
-                    const waitForCropper = setInterval(() => {
-                      const sel = cropper.getCropperSelection();
-                      const cropperImage = cropper.getCropperImage();
-                      if (!sel || !cropperImage) return;
-                      clearInterval(waitForCropper);
-
-                      sel.aspectRatio = 1;
-                      sel.initialAspectRatio = 1;
-                      sel.initialCoverage = 0.9;
-
-                      // Make cropper-canvas fill the container
-                      const cropperCanvas = cropper.getCropperCanvas();
-                      if (cropperCanvas) {
-                        (cropperCanvas as any).style.width = "100%";
-                        (cropperCanvas as any).style.height = "100%";
-                      }
-
-                      cropperImage.$ready(() => {
-                        cropperImage.$center("contain");
-                      });
-                    }, 50);
-                    editThumbCropper.value = cropper;
-                  }, 50);
-                  return null;
-                })()}
               </div>
             )}
 
@@ -389,10 +342,9 @@ export default component$(() => {
                 variant="secondary"
                 class="flex-1"
                 onClick$={() => {
-                  if (editThumbCropper.value) editThumbCropper.value.destroy();
                   editThumbTarget.value = null;
                   editThumbImage.value = null;
-                  editThumbCropper.value = null;
+                  editThumbCanvas.value = null;
                   editError.value = "";
                 }}
               >
