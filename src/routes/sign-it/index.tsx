@@ -1188,7 +1188,7 @@ export default component$(() => {
                 </div>
                 {sig.action_hash && (
                   <button
-                    class="shrink-0 text-xs text-gray-500 hover:text-red-400 transition-colors"
+                    class="shrink-0 rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-red-400 hover:text-red-400 transition-colors"
                     onClick$={() => {
                       revokeTarget.value = sig;
                       revokeReason.value = "";
