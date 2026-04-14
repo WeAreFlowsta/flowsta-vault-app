@@ -105,6 +105,23 @@ struct StatusResponse {
     web_username: Option<String>,
 }
 
+/// Resolve the caller's origin to the `client_id` of a linked third-party app.
+/// Returns `None` if the origin is missing, empty, or hasn't been linked.
+///
+/// Use this to gate sensitive operations (signing, backup retrieve/delete) so
+/// that an unlinked / hostile local process can't impersonate a linked app.
+fn origin_to_client_id(state: &AppState, origin: Option<&str>) -> Option<String> {
+    let orig = match origin {
+        Some(o) if !o.is_empty() => o,
+        _ => return None,
+    };
+    let linked = state.linked_third_party_apps.lock().unwrap();
+    linked
+        .iter()
+        .find(|a| a.origin.as_deref() == Some(orig))
+        .and_then(|a| a.client_id.clone())
+}
+
 /// Look up the scopes granted to the app at the given origin.
 ///
 /// Finds the origin in `linked_third_party_apps`, retrieves its `client_id`,
@@ -215,6 +232,21 @@ async fn sign_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "sign");
+
+    // SECURITY: only linked third-party apps may request signatures with the
+    // user's device key. Without this check, ANY local process could hit
+    // localhost:27777/sign and forge Holochain signatures as the user.
+    if origin_to_client_id(&state.app_state, origin.as_deref()).is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "not_linked".into(),
+                description: Some(
+                    "This origin is not a linked third-party app. Call /link-identity and obtain user approval first.".into(),
+                ),
+            }),
+        ));
+    }
 
     // Record MAU for linked third-party apps making sign requests
     crate::mau::record_mau_for_origin(&state.app_state, origin.as_deref());
@@ -1142,6 +1174,31 @@ async fn backup_handler(
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "backup");
 
+    // SECURITY: caller must be linked AND can only save under its own client_id.
+    // Without these checks, a hostile app could overwrite another app's backups
+    // with bogus data (data destruction / poisoning).
+    let caller_client_id = match origin_to_client_id(&state.app_state, origin.as_deref()) {
+        Some(c) => c,
+        None => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "not_linked".into(),
+                    description: Some("This origin is not a linked third-party app.".into()),
+                }),
+            ));
+        }
+    };
+    if caller_client_id != req.client_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "client_id_mismatch".into(),
+                description: Some("Apps may only save backups under their own client_id.".into()),
+            }),
+        ));
+    }
+
     // Backup key must be available (set on first unlock, persists through lock)
     {
         let bk = state.app_state.backup_key.lock().unwrap();
@@ -1205,6 +1262,24 @@ async fn backup_list_handler(
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "backup_list");
 
+    // SECURITY: only return the caller's own backups. Without this scoping,
+    // any local process could enumerate which third-party apps the user has
+    // linked (revealing sensitive associations: fintech app, dating app, etc).
+    let caller_client_id = match origin_to_client_id(&state.app_state, origin.as_deref()) {
+        Some(c) => c,
+        None => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "not_linked".into(),
+                    description: Some(
+                        "This origin is not a linked third-party app.".into(),
+                    ),
+                }),
+            ));
+        }
+    };
+
     {
         let config = state.app_state.vault_config.lock().unwrap();
         if config.is_none() {
@@ -1218,7 +1293,13 @@ async fn backup_list_handler(
         }
     }
 
-    let stats = crate::backup::get_backup_stats(&state.app_state.data_dir);
+    // Get all stats then filter to only the caller's app.
+    let mut stats = crate::backup::get_backup_stats(&state.app_state.data_dir);
+    stats.apps.retain(|a| a.client_id == caller_client_id);
+    stats.app_count = stats.apps.len();
+    stats.total_backups = stats.apps.iter().map(|a| a.backup_count).sum();
+    stats.total_size = stats.apps.iter().map(|a| a.total_size).sum();
+
     Ok(axum::response::IntoResponse::into_response(Json(stats)))
 }
 
@@ -1237,6 +1318,35 @@ async fn backup_retrieve_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "backup_retrieve");
+
+    // SECURITY: caller must be a linked app AND can only access its own
+    // backups. Without these checks, a hostile app could enumerate and
+    // download backups belonging to ANY other linked app the user has.
+    let caller_client_id = match origin_to_client_id(&state.app_state, origin.as_deref()) {
+        Some(c) => c,
+        None => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "not_linked".into(),
+                    description: Some(
+                        "This origin is not a linked third-party app.".into(),
+                    ),
+                }),
+            ));
+        }
+    };
+    if caller_client_id != req.client_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "client_id_mismatch".into(),
+                description: Some(
+                    "Apps may only retrieve their own backups.".into(),
+                ),
+            }),
+        ));
+    }
 
     {
         let bk = state.app_state.backup_key.lock().unwrap();
@@ -1308,6 +1418,30 @@ async fn backup_delete_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "backup_delete");
+
+    // SECURITY: caller must be linked AND can only delete its own backups.
+    // Without this, hostile app could destroy data of any other linked app.
+    let caller_client_id = match origin_to_client_id(&state.app_state, origin.as_deref()) {
+        Some(c) => c,
+        None => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "not_linked".into(),
+                    description: Some("This origin is not a linked third-party app.".into()),
+                }),
+            ));
+        }
+    };
+    if caller_client_id != req.client_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "client_id_mismatch".into(),
+                description: Some("Apps may only delete their own backups.".into()),
+            }),
+        ));
+    }
 
     {
         let config = state.app_state.vault_config.lock().unwrap();
