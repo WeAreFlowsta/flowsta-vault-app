@@ -30,7 +30,7 @@ jobs:
               repo: context.repo.repo,
               tag_name: context.ref.replace('refs/tags/', ''),
               name: `Flowsta Vault v${{ steps.version.outputs.version }}`,
-              body: `## Flowsta Vault v${{ steps.version.outputs.version }}\n\nDesktop identity manager for Flowsta Auth.\n\n### Downloads\nSee assets below for platform-specific installers.`,
+              body: `## Flowsta Vault v${{ steps.version.outputs.version }}\n\nZero-knowledge desktop companion for Flowsta — holds your keys, your data, signs your files, never leaves your machine.\n\n### Downloads\nSee assets below for platform-specific installers.`,
               draft: true,
               prerelease: false,
             });
