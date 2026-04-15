@@ -618,24 +618,44 @@ async fn check_dna_updates(
         (rlh, priv_ver, id_ver, agent_b64)
     };
 
-    // Reconstruct AgentPubKey from the stored raw base64.
-    let agent_key = match agent_key_raw_b64 {
-        Some(b64) => match base64_standard_decode(&b64) {
-            Ok(bytes) if bytes.len() == 39 => {
-                holochain_types::prelude::AgentPubKey::from_raw_39(bytes)
-            }
-            Ok(bytes) => {
-                log::warn!("Agent key is {} bytes, expected 39", bytes.len());
+    // Prefer the AgentPubKey that lair actually has for the device seed.
+    // The config's stored agent_pub_key_raw_b64 can drift from lair's key if
+    // the vault was set up on an older derivation, so we authoritatively use
+    // what lair reports — that's what the already-installed cells use, and
+    // what install_app needs to be able to sign genesis records.
+    let lair_agent_key = {
+        let handle_guard = state.conductor_handle.lock().unwrap();
+        handle_guard
+            .as_ref()
+            .map(|h| holochain_types::prelude::AgentPubKey::from_raw_32(
+                h.seed_info.ed25519_pub_key.0.to_vec(),
+            ))
+    };
+
+    let agent_key = if let Some(k) = lair_agent_key {
+        k
+    } else {
+        // Fallback to config value if conductor handle not available for some
+        // reason. Shouldn't happen in practice because DNA update runs after
+        // conductor startup succeeds.
+        match agent_key_raw_b64 {
+            Some(b64) => match base64_standard_decode(&b64) {
+                Ok(bytes) if bytes.len() == 39 => {
+                    holochain_types::prelude::AgentPubKey::from_raw_39(bytes)
+                }
+                Ok(bytes) => {
+                    log::warn!("Agent key is {} bytes, expected 39", bytes.len());
+                    return false;
+                }
+                Err(_) => {
+                    log::warn!("Failed to decode agent_pub_key_raw_b64");
+                    return false;
+                }
+            },
+            None => {
+                log::info!("No agent_pub_key_raw_b64 — skipping DNA update check");
                 return false;
             }
-            Err(_) => {
-                log::warn!("Failed to decode agent_pub_key_raw_b64");
-                return false;
-            }
-        },
-        None => {
-            log::info!("No agent_pub_key_raw_b64 — skipping DNA update check");
-            return false;
         }
     };
 
