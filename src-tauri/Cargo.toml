@@ -74,3 +74,10 @@ rusty-chromaprint = "0.3"
 
 # Error handling
 thiserror = "1.0"
+
+# core2 (transitive dep via libflate → libsodium-sys-stable → sodoken → lair)
+# was yanked from crates.io on 2026-04-14 when the maintainer archived it.
+# The upstream GitHub repo no longer contains the source, so we vendor the
+# 0.4.0 crate locally in vendor/core2 to keep fresh cargo resolves succeeding.
+[patch.crates-io]
+core2 = { path = "vendor/core2" }
