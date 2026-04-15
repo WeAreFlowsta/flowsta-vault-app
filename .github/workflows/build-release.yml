@@ -20,17 +20,41 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME#vault-v}" >> $GITHUB_OUTPUT
 
+      - name: Extract changelog entry
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Extract the block between "## [<version>]" and the next "## [" heading.
+          # Fall back to an empty string if no matching entry exists.
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\["ver"\\]" { flag=1; next }
+            flag && /^## \[/ { exit }
+            flag { print }
+          ' CHANGELOG.md > /tmp/release-body.md
+
       - name: Create GitHub Release
         id: create-release
         uses: actions/github-script@v8
         with:
           script: |
+            const fs = require('fs');
+            const version = "${{ steps.version.outputs.version }}";
+            const tagline = "Zero-knowledge desktop companion for Flowsta — holds your keys, your data, signs your files, never leaves your machine.";
+            const changelog = fs.readFileSync('/tmp/release-body.md', 'utf8').trim();
+            const body = [
+              `## Flowsta Vault v${version}`,
+              '',
+              tagline,
+              '',
+              changelog || '',
+              '### Downloads',
+              'See assets below for platform-specific installers.',
+            ].join('\n');
             const { data } = await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
               tag_name: context.ref.replace('refs/tags/', ''),
-              name: `Flowsta Vault v${{ steps.version.outputs.version }}`,
-              body: `## Flowsta Vault v${{ steps.version.outputs.version }}\n\nZero-knowledge desktop companion for Flowsta — holds your keys, your data, signs your files, never leaves your machine.\n\n### Downloads\nSee assets below for platform-specific installers.`,
+              name: `Flowsta Vault v${version}`,
+              body,
               draft: true,
               prerelease: false,
             });
