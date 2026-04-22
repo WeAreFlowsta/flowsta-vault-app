@@ -53,7 +53,7 @@
     },
     "windows": {
       "signCommand": {
-        "cmd": "powershell",
+        "cmd": "pwsh",
         "args": ["-ExecutionPolicy", "Bypass", "-File", "scripts/sign-windows.ps1", "%1"]
       }
     }

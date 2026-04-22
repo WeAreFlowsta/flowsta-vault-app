@@ -5,6 +5,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Mirror all output to a log file so CI can dump it on failure
+# (tauri-bundler captures stdout/stderr but drops them on non-zero exit).
+$logDir = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+$logFile = Join-Path $logDir "sign-windows.log"
+Start-Transcript -Path $logFile -Append -Force | Out-Null
+
 # Fail fast if Tauri didn't substitute the signCommand placeholder.
 if ($FilePath -match '^%\d+$' -or $FilePath -eq '%1') {
     throw "signCommand placeholder was passed literally: '$FilePath'. Tauri did not substitute the file path."

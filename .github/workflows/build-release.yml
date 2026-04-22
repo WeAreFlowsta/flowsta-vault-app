@@ -192,6 +192,19 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }}
 
+      - name: Dump Windows signing transcript on failure
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "sign-windows.log"
+          if (Test-Path $log) {
+            Write-Host "===== sign-windows.log ====="
+            Get-Content $log
+            Write-Host "===== end log ====="
+          } else {
+            Write-Host "No sign-windows.log at $log"
+          }
+
   publish-release:
     needs: [create-release, build]
     runs-on: ubuntu-latest
