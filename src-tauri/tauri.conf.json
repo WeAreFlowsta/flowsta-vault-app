@@ -52,7 +52,10 @@
       "hardenedRuntime": true
     },
     "windows": {
-      "signCommand": "powershell -ExecutionPolicy Bypass -File scripts/sign-windows.ps1 \"%1\""
+      "signCommand": {
+        "cmd": "powershell",
+        "args": ["-ExecutionPolicy", "Bypass", "-File", "scripts/sign-windows.ps1", "%1"]
+      }
     }
   },
   "plugins": {
