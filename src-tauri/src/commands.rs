@@ -1018,22 +1018,37 @@ pub async fn verify_phrase_matches_web_key(
         .await
         .map_err(|e| format!("Failed to reach API: {}", e))?;
 
-    let status = resp.status();
-    if !status.is_success() {
+    if !resp.status().is_success() {
         // 404 = phrase doesn't match any account
         return Ok(false);
     }
 
-    // Verify the returned agent key matches the signed-in user's key
     let body: AgentKeyLookupResponse = resp
         .json()
         .await
         .map_err(|e| format!("Invalid API response: {}", e))?;
 
-    match body.agent_pub_key {
-        Some(ref key) => Ok(key == &expected_web_agent_key),
-        None => Ok(false),
-    }
+    let returned_b64 = match body.agent_pub_key {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+
+    // The two endpoints encode the same 39-byte agent key in different formats:
+    //   /auth/agent-key-by-lookup-hash → standard base64
+    //   /auth/login                    → literal "uhCAk" prefix + base58
+    //                                    (publicKeyToAgentPubKey in api/src/services/crypto.js)
+    // Decode both to raw bytes and compare.
+    let returned_bytes = base64_standard_decode(&returned_b64)
+        .map_err(|_| "Invalid agent_pub_key base64".to_string())?;
+
+    let expected_after_prefix = expected_web_agent_key
+        .strip_prefix("uhCAk")
+        .ok_or_else(|| "expected_web_agent_key missing 'uhCAk' prefix".to_string())?;
+    let expected_bytes = bs58::decode(expected_after_prefix)
+        .into_vec()
+        .map_err(|e| format!("Invalid expected_web_agent_key base58: {}", e))?;
+
+    Ok(returned_bytes == expected_bytes)
 }
 
 /// Fetch user profile (displayName, profilePicture) from the web API.
