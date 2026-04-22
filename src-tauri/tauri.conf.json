@@ -50,6 +50,9 @@
       "signingIdentity": null,
       "entitlements": "entitlements.plist",
       "hardenedRuntime": true
+    },
+    "windows": {
+      "signCommand": "powershell -ExecutionPolicy Bypass -File scripts/sign-windows.ps1 \"%1\""
     }
   },
   "plugins": {
