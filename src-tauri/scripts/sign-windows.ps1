@@ -29,6 +29,17 @@ if (-not (Test-Path -LiteralPath $FilePath)) {
     throw "File to sign does not exist: $FilePath"
 }
 
+# Skip extensions Authenticode / CodeSignTool can't sign. NSIS occasionally
+# asks us to sign its own .tmp scratch files during plugin packing — without
+# this guard, CodeSignTool errors and the build log gets noisy (NSIS itself
+# tolerates the failure, but it masks real errors).
+$signableExt = @('.exe', '.dll', '.msi', '.msix', '.appx', '.cab', '.ocx', '.sys', '.cat')
+$ext = [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
+if (-not $signableExt.Contains($ext)) {
+    Write-Host "Skipping unsignable file ($ext): $FilePath"
+    exit 0
+}
+
 # Tauri passes the file as a path relative to its own CWD. We change CWD
 # below to load CodeSignTool's conf/, so resolve to absolute first or
 # CodeSignTool will look in its own directory and fail with
