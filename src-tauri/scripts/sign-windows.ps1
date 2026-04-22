@@ -29,6 +29,12 @@ if (-not (Test-Path -LiteralPath $FilePath)) {
     throw "File to sign does not exist: $FilePath"
 }
 
+# Tauri passes the file as a path relative to its own CWD. We change CWD
+# below to load CodeSignTool's conf/, so resolve to absolute first or
+# CodeSignTool will look in its own directory and fail with
+# "Invalid input file path".
+$FilePath = (Resolve-Path -LiteralPath $FilePath).Path
+
 Write-Host "Signing $FilePath"
 
 # CodeSignTool reads conf/code_sign_tool.properties relative to CWD, so run from its root dir.
