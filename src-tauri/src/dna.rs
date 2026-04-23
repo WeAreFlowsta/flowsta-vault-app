@@ -14,12 +14,14 @@ use std::path::Path;
 
 /// Default DNA versions bundled with this app build.
 /// Used for first-time installs and as fallback when VaultConfig has no version info.
-pub const BUNDLED_PRIVATE_VERSION: &str = "1.10";
+/// MUST match the filenames listed in tauri.conf.json `bundle.resources` and the
+/// files actually present in src-tauri/resources/.
+pub const BUNDLED_PRIVATE_VERSION: &str = "1.11";
 pub const BUNDLED_IDENTITY_VERSION: &str = "1.4";
 pub const BUNDLED_SIGNING_VERSION: &str = "1.4";
 
 /// hApp bundle filenames bundled with this app build (in src-tauri/resources/).
-const BUNDLED_PRIVATE_HAPP_FILE: &str = "flowsta_private_v1_10_happ.happ";
+const BUNDLED_PRIVATE_HAPP_FILE: &str = "flowsta_private_v1_11_happ.happ";
 const BUNDLED_IDENTITY_HAPP_FILE: &str = "flowsta_identity_v1_4_happ.happ";
 const BUNDLED_SIGNING_HAPP_FILE: &str = "flowsta_signing_v1_4_happ.happ";
 

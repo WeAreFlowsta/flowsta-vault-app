@@ -97,11 +97,20 @@ pub fn generate_conductor_config(
     let signal_url = option_env!("FLOWSTA_SIGNAL_URL")
         .unwrap_or("wss://bootstrap.flowsta.com");
 
+    // Path values use SINGLE-quoted YAML strings — double-quoted YAML interprets
+    // backslash escapes (e.g. "C:\Users\..." reads "\U" as the start of a Unicode
+    // escape and bombs out at the first non-hex character). Single-quoted strings
+    // pass backslashes through verbatim. The only character that needs escaping
+    // inside single quotes is the single quote itself; doubling it is the YAML
+    // convention.
+    let data_root = conductor_dir.display().to_string().replace('\'', "''");
+    let lair_url = lair_connection_url.replace('\'', "''");
+
     let config = format!(
-        r#"data_root_path: "{data_root}"
+        r#"data_root_path: '{data_root}'
 keystore:
   type: lair_server
-  connection_url: "{lair_url}"
+  connection_url: '{lair_url}'
 admin_interfaces:
 - driver:
     type: websocket
@@ -118,9 +127,9 @@ network:
       - urls: ["stun:stun.l.google.com:19302"]
 db_sync_strategy: Resilient
 "#,
-        data_root = conductor_dir.display(),
+        data_root = data_root,
         admin_port = admin_port,
-        lair_url = lair_connection_url,
+        lair_url = lair_url,
         bootstrap_url = bootstrap_url,
         signal_url = signal_url,
     );
