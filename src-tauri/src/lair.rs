@@ -8,6 +8,7 @@
 //! handles this wrapping transparently, following the pattern from lair's official
 //! `deterministic-keys.rs` example.
 
+use crate::process_ext::CommandExt;
 use lair_keystore_api::dependencies::sodoken;
 use lair_keystore_api::prelude::*;
 use percent_encoding::percent_decode_str;
@@ -129,6 +130,7 @@ pub fn start_lair_process(
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .tie_to_parent()
             .spawn()
             .map_err(|e| format!("Failed to spawn lair-keystore init: {}", e))?;
 
@@ -167,6 +169,7 @@ pub fn start_lair_process(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .tie_to_parent()
         .spawn()
         .map_err(|e| format!("Failed to spawn lair-keystore server: {}", e))?;
 

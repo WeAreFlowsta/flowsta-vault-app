@@ -6,6 +6,7 @@
 use crate::{dna, lair};
 use lair_keystore_api::prelude::*;
 use std::path::{Path, PathBuf};
+use crate::process_ext::CommandExt;
 use std::process::{Child, Stdio};
 use tauri::Emitter;
 
@@ -162,6 +163,7 @@ pub fn start_conductor_process(
         .stdin(Stdio::piped())
         .stdout(stdout_file)
         .stderr(stderr_file)
+        .tie_to_parent()
         .spawn()
         .map_err(|e| format!("Failed to spawn holochain conductor: {}", e))?;
 

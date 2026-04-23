@@ -8,6 +8,7 @@ mod ipc_server;
 mod key_derivation;
 mod lair;
 mod mau;
+mod process_ext;
 mod quota_cache;
 mod vault;
 
@@ -95,6 +96,38 @@ pub fn run() {
                     Ok(port) => log::info!("IPC server started on port {}", port),
                     Err(e) => log::error!("Failed to start IPC server: {}", e),
                 }
+            });
+
+            // Catch SIGTERM / SIGINT (Ctrl+C, system shutdown, dpkg postinst kill,
+            // `kill <pid>`) and route them through app.exit() so RunEvent::Exit
+            // fires and ConductorHandle::shutdown() kills the holochain conductor
+            // and lair-keystore children cleanly.
+            let signal_app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                #[cfg(unix)]
+                {
+                    use tokio::signal::unix::{signal, SignalKind};
+                    let mut sigterm = match signal(SignalKind::terminate()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::error!("Failed to register SIGTERM handler: {}", e);
+                            return;
+                        }
+                    };
+                    tokio::select! {
+                        _ = sigterm.recv() => log::info!("SIGTERM received, exiting"),
+                        _ = tokio::signal::ctrl_c() => log::info!("SIGINT received, exiting"),
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    if tokio::signal::ctrl_c().await.is_err() {
+                        log::error!("Failed to register Ctrl+C handler");
+                        return;
+                    }
+                    log::info!("Ctrl+C received, exiting");
+                }
+                signal_app_handle.exit(0);
             });
 
             // --- System tray ---
