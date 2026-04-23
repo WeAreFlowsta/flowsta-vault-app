@@ -222,6 +222,11 @@ jobs:
               release_id: releaseId,
             });
 
+            // Tauri's auto-update tarballs ship without the version in their
+            // filename ("Flowsta Vault_aarch64.app.tar.gz"); inject it in the
+            // rename so they end up consistent with the .dmg naming.
+            const version = context.ref.replace('refs/tags/vault-v', '');
+
             const renames = {
               '_aarch64.dmg': '-macOS-Apple-Silicon.dmg',
               '_x64.dmg': '-macOS-Intel.dmg',
@@ -230,10 +235,10 @@ jobs:
               '-1.x86_64.rpm': '-Linux.rpm',
               '_x64-setup.exe': '-Windows-Setup.exe',
               '_x64_en-US.msi': '-Windows.msi',
-              '_aarch64.app.tar.gz': '-macOS-Apple-Silicon.app.tar.gz',
-              '_x64.app.tar.gz': '-macOS-Intel.app.tar.gz',
-              '_aarch64.app.tar.gz.sig': '-macOS-Apple-Silicon.app.tar.gz.sig',
-              '_x64.app.tar.gz.sig': '-macOS-Intel.app.tar.gz.sig',
+              '_aarch64.app.tar.gz': `_${version}-macOS-Apple-Silicon.app.tar.gz`,
+              '_x64.app.tar.gz': `_${version}-macOS-Intel.app.tar.gz`,
+              '_aarch64.app.tar.gz.sig': `_${version}-macOS-Apple-Silicon.app.tar.gz.sig`,
+              '_x64.app.tar.gz.sig': `_${version}-macOS-Intel.app.tar.gz.sig`,
             };
 
             for (const asset of assets) {
