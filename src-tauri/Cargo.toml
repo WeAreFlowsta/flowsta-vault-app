@@ -25,11 +25,6 @@ tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 tokio = { version = "1", features = ["full"] }
 
-# Linux-only: PR_SET_PDEATHSIG so child processes (lair-keystore, holochain
-# conductor) get SIGTERM if the parent vault process dies for any reason.
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
-
 # Key derivation (port of api/src/services/recoveryPhrase.js)
 bip39 = { version = "2", features = ["default"] }
 hmac = "0.12"
@@ -80,6 +75,14 @@ rusty-chromaprint = "0.3"
 
 # Error handling
 thiserror = "1.0"
+
+# Linux-only: PR_SET_PDEATHSIG so child processes (lair-keystore, holochain
+# conductor) get SIGTERM if the parent vault process dies for any reason.
+# (Must be the last [target...] block before [patch.crates-io] — TOML section
+# headers capture all keys until the next header, so anything placed after
+# this becomes Linux-only too.)
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 # core2 (transitive dep via libflate → libsodium-sys-stable → sodoken → lair)
 # was yanked from crates.io on 2026-04-14 when the maintainer archived it.
