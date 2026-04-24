@@ -16,6 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Fails the release before any builds run if the bundled DNA hApp files
+      # are out of sync between tauri.conf.json, dna.rs constants, and the
+      # actual files in src-tauri/resources/.
+      - name: Check DNA bundle sync
+        run: ./scripts/check-bundle-sync.sh
+
       - name: Get version from tag
         id: version
         run: echo "version=${GITHUB_REF_NAME#vault-v}" >> $GITHUB_OUTPUT
