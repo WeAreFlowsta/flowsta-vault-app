@@ -13,7 +13,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { GlassButton } from "~/components/common/GlassButton";
 import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
 import { SignQuotaMeter, type SignQuotaState } from "~/components/sign-it/SignQuotaMeter";
-import { signaturesContext } from "~/lib/context";
+import { pendingSignPathsContext, signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
 
 // Shared select styling matching Settings auto-lock dropdown
@@ -185,6 +185,24 @@ export default component$(() => {
   // Signals to receive file paths from Tauri drag-drop (bridges native event → Qwik reactivity)
   const droppedFilePath = useSignal<string | null>(null);
   const droppedFilePaths = useSignal<string[] | null>(null);
+
+  // Files queued by the OS "Sign with Flowsta Vault" right-click integration
+  // (Linux .desktop, Windows registry, macOS Service). The layout drains
+  // the Rust queue into this signal; we route them into the same drag-drop
+  // signals so they reuse the existing analyse/batch flow.
+  const pendingSignPaths = useContext(pendingSignPathsContext);
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track }) => {
+    const queued = track(() => pendingSignPaths.value);
+    if (queued.length === 0) return;
+    if (step.value !== "idle") return; // don't interrupt an in-progress flow
+    if (queued.length === 1) {
+      droppedFilePath.value = queued[0];
+    } else {
+      droppedFilePaths.value = queued;
+    }
+    pendingSignPaths.value = []; // mark consumed
+  });
 
   // Listen for Tauri native drag-and-drop
   // eslint-disable-next-line qwik/no-use-visible-task

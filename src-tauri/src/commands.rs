@@ -137,6 +137,10 @@ pub struct AppState {
     /// Cached here so get_my_signatures can query linked agent's signatures
     /// without waiting for identity DNA gossip.
     pub linked_web_agent_key: Mutex<Option<String>>,
+    /// Files passed to the app via the OS file-explorer integration
+    /// ("Sign with Flowsta Vault" right-click) before the frontend was ready
+    /// to handle them. Drained by `take_pending_sign_paths`.
+    pub pending_sign_paths: Mutex<Vec<std::path::PathBuf>>,
 }
 
 impl AppState {
@@ -165,6 +169,7 @@ impl AppState {
             linked_app_scopes: Mutex::new(linked_app_scopes),
             backup_key: Mutex::new(None),
             linked_web_agent_key: Mutex::new(None),
+            pending_sign_paths: Mutex::new(Vec::new()),
         }
     }
 
@@ -2259,6 +2264,39 @@ pub fn get_file_size(path: String) -> Result<u64, String> {
 #[tauri::command]
 pub fn cancel_hash() {
     HASH_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Drain any files queued by the OS file-explorer integration (Linux
+/// .desktop, Windows registry, macOS Service / Apple Event). Called by the
+/// frontend on dashboard mount + on `sign-files-requested` events.
+#[tauri::command]
+pub fn take_pending_sign_paths(state: State<'_, Arc<AppState>>) -> Vec<String> {
+    let mut queue = state.pending_sign_paths.lock().unwrap();
+    let paths: Vec<String> = queue
+        .drain(..)
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    paths
+}
+
+/// Filter a list of incoming OS args / Apple Event URLs down to existing
+/// readable file paths. Used by the CLI / single-instance / `RunEvent::Opened`
+/// handlers to keep the same validation logic in one place.
+pub fn extract_sign_paths_from_args<I, S>(args: I) -> Vec<std::path::PathBuf>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .map(|s| s.as_ref().to_string())
+        // Strip a `file://` prefix if present (RunEvent::Opened can deliver
+        // file URLs on macOS / Windows).
+        .map(|s| s.strip_prefix("file://").map(|t| t.to_string()).unwrap_or(s))
+        // Skip flags / option args that aren't paths.
+        .filter(|s| !s.starts_with("--") && !s.starts_with('-'))
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .collect()
 }
 
 /// Hash a file using SHA-256. Returns hex-encoded hash string. Emits

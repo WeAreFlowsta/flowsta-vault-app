@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Register Flowsta Vault as an "Open With" handler for any file.
+    LSHandlerRank=Alternate means we never become a user's default opener;
+    we just appear in Finder's right-click "Open With" submenu.
+    macOS delivers the chosen files via Apple Events, which Tauri surfaces
+    as `RunEvent::Opened` so the running app can route them into Sign It.
+  -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Any file</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.data</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

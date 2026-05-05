@@ -49,12 +49,23 @@
     "macOS": {
       "signingIdentity": null,
       "entitlements": "entitlements.plist",
-      "hardenedRuntime": true
+      "hardenedRuntime": true,
+      "infoPlist": "installer/Info.macos.plist"
+    },
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/share/applications/flowsta-vault-sign.desktop": "installer/flowsta-vault-sign.desktop"
+        }
+      }
     },
     "windows": {
       "signCommand": {
         "cmd": "pwsh",
         "args": ["-ExecutionPolicy", "Bypass", "-File", "scripts/sign-windows.ps1", "%1"]
+      },
+      "nsis": {
+        "installerHooks": "installer/windows-hooks.nsh"
       }
     }
   },

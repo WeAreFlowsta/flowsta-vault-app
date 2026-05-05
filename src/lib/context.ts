@@ -23,3 +23,12 @@ export interface SignaturesStore {
 
 export const signaturesContext =
   createContextId<SignaturesStore>("app.signatures");
+
+/**
+ * Files queued by the OS file-explorer integration ("Sign with Flowsta
+ * Vault" right-click) waiting to be handed off to the Sign It page. The
+ * layout drains the Rust queue into this signal; the Sign It page reads it
+ * and clears it once consumed.
+ */
+export const pendingSignPathsContext =
+  createContextId<Signal<string[]>>("app.pendingSignPaths");

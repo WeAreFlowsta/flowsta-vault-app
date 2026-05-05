@@ -1,12 +1,12 @@
 import { component$, useSignal, useStore, useVisibleTask$, useContextProvider, $, Slot } from "@builder.io/qwik";
-import { useLocation, Link } from "@builder.io/qwik-city";
+import { useLocation, useNavigate, Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { SetupWizard } from "~/components/vault/SetupWizard";
 import { UnlockScreen } from "~/components/vault/UnlockScreen";
 import { StatusIndicator } from "~/components/vault/StatusIndicator";
 import type { ConnectionStatus } from "~/components/vault/StatusIndicator";
-import { connectionStatusContext, autoLockContext, signaturesContext } from "~/lib/context";
+import { connectionStatusContext, autoLockContext, signaturesContext, pendingSignPathsContext } from "~/lib/context";
 import { hydrateSignaturesCache, persistSignaturesCache } from "~/lib/signatures-cache";
 import { GlassButton } from "~/components/common/GlassButton";
 
@@ -73,7 +73,13 @@ export default component$(() => {
     refresh: refreshSignatures,
   });
 
+  // Files queued by the OS "Sign with Flowsta Vault" integration. Populated
+  // by the drain task below; consumed (and cleared) by the Sign It page.
+  const pendingSignPaths = useSignal<string[]>([]);
+  useContextProvider(pendingSignPathsContext, pendingSignPaths);
+
   const loc = useLocation();
+  const nav = useNavigate();
   const userProfile = useStore({
     displayName: "",
     profilePicture: "",
@@ -350,6 +356,36 @@ export default component$(() => {
     if (scr === "dashboard" && status === "ready") {
       refreshSignatures();
     }
+  });
+
+  // OS file-explorer "Sign with Flowsta Vault" integration. The Rust side
+  // queues file paths from CLI args + Apple Events + single-instance args;
+  // we drain that queue here, expose the paths via context for the Sign It
+  // page to pick up, and route the user to /sign-it/.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(async ({ track, cleanup }) => {
+    const scr = track(() => screen.value);
+    if (scr !== "dashboard") return;
+
+    const drain = async () => {
+      try {
+        const paths = await invoke<string[]>("take_pending_sign_paths");
+        if (paths.length === 0) return;
+        pendingSignPaths.value = paths;
+        if (loc.url.pathname !== "/sign-it/") {
+          await nav("/sign-it/");
+        }
+      } catch (e) {
+        console.warn("take_pending_sign_paths failed:", e);
+      }
+    };
+
+    // Drain anything queued before the listener registers (e.g. files passed
+    // as CLI args at first launch, before vault unlock).
+    drain();
+
+    const unlistenPromise = listen("sign-files-requested", () => { drain(); });
+    cleanup(() => { unlistenPromise.then((u) => u()); });
   });
 
   const handleAuthResponse = $(async (approved: boolean) => {

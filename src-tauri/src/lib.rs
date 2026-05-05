@@ -50,14 +50,48 @@ use tauri::{
     Emitter, Listener, Manager, WindowEvent,
 };
 
+/// Push files queued by the OS file-explorer integration into AppState
+/// and notify the frontend. Used by:
+///   - the initial CLI-arg parser at startup
+///   - the single-instance plugin callback (Vault already running)
+///   - `RunEvent::Opened` (macOS Apple Events, file-association handlers)
+fn enqueue_sign_paths(app: &tauri::AppHandle, paths: Vec<PathBuf>) {
+    if paths.is_empty() {
+        return;
+    }
+    let count = paths.len();
+    let state = app.state::<Arc<AppState>>();
+    {
+        let mut queue = state.pending_sign_paths.lock().unwrap();
+        queue.extend(paths);
+    }
+    log::info!(
+        "Queued {} file(s) from OS file-explorer integration",
+        count,
+    );
+    let _ = app.emit("sign-files-requested", ());
+    // Bring the window to the front so the user sees the new flow.
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_focus();
+        let _ = window.set_always_on_top(false);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Another instance tried to launch — bring existing window to front
-            if let Some(window) = app.get_webview_window("main") {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Another instance tried to launch. Skip the binary-name arg, then
+            // queue any file paths and bring the existing window to front.
+            let paths = commands::extract_sign_paths_from_args(args.iter().skip(1));
+            if !paths.is_empty() {
+                enqueue_sign_paths(app, paths);
+            } else if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_always_on_top(true);
@@ -87,6 +121,20 @@ pub fn run() {
 
             // Share state with Tauri commands
             app.manage(app_state.clone());
+
+            // If we were launched from a file-explorer "Sign with Flowsta
+            // Vault" action, the OS passed the file path(s) as positional
+            // CLI args. Queue them now so the frontend can pick them up
+            // after vault unlock via `take_pending_sign_paths`.
+            let startup_paths = commands::extract_sign_paths_from_args(
+                std::env::args().skip(1),
+            );
+            if !startup_paths.is_empty() {
+                let count = startup_paths.len();
+                let mut queue = app_state.pending_sign_paths.lock().unwrap();
+                queue.extend(startup_paths);
+                log::info!("Queued {} file(s) from launch args", count);
+            }
 
             // Start IPC server in background (needs AppHandle for event emission)
             let ipc_state = app_state.clone();
@@ -236,6 +284,7 @@ pub fn run() {
             commands::hash_file,
             commands::cancel_hash,
             commands::get_file_size,
+            commands::take_pending_sign_paths,
             commands::analyze_file,
             commands::generate_perceptual_hash,
             commands::generate_thumbnail,
@@ -261,13 +310,29 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                let state: Arc<AppState> = app_handle.state::<Arc<AppState>>().inner().clone();
-                if let Ok(mut lock) = state.conductor_handle.lock() {
-                    if let Some(handle) = lock.take() {
-                        handle.shutdown();
-                    }
-                };
+            match event {
+                tauri::RunEvent::Exit => {
+                    let state: Arc<AppState> = app_handle.state::<Arc<AppState>>().inner().clone();
+                    if let Ok(mut lock) = state.conductor_handle.lock() {
+                        if let Some(handle) = lock.take() {
+                            handle.shutdown();
+                        }
+                    };
+                }
+                // Triggered on macOS / iOS when the OS opens files with our
+                // app via Apple Events (Services menu, Open With, drag onto
+                // dock icon). Linux + Windows route through CLI args instead,
+                // handled in the setup hook + single-instance callback.
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                tauri::RunEvent::Opened { urls } => {
+                    let strings: Vec<String> = urls
+                        .iter()
+                        .map(|u| u.as_str().to_string())
+                        .collect();
+                    let paths = commands::extract_sign_paths_from_args(strings);
+                    enqueue_sign_paths(app_handle, paths);
+                }
+                _ => {}
             }
         });
 }
