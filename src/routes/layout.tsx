@@ -6,7 +6,8 @@ import { SetupWizard } from "~/components/vault/SetupWizard";
 import { UnlockScreen } from "~/components/vault/UnlockScreen";
 import { StatusIndicator } from "~/components/vault/StatusIndicator";
 import type { ConnectionStatus } from "~/components/vault/StatusIndicator";
-import { connectionStatusContext, autoLockContext } from "~/lib/context";
+import { connectionStatusContext, autoLockContext, signaturesContext } from "~/lib/context";
+import { hydrateSignaturesCache, persistSignaturesCache } from "~/lib/signatures-cache";
 import { GlassButton } from "~/components/common/GlassButton";
 
 type AppScreen = "loading" | "setup" | "unlock" | "dashboard";
@@ -30,6 +31,48 @@ export default component$(() => {
   const conductorMessage = useSignal("");
   const autoLockMinutes = useSignal(15);
   useContextProvider(autoLockContext, autoLockMinutes);
+
+  // App-wide signatures store. Owned by the layout so navigating between
+  // Overview / Sign It / View All doesn't re-trigger fetches.
+  const signaturesSig = useSignal<any[]>([]);
+  const signaturesLoaded = useSignal(false);
+  const signaturesRefreshing = useSignal(false);
+  // If refresh is requested while one is already running, mark a follow-up.
+  // Important because state may change during the in-flight call (e.g.
+  // auto-link caches the linked agent key mid-fetch, so the next round will
+  // pick up linked-agent sigs that the current call missed).
+  const pendingRefresh = useSignal(false);
+  const refreshSignatures = $(async () => {
+    if (signaturesRefreshing.value) {
+      pendingRefresh.value = true;
+      return;
+    }
+    signaturesRefreshing.value = true;
+    try {
+      do {
+        pendingRefresh.value = false;
+        try {
+          const sigs = await invoke<any[]>("get_my_signatures");
+          if (Array.isArray(sigs)) {
+            signaturesSig.value = sigs;
+            persistSignaturesCache(sigs);
+          }
+        } catch {
+          // Conductor may not be ready yet — caller can retry
+        }
+        signaturesLoaded.value = true;
+      } while (pendingRefresh.value);
+    } finally {
+      signaturesRefreshing.value = false;
+    }
+  });
+  useContextProvider(signaturesContext, {
+    signatures: signaturesSig,
+    loaded: signaturesLoaded,
+    refreshing: signaturesRefreshing,
+    refresh: refreshSignatures,
+  });
+
   const loc = useLocation();
   const userProfile = useStore({
     displayName: "",
@@ -270,15 +313,43 @@ export default component$(() => {
       },
     );
 
-    // Listen for profile sync (profile picture/name updated from web account)
+    // Listen for profile sync (profile picture/name updated from web account).
+    // This event also signals that auto-link is complete, so the cached web
+    // agent key is now available — refresh signatures to pick up linked-agent
+    // sigs that the first fetch may have missed.
     const unlistenProfilePromise = listen("profile-synced", () => {
       fetchProfile();
+      refreshSignatures();
     });
 
     cleanup(() => {
       unlistenPromise.then((unlisten) => unlisten());
       unlistenProfilePromise.then((unlisten) => unlisten());
     });
+  });
+
+  // Hydrate signatures from localStorage cache on first mount so that
+  // returning users see their list instantly (Overview count + Sign It list)
+  // without waiting for the conductor cold-start.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(() => {
+    const cached = hydrateSignaturesCache<any>();
+    if (cached.length > 0) {
+      signaturesSig.value = cached;
+      signaturesLoaded.value = true;
+    }
+  });
+
+  // Trigger the first fetch as soon as the conductor reports ready while we
+  // are on the dashboard. Each lock/unlock cycle restarts the conductor, so
+  // this fires once per unlock (ready transition).
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track }) => {
+    const status = track(() => conductorStatus.value);
+    const scr = track(() => screen.value);
+    if (scr === "dashboard" && status === "ready") {
+      refreshSignatures();
+    }
   });
 
   const handleAuthResponse = $(async (approved: boolean) => {
@@ -402,7 +473,7 @@ export default component$(() => {
 
   // Dashboard: full-width header at top, then sidebar + content below
   return (
-    <div class="flex min-h-screen flex-col bg-gray-800">
+    <div class="flex h-screen flex-col bg-gray-800">
       {/* Full-width header */}
       <header class="sticky top-0 z-40 w-full border-b border-gray-700 bg-gray-900">
         <div class="flex items-center justify-between py-3 px-6">
@@ -438,8 +509,10 @@ export default component$(() => {
         </div>
       </header>
 
-      {/* Below header: sidebar + content */}
-      <div class="flex flex-1">
+      {/* Below header: sidebar + content. min-h-0 lets the row shrink below
+          its content size so <main>'s overflow-y-auto can actually scroll
+          internally instead of expanding the row past the viewport. */}
+      <div class="flex flex-1 min-h-0">
         {/* Sidebar */}
         <aside class="flex w-64 flex-col border-r border-gray-700 bg-gray-900">
           {/* Navigation */}
@@ -513,6 +586,10 @@ export default component$(() => {
               type="button"
               class="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-300 transition-colors"
               onClick$={async () => {
+                // Cache is intentionally NOT cleared here. Signature metadata
+                // is the kind of public-by-design data that gets verified on
+                // the DHT, so persisting it across lock gives the same user
+                // an instant Overview/Sign It view on next unlock.
                 await invoke("lock_vault");
                 screen.value = "unlock";
               }}

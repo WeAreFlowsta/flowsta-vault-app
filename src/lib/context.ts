@@ -1,4 +1,4 @@
-import { createContextId, type Signal } from "@builder.io/qwik";
+import { createContextId, type QRL, type Signal } from "@builder.io/qwik";
 import type { ConnectionStatus } from "~/components/vault/StatusIndicator";
 
 export const connectionStatusContext =
@@ -6,3 +6,20 @@ export const connectionStatusContext =
 
 export const autoLockContext =
   createContextId<Signal<number>>("app.autoLockMinutes");
+
+/**
+ * App-wide signatures store. The dashboard layout fetches signatures once
+ * on conductor-ready + once after auto-link completes, and provides the
+ * result here so Overview / Sign It / View All can all read the same signal
+ * without re-triggering work on each navigation.
+ */
+export interface SignaturesStore {
+  signatures: Signal<any[]>;
+  loaded: Signal<boolean>;
+  refreshing: Signal<boolean>;
+  /** Force a fresh fetch (e.g. after sign / revoke / thumbnail edit). */
+  refresh: QRL<() => Promise<void>>;
+}
+
+export const signaturesContext =
+  createContextId<SignaturesStore>("app.signatures");

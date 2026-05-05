@@ -1,5 +1,6 @@
 import {
   component$,
+  useContext,
   useSignal,
   useStore,
   $,
@@ -10,7 +11,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { GlassButton } from "~/components/common/GlassButton";
+import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
 import { SignQuotaMeter, type SignQuotaState } from "~/components/sign-it/SignQuotaMeter";
+import { signaturesContext } from "~/lib/context";
+import { persistSignaturesCache } from "~/lib/signatures-cache";
 
 // Shared select styling matching Settings auto-lock dropdown
 const selectClass =
@@ -28,6 +32,20 @@ function formatRelativeTime(timestampMs: number): string {
   if (days < 7) return `${days}d ago`;
   return new Date(timestampMs).toLocaleDateString();
 }
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
+  return `${(bytes / Math.pow(k, i)).toFixed(i > 0 ? 1 : 0)} ${sizes[i]}`;
+}
+
+// File size tiers. Hashing is streaming so it's effectively unbounded; the
+// caps are about UX (progress UI, integrity-analysis memory).
+const PROGRESS_THRESHOLD = 50 * 1024 * 1024;             // 50 MB
+const ANALYSIS_LIMIT = 500 * 1024 * 1024;                // 500 MB
+const SIGN_LIMIT = 10 * 1024 * 1024 * 1024;              // 10 GB
 
 interface IntegrityIssue {
   check_type: string;
@@ -91,8 +109,15 @@ export default component$(() => {
   const signResult = useSignal<SignResult | null>(null);
   const error = useSignal("");
   const isDragOver = useSignal(false);
-  const recentSignatures = useSignal<SignResult[]>([]);
-  const signaturesLoaded = useSignal(false);
+  // Hash progress state — driven by `hash-progress` Tauri events. Only
+  // surfaces in the UI for files large enough to warrant a progress bar.
+  const hashing = useSignal(false);
+  const hashProgress = useSignal(0); // 0..1
+  // Shared signatures store from layout — same fetch backs Overview, Sign It
+  // index, and View All so navigation between them is instant.
+  const sigStore = useContext(signaturesContext);
+  const recentSignatures = sigStore.signatures;
+  const signaturesLoaded = sigStore.loaded;
   const existingSignatures = useSignal<any[]>([]);
 
   // Thumbnail state (auto-generated for images)
@@ -204,22 +229,53 @@ export default component$(() => {
 
     try {
       const { invoke: inv } = await import("@tauri-apps/api/core");
-      const hash = await inv<string>("hash_file", { path: filePath });
+
+      let size: number;
+      try {
+        size = await inv<number>("get_file_size", { path: filePath });
+      } catch (e) {
+        error.value = `Could not read file: ${e}`;
+        step.value = "idle";
+        return;
+      }
+      fileSize.value = size;
+      if (size > SIGN_LIMIT) {
+        error.value = `File is too large to sign (${formatBytes(size)}). Maximum is ${formatBytes(SIGN_LIMIT)}.`;
+        step.value = "idle";
+        return;
+      }
+      const analysisSkipped = size > ANALYSIS_LIMIT;
+
+      hashing.value = true;
+      hashProgress.value = 0;
+      let hash: string;
+      try {
+        hash = await inv<string>("hash_file", { path: filePath });
+      } catch (e) {
+        error.value = typeof e === "string" ? e : `Hashing failed: ${e}`;
+        step.value = "idle";
+        return;
+      } finally {
+        hashing.value = false;
+        hashProgress.value = 0;
+      }
       fileHash.value = hash;
-      const report = await inv<IntegrityReport>("analyze_file", { path: filePath });
-      integrityReport.value = report;
 
-      // Generate perceptual hash
-      try {
-        const phash = await inv<any>("generate_perceptual_hash", { path: filePath });
-        perceptualHash.value = phash;
-      } catch { perceptualHash.value = null; }
-
-      // Generate thumbnail (images only)
-      try {
-        const thumb = await inv<string | null>("generate_thumbnail", { path: filePath });
-        thumbnailData.value = thumb;
-      } catch { thumbnailData.value = null; }
+      if (analysisSkipped) {
+        integrityReport.value = null;
+        perceptualHash.value = null;
+        thumbnailData.value = null;
+      } else {
+        try {
+          integrityReport.value = await inv<IntegrityReport>("analyze_file", { path: filePath });
+        } catch { integrityReport.value = null; }
+        try {
+          perceptualHash.value = await inv<any>("generate_perceptual_hash", { path: filePath });
+        } catch { perceptualHash.value = null; }
+        try {
+          thumbnailData.value = await inv<string | null>("generate_thumbnail", { path: filePath });
+        } catch { thumbnailData.value = null; }
+      }
 
       // Check existing signatures (API first, local conductor fallback)
       existingSignatures.value = [];
@@ -266,11 +322,37 @@ export default component$(() => {
         const name = parts[parts.length - 1];
         hashingProgress.value = `${i + 1} of ${paths.length}`;
 
-        const hash = await inv<string>("hash_file", { path: filePath });
-        const report = await inv<IntegrityReport>("analyze_file", { path: filePath });
+        let size: number;
+        try {
+          size = await inv<number>("get_file_size", { path: filePath });
+        } catch (e) {
+          throw new Error(`${name}: could not read file (${e})`);
+        }
+        if (size > SIGN_LIMIT) {
+          throw new Error(`${name} is too large to sign (${formatBytes(size)}). Maximum is ${formatBytes(SIGN_LIMIT)}.`);
+        }
+        const analysisSkipped = size > ANALYSIS_LIMIT;
 
+        // Track in-flight progress for the current file. Cancel applies to
+        // whatever's currently hashing; the for-loop catch handles abort.
+        fileSize.value = size;
+        fileName.value = name;
+        hashing.value = true;
+        hashProgress.value = 0;
+        let hash: string;
+        try {
+          hash = await inv<string>("hash_file", { path: filePath });
+        } finally {
+          hashing.value = false;
+          hashProgress.value = 0;
+        }
+
+        let report: IntegrityReport | null = null;
         let phash = null;
-        try { phash = await inv<any>("generate_perceptual_hash", { path: filePath }); } catch {}
+        if (!analysisSkipped) {
+          try { report = await inv<IntegrityReport>("analyze_file", { path: filePath }); } catch {}
+          try { phash = await inv<any>("generate_perceptual_hash", { path: filePath }); } catch {}
+        }
 
         entries.push({ path: filePath, name, hash, integrityReport: report, perceptualHash: phash });
       }
@@ -281,6 +363,22 @@ export default component$(() => {
       error.value = `Analysis failed: ${e}`;
       step.value = "idle";
     }
+  });
+
+  // Listen for hash-progress events emitted by the Rust hasher. Only one
+  // hash runs at a time (single-flight guaranteed by the UI), so the global
+  // signal is fine here.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(async ({ cleanup }) => {
+    const { listen } = await import("@tauri-apps/api/event");
+    const unlisten = await listen<{ hashed: number; total: number }>(
+      "hash-progress",
+      (event) => {
+        const { hashed, total } = event.payload;
+        if (total > 0) hashProgress.value = hashed / total;
+      },
+    );
+    cleanup(() => { unlisten(); });
   });
 
   // Phase 8: refresh quota when the Vault window regains focus.
@@ -300,33 +398,11 @@ export default component$(() => {
     });
   });
 
-  // Load recent signatures from the signing DNA on mount.
-  // Retries a few times since the conductor may still be starting up.
+  // Quota loads independently — needs to fire on page mount even if the
+  // signatures store is already populated from cache.
   // eslint-disable-next-line qwik/no-use-visible-task
-  useVisibleTask$(async () => {
-    const { invoke: inv } = await import("@tauri-apps/api/core");
-    // Phase 8: load sign quota in parallel (don't block signature loading)
+  useVisibleTask$(() => {
     refreshQuota();
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        const sigs = await inv<any[]>("get_my_signatures");
-        if (Array.isArray(sigs) && sigs.length > 0) {
-          recentSignatures.value = sigs;
-          signaturesLoaded.value = true;
-          return;
-        }
-        // Successful call but empty — conductor is ready, genuinely no signatures
-        if (Array.isArray(sigs)) {
-          signaturesLoaded.value = true;
-          return;
-        }
-      } catch (e) {
-        // Conductor may not be ready yet — keep retrying
-      }
-      await new Promise((r) => setTimeout(r, (attempt + 1) * 2000 + 1000));
-    }
-    // All retries exhausted
-    signaturesLoaded.value = true;
   });
 
   // Metadata form — all empty by default (opt-in declarations)
@@ -337,6 +413,57 @@ export default component$(() => {
     commercialLicensing: "",
     aiTraining: "",
     contactPreference: "",
+  });
+
+  // Tier-aware helper: reads size, validates limits, hashes (with progress),
+  // and runs integrity analysis only for files small enough to fit in RAM.
+  // Returns either { ok: true, ... } or { ok: false, error }.
+  const analyzeOneFile = $(async (filePath: string): Promise<
+    | { ok: true; size: number; hash: string; report: IntegrityReport | null; analysisSkipped: boolean }
+    | { ok: false; error: string }
+  > => {
+    const { invoke: inv } = await import("@tauri-apps/api/core");
+
+    let size: number;
+    try {
+      size = await inv<number>("get_file_size", { path: filePath });
+    } catch (e: any) {
+      return { ok: false, error: `Could not read file: ${e}` };
+    }
+    fileSize.value = size;
+
+    if (size > SIGN_LIMIT) {
+      return {
+        ok: false,
+        error: `File is too large to sign (${formatBytes(size)}). Maximum is ${formatBytes(SIGN_LIMIT)}.`,
+      };
+    }
+
+    const analysisSkipped = size > ANALYSIS_LIMIT;
+
+    hashing.value = true;
+    hashProgress.value = 0;
+    let hash: string;
+    try {
+      hash = await inv<string>("hash_file", { path: filePath });
+    } catch (e: any) {
+      return { ok: false, error: typeof e === "string" ? e : `Hashing failed: ${e}` };
+    } finally {
+      hashing.value = false;
+      hashProgress.value = 0;
+    }
+
+    let report: IntegrityReport | null = null;
+    if (!analysisSkipped) {
+      try {
+        report = await inv<IntegrityReport>("analyze_file", { path: filePath });
+      } catch (e) {
+        // Non-fatal — proceed without integrity report
+        console.warn("analyze_file failed:", e);
+      }
+    }
+
+    return { ok: true, size, hash, report, analysisSkipped };
   });
 
   const processFile = $(async (filePath: string) => {
@@ -350,29 +477,34 @@ export default component$(() => {
     step.value = "analyzing";
 
     try {
-      // Hash the file
-      const hash = await invoke<string>("hash_file", { path: filePath });
-      fileHash.value = hash;
-
-      // Run integrity checks
-      const report = await invoke<IntegrityReport>("analyze_file", {
-        path: filePath,
-      });
-      integrityReport.value = report;
-
-      // Generate perceptual hash (for fuzzy matching)
-      try {
-        const phash = await invoke<any>("generate_perceptual_hash", { path: filePath });
-        perceptualHash.value = phash;
-      } catch {
-        perceptualHash.value = null;
+      const result = await analyzeOneFile(filePath);
+      if (!result.ok) {
+        error.value = result.error;
+        step.value = "idle";
+        return;
       }
+      fileHash.value = result.hash;
+      integrityReport.value = result.report;
 
-      // Generate thumbnail (images only)
-      try {
-        const thumb = await invoke<string | null>("generate_thumbnail", { path: filePath });
-        thumbnailData.value = thumb;
-      } catch {
+      // Generate perceptual hash (for fuzzy matching) — skip for huge files,
+      // it'd OOM the same way analyze_file would.
+      if (!result.analysisSkipped) {
+        try {
+          const phash = await invoke<any>("generate_perceptual_hash", { path: filePath });
+          perceptualHash.value = phash;
+        } catch {
+          perceptualHash.value = null;
+        }
+
+        // Generate thumbnail (images only) — also a full-file read
+        try {
+          const thumb = await invoke<string | null>("generate_thumbnail", { path: filePath });
+          thumbnailData.value = thumb;
+        } catch {
+          thumbnailData.value = null;
+        }
+      } else {
+        perceptualHash.value = null;
         thumbnailData.value = null;
       }
 
@@ -380,7 +512,7 @@ export default component$(() => {
       existingSignatures.value = [];
       try {
         const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
-        const resp = await fetch(`${apiUrl}/api/v1/sign-it/verify?hash=${hash}`);
+        const resp = await fetch(`${apiUrl}/api/v1/sign-it/verify?hash=${result.hash}`);
         if (resp.ok) {
           const data = await resp.json();
           if (data.signatures?.length > 0) {
@@ -390,7 +522,7 @@ export default component$(() => {
       } catch {
         // Offline or API unavailable — try local conductor
         try {
-          const localSigs = await invoke<any[]>("get_signatures_for_hash", { fileHash: hash });
+          const localSigs = await invoke<any[]>("get_signatures_for_hash", { fileHash: result.hash });
           if (Array.isArray(localSigs) && localSigs.length > 0) {
             existingSignatures.value = localSigs;
           }
@@ -503,6 +635,7 @@ export default component$(() => {
       signResults.value = results;
       const successful = results.filter(r => r.success);
       recentSignatures.value = [...successful, ...recentSignatures.value.slice(0, Math.max(0, 10 - successful.length))];
+      persistSignaturesCache(recentSignatures.value);
       step.value = "done";
     } else if (fileHash.value) {
       // Single file signing
@@ -530,6 +663,7 @@ export default component$(() => {
         });
         const enrichedResult = { ...result, fileName: fileName.value, thumbnail: thumbnailData.value };
         recentSignatures.value = [enrichedResult, ...recentSignatures.value.slice(0, 9)];
+        persistSignaturesCache(recentSignatures.value);
 
         // Store thumbnail on DHT (non-blocking, best-effort)
         if (thumbnailData.value && result.action_hash) {
@@ -577,6 +711,7 @@ export default component$(() => {
       recentSignatures.value = recentSignatures.value.filter(
         (s) => s.action_hash !== revokeTarget.value?.action_hash
       );
+      persistSignaturesCache(recentSignatures.value);
       revokeTarget.value = null;
       revokeReason.value = "";
     } catch (e) {
@@ -638,12 +773,47 @@ export default component$(() => {
 
         {step.value === "analyzing" && (
           <div class="flex flex-col items-center py-8">
-            <div class="mb-3 h-8 w-8 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
-            <p class="text-sm text-gray-300">
-              {isBatch.value
-                ? <>Analyzing files... <span class="font-medium text-white">{hashingProgress.value}</span></>
-                : <>Analyzing <span class="font-medium text-white">{fileName.value}</span>...</>}
-            </p>
+            {hashing.value && fileSize.value > PROGRESS_THRESHOLD ? (
+              <div class="w-full max-w-md">
+                <div class="mb-2 flex items-center justify-between text-sm">
+                  <span class="truncate text-white">
+                    {isBatch.value
+                      ? <>Hashing <span class="font-medium">{fileName.value}</span> ({hashingProgress.value})</>
+                      : <>Hashing <span class="font-medium">{fileName.value}</span></>}
+                  </span>
+                  <span class="ml-2 shrink-0 font-mono text-gray-400">
+                    {Math.round(hashProgress.value * 100)}%
+                  </span>
+                </div>
+                <div class="mb-2 h-2 w-full overflow-hidden rounded-full bg-gray-700">
+                  <div
+                    class="h-full bg-amber-400 transition-[width] duration-100 ease-linear"
+                    style={`width: ${(hashProgress.value * 100).toFixed(1)}%`}
+                  />
+                </div>
+                <div class="flex items-center justify-between text-xs text-gray-500">
+                  <span>{formatBytes(fileSize.value)} total</span>
+                  <button
+                    type="button"
+                    class="text-amber-400 hover:text-amber-300 transition-colors"
+                    onClick$={async () => {
+                      await invoke("cancel_hash");
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div class="mb-3 h-8 w-8 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
+                <p class="text-sm text-gray-300">
+                  {isBatch.value
+                    ? <>Analyzing files... <span class="font-medium text-white">{hashingProgress.value}</span></>
+                    : <>Analyzing <span class="font-medium text-white">{fileName.value}</span>...</>}
+                </p>
+              </>
+            )}
           </div>
         )}
 
@@ -854,6 +1024,30 @@ export default component$(() => {
                 </div>
               );
             })()}
+
+            {/* Integrity analysis skipped for very large files (>500MB).
+                The hash and signature are still valid; we just don't run the
+                steganography / metadata checks because they need the whole
+                file in RAM. */}
+            {!isBatch.value && integrityReport.value === null && fileSize.value > ANALYSIS_LIMIT && (
+              <div class="mb-4 rounded-lg border border-gray-700 bg-gray-800 p-4">
+                <h4 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">
+                  File Analysis
+                </h4>
+                <div class="flex items-start gap-2">
+                  <span class="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-gray-500" />
+                  <div>
+                    <p class="text-sm text-gray-300">File analysis skipped</p>
+                    <p class="mt-0.5 text-xs text-gray-500">
+                      Hidden-content checks need to load the whole file into
+                      memory, so we skip them for files over 500&nbsp;MB. Your{" "}
+                      {formatBytes(fileSize.value)} file will still be hashed
+                      and signed normally.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Existing signatures notice */}
             {existingSignatures.value.length > 0 && (
@@ -1144,15 +1338,14 @@ export default component$(() => {
           )}
         </div>
 
-        {!signaturesLoaded.value ? (
-          <div class="flex items-center justify-center gap-3 py-6">
-            <div class="h-4 w-4 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
-            <p class="text-sm text-gray-500">Loading signatures...</p>
-          </div>
-        ) : recentSignatures.value.length === 0 ? (
-          <p class="py-4 text-center text-sm text-gray-500">
-            No signatures yet. Sign a file above to get started.
-          </p>
+        {recentSignatures.value.length === 0 ? (
+          !signaturesLoaded.value ? (
+            <LoadingSignatures />
+          ) : (
+            <p class="py-4 text-center text-sm text-gray-500">
+              No signatures yet. Sign a file above to get started.
+            </p>
+          )
         ) : (
           <div class="space-y-3">
             {recentSignatures.value

@@ -1,11 +1,10 @@
-import { component$, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
+import { component$, useContext, useSignal, useVisibleTask$ } from "@builder.io/qwik";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { CopyButton } from "~/components/ui/CopyButton";
-
-declare const __API_URL__: string;
+import { signaturesContext } from "~/lib/context";
 
 interface VaultIdentity {
   agent_pub_key: string;
@@ -57,9 +56,9 @@ export default component$(() => {
   const loading = useSignal(true);
   const showFullDid = useSignal(false);
 
-  // Web account linking
-  const linking = useSignal(false);
-  const linkError = useSignal("");
+  // Shared signatures store from layout — count + last-known list are
+  // already populated from cache by the time the user reaches Overview.
+  const sigStore = useContext(signaturesContext);
 
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ cleanup }) => {
@@ -87,31 +86,6 @@ export default component$(() => {
     cleanup(() => unlisten());
   });
 
-  const handleLinkWebAccount = $(async () => {
-    linking.value = true;
-    linkError.value = "";
-    try {
-      const result = await invoke<{
-        success: boolean;
-        web_agent_key: string | null;
-        message: string;
-      }>("link_web_account", { apiUrl: __API_URL__ });
-
-      if (result.success && identity.value) {
-        identity.value = {
-          ...identity.value,
-          web_agent_pub_key: result.web_agent_key,
-        };
-      } else if (!result.success) {
-        linkError.value = result.message || "Linking failed";
-      }
-    } catch (err) {
-      linkError.value = err instanceof Error ? err.message : String(err);
-    } finally {
-      linking.value = false;
-    }
-  });
-
   if (loading.value) {
     return (
       <div>
@@ -137,8 +111,11 @@ export default component$(() => {
   if (!id) return null;
 
   const stats = backupStats.value;
-  const webLinked = !!id.web_agent_pub_key;
   const hasDisplayName = !!id.display_name;
+  const sigCount = sigStore.signatures.value.length;
+  const sigsLoaded = sigStore.loaded.value;
+  const activeSigs = sigStore.signatures.value.filter((s: any) => !s.revoked).length;
+  const revokedSigs = sigCount - activeSigs;
 
   // Find most recent backup across all apps
   const lastBackupTime = stats?.apps.reduce(
@@ -226,38 +203,32 @@ export default component$(() => {
 
       {/* Stats Grid */}
       <div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
-        {/* Web Account */}
-        <div class={[
-          "rounded-lg border p-5",
-          webLinked
-            ? "border-green-800/50 bg-green-900/10"
-            : "border-gray-700 bg-gray-900",
-        ].join(" ")}>
+        {/* Signatures */}
+        <Link
+          href="/sign-it/"
+          class="rounded-lg border border-gray-700 bg-gray-900 p-5 transition-colors hover:border-gray-600 hover:bg-gray-800/80"
+        >
           <div class="mb-3 flex items-center gap-2 text-gray-400">
             <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-              <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
             </svg>
-            <span class="text-sm font-medium">Web Account</span>
+            <span class="text-sm font-medium">Signatures</span>
           </div>
-          {webLinked ? (
-            <p class="text-lg font-bold text-green-400">Linked</p>
-          ) : (
-            <>
-              <p class="mb-2 text-lg font-bold text-gray-500">Not linked</p>
-              {linkError.value && (
-                <p class="mb-2 text-xs text-red-400">{linkError.value}</p>
-              )}
-              <button
-                type="button"
-                disabled={linking.value}
-                class="text-xs font-medium text-amber-400 hover:text-amber-300 transition-colors disabled:opacity-50"
-                onClick$={handleLinkWebAccount}
-              >
-                {linking.value ? "Linking..." : "Link now"}
-              </button>
-            </>
-          )}
-        </div>
+          <p class="text-3xl font-bold text-white">
+            {sigsLoaded ? sigCount : (
+              <span class="inline-block h-7 w-10 animate-pulse rounded bg-gray-700 align-middle" />
+            )}
+          </p>
+          <p class="mt-1 text-xs text-gray-500">
+            {!sigsLoaded
+              ? "Loading..."
+              : sigCount === 0
+                ? "Sign your first file"
+                : revokedSigs > 0
+                  ? `${activeSigs} active, ${revokedSigs} revoked`
+                  : `${activeSigs} active`}
+          </p>
+        </Link>
 
         {/* Connected Apps */}
         <Link

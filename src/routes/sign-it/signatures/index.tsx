@@ -1,8 +1,11 @@
-import { component$, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
+import { component$, useContext, useSignal, $ } from "@builder.io/qwik";
 import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
 import ImageCropper from "~/components/sign-it/ImageCropper";
+import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
+import { signaturesContext } from "~/lib/context";
+import { persistSignaturesCache } from "~/lib/signatures-cache";
 
 function getDefaultThumbnail(sig: any): string {
   const hashType = sig.perceptual_hash?.hash_type;
@@ -33,8 +36,12 @@ function formatRelativeTime(timestampMs: number): string {
 }
 
 export default component$(() => {
-  const signatures = useSignal<any[]>([]);
-  const loaded = useSignal(false);
+  // Shared signatures store from layout — same fetch backs Overview, Sign It,
+  // and this page so navigation between them is instant and re-using sigs
+  // doesn't trigger another fetch.
+  const sigStore = useContext(signaturesContext);
+  const signatures = sigStore.signatures;
+  const loaded = sigStore.loaded;
   const showRevoked = useSignal(false);
   const revokeTarget = useSignal<any | null>(null);
   const revokeReason = useSignal("");
@@ -77,6 +84,7 @@ export default component$(() => {
           ? { ...s, thumbnail }
           : s
       );
+      persistSignaturesCache(signatures.value);
       editThumbTarget.value = null;
       editThumbImage.value = null;
       editThumbCanvas.value = null;
@@ -99,6 +107,7 @@ export default component$(() => {
       signatures.value = signatures.value.filter(
         (s) => s.action_hash !== revokeTarget.value?.action_hash
       );
+      persistSignaturesCache(signatures.value);
       revokeTarget.value = null;
       revokeReason.value = "";
     } catch (e) {
@@ -108,25 +117,8 @@ export default component$(() => {
     }
   });
 
-  // Load all signatures from the signing DNA
-  // eslint-disable-next-line qwik/no-use-visible-task
-  useVisibleTask$(async () => {
-    const { invoke: inv } = await import("@tauri-apps/api/core");
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        const sigs = await inv<any[]>("get_my_signatures");
-        if (Array.isArray(sigs)) {
-          signatures.value = sigs;
-          loaded.value = true;
-          return;
-        }
-      } catch {
-        // Conductor may not be ready yet
-      }
-      await new Promise((r) => setTimeout(r, (attempt + 1) * 2000 + 1000));
-    }
-    loaded.value = true;
-  });
+  // No fetch task here — the layout's signaturesContext already owns the
+  // fetch. We just consume the shared signal.
 
   return (
     <div>
@@ -144,10 +136,7 @@ export default component$(() => {
 
       <div class="rounded-lg border border-gray-700 bg-gray-900 p-6">
         {!loaded.value ? (
-          <div class="flex items-center justify-center gap-3 py-6">
-            <div class="h-4 w-4 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
-            <p class="text-sm text-gray-500">Loading signatures...</p>
-          </div>
+          <LoadingSignatures />
         ) : signatures.value.length === 0 ? (
           <div class="py-8 text-center">
             <svg class="mx-auto mb-3 h-10 w-10 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
