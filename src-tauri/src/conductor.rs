@@ -174,6 +174,7 @@ pub fn start_conductor_process(
     // holochain's terminal stays visible on Windows. lair-keystore is fine
     // with hidden consoles, so its window is still hidden via spawn_hidden
     // in lair.rs.
+    let spawn_start = std::time::Instant::now();
     let mut child = std::process::Command::new(&holochain_bin)
         .arg("-c")
         .arg(config_path)
@@ -185,6 +186,12 @@ pub fn start_conductor_process(
         .spawn()
         .map_err(|e| format!("Failed to spawn holochain conductor: {}", e))?;
 
+    let pid = child.id();
+    log::info!(
+        "[conductor:{pid}] spawned in {}ms — writing passphrase to stdin",
+        spawn_start.elapsed().as_millis()
+    );
+
     // Pipe the passphrase for lair authentication.
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
@@ -193,7 +200,7 @@ pub fn start_conductor_process(
             .map_err(|e| format!("Failed to write passphrase to conductor: {}", e))?;
     }
 
-    log::info!("Holochain conductor started (pid {})", child.id());
+    log::info!("[conductor:{pid}] passphrase piped — sleeping 500ms before liveness check");
 
     // Give the process a moment to fail on config errors, then check if it's still alive.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -205,7 +212,13 @@ pub fn start_conductor_process(
                 status, output.trim()
             ))
         }
-        Ok(None) => Ok(child), // Still running — good
+        Ok(None) => {
+            log::info!(
+                "[conductor:{pid}] alive after 500ms (total {}ms since spawn)",
+                spawn_start.elapsed().as_millis()
+            );
+            Ok(child)
+        }
         Err(e) => Err(format!("Failed to check conductor process status: {}", e)),
     }
 }
@@ -407,14 +420,39 @@ pub async fn start_holochain(
             fail_with_lair_cleanup!($err);
         }};
     }
-    let installed_dnas = match dna::install_dnas(
+    let install_start = std::time::Instant::now();
+    log::info!("[conductor] starting DNA install sequence");
+    let install_result = dna::install_dnas(
         admin_port,
         &resource_dir,
         agent_pub_key,
         dna::BUNDLED_PRIVATE_VERSION,
         dna::BUNDLED_IDENTITY_VERSION,
         dna::BUNDLED_SIGNING_VERSION,
-    ).await {
+    ).await;
+    let install_elapsed = install_start.elapsed();
+
+    // Whether install succeeded or failed, capture conductor liveness +
+    // log-file growth right now. This is the critical post-mortem on Windows:
+    // if holochain.exe died mid-install, we want to record that *before*
+    // dropping the child (which destroys the exit status).
+    let conductor_alive = matches!(conductor_child.try_wait(), Ok(None));
+    let stderr_len = std::fs::metadata(conductor_dir.join("holochain-stderr.log"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let stdout_len = std::fs::metadata(conductor_dir.join("holochain-stdout.log"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    log::info!(
+        "[conductor] DNA install finished in {}ms (ok={}, conductor_alive={}, stderr={}B, stdout={}B)",
+        install_elapsed.as_millis(),
+        install_result.is_ok(),
+        conductor_alive,
+        stderr_len,
+        stdout_len,
+    );
+
+    let installed_dnas = match install_result {
         Ok(d) => d,
         Err(e) => fail_with_full_cleanup!(format!("DNA installation failed: {}", e)),
     };

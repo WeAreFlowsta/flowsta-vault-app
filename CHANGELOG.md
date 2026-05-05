@@ -5,6 +5,39 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta1] — 2026-05-06
+
+### Diagnostic build for the Windows first-install crash
+
+This is a **diagnostic-only** pre-release. Behaviour is the same as v0.5.2 (lair
+hidden, holochain visible) but with verbose logging added throughout the
+Holochain startup path. The goal is to capture timing and lifecycle events
+during the Windows first-install failure so we can pin down the root cause and
+ship a clean v0.5.2 with both terminals hidden and no crashes.
+
+**What's new in the log:**
+- `[hide:<pid>]` — lifecycle of the post-spawn `ShowWindow(SW_HIDE)` thread on
+  Windows: when it starts, every poll iteration that finds a top-level
+  window for the spawned pid, the HWND we hide, and how long the whole hunt
+  took.
+- `[lair:init]` / `[lair:server]` — spawn timing for the lair-keystore init
+  and server processes.
+- `[conductor:<pid>]` — spawn time for `holochain.exe`, and a liveness check
+  500ms after spawn.
+- `[dna:private|identity|signing]` — per-DNA install + enable timing, plus
+  the `.happ` file size we're feeding the conductor.
+- A `[conductor]` summary after the DNA install sequence reports whether the
+  conductor process is still alive and the size of its stdout/stderr log
+  files. Critical for the Windows fault: if `holochain.exe` died mid-install,
+  this is the line that pins down which DNA was being processed.
+
+The log is written to the standard Tauri app-log directory; the path is
+printed on every startup (`Log dir: ...`) so testers can find it without
+guessing.
+
+No behaviour changes vs v0.5.2 are included. Once we have a reproducible
+log capture from a tester, we'll cut beta2 with a targeted fix.
+
 ## [0.5.2] — 2026-05-05
 
 ### Hide the lair-keystore terminal window on Windows

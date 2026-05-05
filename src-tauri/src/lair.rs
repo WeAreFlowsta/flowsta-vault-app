@@ -122,7 +122,8 @@ pub fn start_lair_process(
     log::info!("Using lair-keystore binary: {:?}", lair_bin);
 
     if is_first_run {
-        log::info!("First run: initializing lair-keystore...");
+        log::info!("[lair:init] first run — initializing lair-keystore");
+        let init_start = std::time::Instant::now();
         let mut child = Command::new(&lair_bin)
             .arg("init")
             .arg("--piped")
@@ -133,6 +134,7 @@ pub fn start_lair_process(
             .tie_to_parent()
             .spawn_hidden()
             .map_err(|e| format!("Failed to spawn lair-keystore init: {}", e))?;
+        log::info!("[lair:init] spawned pid {}", child.id());
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin
@@ -146,7 +148,10 @@ pub fn start_lair_process(
         if !status.success() {
             return Err(format!("lair-keystore init failed with status: {}", status));
         }
-        log::info!("Lair-keystore initialized successfully");
+        log::info!(
+            "[lair:init] completed in {}ms",
+            init_start.elapsed().as_millis()
+        );
     }
 
     // Read connection URL from config file.
@@ -161,7 +166,8 @@ pub fn start_lair_process(
     }
 
     // Start the lair server.
-    log::info!("Starting lair-keystore server...");
+    log::info!("[lair:server] starting lair-keystore server");
+    let spawn_start = std::time::Instant::now();
     let mut child = Command::new(&lair_bin)
         .arg("server")
         .arg("--piped")
@@ -180,7 +186,11 @@ pub fn start_lair_process(
             .map_err(|e| format!("Failed to write passphrase to lair server: {}", e))?;
     }
 
-    log::info!("Lair-keystore server started (pid {})", child.id());
+    log::info!(
+        "[lair:server] started (pid {}) in {}ms",
+        child.id(),
+        spawn_start.elapsed().as_millis()
+    );
     Ok((child, connection_url))
 }
 

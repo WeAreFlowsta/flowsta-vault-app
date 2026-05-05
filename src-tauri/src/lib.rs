@@ -113,8 +113,11 @@ pub fn run() {
                 .expect("Failed to get app data directory");
             std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
 
-            log::info!("Flowsta Vault starting up...");
+            log::info!("Flowsta Vault starting up (v{})", env!("CARGO_PKG_VERSION"));
             log::info!("Data dir: {:?}", data_dir);
+            if let Ok(log_dir) = app.path().app_log_dir() {
+                log::info!("Log dir: {:?}", log_dir);
+            }
 
             // Initialize app state (shared between Tauri commands and IPC server)
             let app_state = Arc::new(AppState::new(data_dir));

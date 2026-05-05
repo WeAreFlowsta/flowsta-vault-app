@@ -78,7 +78,9 @@ impl CommandExt for Command {
     #[cfg(target_os = "windows")]
     fn spawn_hidden(&mut self) -> io::Result<Child> {
         let child = self.spawn()?;
-        windows_hide::hide_console_for_pid_async(child.id());
+        let pid = child.id();
+        log::info!("[hide] spawned child pid {pid}, dispatching async hide thread");
+        windows_hide::hide_console_for_pid_async(pid);
         Ok(child)
     }
 
@@ -107,7 +109,12 @@ mod windows_hide {
 
     struct EnumState {
         target_pid: u32,
-        hidden: bool,
+        hits: u32,
+        hidden: u32,
+        // Track the first matched HWND so we can log it after enumeration
+        // completes (logging from inside enum_proc would be possible but
+        // keeps the hot loop simpler).
+        first_hwnd: usize,
     }
 
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -117,13 +124,17 @@ mod windows_hide {
             GetWindowThreadProcessId(hwnd, &mut wnd_pid);
         }
         if wnd_pid == state.target_pid {
+            state.hits += 1;
+            if state.first_hwnd == 0 {
+                state.first_hwnd = hwnd as usize;
+            }
             // Only hide currently-visible windows so we don't flap if the
             // child legitimately uses a hidden window for IPC.
             if unsafe { IsWindowVisible(hwnd) } != 0 {
                 unsafe {
                     ShowWindow(hwnd, SW_HIDE);
                 }
-                state.hidden = true;
+                state.hidden += 1;
             }
         }
         // Continue enumeration — a process may legitimately own multiple
@@ -131,10 +142,12 @@ mod windows_hide {
         1
     }
 
-    fn try_hide_once(target_pid: u32) -> bool {
+    fn try_hide_once(target_pid: u32) -> EnumState {
         let mut state = EnumState {
             target_pid,
-            hidden: false,
+            hits: 0,
+            hidden: 0,
+            first_hwnd: 0,
         };
         unsafe {
             EnumWindows(
@@ -142,21 +155,45 @@ mod windows_hide {
                 &mut state as *mut EnumState as LPARAM,
             );
         }
-        state.hidden
+        state
     }
 
     pub(super) fn hide_console_for_pid_async(pid: u32) {
         std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let started = Instant::now();
+            let deadline = started + Duration::from_secs(2);
+            log::info!("[hide:{pid}] thread started");
+            let mut iter: u32 = 0;
             while Instant::now() < deadline {
-                if try_hide_once(pid) {
+                iter += 1;
+                let state = try_hide_once(pid);
+                if state.hidden > 0 {
+                    let elapsed_ms = started.elapsed().as_millis();
+                    log::info!(
+                        "[hide:{pid}] window hidden after {elapsed_ms}ms ({iter} polls); hwnd=0x{:x}, hits={}, hidden={}",
+                        state.first_hwnd,
+                        state.hits,
+                        state.hidden,
+                    );
+                    return;
+                }
+                if state.hits > 0 {
+                    // Found a window for this pid but it was already hidden
+                    // (e.g. WS_VISIBLE never set). Log once and stop —
+                    // continuing to poll burns CPU for no reason.
+                    let elapsed_ms = started.elapsed().as_millis();
+                    log::info!(
+                        "[hide:{pid}] found {} window(s) but none visible after {elapsed_ms}ms ({iter} polls); not hiding",
+                        state.hits,
+                    );
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            // Window never appeared, or we couldn't find it. Not fatal —
-            // worst case is a visible terminal window. Keep silent rather
-            // than spamming logs.
+            let elapsed_ms = started.elapsed().as_millis();
+            log::warn!(
+                "[hide:{pid}] gave up after {elapsed_ms}ms ({iter} polls) — no top-level window ever appeared for this pid"
+            );
         });
     }
 }

@@ -176,7 +176,12 @@ pub async fn install_dnas(
             ));
         }
 
-        log::info!("Installing private DNA v{} from {:?}...", private_version, happ_path);
+        let happ_size = std::fs::metadata(&happ_path).map(|m| m.len()).unwrap_or(0);
+        log::info!(
+            "[dna:private] installing v{} ({} bytes) from {:?}",
+            private_version, happ_size, happ_path,
+        );
+        let install_start = std::time::Instant::now();
         let payload = InstallAppPayload {
             source: AppBundleSource::Path(happ_path),
             agent_key: Some(agent_key.clone()),
@@ -190,13 +195,22 @@ pub async fn install_dnas(
             .install_app(payload)
             .await
             .map_err(|e| format!("Failed to install private DNA: {}", e))?;
+        log::info!(
+            "[dna:private] install_app returned in {}ms",
+            install_start.elapsed().as_millis()
+        );
 
+        let enable_start = std::time::Instant::now();
         admin_ws
             .enable_app(private_app_id.clone())
             .await
             .map_err(|e| format!("Failed to enable private DNA: {}", e))?;
 
-        log::info!("Private DNA v{} installed and enabled", private_version);
+        log::info!(
+            "[dna:private] enabled in {}ms (total {}ms)",
+            enable_start.elapsed().as_millis(),
+            install_start.elapsed().as_millis(),
+        );
     }
 
     // 4. Install identity DNA if needed.
@@ -209,7 +223,12 @@ pub async fn install_dnas(
             ));
         }
 
-        log::info!("Installing identity DNA v{} from {:?}...", identity_version, happ_path);
+        let happ_size = std::fs::metadata(&happ_path).map(|m| m.len()).unwrap_or(0);
+        log::info!(
+            "[dna:identity] installing v{} ({} bytes) from {:?}",
+            identity_version, happ_size, happ_path,
+        );
+        let install_start = std::time::Instant::now();
         let payload = InstallAppPayload {
             source: AppBundleSource::Path(happ_path),
             agent_key: Some(agent_key.clone()),
@@ -223,13 +242,22 @@ pub async fn install_dnas(
             .install_app(payload)
             .await
             .map_err(|e| format!("Failed to install identity DNA: {}", e))?;
+        log::info!(
+            "[dna:identity] install_app returned in {}ms",
+            install_start.elapsed().as_millis()
+        );
 
+        let enable_start = std::time::Instant::now();
         admin_ws
             .enable_app(identity_app_id.clone())
             .await
             .map_err(|e| format!("Failed to enable identity DNA: {}", e))?;
 
-        log::info!("Identity DNA v{} installed and enabled", identity_version);
+        log::info!(
+            "[dna:identity] enabled in {}ms (total {}ms)",
+            enable_start.elapsed().as_millis(),
+            install_start.elapsed().as_millis(),
+        );
     }
 
     // 5. Install signing DNA if needed.
@@ -243,7 +271,12 @@ pub async fn install_dnas(
                 happ_path
             );
         } else {
-            log::info!("Installing signing DNA v{} from {:?}...", signing_version, happ_path);
+            let happ_size = std::fs::metadata(&happ_path).map(|m| m.len()).unwrap_or(0);
+            log::info!(
+                "[dna:signing] installing v{} ({} bytes) from {:?}",
+                signing_version, happ_size, happ_path,
+            );
+            let install_start = std::time::Instant::now();
             let payload = InstallAppPayload {
                 source: AppBundleSource::Path(happ_path),
                 agent_key: Some(agent_key.clone()),
@@ -257,13 +290,22 @@ pub async fn install_dnas(
                 .install_app(payload)
                 .await
                 .map_err(|e| format!("Failed to install signing DNA: {}", e))?;
+            log::info!(
+                "[dna:signing] install_app returned in {}ms",
+                install_start.elapsed().as_millis()
+            );
 
+            let enable_start = std::time::Instant::now();
             admin_ws
                 .enable_app(signing_app_id.clone())
                 .await
                 .map_err(|e| format!("Failed to enable signing DNA: {}", e))?;
 
-            log::info!("Signing DNA v{} installed and enabled", signing_version);
+            log::info!(
+                "[dna:signing] enabled in {}ms (total {}ms)",
+                enable_start.elapsed().as_millis(),
+                install_start.elapsed().as_millis(),
+            );
             signing_installed = true;
         }
     }
