@@ -7,25 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.2] — 2026-05-05
 
-### Hidden sidecar terminal windows on Windows (without crashing)
+### Hide the lair-keystore terminal window on Windows
 
-v0.5.0 hid the terminal windows for `lair-keystore.exe` and `holochain.exe`
-via the `CREATE_NO_WINDOW` flag, but that flag also prevents Windows from
-allocating a console handle — and `holochain.exe` then crashed in
-`MSVCP140.dll` during signing-DNA WASM compilation. v0.5.1 reverted to
-default flags to restore reliable installs at the cost of visible
-terminals.
+v0.5.0 tried to hide both sidecar terminals (`lair-keystore.exe` and
+`holochain.exe`) via `CREATE_NO_WINDOW`. That broke fresh installs because
+the flag also prevents Windows from allocating a console handle, and
+`holochain.exe` then crashed in `MSVCP140.dll` during signing-DNA WASM
+compilation. v0.5.1 reverted to leave both terminals visible.
 
-v0.5.2 takes the right approach: spawn the sidecars with default flags so
-the console is allocated normally (handles valid, no crash), then
-asynchronously enumerate the new process's top-level windows via
-`EnumWindows` + `GetWindowThreadProcessId` and call `ShowWindow(SW_HIDE)`
-on each. A small polling thread retries for up to 2 seconds so the window
-is caught even if it appears late under load.
+v0.5.2 testing showed the crash is specific to `holochain.exe` and
+reproduces with **any** mechanism that hides its console window —
+post-spawn `ShowWindow(SW_HIDE)` reproduces the same `0xc0000005`
+access violation. The root cause is upstream (holochain or wasmer's
+WASM-compilation path on Windows requires a visible console for some
+stdio operation we haven't pinned down). `lair-keystore.exe` is fine
+with hidden consoles.
 
-There's a brief flash (~50 ms typically) while we find and hide the
-window, but no permanent terminal windows and no crashes. Linux and macOS
-are unchanged.
+The compromise: lair-keystore is now spawned with a hidden window via a
+new `Command::spawn_hidden` extension that calls `EnumWindows` +
+`ShowWindow(SW_HIDE)` post-spawn (so the console handle is allocated
+normally, only the window is hidden). The holochain terminal stays
+visible on Windows for now. Half the previous noise, no crashes. Linux
+and macOS are unchanged.
 
 ## [0.5.1] — 2026-05-05
 

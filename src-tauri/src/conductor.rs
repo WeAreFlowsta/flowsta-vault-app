@@ -165,6 +165,15 @@ pub fn start_conductor_process(
     let holochain_bin = crate::resolve_sidecar_bin("holochain");
     log::info!("Using holochain binary: {:?}", holochain_bin);
 
+    // NOTE: we deliberately use .spawn() here (not .spawn_hidden()) — hiding
+    // holochain.exe's console window on Windows triggers an MSVCP140.dll
+    // access violation during signing-DNA WASM compilation, regardless of
+    // whether we use CREATE_NO_WINDOW (v0.5.0) or post-spawn ShowWindow
+    // (v0.5.2-rc1). Both approaches reproduce the same `0xc0000005` crash
+    // when the user installs from scratch. Until that's diagnosed upstream,
+    // holochain's terminal stays visible on Windows. lair-keystore is fine
+    // with hidden consoles, so its window is still hidden via spawn_hidden
+    // in lair.rs.
     let mut child = std::process::Command::new(&holochain_bin)
         .arg("-c")
         .arg(config_path)
@@ -173,7 +182,7 @@ pub fn start_conductor_process(
         .stdout(stdout_file)
         .stderr(stderr_file)
         .tie_to_parent()
-        .spawn_hidden()
+        .spawn()
         .map_err(|e| format!("Failed to spawn holochain conductor: {}", e))?;
 
     // Pipe the passphrase for lair authentication.
