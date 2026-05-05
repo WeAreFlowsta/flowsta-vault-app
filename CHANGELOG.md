@@ -5,6 +5,28 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] — 2026-05-05
+
+### Hidden sidecar terminal windows on Windows (without crashing)
+
+v0.5.0 hid the terminal windows for `lair-keystore.exe` and `holochain.exe`
+via the `CREATE_NO_WINDOW` flag, but that flag also prevents Windows from
+allocating a console handle — and `holochain.exe` then crashed in
+`MSVCP140.dll` during signing-DNA WASM compilation. v0.5.1 reverted to
+default flags to restore reliable installs at the cost of visible
+terminals.
+
+v0.5.2 takes the right approach: spawn the sidecars with default flags so
+the console is allocated normally (handles valid, no crash), then
+asynchronously enumerate the new process's top-level windows via
+`EnumWindows` + `GetWindowThreadProcessId` and call `ShowWindow(SW_HIDE)`
+on each. A small polling thread retries for up to 2 seconds so the window
+is caught even if it appears late under load.
+
+There's a brief flash (~50 ms typically) while we find and hide the
+window, but no permanent terminal windows and no crashes. Linux and macOS
+are unchanged.
+
 ## [0.5.1] — 2026-05-05
 
 ### Windows: fresh installs failed during signing DNA setup
