@@ -236,7 +236,6 @@ jobs:
             const renames = {
               '_aarch64.dmg': '-macOS-Apple-Silicon.dmg',
               '_x64.dmg': '-macOS-Intel.dmg',
-              '_amd64.AppImage': '-Linux.AppImage',
               '_amd64.deb': '-Linux.deb',
               '-1.x86_64.rpm': '-Linux.rpm',
               '_x64-setup.exe': '-Windows-Setup.exe',
