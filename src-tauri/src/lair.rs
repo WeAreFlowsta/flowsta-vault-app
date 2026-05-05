@@ -220,9 +220,21 @@ pub async fn connect_to_lair(
     let passphrase_array: SharedLockedArray = Arc::new(std::sync::Mutex::new(
         sodoken::LockedArray::from(passphrase.as_bytes().to_vec()),
     ));
-    lair_keystore_api::ipc_keystore_connect(url, passphrase_array)
-        .await
-        .map_err(|e| format!("Failed to connect to lair: {}", e))
+    // Wrap in a timeout so the user gets a clear error instead of an
+    // indefinite spinner if the IPC handshake hangs (e.g., a runtime-library
+    // mismatch between our embedded lair_keystore_api and the bundled
+    // lair-keystore binary on certain Linux setups).
+    let connect = lair_keystore_api::ipc_keystore_connect(url, passphrase_array);
+    match tokio::time::timeout(std::time::Duration::from_secs(30), connect).await {
+        Ok(Ok(client)) => Ok(client),
+        Ok(Err(e)) => Err(format!("Failed to connect to lair: {}", e)),
+        Err(_) => Err(
+            "Timed out connecting to the local key store. \
+             Try reinstalling Flowsta Vault, or restart your computer if \
+             the problem persists."
+                .to_string(),
+        ),
+    }
 }
 
 /// Wait for the lair connection to be ready.
