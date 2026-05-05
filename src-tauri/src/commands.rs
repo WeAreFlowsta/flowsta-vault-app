@@ -2239,33 +2239,106 @@ fn base64_standard_decode(input: &str) -> Result<Vec<u8>, ()> {
 
 // ── Sign It commands ────────────────────────────────────────────────
 
-/// Hash a file using SHA-256. Returns hex-encoded hash string.
+// Cancel flag for the in-flight hash. Single-flight is enforced by the UI
+// (one file at a time, batch is sequential). Each new hash_file call resets
+// this flag at the start; cancel_hash flips it to true.
+static HASH_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Returns the size of a file in bytes. Cheap metadata read used by the
+/// frontend to gate progress UI + integrity-analysis tier without hitting
+/// the slower hash path first.
 #[tauri::command]
-pub fn hash_file(path: String) -> Result<String, String> {
-    crate::file_analyzer::hash_file(std::path::Path::new(&path))
+pub fn get_file_size(path: String) -> Result<u64, String> {
+    std::fs::metadata(&path)
+        .map(|m| m.len())
+        .map_err(|e| format!("Failed to read file metadata: {}", e))
+}
+
+/// Cancel the currently-running hash_file call (if any). The cancel flag is
+/// checked between every 64KB read chunk inside the streaming hasher.
+#[tauri::command]
+pub fn cancel_hash() {
+    HASH_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Hash a file using SHA-256. Returns hex-encoded hash string. Emits
+/// `hash-progress` events with `{ hashed, total }` (bytes) throttled to
+/// ~10 fps so UIs can show progress without IPC spam.
+///
+/// Runs on the blocking thread pool — file I/O of multi-GB files would
+/// otherwise freeze the main thread (OS marks the app "not responding").
+#[tauri::command]
+pub async fn hash_file(path: String, app: tauri::AppHandle) -> Result<String, String> {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+    use tauri::Emitter;
+
+    HASH_CANCEL.store(false, Ordering::Relaxed);
+
+    tokio::task::spawn_blocking(move || {
+        let mut last_emit = Instant::now() - Duration::from_secs(1); // emit immediately
+        crate::file_analyzer::hash_file_with_progress(
+            std::path::Path::new(&path),
+            |hashed, total| {
+                if HASH_CANCEL.load(Ordering::Relaxed) {
+                    return false;
+                }
+                // Always emit the first event (so the UI sees `total`) and the
+                // final completion event; throttle the middle to ~10 fps.
+                let is_done = hashed == total;
+                if is_done || last_emit.elapsed() >= Duration::from_millis(100) {
+                    let _ = app.emit(
+                        "hash-progress",
+                        serde_json::json!({ "hashed": hashed, "total": total }),
+                    );
+                    last_emit = Instant::now();
+                }
+                true
+            },
+        )
+    })
+    .await
+    .map_err(|e| format!("Hash task panicked: {}", e))?
 }
 
 /// Run integrity checks on a file. Returns an IntegrityReport.
+/// Runs on the blocking thread pool — analyze_file reads the full file into
+/// RAM and runs CPU-bound steg checks.
 #[tauri::command]
-pub fn analyze_file(path: String) -> Result<crate::file_analyzer::IntegrityReport, String> {
-    crate::file_analyzer::analyze_file(std::path::Path::new(&path))
+pub async fn analyze_file(path: String) -> Result<crate::file_analyzer::IntegrityReport, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::file_analyzer::analyze_file(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|e| format!("Analyze task panicked: {}", e))?
 }
 
 /// Generate a perceptual hash for a file (for fuzzy matching).
 /// Returns None for file types that don't support perceptual hashing.
+/// Runs on the blocking thread pool — full-file read + image/audio decode.
 #[tauri::command]
-pub fn generate_perceptual_hash(path: String) -> Result<Option<crate::file_analyzer::PerceptualHash>, String> {
-    let data = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
-    let result = crate::file_analyzer::generate_perceptual_hash(&data);
-    Ok(result)
+pub async fn generate_perceptual_hash(
+    path: String,
+) -> Result<Option<crate::file_analyzer::PerceptualHash>, String> {
+    tokio::task::spawn_blocking(move || {
+        let data = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
+        Ok(crate::file_analyzer::generate_perceptual_hash(&data))
+    })
+    .await
+    .map_err(|e| format!("Perceptual hash task panicked: {}", e))?
 }
 
 /// Generate a thumbnail for an image file.
 /// Returns a base64 JPEG data URI for images, None for other file types.
+/// Runs on the blocking thread pool — full-file read + image decode + resize.
 #[tauri::command]
-pub fn generate_thumbnail(path: String) -> Result<Option<String>, String> {
-    let data = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
-    Ok(crate::file_analyzer::generate_image_thumbnail(&data))
+pub async fn generate_thumbnail(path: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let data = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
+        Ok(crate::file_analyzer::generate_image_thumbnail(&data))
+    })
+    .await
+    .map_err(|e| format!("Thumbnail task panicked: {}", e))?
 }
 
 /// Sign a file hash and commit the SignatureRecord to the signing DNA.
@@ -2367,293 +2440,316 @@ pub async fn sign_file(
     }))
 }
 
-/// Get all signatures from the signing DNA.
-/// Queries all installed signing DNA versions locally for own signatures,
-/// then queries linked agents' signatures via the identity + signing DNAs.
-/// Everything runs on the local conductor — no API dependency.
-#[tauri::command]
-pub async fn get_my_signatures(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<serde_json::Value>, String> {
-    use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
-        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
-    use holochain_types::prelude::ExternIO;
-
-    let conductor_ports = {
-        let conductor = state.conductor_handle.lock().unwrap();
-        conductor.as_ref().map(|h| (h.admin_port, h.app_port))
-    };
-
-    let (admin_port, app_port) = conductor_ports
-        .ok_or("Conductor not running")?;
-
-    let admin_ws = AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some("flowsta-vault-read".to_string()),
-    )
-    .await
-    .map_err(|e| format!("Admin WS: {}", e))?;
-
-    // Ensure all apps are enabled — conductor may disable cells on restart
-    crate::dna::ensure_apps_enabled(&admin_ws).await;
-
-    let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
-
-    // Find ALL installed signing DNA apps (current + old versions kept for history)
-    let signing_apps: Vec<_> = apps.iter()
-        .filter(|a| a.installed_app_id.starts_with("flowsta_signing_v"))
-        .collect();
-
-    if signing_apps.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    use holochain_types::prelude::{Record, Entry};
-
-    #[derive(serde::Deserialize, serde::Serialize)]
-    struct SignatureEntry {
-        file_hash: Vec<u8>,
-        signature: Vec<u8>,
-        signer: holochain_types::prelude::AgentPubKey,
-        signed_at: i64,
-        intent: Option<String>,
-        ai_generation: Option<String>,
-        content_rights: Option<serde_json::Value>,
-        integrity_report: Option<serde_json::Value>,
-        perceptual_hash: Option<serde_json::Value>,
-    }
-
-    let mut signatures = Vec::new();
-
-    // Query signatures from each installed signing DNA version
-    for signing_app in &signing_apps {
-        let role_name = match signing_app.cell_info.keys()
-            .find(|k| k.starts_with("flowsta_signing")) {
-            Some(r) => r.clone(),
-            None => continue,
-        };
-
-        let cell_id = match signing_app.cell_info[&role_name].iter()
-            .find_map(|c| match c {
-                CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-                _ => None,
-            }) {
-            Some(c) => c,
-            None => continue,
-        };
-
-        let credentials = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-            cell_id: cell_id.clone(), functions: None,
-        }).await {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("Failed to auth creds for {}: {}", signing_app.installed_app_id, e);
-                continue;
-            }
-        };
-
-        let issued = match admin_ws.issue_app_auth_token(
-            IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app.installed_app_id.clone()),
-        ).await {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!("Failed to get token for {}: {}", signing_app.installed_app_id, e);
-                continue;
-            }
-        };
-
-        let signer = ClientAgentSigner::default();
-        signer.add_credentials(cell_id, credentials);
-        let app_ws = match AppWebsocket::connect(
-            format!("localhost:{}", app_port),
-            issued.token, signer.into(),
-            Some("flowsta-vault-read".into()),
-        ).await {
-            Ok(ws) => ws,
-            Err(e) => {
-                log::warn!("Failed to connect app WS for {}: {}", signing_app.installed_app_id, e);
-                continue;
-            }
-        };
-
-        let payload_mp = rmp_serde::to_vec_named(&())
-            .map_err(|e| format!("msgpack: {}", e))?;
-
-        match app_ws.call_zome(
-            ZomeCallTarget::RoleName(role_name.clone().into()),
-            "signing".into(),
-            "get_my_signatures".into(),
-            ExternIO::from(payload_mp),
-        ).await {
-            Ok(result) => {
-                if let Ok(records) = rmp_serde::from_slice::<Vec<Record>>(result.as_bytes()) {
-                    log::info!("Got {} signatures from {}", records.len(), signing_app.installed_app_id);
-
-                    // Process each record while we still have the app_ws for this version
-                    for record in &records {
-                        if let Some(Entry::App(entry_bytes)) = record.entry().as_option() {
-                            match rmp_serde::from_slice::<SignatureEntry>(entry_bytes.bytes()) {
-                                Ok(entry) => {
-                                    let action_hash = hex::encode(record.action_hashed().hash.get_raw_39());
-                                    let raw_32 = entry.signer.get_raw_32();
-                                    let pub_key_arr: [u8; 32] = raw_32.try_into().unwrap_or([0u8; 32]);
-                                    let signer_str = crate::key_derivation::construct_agent_pub_key_string(
-                                        &pub_key_arr,
-                                    );
-
-                                    // Check revocation on same app connection (same DHT)
-                                    let mut revoked = false;
-                                    let mut revoked_at: Option<i64> = None;
-                                    let mut revocation_reason: Option<String> = None;
-                                    {
-                                        let rev_payload = rmp_serde::to_vec_named(
-                                            &record.action_hashed().hash
-                                        ).unwrap_or_default();
-                                        if let Ok(rev_result) = app_ws.call_zome(
-                                            ZomeCallTarget::RoleName(role_name.clone().into()),
-                                            "signing".into(),
-                                            "get_revocations_for_signature".into(),
-                                            ExternIO::from(rev_payload),
-                                        ).await {
-                                            if let Ok(rev_records) = rmp_serde::from_slice::<Vec<Record>>(rev_result.as_bytes()) {
-                                                if !rev_records.is_empty() {
-                                                    revoked = true;
-                                                    if let Some(Entry::App(rev_entry)) = rev_records[0].entry().as_option() {
-                                                        #[derive(serde::Deserialize)]
-                                                        struct RevEntry { revoked_at: i64, reason: Option<String> }
-                                                        if let Ok(rev) = rmp_serde::from_slice::<RevEntry>(rev_entry.bytes()) {
-                                                            revoked_at = Some(rev.revoked_at);
-                                                            revocation_reason = rev.reason;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Fetch thumbnail (best-effort, non-fatal)
-                                    let mut thumbnail: Option<String> = None;
-                                    {
-                                        let thumb_payload = rmp_serde::to_vec_named(
-                                            &record.action_hashed().hash
-                                        ).unwrap_or_default();
-                                        if let Ok(thumb_result) = app_ws.call_zome(
-                                            ZomeCallTarget::RoleName(role_name.clone().into()),
-                                            "signing".into(),
-                                            "get_thumbnail".into(),
-                                            ExternIO::from(thumb_payload),
-                                        ).await {
-                                            if let Ok(thumb_records) = rmp_serde::from_slice::<Option<Record>>(thumb_result.as_bytes()) {
-                                                if let Some(thumb_record) = thumb_records {
-                                                    if let Some(Entry::App(thumb_entry)) = thumb_record.entry().as_option() {
-                                                        #[derive(serde::Deserialize)]
-                                                        struct ThumbEntry { thumbnail: String }
-                                                        if let Ok(te) = rmp_serde::from_slice::<ThumbEntry>(thumb_entry.bytes()) {
-                                                            thumbnail = Some(te.thumbnail);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    signatures.push(serde_json::json!({
-                                        "file_hash": hex::encode(&entry.file_hash),
-                                        "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
-                                        "agent_pub_key": signer_str,
-                                        "signed_at": entry.signed_at,
-                                        "action_hash": action_hash,
-                                        "signing_app_id": signing_app.installed_app_id,
-                                        "intent": entry.intent,
-                                        "ai_generation": entry.ai_generation,
-                                        "content_rights": entry.content_rights,
-                                        "integrity_report": entry.integrity_report,
-                                        "perceptual_hash": entry.perceptual_hash,
-                                        "revoked": revoked,
-                                        "revoked_at": revoked_at,
-                                        "revocation_reason": revocation_reason,
-                                        "thumbnail": thumbnail,
-                                    }));
-                                }
-                                Err(e) => {
-                                    log::warn!("Failed to deserialize signature entry: {}", e);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!("get_my_signatures failed for {}: {}", signing_app.installed_app_id, e);
-            }
-        }
-    }
-
-    log::info!("Loaded {} own signatures from {} signing DNA version(s)", signatures.len(), signing_apps.len());
-
-    // Query linked agents from the identity DNA, then fetch their signatures
-    // from the signing DNA. Everything on the local conductor — no API needed.
-    // Get cached web agent key (set during auto-link on unlock)
-    let cached_web_key = {
-        let key = state.linked_web_agent_key.lock().unwrap();
-        key.clone()
-    };
-    let linked_sigs = fetch_linked_agent_signatures(&admin_ws, &apps, admin_port, app_port, cached_web_key).await;
-    if !linked_sigs.is_empty() {
-        log::info!("Found {} signatures from linked agents", linked_sigs.len());
-        // Deduplicate by action_hash
-        let existing_hashes: std::collections::HashSet<String> = signatures.iter()
-            .filter_map(|s| s.get("action_hash").and_then(|h| h.as_str()).map(|s| s.to_string()))
-            .collect();
-        for sig in linked_sigs {
-            let hash = sig.get("action_hash").and_then(|h| h.as_str()).unwrap_or("");
-            if !hash.is_empty() && !existing_hashes.contains(hash) {
-                signatures.push(sig);
-            }
-        }
-    }
-
-    log::info!("Total signatures (own + linked): {}", signatures.len());
-    Ok(signatures)
+/// SignatureEntry as committed by the signing DNA. Shared by own + linked
+/// signature queries.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SignatureEntry {
+    file_hash: Vec<u8>,
+    signature: Vec<u8>,
+    signer: holochain_types::prelude::AgentPubKey,
+    signed_at: i64,
+    intent: Option<String>,
+    ai_generation: Option<String>,
+    content_rights: Option<serde_json::Value>,
+    integrity_report: Option<serde_json::Value>,
+    perceptual_hash: Option<serde_json::Value>,
 }
 
-/// Fetch signatures from linked agents via the local signing DNA.
-/// First tries the identity DNA for linked agents. If that returns empty
-/// (gossip may not have synced yet), falls back to the cached web agent key
-/// from auto-link on unlock.
-async fn fetch_linked_agent_signatures(
-    admin_ws: &holochain_client::AdminWebsocket,
-    apps: &[holochain_client::AppInfo],
-    admin_port: u16,
-    app_port: u16,
-    cached_web_agent_key: Option<String>,
-) -> Vec<serde_json::Value> {
-    use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
-        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
-    use holochain_types::prelude::{ExternIO, Record, Entry, AgentPubKey};
+/// Best-effort revocation lookup for one signature. Returns
+/// `(false, None, None)` if no revocation records exist or the lookup fails;
+/// `(true, ...)` if at least one revocation record exists, with metadata
+/// populated when it parses cleanly.
+async fn fetch_revocation_for_action(
+    app_ws: &holochain_client::AppWebsocket,
+    role_name: &str,
+    action_hash: &holochain_types::prelude::ActionHash,
+) -> (bool, Option<i64>, Option<String>) {
+    use holochain_client::ZomeCallTarget;
+    use holochain_types::prelude::{Entry, ExternIO, Record};
 
-    // 1. Find the identity DNA app with agent_linking zome (v1.3+).
-    // Prefer the highest version — sort by app ID descending.
+    let payload = match rmp_serde::to_vec_named(action_hash) {
+        Ok(p) => p,
+        Err(_) => return (false, None, None),
+    };
+    let result = match app_ws.call_zome(
+        ZomeCallTarget::RoleName(role_name.into()),
+        "signing".into(),
+        "get_revocations_for_signature".into(),
+        ExternIO::from(payload),
+    ).await {
+        Ok(r) => r,
+        Err(_) => return (false, None, None),
+    };
+    let records: Vec<Record> = match rmp_serde::from_slice(result.as_bytes()) {
+        Ok(r) => r,
+        Err(_) => return (false, None, None),
+    };
+    let first = match records.first() {
+        Some(f) => f,
+        None => return (false, None, None),
+    };
+    if let Some(Entry::App(rev_entry)) = first.entry().as_option() {
+        #[derive(serde::Deserialize)]
+        struct RevEntry { revoked_at: i64, reason: Option<String> }
+        if let Ok(rev) = rmp_serde::from_slice::<RevEntry>(rev_entry.bytes()) {
+            return (true, Some(rev.revoked_at), rev.reason);
+        }
+    }
+    (true, None, None)
+}
+
+/// Best-effort thumbnail lookup. Returns None if missing or any step fails.
+async fn fetch_thumbnail_for_action(
+    app_ws: &holochain_client::AppWebsocket,
+    role_name: &str,
+    action_hash: &holochain_types::prelude::ActionHash,
+) -> Option<String> {
+    use holochain_client::ZomeCallTarget;
+    use holochain_types::prelude::{Entry, ExternIO, Record};
+
+    let payload = rmp_serde::to_vec_named(action_hash).ok()?;
+    let result = app_ws.call_zome(
+        ZomeCallTarget::RoleName(role_name.into()),
+        "signing".into(),
+        "get_thumbnail".into(),
+        ExternIO::from(payload),
+    ).await.ok()?;
+    let thumb_record: Option<Record> = rmp_serde::from_slice(result.as_bytes()).ok()?;
+    let record = thumb_record?;
+    if let Some(Entry::App(thumb_entry)) = record.entry().as_option() {
+        #[derive(serde::Deserialize)]
+        struct ThumbEntry { thumbnail: String }
+        if let Ok(te) = rmp_serde::from_slice::<ThumbEntry>(thumb_entry.bytes()) {
+            return Some(te.thumbnail);
+        }
+    }
+    None
+}
+
+/// Authorise + connect an AppWebsocket for the given signing app version.
+/// Returns `(app_ws, role_name)` on success, or None (with a logged warning)
+/// if any step fails — caller should skip this version.
+async fn connect_signing_app_ws(
+    admin_ws: &holochain_client::AdminWebsocket,
+    app_port: u16,
+    signing_app: &holochain_client::AppInfo,
+    ws_origin: &str,
+) -> Option<(holochain_client::AppWebsocket, String)> {
+    use holochain_client::{AppWebsocket, AuthorizeSigningCredentialsPayload,
+        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload};
+
+    let role_name = signing_app.cell_info.keys()
+        .find(|k| k.starts_with("flowsta_signing"))?
+        .clone();
+    let cell_id = signing_app.cell_info[&role_name].iter()
+        .find_map(|c| match c {
+            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        })?;
+    let creds = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+        cell_id: cell_id.clone(), functions: None,
+    }).await {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("auth creds for {}: {}", signing_app.installed_app_id, e);
+            return None;
+        }
+    };
+    let issued = match admin_ws.issue_app_auth_token(
+        IssueAppAuthenticationTokenPayload::for_installed_app_id(
+            signing_app.installed_app_id.clone(),
+        ),
+    ).await {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("token for {}: {}", signing_app.installed_app_id, e);
+            return None;
+        }
+    };
+    let signer = ClientAgentSigner::default();
+    signer.add_credentials(cell_id, creds);
+    let app_ws = match AppWebsocket::connect(
+        format!("localhost:{}", app_port),
+        issued.token, signer.into(),
+        Some(ws_origin.into()),
+    ).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            log::warn!("app WS for {}: {}", signing_app.installed_app_id, e);
+            return None;
+        }
+    };
+    Some((app_ws, role_name))
+}
+
+/// Build the JSON for one own signature. Revocation + thumbnail fetches run
+/// in parallel.
+async fn build_own_signature_json(
+    app_ws: &holochain_client::AppWebsocket,
+    role_name: &str,
+    record: &holochain_types::prelude::Record,
+    entry: SignatureEntry,
+    signing_app_id: &str,
+) -> serde_json::Value {
+    let action_hash = record.action_hashed().hash.clone();
+    let (revocation, thumbnail) = tokio::join!(
+        fetch_revocation_for_action(app_ws, role_name, &action_hash),
+        fetch_thumbnail_for_action(app_ws, role_name, &action_hash),
+    );
+    let (revoked, revoked_at, revocation_reason) = revocation;
+    let action_hash_hex = hex::encode(action_hash.get_raw_39());
+    let raw_32 = entry.signer.get_raw_32();
+    let pub_key_arr: [u8; 32] = raw_32.try_into().unwrap_or([0u8; 32]);
+    let signer_str = crate::key_derivation::construct_agent_pub_key_string(&pub_key_arr);
+
+    serde_json::json!({
+        "file_hash": hex::encode(&entry.file_hash),
+        "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
+        "agent_pub_key": signer_str,
+        "signed_at": entry.signed_at,
+        "action_hash": action_hash_hex,
+        "signing_app_id": signing_app_id,
+        "intent": entry.intent,
+        "ai_generation": entry.ai_generation,
+        "content_rights": entry.content_rights,
+        "integrity_report": entry.integrity_report,
+        "perceptual_hash": entry.perceptual_hash,
+        "revoked": revoked,
+        "revoked_at": revoked_at,
+        "revocation_reason": revocation_reason,
+        "thumbnail": thumbnail,
+    })
+}
+
+/// Build the JSON for one linked-agent signature. Matches existing behavior:
+/// linked sigs assume not-revoked (only thumbnail is fetched).
+async fn build_linked_signature_json(
+    app_ws: &holochain_client::AppWebsocket,
+    role_name: &str,
+    record: &holochain_types::prelude::Record,
+    entry: SignatureEntry,
+    signing_app_id: &str,
+) -> serde_json::Value {
+    let action_hash = record.action_hashed().hash.clone();
+    let thumbnail = fetch_thumbnail_for_action(app_ws, role_name, &action_hash).await;
+    let action_hash_hex = hex::encode(action_hash.get_raw_39());
+    let raw_32 = entry.signer.get_raw_32();
+    let pub_key_arr: [u8; 32] = raw_32.try_into().unwrap_or([0u8; 32]);
+    let signer_str = crate::key_derivation::construct_agent_pub_key_string(&pub_key_arr);
+
+    serde_json::json!({
+        "file_hash": hex::encode(&entry.file_hash),
+        "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
+        "agent_pub_key": signer_str,
+        "signed_at": entry.signed_at,
+        "action_hash": action_hash_hex,
+        "signing_app_id": signing_app_id,
+        "intent": entry.intent,
+        "ai_generation": entry.ai_generation,
+        "content_rights": entry.content_rights,
+        "integrity_report": entry.integrity_report,
+        "perceptual_hash": entry.perceptual_hash,
+        "revoked": false,
+        "revoked_at": serde_json::Value::Null,
+        "revocation_reason": serde_json::Value::Null,
+        "thumbnail": thumbnail,
+    })
+}
+
+/// Query own signatures for one signing DNA version. Per-signature
+/// enrichment runs in parallel.
+async fn query_own_sigs_for_version(
+    admin_ws: &holochain_client::AdminWebsocket,
+    app_port: u16,
+    signing_app: &holochain_client::AppInfo,
+) -> Vec<serde_json::Value> {
+    use holochain_client::ZomeCallTarget;
+    use holochain_types::prelude::{Entry, ExternIO, Record};
+
+    let (app_ws, role_name) = match connect_signing_app_ws(
+        admin_ws, app_port, signing_app, "flowsta-vault-read",
+    ).await {
+        Some(x) => x,
+        None => return Vec::new(),
+    };
+
+    let payload_mp = match rmp_serde::to_vec_named(&()) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("msgpack ({}): {}", signing_app.installed_app_id, e);
+            return Vec::new();
+        }
+    };
+
+    let records: Vec<Record> = match app_ws.call_zome(
+        ZomeCallTarget::RoleName(role_name.clone().into()),
+        "signing".into(),
+        "get_my_signatures".into(),
+        ExternIO::from(payload_mp),
+    ).await {
+        Ok(r) => match rmp_serde::from_slice(r.as_bytes()) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("decode records ({}): {}", signing_app.installed_app_id, e);
+                return Vec::new();
+            }
+        }
+        Err(e) => {
+            log::warn!("get_my_signatures failed for {}: {}", signing_app.installed_app_id, e);
+            return Vec::new();
+        }
+    };
+    log::info!("Got {} signatures from {}", records.len(), signing_app.installed_app_id);
+
+    // Pair each record with its decoded SignatureEntry, dropping any that
+    // fail to deserialise.
+    let entries: Vec<(&Record, SignatureEntry)> = records.iter().filter_map(|record| {
+        let entry_bytes = match record.entry().as_option() {
+            Some(Entry::App(b)) => b,
+            _ => return None,
+        };
+        rmp_serde::from_slice::<SignatureEntry>(entry_bytes.bytes())
+            .ok()
+            .map(|e| (record, e))
+    }).collect();
+
+    let futures = entries.into_iter().map(|(record, entry)| {
+        build_own_signature_json(&app_ws, &role_name, record, entry,
+            &signing_app.installed_app_id)
+    });
+    futures::future::join_all(futures).await
+}
+
+/// Resolve the set of linked agents to query for cross-agent signatures.
+/// Tries the identity DNA's `get_linked_agents` first, falls back to the
+/// cached web agent key set during auto-link on unlock.
+async fn fetch_linked_agent_keys(
+    admin_ws: &holochain_client::AdminWebsocket,
+    app_port: u16,
+    apps: &[holochain_client::AppInfo],
+    cached_web_agent_key: Option<String>,
+) -> Vec<holochain_types::prelude::AgentPubKey> {
+    use holochain_client::{AppWebsocket, AuthorizeSigningCredentialsPayload,
+        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    use holochain_types::prelude::{AgentPubKey, ExternIO};
+
     let mut identity_apps: Vec<_> = apps.iter()
         .filter(|a| a.installed_app_id.starts_with("flowsta_identity_v"))
         .collect();
     identity_apps.sort_by(|a, b| b.installed_app_id.cmp(&a.installed_app_id));
-    let identity_app = identity_apps.into_iter().next();
-    let identity_app = match identity_app {
-        Some(app) => app,
+    let identity_app = match identity_apps.into_iter().next() {
+        Some(a) => a,
         None => {
             log::info!("No identity DNA with agent_linking found — skipping cross-agent lookup");
             return Vec::new();
         }
     };
 
-    // 2. Connect to identity DNA and call get_linked_agents
     let identity_role = match identity_app.cell_info.keys()
         .find(|k| k.starts_with("flowsta_identity")) {
         Some(r) => r.clone(),
         None => return Vec::new(),
     };
-
     let identity_cell_id = match identity_app.cell_info[&identity_role].iter()
         .find_map(|c| match c {
             CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
@@ -2663,38 +2759,36 @@ async fn fetch_linked_agent_signatures(
         None => return Vec::new(),
     };
 
-    // Get our own agent key to pass to get_linked_agents
     let my_agent_key = identity_cell_id.agent_pubkey().clone();
 
-    let identity_creds = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
+    let creds = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
         cell_id: identity_cell_id.clone(), functions: None,
     }).await {
         Ok(c) => c,
-        Err(e) => { log::warn!("Failed to authorize identity creds: {}", e); return Vec::new(); }
+        Err(e) => { log::warn!("identity auth creds: {}", e); return Vec::new(); }
     };
-
     let issued = match admin_ws.issue_app_auth_token(
-        IssueAppAuthenticationTokenPayload::for_installed_app_id(identity_app.installed_app_id.clone()),
+        IssueAppAuthenticationTokenPayload::for_installed_app_id(
+            identity_app.installed_app_id.clone(),
+        ),
     ).await {
         Ok(t) => t,
-        Err(e) => { log::warn!("Failed to get identity token: {}", e); return Vec::new(); }
+        Err(e) => { log::warn!("identity token: {}", e); return Vec::new(); }
     };
-
     let signer = ClientAgentSigner::default();
-    signer.add_credentials(identity_cell_id, identity_creds);
+    signer.add_credentials(identity_cell_id, creds);
     let identity_ws = match AppWebsocket::connect(
         format!("localhost:{}", app_port),
         issued.token, signer.into(),
         Some("flowsta-vault-linked".into()),
     ).await {
         Ok(ws) => ws,
-        Err(e) => { log::warn!("Failed to connect identity app WS: {}", e); return Vec::new(); }
+        Err(e) => { log::warn!("identity app WS: {}", e); return Vec::new(); }
     };
 
-    // Call get_linked_agents(my_agent_key)
     let payload_mp = match rmp_serde::to_vec_named(&my_agent_key) {
         Ok(p) => p,
-        Err(e) => { log::warn!("Failed to serialize agent key: {}", e); return Vec::new(); }
+        Err(_) => return Vec::new(),
     };
 
     let mut linked_keys: Vec<AgentPubKey> = match identity_ws.call_zome(
@@ -2703,184 +2797,172 @@ async fn fetch_linked_agent_signatures(
         "get_linked_agents".into(),
         ExternIO::from(payload_mp),
     ).await {
-        Ok(result) => {
-            match rmp_serde::from_slice(result.as_bytes()) {
-                Ok(keys) => keys,
-                Err(e) => { log::warn!("Failed to deserialize linked agents: {}", e); return Vec::new(); }
-            }
-        }
-        Err(e) => { log::warn!("get_linked_agents failed: {}", e); return Vec::new(); }
+        Ok(result) => rmp_serde::from_slice(result.as_bytes()).unwrap_or_default(),
+        Err(e) => { log::warn!("get_linked_agents: {}", e); Vec::new() }
     };
 
     if linked_keys.is_empty() {
-        // Identity DNA gossip may not have synced yet — use cached web agent key
-        if let Some(ref cached_key) = cached_web_agent_key {
+        if let Some(ref cached) = cached_web_agent_key {
             log::info!("Identity DNA returned no linked agents, using cached web agent key");
-            match base64_standard_decode(cached_key) {
+            match base64_standard_decode(cached) {
+                Ok(key_bytes) if key_bytes.len() == 39 => {
+                    linked_keys.push(AgentPubKey::from_raw_39(key_bytes));
+                }
                 Ok(key_bytes) => {
-                    if key_bytes.len() == 39 {
-                        let mut arr = [0u8; 39];
-                        arr.copy_from_slice(&key_bytes);
-                        linked_keys.push(AgentPubKey::from_raw_39(arr.to_vec()));
-                    } else {
-                        log::warn!("Cached web agent key is {} bytes, expected 39", key_bytes.len());
-                    }
+                    log::warn!("Cached web agent key is {} bytes, expected 39", key_bytes.len());
                 }
                 Err(_) => log::warn!("Failed to decode cached web agent key"),
             }
         }
-
         if linked_keys.is_empty() {
             log::info!("No linked agents found (no cache available)");
-            return Vec::new();
         }
     }
+    linked_keys
+}
 
-    log::info!("Found {} linked agent(s), querying their signatures", linked_keys.len());
+/// Query linked agents' signatures for one signing DNA version.
+/// Per-agent calls run serially (typically 1-2 linked agents); per-signature
+/// enrichment within a returned batch runs in parallel.
+async fn query_linked_sigs_for_version(
+    admin_ws: &holochain_client::AdminWebsocket,
+    app_port: u16,
+    signing_app: &holochain_client::AppInfo,
+    linked_keys: &[holochain_types::prelude::AgentPubKey],
+) -> Vec<serde_json::Value> {
+    use holochain_client::ZomeCallTarget;
+    use holochain_types::prelude::{Entry, ExternIO, Record};
 
-    // 3. For each linked agent, query get_signatures_for_agent on ALL signing DNA versions.
-    // Linked agents' signatures may be on any version (e.g. web agent on v1.3, vault on v1.4).
+    let (app_ws, role_name) = match connect_signing_app_ws(
+        admin_ws, app_port, signing_app, "flowsta-vault-linked-sign",
+    ).await {
+        Some(x) => x,
+        None => return Vec::new(),
+    };
+
+    let mut all = Vec::new();
+    for linked_key in linked_keys {
+        let payload = match rmp_serde::to_vec_named(linked_key) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let records: Vec<Record> = match app_ws.call_zome(
+            ZomeCallTarget::RoleName(role_name.clone().into()),
+            "signing".into(),
+            "get_signatures_for_agent".into(),
+            ExternIO::from(payload),
+        ).await {
+            Ok(r) => match rmp_serde::from_slice(r.as_bytes()) {
+                Ok(v) => v,
+                Err(_) => continue,
+            }
+            Err(e) => {
+                log::warn!("get_signatures_for_agent failed on {}: {}", signing_app.installed_app_id, e);
+                continue;
+            }
+        };
+        if !records.is_empty() {
+            log::info!("Got {} signatures for linked agent from {}", records.len(), signing_app.installed_app_id);
+        }
+
+        let entries: Vec<(&Record, SignatureEntry)> = records.iter().filter_map(|record| {
+            let entry_bytes = match record.entry().as_option() {
+                Some(Entry::App(b)) => b,
+                _ => return None,
+            };
+            rmp_serde::from_slice::<SignatureEntry>(entry_bytes.bytes())
+                .ok()
+                .map(|e| (record, e))
+        }).collect();
+
+        let futures = entries.into_iter().map(|(record, entry)| {
+            build_linked_signature_json(&app_ws, &role_name, record, entry,
+                &signing_app.installed_app_id)
+        });
+        let mut sigs: Vec<serde_json::Value> = futures::future::join_all(futures).await;
+        all.append(&mut sigs);
+    }
+    all
+}
+
+/// Get all signatures from the signing DNA.
+/// Queries all installed signing DNA versions in parallel for own signatures
+/// + linked agents' signatures, with per-signature enrichment (revocation +
+/// thumbnail) also running concurrently. Everything runs on the local
+/// conductor — no API dependency.
+#[tauri::command]
+pub async fn get_my_signatures(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    use holochain_client::AdminWebsocket;
+
+    let conductor_ports = {
+        let conductor = state.conductor_handle.lock().unwrap();
+        conductor.as_ref().map(|h| (h.admin_port, h.app_port))
+    };
+    let (admin_port, app_port) = conductor_ports.ok_or("Conductor not running")?;
+
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", admin_port),
+        Some("flowsta-vault-read".to_string()),
+    ).await.map_err(|e| format!("Admin WS: {}", e))?;
+
+    // Ensure all apps are enabled — conductor may disable cells on restart
+    crate::dna::ensure_apps_enabled(&admin_ws).await;
+
+    let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
     let signing_apps: Vec<_> = apps.iter()
         .filter(|a| a.installed_app_id.starts_with("flowsta_signing_v"))
         .collect();
-
-    #[derive(serde::Deserialize, serde::Serialize)]
-    struct SignatureEntry {
-        file_hash: Vec<u8>,
-        signature: Vec<u8>,
-        signer: AgentPubKey,
-        signed_at: i64,
-        intent: Option<String>,
-        ai_generation: Option<String>,
-        content_rights: Option<serde_json::Value>,
-        integrity_report: Option<serde_json::Value>,
-        perceptual_hash: Option<serde_json::Value>,
+    if signing_apps.is_empty() {
+        return Ok(Vec::new());
     }
 
-    let mut linked_signatures = Vec::new();
+    // Phase 1: own signatures across all versions in parallel + linked-agent
+    // key discovery in parallel. Linked-keys path is independent of the
+    // own-sigs path so it can overlap with the cold-DHT warmup.
+    let cached_web_key = {
+        let key = state.linked_web_agent_key.lock().unwrap();
+        key.clone()
+    };
+    let own_future = futures::future::join_all(
+        signing_apps.iter()
+            .map(|app| query_own_sigs_for_version(&admin_ws, app_port, app)),
+    );
+    let keys_future = fetch_linked_agent_keys(&admin_ws, app_port, &apps, cached_web_key);
+    let (own_results, linked_keys) = tokio::join!(own_future, keys_future);
 
-    for signing_app in &signing_apps {
-        let signing_role = match signing_app.cell_info.keys()
-            .find(|k| k.starts_with("flowsta_signing")) {
-            Some(r) => r.clone(),
-            None => continue,
-        };
+    let mut signatures: Vec<serde_json::Value> = own_results.into_iter().flatten().collect();
+    log::info!(
+        "Loaded {} own signatures from {} signing DNA version(s)",
+        signatures.len(), signing_apps.len(),
+    );
 
-        let signing_cell_id = match signing_app.cell_info[&signing_role].iter()
-            .find_map(|c| match c {
-                CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-                _ => None,
-            }) {
-            Some(c) => c,
-            None => continue,
-        };
-
-        let signing_creds = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-            cell_id: signing_cell_id.clone(), functions: None,
-        }).await {
-            Ok(c) => c,
-            Err(e) => { log::warn!("Failed to authorize signing creds for {}: {}", signing_app.installed_app_id, e); continue; }
-        };
-
-        let issued2 = match admin_ws.issue_app_auth_token(
-            IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app.installed_app_id.clone()),
-        ).await {
-            Ok(t) => t,
-            Err(e) => { log::warn!("Failed to get signing token for {}: {}", signing_app.installed_app_id, e); continue; }
-        };
-
-        let signer2 = ClientAgentSigner::default();
-        signer2.add_credentials(signing_cell_id, signing_creds);
-        let signing_ws = match AppWebsocket::connect(
-            format!("localhost:{}", app_port),
-            issued2.token, signer2.into(),
-            Some("flowsta-vault-linked-sign".into()),
-        ).await {
-            Ok(ws) => ws,
-            Err(e) => { log::warn!("Failed to connect signing app WS for {}: {}", signing_app.installed_app_id, e); continue; }
-        };
-
-        for linked_key in &linked_keys {
-            let payload = match rmp_serde::to_vec_named(linked_key) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            match signing_ws.call_zome(
-                ZomeCallTarget::RoleName(signing_role.clone().into()),
-                "signing".into(),
-                "get_signatures_for_agent".into(),
-                ExternIO::from(payload),
-            ).await {
-                Ok(result) => {
-                    if let Ok(records) = rmp_serde::from_slice::<Vec<Record>>(result.as_bytes()) {
-                        if !records.is_empty() {
-                            log::info!("Got {} signatures for linked agent from {}", records.len(), signing_app.installed_app_id);
-                        }
-                        for record in &records {
-                            if let Some(Entry::App(entry_bytes)) = record.entry().as_option() {
-                                if let Ok(entry) = rmp_serde::from_slice::<SignatureEntry>(entry_bytes.bytes()) {
-                                    let action_hash = hex::encode(record.action_hashed().hash.get_raw_39());
-                                    let raw_32 = entry.signer.get_raw_32();
-                                    let pub_key_arr: [u8; 32] = raw_32.try_into().unwrap_or([0u8; 32]);
-                                    let signer_str = crate::key_derivation::construct_agent_pub_key_string(&pub_key_arr);
-
-                                    // Fetch thumbnail (best-effort)
-                                    let mut thumbnail: Option<String> = None;
-                                    {
-                                        let thumb_payload = rmp_serde::to_vec_named(
-                                            &record.action_hashed().hash
-                                        ).unwrap_or_default();
-                                        if let Ok(thumb_result) = signing_ws.call_zome(
-                                            ZomeCallTarget::RoleName(signing_role.clone().into()),
-                                            "signing".into(),
-                                            "get_thumbnail".into(),
-                                            ExternIO::from(thumb_payload),
-                                        ).await {
-                                            if let Ok(thumb_records) = rmp_serde::from_slice::<Option<Record>>(thumb_result.as_bytes()) {
-                                                if let Some(thumb_record) = thumb_records {
-                                                    if let Some(Entry::App(thumb_entry)) = thumb_record.entry().as_option() {
-                                                        #[derive(serde::Deserialize)]
-                                                        struct ThumbEntry { thumbnail: String }
-                                                        if let Ok(te) = rmp_serde::from_slice::<ThumbEntry>(thumb_entry.bytes()) {
-                                                            thumbnail = Some(te.thumbnail);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    linked_signatures.push(serde_json::json!({
-                                        "file_hash": hex::encode(&entry.file_hash),
-                                        "signature": crate::key_derivation::base64_standard_encode(&entry.signature),
-                                        "agent_pub_key": signer_str,
-                                        "signed_at": entry.signed_at,
-                                        "action_hash": action_hash,
-                                        "signing_app_id": signing_app.installed_app_id,
-                                        "intent": entry.intent,
-                                        "ai_generation": entry.ai_generation,
-                                        "content_rights": entry.content_rights,
-                                        "integrity_report": entry.integrity_report,
-                                        "perceptual_hash": entry.perceptual_hash,
-                                        "revoked": false,
-                                        "revoked_at": null,
-                                        "revocation_reason": null,
-                                        "thumbnail": thumbnail,
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::warn!("get_signatures_for_agent failed on {}: {}", signing_app.installed_app_id, e);
+    // Phase 2: linked-agent sigs (now that we have the keys). Parallelised
+    // across the same set of signing DNA versions.
+    if !linked_keys.is_empty() {
+        log::info!("Found {} linked agent(s), querying their signatures", linked_keys.len());
+        let linked_results = futures::future::join_all(
+            signing_apps.iter()
+                .map(|app| query_linked_sigs_for_version(&admin_ws, app_port, app, &linked_keys)),
+        ).await;
+        let linked_sigs: Vec<serde_json::Value> = linked_results.into_iter().flatten().collect();
+        if !linked_sigs.is_empty() {
+            log::info!("Found {} signatures from linked agents", linked_sigs.len());
+            let existing: std::collections::HashSet<String> = signatures.iter()
+                .filter_map(|s| s.get("action_hash").and_then(|h| h.as_str()).map(String::from))
+                .collect();
+            for sig in linked_sigs {
+                let hash = sig.get("action_hash").and_then(|h| h.as_str()).unwrap_or("").to_string();
+                if !hash.is_empty() && !existing.contains(&hash) {
+                    signatures.push(sig);
                 }
             }
         }
     }
 
-    linked_signatures
+    log::info!("Total signatures (own + linked): {}", signatures.len());
+    Ok(signatures)
 }
 
 /// Revoke a signature by action hash. Creates a RevocationEntry on the DHT.

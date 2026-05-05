@@ -372,11 +372,30 @@ fn is_likely_text(data: &[u8]) -> bool {
 
 /// Hash a file using SHA-256. Returns hex-encoded hash.
 pub fn hash_file(path: &Path) -> Result<String, String> {
+    hash_file_with_progress(path, |_, _| true)
+}
+
+/// Hash a file using SHA-256 with optional progress reporting + cancellation.
+///
+/// `on_progress(hashed, total)` is invoked after each chunk. Returning `false`
+/// cancels the hash and the function returns `Err("Cancelled")`.
+///
+/// The callback is called for every 64KB chunk read; callers should throttle
+/// any expensive work (event emission, IPC) themselves.
+pub fn hash_file_with_progress<F>(path: &Path, mut on_progress: F) -> Result<String, String>
+where
+    F: FnMut(u64, u64) -> bool,
+{
+    let metadata =
+        std::fs::metadata(path).map_err(|e| format!("Failed to read file metadata: {}", e))?;
+    let total = metadata.len();
+
     let mut file =
         std::fs::File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
 
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 65536]; // 64KB chunks
+    let mut hashed: u64 = 0;
     loop {
         let bytes_read = file
             .read(&mut buffer)
@@ -385,6 +404,10 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
             break;
         }
         hasher.update(&buffer[..bytes_read]);
+        hashed += bytes_read as u64;
+        if !on_progress(hashed, total) {
+            return Err("Cancelled".to_string());
+        }
     }
 
     let hash = hasher.finalize();

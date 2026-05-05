@@ -234,6 +234,8 @@ pub fn run() {
             commands::respond_document_sign_request,
             commands::get_pending_document_sign,
             commands::hash_file,
+            commands::cancel_hash,
+            commands::get_file_size,
             commands::analyze_file,
             commands::generate_perceptual_hash,
             commands::generate_thumbnail,
