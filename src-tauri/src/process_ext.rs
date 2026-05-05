@@ -5,16 +5,19 @@
 //! when the vault is killed (SIGKILL, OOM, dev-mode reload, dpkg upgrade, …)
 //! and they then hold the conductor admin-WS port, blocking the next launch.
 //!
-//! Today we cover Linux via `prctl(PR_SET_PDEATHSIG, SIGTERM)`. macOS and
-//! Windows fall back to a no-op — clean exits still work via the existing
-//! `RunEvent::Exit` shutdown path; only abnormal terminations there will leak.
-//! Job Objects (Windows) and a `kqueue` watcher (macOS) are TODO.
+//! Linux: `prctl(PR_SET_PDEATHSIG, SIGTERM)`.
+//! Windows: `CREATE_NO_WINDOW` so console-mode children don't open a terminal.
+//! Lifetime tying on Windows (Job Objects) and macOS (kqueue) is still TODO —
+//! clean exits work via the `RunEvent::Exit` path; only abnormal terminations
+//! there will leak children.
 
 use std::process::Command;
 
 pub trait CommandExt {
-    /// Configure the child so that the kernel sends it `SIGTERM` when the
-    /// parent process dies, regardless of how the parent exits.
+    /// Configure the child to be managed as a vault sidecar:
+    /// - Linux: kernel sends `SIGTERM` when the parent dies.
+    /// - Windows: no console window is allocated for the child.
+    /// - macOS: no-op for now.
     fn tie_to_parent(&mut self) -> &mut Self;
 }
 
@@ -37,7 +40,17 @@ impl CommandExt for Command {
         self
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    fn tie_to_parent(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt as _;
+        // CREATE_NO_WINDOW = 0x08000000. Suppresses the console window that
+        // would otherwise pop up for console-mode children like
+        // lair-keystore.exe and holochain.exe.
+        self.creation_flags(0x08000000);
+        self
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     fn tie_to_parent(&mut self) -> &mut Self {
         self
     }
