@@ -21,7 +21,11 @@ jobs:
           - platform: macos-latest
             target: x86_64-apple-darwin
             label: macOS-Intel
-          - platform: windows-latest
+          # Pinned to windows-2022 (VS 2022) — `windows-latest` rolled to a
+          # VS 2026 image whose newer MSVC headers fail to compile
+          # aws-lc-sys 0.33.0's c11 test (C1189: "C atomics require C11 or
+          # later"). Revisit once aws-lc-sys upstream catches up.
+          - platform: windows-2022
             target: x86_64-pc-windows-msvc
             label: Windows
 
