@@ -5,6 +5,29 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-05-05
+
+### Windows: fresh installs failed during signing DNA setup
+
+A reported regression in v0.5.0: fresh installs on Windows failed with
+**"DNA installation failed: Failed to install signing DNA: Websocket error:
+Websocket closed: ConnectionClosed"**, leaving the conductor in an HC Error
+state. Existing installs that already had DNAs installed weren't affected.
+
+Root cause: v0.5.0 set `CREATE_NO_WINDOW` on the Windows spawn flags for
+`lair-keystore.exe` and `holochain.exe` to hide their terminal windows.
+That flag also prevents Windows from allocating a console handle for the
+child process. During signing-DNA WASM compilation (the largest of the three
+bundled DNAs), `holochain.exe`'s LLVM/cranelift stdio path dereferenced the
+null console handle and crashed with `0xc0000005` access violation in
+`MSVCP140.dll`. Private + identity DNAs were small enough to install via a
+code path that didn't touch the affected stdio.
+
+Reverted to the v0.4.2 behaviour: terminal windows are visible again on
+Windows, but installs work reliably. A proper fix using `STARTUPINFO` with
+`STARTF_USESHOWWINDOW + SW_HIDE` (which hides the window without preventing
+console allocation) is scheduled for a future release.
+
 ## [0.5.0] — 2026-05-05
 
 ### Sign with Flowsta Vault from your file manager

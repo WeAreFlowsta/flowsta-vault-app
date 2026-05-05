@@ -6,18 +6,33 @@
 //! and they then hold the conductor admin-WS port, blocking the next launch.
 //!
 //! Linux: `prctl(PR_SET_PDEATHSIG, SIGTERM)`.
-//! Windows: `CREATE_NO_WINDOW` so console-mode children don't open a terminal.
-//! Lifetime tying on Windows (Job Objects) and macOS (kqueue) is still TODO —
-//! clean exits work via the `RunEvent::Exit` path; only abnormal terminations
-//! there will leak children.
+//! Windows + macOS: no-op for now. Clean exits work via the `RunEvent::Exit`
+//! path; only abnormal terminations there will leak children. Job Objects
+//! (Windows) and kqueue (macOS) remain TODO.
+//!
+//! ## Why there's no console-window hiding here
+//!
+//! v0.5.0 set `CREATE_NO_WINDOW` (0x08000000) on Windows to hide the
+//! terminal windows that pop up for `lair-keystore.exe` and `holochain.exe`.
+//! That flag does more than hide the window — it tells Windows not to
+//! allocate a console handle at all. `holochain.exe` then crashed with an
+//! access violation in `MSVCP140.dll` during signing-DNA WASM compilation
+//! (LLVM/cranelift's stdio path dereferences the null console handle).
+//!
+//! v0.5.1 reverts to v0.4.2 behaviour: terminals are visible again on
+//! Windows, but installs work reliably. The proper fix is to spawn via
+//! `CreateProcessW` with `STARTUPINFO` configured for
+//! `STARTF_USESHOWWINDOW + SW_HIDE`, which keeps the console handle valid
+//! while hiding its window. That requires raw `windows-sys` / a custom
+//! Child wrapper and is scheduled for a future release with Windows-VM
+//! testing.
 
 use std::process::Command;
 
 pub trait CommandExt {
     /// Configure the child to be managed as a vault sidecar:
     /// - Linux: kernel sends `SIGTERM` when the parent dies.
-    /// - Windows: no console window is allocated for the child.
-    /// - macOS: no-op for now.
+    /// - Windows / macOS: no-op for now.
     fn tie_to_parent(&mut self) -> &mut Self;
 }
 
@@ -40,17 +55,7 @@ impl CommandExt for Command {
         self
     }
 
-    #[cfg(target_os = "windows")]
-    fn tie_to_parent(&mut self) -> &mut Self {
-        use std::os::windows::process::CommandExt as _;
-        // CREATE_NO_WINDOW = 0x08000000. Suppresses the console window that
-        // would otherwise pop up for console-mode children like
-        // lair-keystore.exe and holochain.exe.
-        self.creation_flags(0x08000000);
-        self
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(not(target_os = "linux"))]
     fn tie_to_parent(&mut self) -> &mut Self {
         self
     }
