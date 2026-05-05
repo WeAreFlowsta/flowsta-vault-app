@@ -173,7 +173,7 @@ pub fn start_conductor_process(
         .stdout(stdout_file)
         .stderr(stderr_file)
         .tie_to_parent()
-        .spawn()
+        .spawn_hidden()
         .map_err(|e| format!("Failed to spawn holochain conductor: {}", e))?;
 
     // Pipe the passphrase for lair authentication.

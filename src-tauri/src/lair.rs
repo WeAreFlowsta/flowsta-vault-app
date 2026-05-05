@@ -131,7 +131,7 @@ pub fn start_lair_process(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .tie_to_parent()
-            .spawn()
+            .spawn_hidden()
             .map_err(|e| format!("Failed to spawn lair-keystore init: {}", e))?;
 
         if let Some(mut stdin) = child.stdin.take() {
@@ -170,7 +170,7 @@ pub fn start_lair_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .tie_to_parent()
-        .spawn()
+        .spawn_hidden()
         .map_err(|e| format!("Failed to spawn lair-keystore server: {}", e))?;
 
     // Pipe passphrase to stdin.

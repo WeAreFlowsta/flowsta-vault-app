@@ -79,11 +79,21 @@ thiserror = "1.0"
 
 # Linux-only: PR_SET_PDEATHSIG so child processes (lair-keystore, holochain
 # conductor) get SIGTERM if the parent vault process dies for any reason.
-# (Must be the last [target...] block before [patch.crates-io] — TOML section
-# headers capture all keys until the next header, so anything placed after
-# this becomes Linux-only too.)
+# (TOML section headers capture all keys until the next header, so anything
+# placed after this becomes Linux-only too — see also the Windows block
+# below.)
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+# Windows-only: EnumWindows + ShowWindow(SW_HIDE) so the spawned
+# lair-keystore.exe / holochain.exe console windows are hidden post-spawn
+# without using CREATE_NO_WINDOW (which crashed holochain in v0.5.0 by
+# preventing console-handle allocation — see process_ext.rs).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # core2 (transitive dep via libflate → libsodium-sys-stable → sodoken → lair)
 # was yanked from crates.io on 2026-04-14 when the maintainer archived it.
