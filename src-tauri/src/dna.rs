@@ -11,6 +11,7 @@ use holochain_client::{AdminWebsocket, AllowedOrigins, AppStatusFilter, InstallA
 use holochain_types::app::AppBundleSource;
 use holochain_types::prelude::AgentPubKey;
 use std::path::Path;
+use std::process::Child;
 
 /// Default DNA versions bundled with this app build.
 /// Used for first-time installs and as fallback when VaultConfig has no version info.
@@ -68,6 +69,7 @@ async fn reconnect_admin(admin_port: u16) -> Result<AdminWebsocket, String> {
 async fn install_app_resilient<F>(
     admin_ws: &mut AdminWebsocket,
     admin_port: u16,
+    conductor_child: &mut Child,
     app_id: &str,
     mut make_payload: F,
 ) -> Result<(), String>
@@ -94,6 +96,19 @@ where
     while std::time::Instant::now() < deadline {
         attempts += 1;
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        // Bail fast if the conductor process exited — no amount of WS
+        // reconnecting will recover from that. The outer start_holochain
+        // wrapper will spawn a fresh conductor that warm-starts against
+        // the on-disk state populated so far.
+        if let Ok(Some(status)) = conductor_child.try_wait() {
+            return Err(format!(
+                "install_app({}) bailing: conductor process exited (status {}) after {}ms",
+                app_id,
+                status,
+                started.elapsed().as_millis(),
+            ));
+        }
 
         match reconnect_admin(admin_port).await {
             Ok(ws) => *admin_ws = ws,
@@ -175,6 +190,7 @@ where
 async fn enable_app_resilient(
     admin_ws: &mut AdminWebsocket,
     admin_port: u16,
+    conductor_child: &mut Child,
     app_id: &str,
 ) -> Result<(), String> {
     if admin_ws.enable_app(app_id.to_string()).await.is_ok() {
@@ -197,6 +213,19 @@ async fn enable_app_resilient(
     while std::time::Instant::now() < deadline {
         attempts += 1;
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        // Bail fast if the conductor process exited — no amount of WS
+        // reconnecting will recover from that. The outer start_holochain
+        // wrapper will spawn a fresh conductor that warm-starts against
+        // the on-disk state populated so far.
+        if let Ok(Some(status)) = conductor_child.try_wait() {
+            return Err(format!(
+                "enable_app({}) bailing: conductor process exited (status {}) after {}ms",
+                app_id,
+                status,
+                started.elapsed().as_millis(),
+            ));
+        }
 
         match reconnect_admin(admin_port).await {
             Ok(ws) => *admin_ws = ws,
@@ -267,6 +296,7 @@ pub async fn install_dnas(
     private_version: &str,
     identity_version: &str,
     signing_version: &str,
+    conductor_child: &mut Child,
 ) -> Result<InstalledDnas, String> {
     let private_app_id = make_app_id("private", private_version);
     let identity_app_id = make_app_id("identity", identity_version);
@@ -386,7 +416,7 @@ pub async fn install_dnas(
             app.installed_app_id,
             app.status,
         );
-        enable_app_resilient(&mut admin_ws, admin_port, &app.installed_app_id)
+        enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &app.installed_app_id)
             .await
             .map_err(|e| format!("Failed to enable existing {}: {}", app.installed_app_id, e))?;
     }
@@ -419,6 +449,7 @@ pub async fn install_dnas(
         install_app_resilient(
             &mut admin_ws,
             admin_port,
+            conductor_child,
             &private_app_id,
             || InstallAppPayload {
                 source: AppBundleSource::Path(happ_path.clone()),
@@ -437,7 +468,7 @@ pub async fn install_dnas(
         );
 
         let enable_start = std::time::Instant::now();
-        enable_app_resilient(&mut admin_ws, admin_port, &private_app_id)
+        enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &private_app_id)
             .await
             .map_err(|e| format!("Failed to enable private DNA: {}", e))?;
 
@@ -467,6 +498,7 @@ pub async fn install_dnas(
         install_app_resilient(
             &mut admin_ws,
             admin_port,
+            conductor_child,
             &identity_app_id,
             || InstallAppPayload {
                 source: AppBundleSource::Path(happ_path.clone()),
@@ -485,7 +517,7 @@ pub async fn install_dnas(
         );
 
         let enable_start = std::time::Instant::now();
-        enable_app_resilient(&mut admin_ws, admin_port, &identity_app_id)
+        enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &identity_app_id)
             .await
             .map_err(|e| format!("Failed to enable identity DNA: {}", e))?;
 
@@ -516,6 +548,7 @@ pub async fn install_dnas(
             install_app_resilient(
                 &mut admin_ws,
                 admin_port,
+                conductor_child,
                 &signing_app_id,
                 || InstallAppPayload {
                     source: AppBundleSource::Path(happ_path.clone()),
@@ -534,7 +567,7 @@ pub async fn install_dnas(
             );
 
             let enable_start = std::time::Instant::now();
-            enable_app_resilient(&mut admin_ws, admin_port, &signing_app_id)
+            enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &signing_app_id)
                 .await
                 .map_err(|e| format!("Failed to enable signing DNA: {}", e))?;
 

@@ -476,6 +476,7 @@ async fn start_holochain_attempt(
         dna::BUNDLED_PRIVATE_VERSION,
         dna::BUNDLED_IDENTITY_VERSION,
         dna::BUNDLED_SIGNING_VERSION,
+        &mut conductor_child,
     ).await;
     let install_elapsed = install_start.elapsed();
 

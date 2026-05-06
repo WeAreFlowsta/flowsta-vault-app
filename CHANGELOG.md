@@ -5,6 +5,31 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta5] — 2026-05-06
+
+### Bail out of inner retry the moment the conductor process exits
+
+beta4 added the outer auto-restart and it works. But the inner WS-recovery
+loop was still burning ~35 s waiting on a port that nothing was listening
+on, before handing off to the outer restart. The Windows symptom is
+distinctive: once `holochain.exe` exits, every reconnect attempt comes
+back with `os error 10061` (connection refused) — there's no point
+hammering it.
+
+`install_app_resilient` and `enable_app_resilient` now take a handle to
+the conductor's child process and call `Child::try_wait()` on every
+recovery iteration. The instant the OS reports the process has exited,
+the helpers return an error so the outer `start_holochain` retry can
+spawn a fresh conductor immediately.
+
+Cross-platform: macOS / Linux never have the conductor exit during DNA
+install, so the early-bail check is a no-op there. The path is
+unchanged for those platforms.
+
+End-to-end on Windows: first-install + auto-recovery should now complete
+in ~10 s instead of ~70 s, with the same eventual outcome (working vault
+on the first launch).
+
 ## [0.5.2-beta4] — 2026-05-06
 
 ### Auto-restart the conductor on first-install hiccups
