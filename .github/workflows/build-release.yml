@@ -44,6 +44,10 @@ jobs:
           script: |
             const fs = require('fs');
             const version = "${{ steps.version.outputs.version }}";
+            // Tags like v0.5.2 are stable; v0.5.2-beta1 / v0.5.2-rc1 are
+            // pre-releases. Marking pre-releases correctly keeps them out
+            // of GitHub's "Latest" slot when they're published.
+            const isPrerelease = version.includes('-');
             const tagline = "Zero-knowledge desktop companion for Flowsta — holds your keys, your data, signs your files, never leaves your machine.";
             const changelog = fs.readFileSync('/tmp/release-body.md', 'utf8').trim();
             const body = [
@@ -62,7 +66,7 @@ jobs:
               name: `Flowsta Vault v${version}`,
               body,
               draft: true,
-              prerelease: false,
+              prerelease: isPrerelease,
             });
             return data.id;
 
@@ -185,6 +189,23 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $dest -Force
           "CODE_SIGN_TOOL_DIR=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # Pre-release tags (e.g. vault-v0.5.2-beta1) need to skip the MSI
+      # bundle on Windows: the MSI bundler requires numeric-only pre-release
+      # identifiers and rejects "beta1". NSIS has no such restriction and
+      # is what end users install anyway. Stable tags (vault-v0.5.2) get
+      # the full bundle list from tauri.conf.json.
+      - name: Compute Tauri bundle args
+        id: tauri_args
+        shell: bash
+        run: |
+          EXTRA=""
+          VERSION="${GITHUB_REF_NAME#vault-v}"
+          if [[ "$RUNNER_OS" == "Windows" ]] && [[ "$VERSION" == *-* ]]; then
+            EXTRA=" --bundles nsis"
+            echo "Pre-release detected ($VERSION) — skipping MSI bundle on Windows"
+          fi
+          echo "extra=$EXTRA" >> "$GITHUB_OUTPUT"
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -200,7 +221,7 @@ jobs:
           ESIGNER_TOTP_SECRET: ${{ secrets.ESIGNER_TOTP_SECRET }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }}${{ steps.tauri_args.outputs.extra }}
 
       - name: Dump Windows signing transcript on failure
         if: failure() && runner.os == 'Windows'
