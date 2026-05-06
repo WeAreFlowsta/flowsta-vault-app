@@ -5,6 +5,39 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta2] — 2026-05-06
+
+### Fix the Windows first-install failure
+
+beta1's diagnostic logging pinned down two distinct bugs masquerading as a
+single "HC Error". Neither involves holochain.exe crashing — the conductor
+stays alive throughout. holochain.exe's terminal stays visible on Windows
+in this build; the next beta will revisit hiding it now that we have a
+working baseline.
+
+**Bug 1 — `enable_app(identity)` WebSocket reset on first install.**
+The conductor's WS server forcibly closes long-running admin requests
+(Windows error 10054 / `Websocket closed: ConnectionClosed`) while the
+identity hApp's ~3.9 MB WASM is being compiled for the first time. The
+work usually completes server-side; only the response is lost. Vault now
+wraps every `enable_app` call in `enable_app_resilient` — on a WS error
+it reconnects, polls `list_apps(Enabled)` for the target app, and either
+treats already-Enabled as success or retries `enable_app` on the fresh
+connection. Total recovery budget is 120 s, which is plenty for the
+worst-case first-time WASM compile we've measured.
+
+**Bug 2 — partially-installed apps left in `Disabled(NeverStarted)` on
+retry.** When Bug 1 dropped the connection mid-enable, the identity app
+was registered in the conductor's state DB but never marked Enabled. The
+next vault unlock then walked the install path, saw the existing
+identity, marked it `installed`, and skipped past it — but never
+explicitly re-enabled the disabled cell. DNA verification then failed
+with `private=true, identity=false`. Vault now runs a normalization pass
+that calls `enable_app_resilient` on every known-target-and-keymatched
+existing app before deciding what's missing. enable_app is safe to call
+on an already-Enabled app, so the pass is a no-op when state is
+healthy.
+
 ## [0.5.2-beta1] — 2026-05-06
 
 ### Diagnostic build for the Windows first-install crash

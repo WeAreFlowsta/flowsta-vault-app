@@ -44,6 +44,111 @@ fn make_happ_filename(dna_type: &str, version: &str) -> String {
     format!("flowsta_{}_v{}_happ.happ", dna_type, version.replace('.', "_"))
 }
 
+/// Reconnect to the admin WebSocket. Used during recovery from a WS reset.
+async fn reconnect_admin(admin_port: u16) -> Result<AdminWebsocket, String> {
+    AdminWebsocket::connect(
+        format!("localhost:{}", admin_port),
+        Some("flowsta-vault".to_string()),
+    )
+    .await
+    .map_err(|e| format!("admin WS reconnect failed: {}", e))
+}
+
+/// Enable an app, surviving a WebSocket reset mid-call.
+///
+/// On a fresh install, the conductor's first `enable_app` of a sizeable hApp
+/// (identity DNA, ~3.9 MB) blocks long enough on WASM compilation that the
+/// conductor's WS server forcibly closes the long-running admin request
+/// (Windows error 10054 / `Websocket closed: ConnectionClosed`). The
+/// conductor process itself stays alive — only the WebSocket dies — and
+/// the work usually does complete server-side.
+///
+/// This helper:
+/// 1. Tries `enable_app` once on the existing connection.
+/// 2. On error, reconnects the admin WS, polls `list_apps(Enabled)` until
+///    the target app shows Enabled, and retries `enable_app` against the
+///    fresh connection on each iteration. Total budget 120 s.
+/// 3. Treats already-Enabled (after the first call) as success — the
+///    server-side enable completed even though the response was lost.
+///
+/// `admin_ws` is replaced with a fresh connection on recovery so subsequent
+/// calls in the install sequence don't try to use a dead socket.
+async fn enable_app_resilient(
+    admin_ws: &mut AdminWebsocket,
+    admin_port: u16,
+    app_id: &str,
+) -> Result<(), String> {
+    if admin_ws.enable_app(app_id.to_string()).await.is_ok() {
+        return Ok(());
+    }
+
+    log::warn!(
+        "[enable] {} initial enable_app failed — reconnecting and polling for status",
+        app_id,
+    );
+
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(120);
+    let mut attempts: u32 = 0;
+
+    while std::time::Instant::now() < deadline {
+        attempts += 1;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        match reconnect_admin(admin_port).await {
+            Ok(ws) => *admin_ws = ws,
+            Err(e) => {
+                log::warn!("[enable] {} reconnect attempt {} failed: {}", app_id, attempts, e);
+                continue;
+            }
+        }
+
+        match admin_ws.list_apps(Some(AppStatusFilter::Enabled)).await {
+            Ok(enabled) if enabled.iter().any(|a| a.installed_app_id == app_id) => {
+                log::info!(
+                    "[enable] {} confirmed Enabled after {}ms ({} attempts)",
+                    app_id,
+                    started.elapsed().as_millis(),
+                    attempts,
+                );
+                return Ok(());
+            }
+            Ok(_) => {
+                match admin_ws.enable_app(app_id.to_string()).await {
+                    Ok(_) => {
+                        log::info!(
+                            "[enable] {} retry succeeded after {}ms ({} attempts)",
+                            app_id,
+                            started.elapsed().as_millis(),
+                            attempts,
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[enable] {} retry attempt {} failed: {} — continuing to poll",
+                            app_id, attempts, e,
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "[enable] {} list_apps attempt {} failed: {} — continuing to poll",
+                    app_id, attempts, e,
+                );
+            }
+        }
+    }
+
+    Err(format!(
+        "enable_app({}) gave up after {}s ({} attempts)",
+        app_id,
+        started.elapsed().as_secs(),
+        attempts,
+    ))
+}
+
 /// Install Flowsta DNAs into the conductor if not already present.
 ///
 /// Accepts dynamic versions (from VaultConfig or defaults). Checks for existing
@@ -83,7 +188,9 @@ pub async fn install_dnas(
     };
 
     // 1. Connect to admin WebSocket.
-    let admin_ws = AdminWebsocket::connect(
+    //    Mutable: enable_app_resilient may swap in a fresh connection if
+    //    the conductor's WS server resets a long-running admin call.
+    let mut admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
         Some("flowsta-vault".to_string()),
     )
@@ -148,17 +255,41 @@ pub async fn install_dnas(
         }
     }
 
-    if private_installed && identity_installed && signing_installed {
-        log::info!("All DNAs already installed with correct agent key, skipping");
-
-        // Ensure all apps are enabled — conductor may disable cells on restart
-        for app in &existing_apps {
-            match admin_ws.enable_app(app.installed_app_id.clone()).await {
-                Ok(_) => log::info!("Enabled {}", app.installed_app_id),
-                Err(e) => log::warn!("Failed to enable {}: {}", app.installed_app_id, e),
-            }
+    // 2.5. Normalize state: ensure every known-installed-and-keymatched app
+    //      is in Enabled state. install_app from a previous run may have
+    //      committed the app to the conductor's state DB while enable_app
+    //      didn't complete (long WASM compile reset the WS, or the user
+    //      locked the vault mid-enable). Without this pass, a partial
+    //      install would be detected as "already installed" and skipped on
+    //      retry but the cell would never get enabled — DNA verification
+    //      then fails with `private=true, identity=false`.
+    //
+    //      Uses enable_app_resilient so a long compile that resets the WS
+    //      again is also handled here.
+    for app in &existing_apps {
+        let is_target = app.installed_app_id == private_app_id
+            || app.installed_app_id == identity_app_id
+            || app.installed_app_id == signing_app_id;
+        if !is_target {
+            continue;
+        }
+        // Wrong-key apps were just uninstalled in the loop above.
+        if app.agent_pub_key != agent_key {
+            continue;
         }
 
+        log::info!(
+            "[enable] normalizing {} (status was {:?})",
+            app.installed_app_id,
+            app.status,
+        );
+        enable_app_resilient(&mut admin_ws, admin_port, &app.installed_app_id)
+            .await
+            .map_err(|e| format!("Failed to enable existing {}: {}", app.installed_app_id, e))?;
+    }
+
+    if private_installed && identity_installed && signing_installed {
+        log::info!("All DNAs already installed with correct agent key, skipping");
         return Ok(InstalledDnas {
             private_app_id,
             identity_app_id,
@@ -201,8 +332,7 @@ pub async fn install_dnas(
         );
 
         let enable_start = std::time::Instant::now();
-        admin_ws
-            .enable_app(private_app_id.clone())
+        enable_app_resilient(&mut admin_ws, admin_port, &private_app_id)
             .await
             .map_err(|e| format!("Failed to enable private DNA: {}", e))?;
 
@@ -248,8 +378,7 @@ pub async fn install_dnas(
         );
 
         let enable_start = std::time::Instant::now();
-        admin_ws
-            .enable_app(identity_app_id.clone())
+        enable_app_resilient(&mut admin_ws, admin_port, &identity_app_id)
             .await
             .map_err(|e| format!("Failed to enable identity DNA: {}", e))?;
 
@@ -296,8 +425,7 @@ pub async fn install_dnas(
             );
 
             let enable_start = std::time::Instant::now();
-            admin_ws
-                .enable_app(signing_app_id.clone())
+            enable_app_resilient(&mut admin_ws, admin_port, &signing_app_id)
                 .await
                 .map_err(|e| format!("Failed to enable signing DNA: {}", e))?;
 
