@@ -5,6 +5,32 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta3] — 2026-05-06
+
+### Make `install_app` resilient too
+
+beta2 confirmed Bug 2 was fixed (the normalization pass made lock+unlock
+recovery succeed in 1.8 s, vs. needing two retries before). It also
+showed Bug 1 has a second face: the same WS-reset-during-long-WASM-compile
+hits **`install_app(identity)`** on a fresh install, not just
+`enable_app(identity)`. Beta2 wrapped only the latter, so the first
+install still failed and the user had to lock+unlock to recover.
+
+beta3 adds an `install_app_resilient` helper that mirrors the existing
+`enable_app_resilient`: on a WS error, reconnect, poll `list_apps` for
+the target app, and either accept already-registered (the conductor
+completed the install server-side, only the response was lost) or
+retry `install_app` on a fresh connection. The retry is fast because
+the conductor caches the compiled WASM even when the response is lost.
+
+All three DNA install blocks (private / identity / signing) now route
+through `install_app_resilient`, then `enable_app_resilient`, so a WS
+reset at either step is recoverable inside the same vault session — the
+user shouldn't need to lock and unlock to get past the first install.
+
+holochain.exe terminal still visible on Windows; will be addressed in
+the next beta once first-install is rock solid.
+
 ## [0.5.2-beta2] — 2026-05-06
 
 ### Fix the Windows first-install failure

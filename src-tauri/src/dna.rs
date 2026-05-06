@@ -54,6 +54,101 @@ async fn reconnect_admin(admin_port: u16) -> Result<AdminWebsocket, String> {
     .map_err(|e| format!("admin WS reconnect failed: {}", e))
 }
 
+/// Install an app, surviving a WebSocket reset mid-call.
+///
+/// `install_app` for the identity hApp (~3.9 MB) on a clean conductor blocks
+/// long enough on first-time WASM compilation that the conductor's WS server
+/// resets the long-running admin request before responding (Windows error
+/// 10054 / `Websocket closed: ConnectionClosed`). The conductor itself
+/// stays alive and the WASM is cached server-side, so a retry on a fresh
+/// WebSocket completes quickly.
+///
+/// `make_payload` is called once per attempt because `InstallAppPayload`
+/// isn't `Clone` and we need a fresh value for each retry.
+async fn install_app_resilient<F>(
+    admin_ws: &mut AdminWebsocket,
+    admin_port: u16,
+    app_id: &str,
+    mut make_payload: F,
+) -> Result<(), String>
+where
+    F: FnMut() -> InstallAppPayload,
+{
+    if admin_ws.install_app(make_payload()).await.is_ok() {
+        return Ok(());
+    }
+
+    log::warn!(
+        "[install] {} initial install_app failed — reconnecting and polling for status",
+        app_id,
+    );
+
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(120);
+    let mut attempts: u32 = 0;
+
+    while std::time::Instant::now() < deadline {
+        attempts += 1;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        match reconnect_admin(admin_port).await {
+            Ok(ws) => *admin_ws = ws,
+            Err(e) => {
+                log::warn!("[install] {} reconnect attempt {} failed: {}", app_id, attempts, e);
+                continue;
+            }
+        }
+
+        // Did the install actually complete server-side despite the WS error?
+        match admin_ws.list_apps(None).await {
+            Ok(apps) if apps.iter().any(|a| a.installed_app_id == app_id) => {
+                log::info!(
+                    "[install] {} confirmed registered after {}ms ({} attempts)",
+                    app_id,
+                    started.elapsed().as_millis(),
+                    attempts,
+                );
+                return Ok(());
+            }
+            Ok(_) => {
+                // Not yet registered — try again on the fresh connection.
+                // The first attempt's WASM compile is cached server-side
+                // even when the response was lost, so this retry is fast.
+                match admin_ws.install_app(make_payload()).await {
+                    Ok(_) => {
+                        log::info!(
+                            "[install] {} retry succeeded after {}ms ({} attempts)",
+                            app_id,
+                            started.elapsed().as_millis(),
+                            attempts,
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[install] {} retry attempt {} failed: {} — continuing to poll",
+                            app_id, attempts, e,
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "[install] {} list_apps attempt {} failed: {} — continuing to poll",
+                    app_id, attempts, e,
+                );
+            }
+        }
+    }
+
+    Err(format!(
+        "install_app({}) gave up after {}s ({} attempts)",
+        app_id,
+        started.elapsed().as_secs(),
+        attempts,
+    ))
+}
+
 /// Enable an app, surviving a WebSocket reset mid-call.
 ///
 /// On a fresh install, the conductor's first `enable_app` of a sizeable hApp
@@ -313,19 +408,21 @@ pub async fn install_dnas(
             private_version, happ_size, happ_path,
         );
         let install_start = std::time::Instant::now();
-        let payload = InstallAppPayload {
-            source: AppBundleSource::Path(happ_path),
-            agent_key: Some(agent_key.clone()),
-            installed_app_id: Some(private_app_id.clone()),
-            network_seed: None,
-            roles_settings: None,
-            ignore_genesis_failure: false,
-        };
-
-        admin_ws
-            .install_app(payload)
-            .await
-            .map_err(|e| format!("Failed to install private DNA: {}", e))?;
+        install_app_resilient(
+            &mut admin_ws,
+            admin_port,
+            &private_app_id,
+            || InstallAppPayload {
+                source: AppBundleSource::Path(happ_path.clone()),
+                agent_key: Some(agent_key.clone()),
+                installed_app_id: Some(private_app_id.clone()),
+                network_seed: None,
+                roles_settings: None,
+                ignore_genesis_failure: false,
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to install private DNA: {}", e))?;
         log::info!(
             "[dna:private] install_app returned in {}ms",
             install_start.elapsed().as_millis()
@@ -359,19 +456,21 @@ pub async fn install_dnas(
             identity_version, happ_size, happ_path,
         );
         let install_start = std::time::Instant::now();
-        let payload = InstallAppPayload {
-            source: AppBundleSource::Path(happ_path),
-            agent_key: Some(agent_key.clone()),
-            installed_app_id: Some(identity_app_id.clone()),
-            network_seed: None,
-            roles_settings: None,
-            ignore_genesis_failure: false,
-        };
-
-        admin_ws
-            .install_app(payload)
-            .await
-            .map_err(|e| format!("Failed to install identity DNA: {}", e))?;
+        install_app_resilient(
+            &mut admin_ws,
+            admin_port,
+            &identity_app_id,
+            || InstallAppPayload {
+                source: AppBundleSource::Path(happ_path.clone()),
+                agent_key: Some(agent_key.clone()),
+                installed_app_id: Some(identity_app_id.clone()),
+                network_seed: None,
+                roles_settings: None,
+                ignore_genesis_failure: false,
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to install identity DNA: {}", e))?;
         log::info!(
             "[dna:identity] install_app returned in {}ms",
             install_start.elapsed().as_millis()
@@ -406,19 +505,21 @@ pub async fn install_dnas(
                 signing_version, happ_size, happ_path,
             );
             let install_start = std::time::Instant::now();
-            let payload = InstallAppPayload {
-                source: AppBundleSource::Path(happ_path),
-                agent_key: Some(agent_key.clone()),
-                installed_app_id: Some(signing_app_id.clone()),
-                network_seed: None,
-                roles_settings: None,
-                ignore_genesis_failure: false,
-            };
-
-            admin_ws
-                .install_app(payload)
-                .await
-                .map_err(|e| format!("Failed to install signing DNA: {}", e))?;
+            install_app_resilient(
+                &mut admin_ws,
+                admin_port,
+                &signing_app_id,
+                || InstallAppPayload {
+                    source: AppBundleSource::Path(happ_path.clone()),
+                    agent_key: Some(agent_key.clone()),
+                    installed_app_id: Some(signing_app_id.clone()),
+                    network_seed: None,
+                    roles_settings: None,
+                    ignore_genesis_failure: false,
+                },
+            )
+            .await
+            .map_err(|e| format!("Failed to install signing DNA: {}", e))?;
             log::info!(
                 "[dna:signing] install_app returned in {}ms",
                 install_start.elapsed().as_millis()
