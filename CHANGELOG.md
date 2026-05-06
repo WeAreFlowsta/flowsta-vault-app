@@ -5,6 +5,45 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta4] — 2026-05-06
+
+### Auto-restart the conductor on first-install hiccups
+
+beta3 added retry+reconnect for `install_app` and `enable_app`, but the
+new logs revealed the next layer of the problem: on Windows, the
+conductor process itself can exit during identity DNA's first-time
+setup. Once `holochain.exe` is gone, no amount of WS reconnecting will
+help — every reconnect attempt comes back with `os error 10061`
+(connection refused) because there's nothing listening on the admin
+port. The vault was sitting in its 120 s recovery loop watching a dead
+process before bailing out with `HC Error`.
+
+Users were already working around this by hand: lock the vault → unlock.
+That kills the (already-dead) conductor and starts a fresh one, which
+warm-starts against the cached WASM and registered-but-disabled identity
+DNA. Total recovery: <2 s of actual conductor work.
+
+beta4 automates that workaround:
+
+- `start_holochain` now wraps the full startup-and-DNA-install flow in a
+  retry-once pattern. If the first attempt errors for any reason, vault
+  pauses 2 s for OS resources to release and runs the whole flow again
+  on a fresh conductor process. The frontend gets a transient
+  *"First-run setup needs a quick restart..."* status so the user sees
+  visible progress instead of an HC Error.
+- `enable_app_resilient` and `install_app_resilient` shrink their
+  per-call recovery budget from 120 s to 30 s. 30 s is plenty for a
+  healthy conductor's slow WASM compile; if the conductor has died, we
+  hand off to the outer restart sooner instead of burning two minutes
+  watching a closed port.
+
+End-to-end behaviour: the user sees a slightly longer "Initializing..."
+on a clean Windows install (the cost of the auto-restart), but no HC
+Error and no manual lock+unlock dance.
+
+holochain.exe terminal is still visible on Windows; will be addressed in
+the next beta once first-install is solid.
+
 ## [0.5.2-beta3] — 2026-05-06
 
 ### Make `install_app` resilient too

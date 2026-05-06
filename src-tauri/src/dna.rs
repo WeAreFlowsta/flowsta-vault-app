@@ -84,7 +84,11 @@ where
     );
 
     let started = std::time::Instant::now();
-    let deadline = started + std::time::Duration::from_secs(120);
+    // 30 s is plenty for a healthy conductor's slow WASM compile.
+    // If the conductor has actually died (its WS server stops accepting
+    // connections — Windows error 10061) burning more time here is futile;
+    // the outer `start_holochain` retry will restart the conductor entirely.
+    let deadline = started + std::time::Duration::from_secs(30);
     let mut attempts: u32 = 0;
 
     while std::time::Instant::now() < deadline {
@@ -183,7 +187,11 @@ async fn enable_app_resilient(
     );
 
     let started = std::time::Instant::now();
-    let deadline = started + std::time::Duration::from_secs(120);
+    // 30 s is plenty for a healthy conductor's slow WASM compile.
+    // If the conductor has actually died (its WS server stops accepting
+    // connections — Windows error 10061) burning more time here is futile;
+    // the outer `start_holochain` retry will restart the conductor entirely.
+    let deadline = started + std::time::Duration::from_secs(30);
     let mut attempts: u32 = 0;
 
     while std::time::Instant::now() < deadline {

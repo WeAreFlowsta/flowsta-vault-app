@@ -309,11 +309,58 @@ async fn wait_for_admin_ws(
     }
 }
 
-/// Full startup sequence: lair → seed import → conductor → connect → install DNAs.
+/// Public entry point. Calls `start_holochain_attempt` once, and on failure
+/// kills any leftover children, briefly waits for OS resources, and retries
+/// once with a fresh conductor.
+///
+/// This automates the manual lock+unlock recovery: on Windows, the first
+/// fresh-install of identity DNA can leave the conductor in a state where
+/// its WS server stops responding (the conductor process itself eventually
+/// exits). The fix is the same one users were doing by hand — restart the
+/// conductor. Second attempt benefits from the WASM cache the first one
+/// populated on disk, so it's typically fast (<2 s of DNA work).
+pub async fn start_holochain(
+    app_handle: tauri::AppHandle,
+    data_dir: PathBuf,
+    resource_dir: PathBuf,
+    passphrase: String,
+    device_seed: [u8; 32],
+) -> Result<ConductorHandle, String> {
+    match start_holochain_attempt(
+        app_handle.clone(),
+        data_dir.clone(),
+        resource_dir.clone(),
+        passphrase.clone(),
+        device_seed,
+    )
+    .await
+    {
+        Ok(h) => return Ok(h),
+        Err(e) => {
+            log::warn!(
+                "[start_holochain] first attempt failed: {} — auto-restarting conductor",
+                e,
+            );
+            let _ = app_handle.emit(
+                "conductor-status",
+                ConductorStatus::Starting {
+                    message: "First-run setup needs a quick restart...".into(),
+                },
+            );
+            // Brief pause so the admin WS port is released and any process
+            // tear-down completes before the second attempt binds it.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    start_holochain_attempt(app_handle, data_dir, resource_dir, passphrase, device_seed).await
+}
+
+/// One full startup attempt: lair → seed import → conductor → connect → install DNAs.
 ///
 /// Called after vault unlock. Runs in a background task.
 /// Emits Tauri events for frontend status updates.
-pub async fn start_holochain(
+async fn start_holochain_attempt(
     app_handle: tauri::AppHandle,
     data_dir: PathBuf,
     resource_dir: PathBuf,
