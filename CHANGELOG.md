@@ -5,6 +5,35 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta6] — 2026-05-06
+
+### Hide both sidecar terminals on Windows; soften the recovery message
+
+beta5's first-install captured the conductor's exit status for the first
+time: `0xc0000005` (Windows `STATUS_ACCESS_VIOLATION`) — `holochain.exe`
+genuinely crashes during signing DNA's first-time WASM compile, same
+crash class as v0.5.0. With the start_holochain auto-restart (beta4) and
+the fast bail-on-process-exit (beta5) catching this transparently, the
+visible-terminal workaround is no longer load-bearing.
+
+beta6:
+
+- Re-enables `spawn_hidden()` for `holochain.exe` (was disabled in
+  v0.5.2-rc2 on the theory that hiding caused the crash). beta1's
+  diagnostic logging and beta5's exit-code capture proved the crash
+  happens regardless of window state — it's an upstream holochain bug,
+  not something the vault's spawn flags can change. Both sidecar
+  terminals (`lair-keystore.exe` and `holochain.exe`) are now hidden on
+  Windows. Linux / macOS unchanged.
+- Replaces the auto-restart status message *"First-run setup needs a
+  quick restart..."* with *"Finishing first-time setup..."* so the
+  brief recovery feels like progression, not a fault recovery.
+
+The upstream `holochain.exe` crash on first signing-DNA install will be
+filed with the holochain team. The vault's auto-restart is a clean
+work-around in the meantime; users see a single ~30 s "Initializing..."
+on a clean Windows install and then the vault is ready.
+
 ## [0.5.2-beta5] — 2026-05-06
 
 ### Bail out of inner retry the moment the conductor process exits

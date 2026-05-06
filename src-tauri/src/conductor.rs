@@ -165,15 +165,15 @@ pub fn start_conductor_process(
     let holochain_bin = crate::resolve_sidecar_bin("holochain");
     log::info!("Using holochain binary: {:?}", holochain_bin);
 
-    // NOTE: we deliberately use .spawn() here (not .spawn_hidden()) — hiding
-    // holochain.exe's console window on Windows triggers an MSVCP140.dll
-    // access violation during signing-DNA WASM compilation, regardless of
-    // whether we use CREATE_NO_WINDOW (v0.5.0) or post-spawn ShowWindow
-    // (v0.5.2-rc1). Both approaches reproduce the same `0xc0000005` crash
-    // when the user installs from scratch. Until that's diagnosed upstream,
-    // holochain's terminal stays visible on Windows. lair-keystore is fine
-    // with hidden consoles, so its window is still hidden via spawn_hidden
-    // in lair.rs.
+    // Hide the conductor's console window on Windows via post-spawn
+    // ShowWindow(SW_HIDE). Earlier RCs avoided this on the theory that
+    // hiding caused the `0xc0000005` access violation we saw on first
+    // install of signing DNA. The diagnostic logging added in beta1 and
+    // the conductor exit-code captured in beta5 proved that crash
+    // happens *regardless* of window state — it's an upstream holochain
+    // bug in the WASM compile path, not anything to do with the console.
+    // Now that the start_holochain auto-restart catches that crash and
+    // recovers transparently, the window can be hidden safely.
     let spawn_start = std::time::Instant::now();
     let mut child = std::process::Command::new(&holochain_bin)
         .arg("-c")
@@ -183,7 +183,7 @@ pub fn start_conductor_process(
         .stdout(stdout_file)
         .stderr(stderr_file)
         .tie_to_parent()
-        .spawn()
+        .spawn_hidden()
         .map_err(|e| format!("Failed to spawn holochain conductor: {}", e))?;
 
     let pid = child.id();
@@ -344,7 +344,7 @@ pub async fn start_holochain(
             let _ = app_handle.emit(
                 "conductor-status",
                 ConductorStatus::Starting {
-                    message: "First-run setup needs a quick restart...".into(),
+                    message: "Finishing first-time setup...".into(),
                 },
             );
             // Brief pause so the admin WS port is released and any process
