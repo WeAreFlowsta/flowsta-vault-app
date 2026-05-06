@@ -5,6 +5,43 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta7] — 2026-05-07
+
+### Stop the hide thread bailing out before terminal windows appear
+
+beta6 hid lair-keystore reliably but the holochain conductor's terminal
+still flashed (and sometimes stuck around) on Windows. The diagnostic
+logs showed the hide thread exiting too early: it would find a window
+owned by the spawned PID with `IsWindowVisible == 0` after a few polls,
+log *"found 1 window(s) but none visible — not hiding"*, and quit.
+Conhost then toggled `WS_VISIBLE` on milliseconds later — too late for
+us to catch.
+
+The early-exit on *"found but invisible"* assumed the child was
+deliberately keeping a hidden IPC window we shouldn't flap. That was
+wrong for our case. The fix is to keep polling for the full budget and
+call `ShowWindow(SW_HIDE)` on every match every iteration, regardless
+of current visibility. `SW_HIDE` is idempotent on already-hidden
+windows, so the worst case is a 50 ms visibility flicker between
+conhost toggling the window on and our next poll catching it.
+
+The hide thread now also:
+
+- Polls for **3 s total** (was 2 s) at **50 ms intervals** — 60 attempts
+  per spawned process, more than enough headroom for slow Windows
+  startups.
+- Logs the **window class name** on the first match per pid. Lets us
+  confirm we're actually finding the `ConsoleWindowClass` window vs.
+  some unrelated internal window. If beta7 logs show we're matching a
+  non-console class and the real terminal still escapes, beta8 will add
+  conhost-parent tracking — find `ConsoleWindowClass` windows whose
+  conhost.exe parent matches our spawned PID.
+- Reports a summary at exit: total iterations, total hide calls, and
+  how many of those calls were on a previously-visible window (the
+  metric that tells us the polling is doing useful work).
+
+Linux / macOS unchanged.
+
 ## [0.5.2-beta6] — 2026-05-06
 
 ### Hide both sidecar terminals on Windows; soften the recovery message

@@ -96,25 +96,46 @@ mod windows_hide {
     //! suppress the console windows that pop up when we spawn console-mode
     //! sidecars on Windows.
     //!
-    //! We poll instead of using a synchronous EnumWindows call because the
-    //! window may not exist yet at the moment we return from
-    //! `Command::spawn` — Windows creates the console host process
-    //! asynchronously. Retrying for up to 2 seconds catches it reliably
-    //! across machines + load conditions.
+    //! ## Why always-hide on every poll
+    //!
+    //! The previous implementation exited early when it found a matching
+    //! window that wasn't currently visible (`IsWindowVisible == 0`),
+    //! reasoning the child was using a hidden IPC window we shouldn't
+    //! flap. That was wrong — Windows console hosts (conhost) create
+    //! their window with WS_VISIBLE off and toggle it on later, often
+    //! after our few-poll budget had already elapsed. Result: terminal
+    //! windows reliably appeared after we'd "given up".
+    //!
+    //! Now we poll for the full 3 s budget at 50 ms intervals and call
+    //! `ShowWindow(SW_HIDE)` on every match every iteration regardless of
+    //! current visibility. `SW_HIDE` is idempotent on already-hidden
+    //! windows, so the worst case is a 50 ms visibility flicker between
+    //! the OS toggling `WS_VISIBLE` on and our next poll catching it.
+    //!
+    //! We also log the window class on the first match per pid so we can
+    //! verify we're finding the actual `ConsoleWindowClass` window vs.
+    //! some unrelated internal window.
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, IsWindowVisible, ShowWindow, SW_HIDE,
+        EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible, ShowWindow, SW_HIDE,
     };
 
     struct EnumState {
         target_pid: u32,
-        hits: u32,
-        hidden: u32,
-        // Track the first matched HWND so we can log it after enumeration
-        // completes (logging from inside enum_proc would be possible but
-        // keeps the hot loop simpler).
-        first_hwnd: usize,
+        hides: u32,
+        hides_while_visible: u32,
+        first_class: Option<String>,
+    }
+
+    fn get_window_class(hwnd: HWND) -> String {
+        let mut buf = [0u16; 256];
+        let len = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        if len > 0 {
+            String::from_utf16_lossy(&buf[..len as usize])
+        } else {
+            String::new()
+        }
     }
 
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -124,17 +145,19 @@ mod windows_hide {
             GetWindowThreadProcessId(hwnd, &mut wnd_pid);
         }
         if wnd_pid == state.target_pid {
-            state.hits += 1;
-            if state.first_hwnd == 0 {
-                state.first_hwnd = hwnd as usize;
+            if state.first_class.is_none() {
+                state.first_class = Some(get_window_class(hwnd));
             }
-            // Only hide currently-visible windows so we don't flap if the
-            // child legitimately uses a hidden window for IPC.
-            if unsafe { IsWindowVisible(hwnd) } != 0 {
-                unsafe {
-                    ShowWindow(hwnd, SW_HIDE);
-                }
-                state.hidden += 1;
+            // Always hide regardless of current visibility. ShowWindow(SW_HIDE)
+            // on an already-hidden window is a cheap no-op; this catches the
+            // race where conhost toggles WS_VISIBLE on between our polls.
+            let was_visible = unsafe { IsWindowVisible(hwnd) } != 0;
+            unsafe {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+            state.hides += 1;
+            if was_visible {
+                state.hides_while_visible += 1;
             }
         }
         // Continue enumeration — a process may legitimately own multiple
@@ -145,9 +168,9 @@ mod windows_hide {
     fn try_hide_once(target_pid: u32) -> EnumState {
         let mut state = EnumState {
             target_pid,
-            hits: 0,
-            hidden: 0,
-            first_hwnd: 0,
+            hides: 0,
+            hides_while_visible: 0,
+            first_class: None,
         };
         unsafe {
             EnumWindows(
@@ -161,38 +184,44 @@ mod windows_hide {
     pub(super) fn hide_console_for_pid_async(pid: u32) {
         std::thread::spawn(move || {
             let started = Instant::now();
-            let deadline = started + Duration::from_secs(2);
+            let deadline = started + Duration::from_secs(3);
             log::info!("[hide:{pid}] thread started");
             let mut iter: u32 = 0;
+            let mut total_hides: u32 = 0;
+            let mut total_visible_hides: u32 = 0;
+            let mut logged_class = false;
             while Instant::now() < deadline {
                 iter += 1;
                 let state = try_hide_once(pid);
-                if state.hidden > 0 {
-                    let elapsed_ms = started.elapsed().as_millis();
-                    log::info!(
-                        "[hide:{pid}] window hidden after {elapsed_ms}ms ({iter} polls); hwnd=0x{:x}, hits={}, hidden={}",
-                        state.first_hwnd,
-                        state.hits,
-                        state.hidden,
-                    );
-                    return;
+                total_hides += state.hides;
+                total_visible_hides += state.hides_while_visible;
+                if !logged_class {
+                    if let Some(class) = state.first_class.as_ref() {
+                        log::info!(
+                            "[hide:{pid}] first match window class: '{}' (after {}ms)",
+                            class,
+                            started.elapsed().as_millis(),
+                        );
+                        logged_class = true;
+                    }
                 }
-                if state.hits > 0 {
-                    // Found a window for this pid but it was already hidden
-                    // (e.g. WS_VISIBLE never set). Log once and stop —
-                    // continuing to poll burns CPU for no reason.
-                    let elapsed_ms = started.elapsed().as_millis();
+                if state.hides_while_visible > 0 {
                     log::info!(
-                        "[hide:{pid}] found {} window(s) but none visible after {elapsed_ms}ms ({iter} polls); not hiding",
-                        state.hits,
+                        "[hide:{pid}] hid {} visible window(s) on iter {} ({}ms elapsed)",
+                        state.hides_while_visible,
+                        iter,
+                        started.elapsed().as_millis(),
                     );
-                    return;
                 }
-                std::thread::sleep(Duration::from_millis(20));
+                std::thread::sleep(Duration::from_millis(50));
             }
-            let elapsed_ms = started.elapsed().as_millis();
-            log::warn!(
-                "[hide:{pid}] gave up after {elapsed_ms}ms ({iter} polls) — no top-level window ever appeared for this pid"
+            log::info!(
+                "[hide:{pid}] thread exited after {}ms ({} iters, {} total hide calls, {} hides-while-visible, class={:?})",
+                started.elapsed().as_millis(),
+                iter,
+                total_hides,
+                total_visible_hides,
+                logged_class,
             );
         });
     }
