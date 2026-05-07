@@ -25,8 +25,9 @@ for r in sorted(cfg['bundle']['resources']):
 
 # Only match real assigned constants — not doc comments — so e.g. an
 # `e.g. ('private', '1.10') -> 'flowsta_private_v1_10_happ.happ'` comment
-# doesn't trigger a false positive.
-constants=$(grep -E '^const BUNDLED_[A-Z_]+_HAPP_FILE: &str =' src-tauri/src/dna.rs \
+# doesn't trigger a false positive. Allows digits in the middle so
+# version-suffixed constants like `BUNDLED_SIGNING_V1_3_HAPP_FILE` match.
+constants=$(grep -E '^const BUNDLED_[A-Z0-9_]+_HAPP_FILE: &str =' src-tauri/src/dna.rs \
   | grep -oE '"[^"]+"' | tr -d '"' | sort -u)
 
 on_disk=$(ls src-tauri/resources/*.happ 2>/dev/null | xargs -n1 basename | sort -u)

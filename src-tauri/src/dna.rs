@@ -29,14 +29,30 @@ pub const BUNDLED_SIGNING_VERSION: &str = "1.4";
 /// against). Without these, a fresh install would only show signatures
 /// authored on the current DNA version — historical ones would be invisible.
 ///
-/// New entries here MUST also be added to tauri.conf.json `bundle.resources`
-/// so Tauri actually packages the .happ files in the .deb / .nsis installers.
-pub const HISTORICAL_SIGNING_VERSIONS: &[&str] = &["1.0", "1.1", "1.2", "1.3"];
+/// Each tuple is `(version, bundled_happ_filename)`. Both must agree with
+/// the `BUNDLED_SIGNING_V{X}_{Y}_HAPP_FILE` constants above and the entries
+/// in tauri.conf.json `bundle.resources`.
+pub const HISTORICAL_SIGNING_VERSIONS: &[(&str, &str)] = &[
+    ("1.3", BUNDLED_SIGNING_V1_3_HAPP_FILE),
+    ("1.2", BUNDLED_SIGNING_V1_2_HAPP_FILE),
+    ("1.1", BUNDLED_SIGNING_V1_1_HAPP_FILE),
+    ("1.0", BUNDLED_SIGNING_V1_0_HAPP_FILE),
+];
 
 /// hApp bundle filenames bundled with this app build (in src-tauri/resources/).
 const BUNDLED_PRIVATE_HAPP_FILE: &str = "flowsta_private_v1_11_happ.happ";
 const BUNDLED_IDENTITY_HAPP_FILE: &str = "flowsta_identity_v1_4_happ.happ";
 const BUNDLED_SIGNING_HAPP_FILE: &str = "flowsta_signing_v1_4_happ.happ";
+
+// Historical signing-DNA bundles. Installed by `install_historical_signing_dnas`
+// at the end of `install_dnas` so users see signatures they made on older
+// signing DNA versions. Each constant must have a matching entry in
+// tauri.conf.json `bundle.resources` and a file in src-tauri/resources/ —
+// scripts/check-bundle-sync.sh enforces this.
+const BUNDLED_SIGNING_V1_3_HAPP_FILE: &str = "flowsta_signing_v1_3_happ.happ";
+const BUNDLED_SIGNING_V1_2_HAPP_FILE: &str = "flowsta_signing_v1_2_happ.happ";
+const BUNDLED_SIGNING_V1_1_HAPP_FILE: &str = "flowsta_signing_v1_1_happ.happ";
+const BUNDLED_SIGNING_V1_0_HAPP_FILE: &str = "flowsta_signing_v1_0_happ.happ";
 
 /// Result of DNA installation — app IDs for later use.
 pub struct InstalledDnas {
@@ -676,7 +692,7 @@ async fn install_historical_signing_dnas(
         }
     };
 
-    for version in HISTORICAL_SIGNING_VERSIONS {
+    for (version, happ_filename) in HISTORICAL_SIGNING_VERSIONS {
         let app_id = make_app_id("signing", version);
         if existing_apps
             .iter()
@@ -686,8 +702,7 @@ async fn install_historical_signing_dnas(
             continue;
         }
 
-        let happ_filename = make_happ_filename("signing", version);
-        let happ_path = resource_dir.join(&happ_filename);
+        let happ_path = resource_dir.join(happ_filename);
         if !happ_path.exists() {
             log::warn!(
                 "[historical] signing v{} bundle not found at {:?} — skipping",
