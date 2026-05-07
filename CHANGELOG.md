@@ -5,6 +5,53 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta11] — 2026-05-07
+
+### Backfill historical signing-DNA versions on every install
+
+Each Sign It signature lives on the signing DNA that was current at
+sign-time, and the `get_my_signatures` zome only returns entries from
+the cell it's called against. Until now, a fresh install only got the
+current signing DNA (v1.4) — historical signatures on v1.0 / v1.1 / v1.2
+/ v1.3 were invisible on any new device.
+
+beta11 bundles all five signing-DNA versions in the installer
+(`bundle.resources` extended) and adds an `install_historical_signing_dnas`
+pass at the end of `install_dnas` that installs + enables any of the
+historical versions that aren't already present. Best-effort — a
+per-version failure logs a warning and moves on, the unlock continues.
+
+End result: a fresh install on any platform shows the user's full
+signature history as soon as DHT gossip catches up.
+
+### Sign It on Windows: friendly placeholder + dashboard tile gate
+
+The Windows Sign It path isn't yet reliable in this build (signing-DNA
+admin calls trigger a conductor crash that the runtime watchdog
+absorbs but can't durably recover from). Rather than show a broken
+list, beta11 replaces the Sign It page on Windows with:
+
+> **Signing files from Windows is coming soon.** Until then, sign at
+> flowsta.com or use Flowsta Vault on Linux / macOS — your signatures
+> will appear here automatically.
+
+A clear "Open flowsta.com" button takes the user to the web Sign It.
+
+The Overview dashboard's Signatures tile shows "—" with the same
+friendly subtitle on Windows, and the layout-owned background fetch
+(`refreshSignatures` on conductor-ready and on `profile-synced`) is
+skipped on Windows so the watchdog doesn't fire in a tight loop.
+
+Linux / macOS users see no behaviour change — full Sign It UI, full
+sig list, full create / revoke / thumbnail flow.
+
+### File-explorer right-click label
+
+Renamed *"Sign with Flowsta Vault"* → *"Sign It with Flowsta Vault"*
+on Linux (`flowsta-vault-sign.desktop`) and Windows (NSIS installer
+hook). macOS uses the OS's generic "Open With" menu and shows the
+product name there, so no change needed.
+
 ## [0.5.2-beta10] — 2026-05-07
 
 ### Runtime conductor watchdog — recovers from post-startup crashes

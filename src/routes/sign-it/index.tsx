@@ -10,6 +10,7 @@ import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
+import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { GlassButton } from "~/components/common/GlassButton";
 import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
 import { SignQuotaMeter, type SignQuotaState } from "~/components/sign-it/SignQuotaMeter";
@@ -99,6 +100,24 @@ function getDefaultThumbnail(sig: any): string {
 type SigningStep = "idle" | "selected" | "analyzing" | "ready" | "signing" | "done";
 
 export default component$(() => {
+  // Sign It is gated on Windows for v0.5.2 — the local conductor's
+  // signing-DNA admin path isn't reliable on this platform yet, so we
+  // direct users to flowsta.com (web Sign It) until it is. Detected from
+  // the WebView's user agent at mount; SSR-safe.
+  const isWindows = useSignal(false);
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(() => {
+    isWindows.value =
+      typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
+  });
+  const openWebSignIt = $(async () => {
+    try {
+      await openExternal("https://flowsta.com/dashboard/sign-it/");
+    } catch {
+      /* shell plugin disabled or blocked — silently no-op */
+    }
+  });
+
   const step = useSignal<SigningStep>("idle");
   const selectedFile = useSignal<string | null>(null);
   const fileName = useSignal("");
@@ -738,6 +757,43 @@ export default component$(() => {
       revoking.value = false;
     }
   });
+
+  // Windows users see a message + "Open flowsta.com" instead of the full
+  // Sign It UI for now. See `isWindows` declaration above for context.
+  if (isWindows.value) {
+    return (
+      <div>
+        <h1 class="mb-6 text-2xl font-bold text-white">Sign It</h1>
+        <div class="rounded-lg border border-gray-700 bg-gray-900 p-8 text-center">
+          <div class="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-full bg-amber-500/10 text-amber-400">
+            <svg
+              class="h-8 w-8"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width={2}
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10"
+              />
+            </svg>
+          </div>
+          <h2 class="mb-3 text-xl font-semibold text-white">
+            Signing files from Windows is coming soon
+          </h2>
+          <p class="mx-auto mb-6 max-w-md text-sm leading-relaxed text-gray-400">
+            Until then, sign at flowsta.com or use Flowsta Vault on Linux or
+            macOS — your signatures will appear here automatically.
+          </p>
+          <GlassButton variant="primary" onClick$={openWebSignIt}>
+            Open flowsta.com
+          </GlassButton>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>

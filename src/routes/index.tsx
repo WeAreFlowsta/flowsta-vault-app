@@ -116,6 +116,12 @@ export default component$(() => {
   const sigsLoaded = sigStore.loaded.value;
   const activeSigs = sigStore.signatures.value.filter((s: any) => !s.revoked).length;
   const revokedSigs = sigCount - activeSigs;
+  // Sign It is gated on Windows in v0.5.2 (see /sign-it/index.tsx). On
+  // Windows the count comes back as 0 because the underlying fetch can't
+  // run reliably; show "—" with a friendlier subtitle instead of "0 — Sign
+  // your first file" which would be misleading.
+  const isWindows =
+    typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
 
   // Find most recent backup across all apps
   const lastBackupTime = stats?.apps.reduce(
@@ -215,18 +221,24 @@ export default component$(() => {
             <span class="text-sm font-medium">Signatures</span>
           </div>
           <p class="text-3xl font-bold text-white">
-            {sigsLoaded ? sigCount : (
+            {isWindows ? (
+              "—"
+            ) : sigsLoaded ? (
+              sigCount
+            ) : (
               <span class="inline-block h-7 w-10 animate-pulse rounded bg-gray-700 align-middle" />
             )}
           </p>
           <p class="mt-1 text-xs text-gray-500">
-            {!sigsLoaded
-              ? "Loading..."
-              : sigCount === 0
-                ? "Sign your first file"
-                : revokedSigs > 0
-                  ? `${activeSigs} active, ${revokedSigs} revoked`
-                  : `${activeSigs} active`}
+            {isWindows
+              ? "Sign at flowsta.com — coming soon here"
+              : !sigsLoaded
+                ? "Loading..."
+                : sigCount === 0
+                  ? "Sign your first file"
+                  : revokedSigs > 0
+                    ? `${activeSigs} active, ${revokedSigs} revoked`
+                    : `${activeSigs} active`}
           </p>
         </Link>
 

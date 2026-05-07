@@ -21,6 +21,18 @@ pub const BUNDLED_PRIVATE_VERSION: &str = "1.11";
 pub const BUNDLED_IDENTITY_VERSION: &str = "1.4";
 pub const BUNDLED_SIGNING_VERSION: &str = "1.4";
 
+/// Historical signing DNA versions bundled with this app build, in addition
+/// to the current `BUNDLED_SIGNING_VERSION`. Installing these on first launch
+/// lets the user see signatures they made on older signing DNA versions
+/// (each signature is on whichever DNA was current at sign-time, and the
+/// `get_my_signatures` zome only returns entries from the cell it's called
+/// against). Without these, a fresh install would only show signatures
+/// authored on the current DNA version — historical ones would be invisible.
+///
+/// New entries here MUST also be added to tauri.conf.json `bundle.resources`
+/// so Tauri actually packages the .happ files in the .deb / .nsis installers.
+pub const HISTORICAL_SIGNING_VERSIONS: &[&str] = &["1.0", "1.1", "1.2", "1.3"];
+
 /// hApp bundle filenames bundled with this app build (in src-tauri/resources/).
 const BUNDLED_PRIVATE_HAPP_FILE: &str = "flowsta_private_v1_11_happ.happ";
 const BUNDLED_IDENTITY_HAPP_FILE: &str = "flowsta_identity_v1_4_happ.happ";
@@ -613,11 +625,107 @@ pub async fn install_dnas(
         signing_ok,
     );
 
+    // Backfill historical signing DNA versions so the user sees signatures
+    // they made before the current DNA. Best-effort — log warnings, don't
+    // fail the unlock if any of them error out.
+    install_historical_signing_dnas(
+        &mut admin_ws,
+        admin_port,
+        resource_dir,
+        &agent_key,
+        conductor_child,
+    )
+    .await;
+
     Ok(InstalledDnas {
         private_app_id,
         identity_app_id,
         signing_app_id,
     })
+}
+
+/// Install older signing DNA versions if they're not already installed.
+///
+/// The user's signature history lives on whichever signing DNA was current
+/// at sign-time. Without these older cells installed, a fresh install would
+/// only see signatures authored on `BUNDLED_SIGNING_VERSION`. The historical
+/// .happ files ship in `src-tauri/resources/` (see
+/// `HISTORICAL_SIGNING_VERSIONS` for the list, and tauri.conf.json
+/// `bundle.resources` for the packaging).
+///
+/// Best-effort: a per-version failure logs a warning and moves on. We
+/// intentionally do *not* call `install_app_resilient` here — these
+/// installs run after the main install has already been verified, and
+/// we don't want a single old-version failure to trigger the auto-restart
+/// machinery and block the user from reaching their dashboard.
+async fn install_historical_signing_dnas(
+    admin_ws: &mut AdminWebsocket,
+    _admin_port: u16,
+    resource_dir: &Path,
+    agent_key: &AgentPubKey,
+    _conductor_child: &mut Child,
+) {
+    let existing_apps = match admin_ws.list_apps(None).await {
+        Ok(apps) => apps,
+        Err(e) => {
+            log::warn!(
+                "[historical] could not list apps to check what's already installed: {}",
+                e,
+            );
+            return;
+        }
+    };
+
+    for version in HISTORICAL_SIGNING_VERSIONS {
+        let app_id = make_app_id("signing", version);
+        if existing_apps
+            .iter()
+            .any(|a| a.installed_app_id == app_id)
+        {
+            log::info!("[historical] signing v{} already installed, skipping", version);
+            continue;
+        }
+
+        let happ_filename = make_happ_filename("signing", version);
+        let happ_path = resource_dir.join(&happ_filename);
+        if !happ_path.exists() {
+            log::warn!(
+                "[historical] signing v{} bundle not found at {:?} — skipping",
+                version,
+                happ_path,
+            );
+            continue;
+        }
+
+        log::info!("[historical] installing signing v{} from {:?}", version, happ_path);
+        let payload = InstallAppPayload {
+            source: AppBundleSource::Path(happ_path),
+            agent_key: Some(agent_key.clone()),
+            installed_app_id: Some(app_id.clone()),
+            network_seed: None,
+            roles_settings: None,
+            ignore_genesis_failure: false,
+        };
+        match admin_ws.install_app(payload).await {
+            Ok(_) => log::info!("[historical] signing v{} installed", version),
+            Err(e) => {
+                log::warn!(
+                    "[historical] signing v{} install failed: {} (skipping)",
+                    version, e,
+                );
+                continue;
+            }
+        }
+        match admin_ws.enable_app(app_id.clone()).await {
+            Ok(_) => log::info!("[historical] signing v{} enabled", version),
+            Err(e) => {
+                log::warn!(
+                    "[historical] signing v{} enable failed: {} (left in Disabled state)",
+                    version, e,
+                );
+            }
+        }
+    }
 }
 
 /// Attach an app interface to the conductor so zome calls can be made.

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Sign with Flowsta Vault
+Name=Sign It with Flowsta Vault
 GenericName=Cryptographically sign a file
 Comment=Sign a file using your Flowsta Vault identity
 Exec=flowsta-vault %F
