@@ -5,6 +5,22 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta12] — 2026-05-07
+
+### Skip historical signing-DNA backfill on Windows
+
+The historical signing-DNA backfill introduced in beta11 is now gated
+to Linux + macOS. Sign It is already UI-gated on Windows in this
+release, so historical signatures aren't surfaced there — the backfill
+runs only on platforms where it's relevant.
+
+Linux + macOS behaviour is unchanged: a fresh install pulls in all
+five signing DNA versions (v1.0–v1.4) so the user's full signature
+history is visible end-to-end.
+
+The Windows gate is scheduled to be lifted in a future release once
+the platform-side issues are fully resolved.
+
 ## [0.5.2-beta11] — 2026-05-07
 
 ### Backfill historical signing-DNA versions on every install
