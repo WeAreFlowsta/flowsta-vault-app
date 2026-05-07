@@ -1,6 +1,6 @@
 [package]
 name = "flowsta-vault"
-version = "0.5.2-beta7"
+version = "0.5.2-beta8"
 description = "Flowsta Vault - Desktop identity manager powered by Holochain"
 authors = ["Flowsta"]
 license = ""
@@ -93,6 +93,9 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    # ToolHelp32 for parent-PID lookup — hide thread uses it to find
+    # conhost.exe children of our spawned binaries on Windows.
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 # core2 (transitive dep via libflate → libsodium-sys-stable → sodoken → lair)

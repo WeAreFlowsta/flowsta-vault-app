@@ -115,17 +115,81 @@ mod windows_hide {
     //! We also log the window class on the first match per pid so we can
     //! verify we're finding the actual `ConsoleWindowClass` window vs.
     //! some unrelated internal window.
+    use std::collections::HashMap;
     use std::time::{Duration, Instant};
-    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible, ShowWindow, SW_HIDE,
     };
 
+    /// Window classes used by Windows' console host.
+    ///
+    /// - `ConsoleWindowClass`     — classic conhost window
+    /// - `OpenConsoleWindow`      — Windows Terminal's underlying conhost
+    /// - `PseudoConsoleWindow`    — ConPTY infrastructure window owned by the
+    ///                              attached process (always invisible, but
+    ///                              we still hide it for completeness)
+    /// - `CASCADIA_HOSTING_WINDOW_CLASS` — Windows Terminal hosting frame
+    fn is_console_class(class: &str) -> bool {
+        matches!(
+            class,
+            "ConsoleWindowClass"
+                | "OpenConsoleWindow"
+                | "PseudoConsoleWindow"
+                | "CASCADIA_HOSTING_WINDOW_CLASS"
+        )
+    }
+
+    /// One-shot Toolhelp32 snapshot returning a `pid → parent_pid` map for
+    /// every process currently running. Used by the hide thread to find
+    /// conhost.exe children whose parent is our spawned binary.
+    fn build_parent_map() -> HashMap<u32, u32> {
+        let mut map: HashMap<u32, u32> = HashMap::new();
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap.is_null() || snap == INVALID_HANDLE_VALUE {
+                return map;
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snap, &mut entry) != 0 {
+                loop {
+                    map.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+                    if Process32NextW(snap, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snap);
+        }
+        map
+    }
+
+    /// Candidate window discovered during a single EnumWindows pass.
+    /// Hide decisions happen outside the callback so we can consult the
+    /// parent-PID map.
+    #[derive(Clone)]
+    struct Candidate {
+        hwnd: usize,
+        owner_pid: u32,
+        class: String,
+        was_visible: bool,
+    }
+
     struct EnumState {
         target_pid: u32,
+        candidates: Vec<Candidate>,
+    }
+
+    struct PassResult {
         hides: u32,
         hides_while_visible: u32,
         first_class: Option<String>,
+        first_via_parent_class: Option<String>,
     }
 
     fn get_window_class(hwnd: HWND) -> String {
@@ -138,39 +202,50 @@ mod windows_hide {
         }
     }
 
+    /// EnumWindows callback. Collects every window whose owning PID matches
+    /// our target *or* whose class is one of the known console classes.
+    /// Hide decisions are made outside the callback (we consult the parent-PID
+    /// map there).
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let state = unsafe { &mut *(lparam as *mut EnumState) };
         let mut wnd_pid: u32 = 0;
         unsafe {
             GetWindowThreadProcessId(hwnd, &mut wnd_pid);
         }
-        if wnd_pid == state.target_pid {
-            if state.first_class.is_none() {
-                state.first_class = Some(get_window_class(hwnd));
-            }
-            // Always hide regardless of current visibility. ShowWindow(SW_HIDE)
-            // on an already-hidden window is a cheap no-op; this catches the
-            // race where conhost toggles WS_VISIBLE on between our polls.
+
+        let direct = wnd_pid == state.target_pid;
+        // Cheap gate: only fetch the class for non-direct candidates, where
+        // we need it to recognise console-host windows. Direct matches we
+        // hide regardless of class.
+        let class = if direct {
+            String::new()
+        } else {
+            get_window_class(hwnd)
+        };
+        let console_class = !direct && is_console_class(&class);
+
+        if direct || console_class {
             let was_visible = unsafe { IsWindowVisible(hwnd) } != 0;
-            unsafe {
-                ShowWindow(hwnd, SW_HIDE);
-            }
-            state.hides += 1;
-            if was_visible {
-                state.hides_while_visible += 1;
-            }
+            // Capture the direct-match class lazily — we only need it for
+            // the first one we see (for diagnostic logging).
+            let class_str = if direct { get_window_class(hwnd) } else { class };
+            state.candidates.push(Candidate {
+                hwnd: hwnd as usize,
+                owner_pid: wnd_pid,
+                class: class_str,
+                was_visible,
+            });
         }
-        // Continue enumeration — a process may legitimately own multiple
-        // top-level windows; we want to hide all of them.
+        // Continue enumeration — multiple matches per process are possible.
         1
     }
 
-    fn try_hide_once(target_pid: u32) -> EnumState {
+    /// One pass: enumerate windows, then hide every direct-match window plus
+    /// every console-class window whose owning process's parent is our target.
+    fn try_hide_once(target_pid: u32, parent_map: &HashMap<u32, u32>) -> PassResult {
         let mut state = EnumState {
             target_pid,
-            hides: 0,
-            hides_while_visible: 0,
-            first_class: None,
+            candidates: Vec::new(),
         };
         unsafe {
             EnumWindows(
@@ -178,7 +253,44 @@ mod windows_hide {
                 &mut state as *mut EnumState as LPARAM,
             );
         }
-        state
+
+        let mut hides: u32 = 0;
+        let mut hides_while_visible: u32 = 0;
+        let mut first_class: Option<String> = None;
+        let mut first_via_parent_class: Option<String> = None;
+
+        for c in &state.candidates {
+            let direct = c.owner_pid == target_pid;
+            let via_parent = !direct
+                && parent_map.get(&c.owner_pid) == Some(&target_pid)
+                && is_console_class(&c.class);
+
+            if !(direct || via_parent) {
+                continue;
+            }
+
+            if direct && first_class.is_none() {
+                first_class = Some(c.class.clone());
+            }
+            if via_parent && first_via_parent_class.is_none() {
+                first_via_parent_class = Some(c.class.clone());
+            }
+
+            unsafe {
+                ShowWindow(c.hwnd as HWND, SW_HIDE);
+            }
+            hides += 1;
+            if c.was_visible {
+                hides_while_visible += 1;
+            }
+        }
+
+        PassResult {
+            hides,
+            hides_while_visible,
+            first_class,
+            first_via_parent_class,
+        }
     }
 
     pub(super) fn hide_console_for_pid_async(pid: u32) {
@@ -189,26 +301,44 @@ mod windows_hide {
             let mut iter: u32 = 0;
             let mut total_hides: u32 = 0;
             let mut total_visible_hides: u32 = 0;
-            let mut logged_class = false;
+            let mut logged_direct_class = false;
+            let mut logged_via_parent_class = false;
             while Instant::now() < deadline {
                 iter += 1;
-                let state = try_hide_once(pid);
-                total_hides += state.hides;
-                total_visible_hides += state.hides_while_visible;
-                if !logged_class {
-                    if let Some(class) = state.first_class.as_ref() {
+                // Re-snapshot the parent-PID map every iteration. Conhost can
+                // be spawned with a delay after our spawn returns, so an
+                // earlier snapshot might miss it.
+                let parent_map = build_parent_map();
+                let pass = try_hide_once(pid, &parent_map);
+                total_hides += pass.hides;
+                total_visible_hides += pass.hides_while_visible;
+
+                if !logged_direct_class {
+                    if let Some(class) = pass.first_class.as_ref() {
                         log::info!(
-                            "[hide:{pid}] first match window class: '{}' (after {}ms)",
+                            "[hide:{pid}] first direct-match class: '{}' (iter {}, {}ms)",
                             class,
+                            iter,
                             started.elapsed().as_millis(),
                         );
-                        logged_class = true;
+                        logged_direct_class = true;
                     }
                 }
-                if state.hides_while_visible > 0 {
+                if !logged_via_parent_class {
+                    if let Some(class) = pass.first_via_parent_class.as_ref() {
+                        log::info!(
+                            "[hide:{pid}] first conhost-child match class: '{}' (iter {}, {}ms)",
+                            class,
+                            iter,
+                            started.elapsed().as_millis(),
+                        );
+                        logged_via_parent_class = true;
+                    }
+                }
+                if pass.hides_while_visible > 0 {
                     log::info!(
                         "[hide:{pid}] hid {} visible window(s) on iter {} ({}ms elapsed)",
-                        state.hides_while_visible,
+                        pass.hides_while_visible,
                         iter,
                         started.elapsed().as_millis(),
                     );
@@ -216,12 +346,13 @@ mod windows_hide {
                 std::thread::sleep(Duration::from_millis(50));
             }
             log::info!(
-                "[hide:{pid}] thread exited after {}ms ({} iters, {} total hide calls, {} hides-while-visible, class={:?})",
+                "[hide:{pid}] thread exited after {}ms ({} iters, {} hide calls, {} hides-while-visible, direct={}, via-parent={})",
                 started.elapsed().as_millis(),
                 iter,
                 total_hides,
                 total_visible_hides,
-                logged_class,
+                logged_direct_class,
+                logged_via_parent_class,
             );
         });
     }

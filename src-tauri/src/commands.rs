@@ -2923,13 +2923,37 @@ async fn query_linked_sigs_for_version(
     all
 }
 
-/// Get all signatures from the signing DNA.
-/// Queries all installed signing DNA versions in parallel for own signatures
-/// + linked agents' signatures, with per-signature enrichment (revocation +
-/// thumbnail) also running concurrently. Everything runs on the local
-/// conductor — no API dependency.
+/// Public signatures fetch entry point. On Windows the conductor's WS server
+/// can reset long-running admin connections — if the first attempt errors
+/// with a WebSocket-related message, retry once with fresh connections.
 #[tauri::command]
 pub async fn get_my_signatures(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    match get_my_signatures_inner(state.clone()).await {
+        Ok(sigs) => Ok(sigs),
+        Err(e) => {
+            let ws_error = e.contains("Websocket")
+                || e.contains("ConnectionReset")
+                || e.contains("ConnectionClosed")
+                || e.contains("ConnectionRefused");
+            if ws_error {
+                log::warn!(
+                    "[get_my_signatures] first attempt failed with WS error ({}) — retrying once",
+                    e,
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                get_my_signatures_inner(state).await
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// One attempt at fetching signatures. Connects fresh admin / app WebSockets
+/// every call, so a previous reset doesn't carry over.
+async fn get_my_signatures_inner(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     use holochain_client::AdminWebsocket;

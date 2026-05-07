@@ -5,6 +5,56 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta8] — 2026-05-07
+
+### Hide conhost.exe terminals + recover signatures fetch from WS resets
+
+beta7 closed the timing race for any window the OS attributed to our
+spawned PID directly. The diagnostic logging revealed that on this
+machine, what we were finding was the **PseudoConsoleWindow** (an
+invisible-by-design ConPTY infrastructure window) — not the visible
+terminal. The visible terminal is created by `conhost.exe`, a separate
+process whose **parent** is our spawned binary.
+
+beta8 extends `windows_hide` to handle that:
+
+- Each poll iteration also takes a Toolhelp32 snapshot of every
+  process's parent PID and enumerates windows whose class matches a
+  known console host class (`ConsoleWindowClass`, `OpenConsoleWindow`,
+  `PseudoConsoleWindow`, `CASCADIA_HOSTING_WINDOW_CLASS`). Any whose
+  owner-process's parent is our spawned PID get hidden.
+- The diagnostic log now distinguishes "first direct-match class" from
+  "first conhost-child match class" so the next test makes it obvious
+  which path is finding the visible terminal.
+
+Linux / macOS unchanged — they don't allocate consoles for sidecar
+processes the same way.
+
+### Signatures fetch survives a WebSocket reset mid-call
+
+User reports show `get_my_signatures` returning 0 on Windows when the
+conductor's WS server resets the long-running admin connection during
+the call (the same WS-server quirk we work around in the install path).
+The frontend then displays an empty list instead of an error.
+
+beta8:
+
+- Wraps the `get_my_signatures` Tauri command in a retry-once-on-WS-
+  error pattern that mirrors `install_app_resilient` /
+  `enable_app_resilient`. On a Websocket / ConnectionReset / closed-
+  connection error, sleep 1 s and run the whole fetch again with fresh
+  admin + app WebSockets.
+- Shrinks `ensure_apps_enabled`'s retry budget from 6 × 3 s to
+  3 × 1 s. Plenty for the typical "cells just came online" case, and
+  the shorter window means the admin WS is held open for less time
+  before either succeeding or returning, reducing the chance of being
+  caught by a WS reset.
+
+The frontend layout-owned background fetch on conductor-ready is
+unchanged — signatures still load automatically when the vault unlocks
+regardless of which page you're on. The retry happens transparently
+inside the backend command.
+
 ## [0.5.2-beta7] — 2026-05-07
 
 ### Stop the hide thread bailing out before terminal windows appear
