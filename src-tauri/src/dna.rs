@@ -682,18 +682,21 @@ pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
 
         if let Some(cell_id) = cell_id {
             // Try to authorize credentials — this will fail with CellDisabled
-            // if cells aren't ready. Capped at 3 attempts × 1 s = 3 s total
-            // worst case so we don't hold the admin WS open long enough for
-            // the conductor's WS server to reset it under us. If 3 s isn't
-            // enough, the caller's own retry will pick up where we left off.
-            for attempt in 1..=3 {
+            // if cells aren't ready. 6 attempts × 3 s sleep gives the
+            // conductor up to ~18 s to bring cells online, which matches the
+            // pre-0.5.2 behaviour. The shorter budget tried in 0.5.2-beta8
+            // caused signatures to come back empty on both Linux and Windows
+            // when cells took longer than 3 s to ready —
+            // `connect_signing_app_ws` would still see CellDisabled and the
+            // per-version sig query returned Vec::new().
+            for attempt in 1..=6 {
                 match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
                     cell_id: cell_id.clone(),
                     functions: None,
                 }).await {
                     Ok(_) => {
                         if attempt > 1 {
-                            log::info!("ensure_apps_enabled: cells ready after {}s wait", attempt - 1);
+                            log::info!("ensure_apps_enabled: cells ready after {}s wait", (attempt - 1) * 3);
                         } else {
                             log::info!("ensure_apps_enabled: cells ready");
                         }
@@ -701,12 +704,12 @@ pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
                     }
                     Err(e) => {
                         let err_str = format!("{}", e);
-                        if err_str.contains("CellDisabled") && attempt < 3 {
+                        if err_str.contains("CellDisabled") && attempt < 6 {
                             log::info!(
-                                "ensure_apps_enabled: cells not ready yet (attempt {}), waiting 1s...",
+                                "ensure_apps_enabled: cells not ready yet (attempt {}), waiting 3s...",
                                 attempt,
                             );
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                             // Re-enable all apps before retrying
                             for app in &apps {
                                 let _ = admin_ws.enable_app(app.installed_app_id.clone()).await;

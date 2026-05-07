@@ -5,6 +5,41 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta9] — 2026-05-07
+
+### Fix beta8 regression: 0 signatures returned on Linux + Windows
+
+beta8 shrunk `ensure_apps_enabled`'s retry budget from 6 × 3 s = 18 s
+down to 3 × 1 s = 3 s with the goal of holding the admin WebSocket open
+for less time on Windows. The reasoning was sound *for Windows* — the
+conductor's WS server can reset long-running admin connections — but it
+broke signatures retrieval on **all** platforms.
+
+The chain of events:
+
+1. Conductor reports apps Enabled, but the cells take a few seconds to
+   fully initialise after that (transient `CellDisabled` state).
+2. `ensure_apps_enabled` calls `authorize_signing_credentials` to verify
+   readiness. With the old 18 s budget, it'd retry through the
+   `CellDisabled` window — typically succeeding by attempt 2 or 3.
+3. With the 3 s budget, all 3 attempts can fail before cells come up,
+   and the function bails *silently* (`log::warn!` then return).
+4. The downstream `connect_signing_app_ws` then calls the same
+   `authorize_signing_credentials` and **still sees** `CellDisabled` —
+   it returns `None`, and the per-version sig query returns
+   `Vec::new()`.
+5. End result: `get_my_signatures` succeeds with an empty list. The
+   retry wrapper added in beta8 only fires on WebSocket errors, not on
+   empty-but-Ok results, so the user sees 0 signatures.
+
+beta9 reverts the retry budget to the 6 × 3 s pattern that worked on
+0.5.1. Windows safety on the long wait is now provided by the outer
+`start_holochain` auto-restart (beta4) and the `get_my_signatures`
+retry-once wrapper (beta8) — both of which catch the WS-reset case
+without needing this function to bail early.
+
+No other changes; this is a focused regression fix.
+
 ## [0.5.2-beta8] — 2026-05-07
 
 ### Hide conhost.exe terminals + recover signatures fetch from WS resets
