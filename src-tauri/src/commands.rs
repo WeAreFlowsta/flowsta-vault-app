@@ -141,6 +141,16 @@ pub struct AppState {
     /// ("Sign with Flowsta Vault" right-click) before the frontend was ready
     /// to handle them. Drained by `take_pending_sign_paths`.
     pub pending_sign_paths: Mutex<Vec<std::path::PathBuf>>,
+    /// Lair-keystore passphrase, held while the vault is unlocked so the
+    /// runtime watchdog can restart the conductor without re-prompting
+    /// the user. Stored in a `sodoken::LockedArray` (memory-locked pages,
+    /// zeroed on drop). `None` when locked.
+    pub unlock_passphrase: Mutex<Option<lair_keystore_api::dependencies::sodoken::LockedArray>>,
+    /// Serializes concurrent watchdog restart attempts. Two commands that
+    /// fail simultaneously and call `ensure_conductor_alive` should not
+    /// both spawn a fresh conductor — the first one wins, the others
+    /// observe the recovered state.
+    pub conductor_restart_lock: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -170,6 +180,8 @@ impl AppState {
             backup_key: Mutex::new(None),
             linked_web_agent_key: Mutex::new(None),
             pending_sign_paths: Mutex::new(Vec::new()),
+            unlock_passphrase: Mutex::new(None),
+            conductor_restart_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -355,6 +367,14 @@ pub fn setup_vault(
     // Load MAU state (fresh store for new vault)
     crate::mau::load_mau_state(&state);
 
+    // Cache the lair passphrase in a memory-locked, zero-on-drop buffer so
+    // the runtime watchdog can restart the conductor without re-prompting.
+    *state.unlock_passphrase.lock().unwrap() = Some(
+        lair_keystore_api::dependencies::sodoken::LockedArray::from(
+            conductor_passphrase.as_bytes().to_vec(),
+        ),
+    );
+
     // Spawn conductor startup in background
     spawn_conductor_startup(
         conductor_seed,
@@ -421,6 +441,14 @@ pub fn unlock_vault(
     // Load MAU state from encrypted disk storage
     crate::mau::load_mau_state(&state);
 
+    // Cache the lair passphrase in a memory-locked, zero-on-drop buffer so
+    // the runtime watchdog can restart the conductor without re-prompting.
+    *state.unlock_passphrase.lock().unwrap() = Some(
+        lair_keystore_api::dependencies::sodoken::LockedArray::from(
+            passphrase.as_bytes().to_vec(),
+        ),
+    );
+
     // Spawn conductor startup in background (if device seed is available)
     spawn_conductor_startup(device_seed, data_dir, passphrase, app_handle, state.inner().clone());
 
@@ -442,6 +470,10 @@ pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     }
     *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
 
+    // Drop the cached passphrase. `LockedArray::Drop` zeroes the bytes
+    // and unlocks the memory pages.
+    *state.unlock_passphrase.lock().unwrap() = None;
+
     log::info!("Vault locked.");
     Ok(())
 }
@@ -450,6 +482,143 @@ pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 #[tauri::command]
 pub fn get_conductor_status(state: State<'_, Arc<AppState>>) -> ConductorStatus {
     state.conductor_status.lock().unwrap().clone()
+}
+
+/// Runtime conductor watchdog. Checks whether the conductor process is
+/// still alive; if it has exited, runs the full `start_holochain` flow
+/// again using the cached unlock-time credentials so the user doesn't
+/// have to re-enter their password.
+///
+/// On Windows specifically, holochain.exe occasionally crashes mid-session
+/// (`STATUS_ACCESS_VIOLATION` 0xc0000005) when admin calls touch the
+/// signing cell. The startup auto-restart in `conductor::start_holochain`
+/// only covers crashes during DNA install — runtime crashes are caught
+/// here.
+///
+/// Concurrent callers are serialised by `conductor_restart_lock`: the
+/// first to arrive does the restart, others wait and then observe the
+/// recovered handle on a re-check.
+async fn ensure_conductor_alive(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    // Serialise restart attempts so two failed commands don't both try
+    // to bring the conductor up.
+    let _guard = state.conductor_restart_lock.lock().await;
+
+    // Re-check liveness inside the lock. If a previous holder of the
+    // lock already restarted, we have nothing to do.
+    let needs_restart = {
+        let mut handle_guard = state.conductor_handle.lock().unwrap();
+        match handle_guard.as_mut() {
+            Some(h) => match h.conductor_child.try_wait() {
+                Ok(Some(status)) => {
+                    log::warn!(
+                        "[watchdog] conductor process exited (status: {}) — will restart",
+                        status,
+                    );
+                    true
+                }
+                Ok(None) => false, // process still alive
+                Err(e) => {
+                    log::warn!("[watchdog] try_wait failed: {} — assuming dead", e);
+                    true
+                }
+            },
+            None => true, // no handle at all
+        }
+    };
+
+    if !needs_restart {
+        log::info!("[watchdog] conductor is alive (recovered by an earlier caller)");
+        return Ok(());
+    }
+
+    // Take the old (dead) handle and shut it down — this kills any
+    // leftover lair-keystore process so the new conductor can take its
+    // socket / port cleanly.
+    if let Some(old) = state.conductor_handle.lock().unwrap().take() {
+        log::info!("[watchdog] cleaning up old handle");
+        old.shutdown();
+    }
+    *state.conductor_status.lock().unwrap() = ConductorStatus::Starting {
+        message: "Recovering conductor...".into(),
+    };
+    let _ = app_handle.emit(
+        "conductor-status",
+        ConductorStatus::Starting {
+            message: "Recovering conductor...".into(),
+        },
+    );
+
+    // Extract the cached passphrase. Briefly copies the bytes into a
+    // `String` for the duration of the start_holochain call; the
+    // long-lived copy stays in the `LockedArray`.
+    let passphrase = {
+        let mut guard = state.unlock_passphrase.lock().unwrap();
+        let arr = guard
+            .as_mut()
+            .ok_or("[watchdog] cannot restart: vault is locked (no cached passphrase)")?;
+        let bytes_locked = arr.lock();
+        String::from_utf8(bytes_locked.to_vec())
+            .map_err(|e| format!("[watchdog] passphrase utf8 error: {}", e))?
+    };
+
+    // Pull device_seed out of vault_config.
+    let device_seed: [u8; 32] = {
+        let cfg_guard = state.vault_config.lock().unwrap();
+        let cfg = cfg_guard
+            .as_ref()
+            .ok_or("[watchdog] vault config not available")?;
+        let seed_vec = cfg
+            .device_seed
+            .as_ref()
+            .ok_or("[watchdog] no device seed in vault config")?;
+        if seed_vec.len() != 32 {
+            return Err(format!(
+                "[watchdog] device seed wrong length ({} bytes)",
+                seed_vec.len()
+            ));
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(seed_vec);
+        seed
+    };
+
+    let data_dir = state.data_dir.clone();
+    #[cfg(debug_assertions)]
+    let resource_dir =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+    #[cfg(not(debug_assertions))]
+    let resource_dir = app_handle
+        .path()
+        .resource_dir()
+        .map(|d| d.join("resources"))
+        .unwrap_or_else(|_| data_dir.clone());
+
+    log::info!("[watchdog] running start_holochain to bring conductor back");
+    let new_handle = crate::conductor::start_holochain(
+        app_handle.clone(),
+        data_dir,
+        resource_dir,
+        passphrase,
+        device_seed,
+    )
+    .await
+    .map_err(|e| format!("[watchdog] restart failed: {}", e))?;
+
+    log::info!(
+        "[watchdog] conductor recovered (admin port {})",
+        new_handle.admin_port,
+    );
+    let port = new_handle.admin_port;
+    *state.conductor_handle.lock().unwrap() = Some(new_handle);
+    *state.conductor_status.lock().unwrap() = ConductorStatus::Ready { admin_port: port };
+    let _ = app_handle.emit(
+        "conductor-status",
+        ConductorStatus::Ready { admin_port: port },
+    );
+    Ok(())
 }
 
 /// Spawn the conductor startup sequence in a background task.
@@ -2141,10 +2310,11 @@ pub fn delete_app_backup(
 #[tauri::command]
 pub async fn export_all_data(
     state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     // Fetch the user's Sign It signatures from the local signing DNAs.
     // Non-fatal if it fails — export without signatures rather than blocking.
-    let signatures = match get_my_signatures(state.clone()).await {
+    let signatures = match get_my_signatures(state.clone(), app_handle).await {
         Ok(sigs) => Some(sigs),
         Err(e) => {
             log::warn!("export_all_data: failed to fetch signatures: {}", e);
@@ -2923,32 +3093,54 @@ async fn query_linked_sigs_for_version(
     all
 }
 
-/// Public signatures fetch entry point. On Windows the conductor's WS server
-/// can reset long-running admin connections — if the first attempt errors
-/// with a WebSocket-related message, retry once with fresh connections.
+/// Public signatures fetch entry point. On Windows the conductor process
+/// can crash mid-session and the WS connection comes back as either
+/// closed (10054) or refused (10061). On the first such error, we run
+/// the runtime watchdog to bring the conductor back, then retry once.
+/// On other errors, we fail cleanly.
 #[tauri::command]
 pub async fn get_my_signatures(
     state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
 ) -> Result<Vec<serde_json::Value>, String> {
     match get_my_signatures_inner(state.clone()).await {
         Ok(sigs) => Ok(sigs),
         Err(e) => {
-            let ws_error = e.contains("Websocket")
-                || e.contains("ConnectionReset")
-                || e.contains("ConnectionClosed")
-                || e.contains("ConnectionRefused");
-            if ws_error {
-                log::warn!(
-                    "[get_my_signatures] first attempt failed with WS error ({}) — retrying once",
-                    e,
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                get_my_signatures_inner(state).await
-            } else {
-                Err(e)
+            if !is_conductor_unreachable_error(&e) {
+                return Err(e);
             }
+            log::warn!(
+                "[get_my_signatures] first attempt failed with conductor-unreachable error ({}) — running watchdog",
+                e,
+            );
+            // Try to bring the conductor back. Best-effort: even if the
+            // watchdog returns Err (e.g. vault was just locked), we still
+            // attempt the retry so the original error message reaches the
+            // caller via the inner call's failure rather than a recovery
+            // failure.
+            if let Err(re) = ensure_conductor_alive(state.inner(), &app_handle).await {
+                log::warn!(
+                    "[get_my_signatures] watchdog could not restart conductor: {} — retrying inner anyway",
+                    re,
+                );
+            }
+            // Brief settle so cell normalization completes.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            get_my_signatures_inner(state).await
         }
     }
+}
+
+/// True if `err` is one of the messages we see when the conductor's
+/// admin WebSocket can't be reached — either the conductor closed the
+/// connection (10054) or the process is gone entirely (10061).
+fn is_conductor_unreachable_error(err: &str) -> bool {
+    err.contains("Websocket")
+        || err.contains("ConnectionReset")
+        || err.contains("ConnectionClosed")
+        || err.contains("ConnectionRefused")
+        || err.contains("os error 10054")
+        || err.contains("os error 10061")
 }
 
 /// One attempt at fetching signatures. Connects fresh admin / app WebSockets

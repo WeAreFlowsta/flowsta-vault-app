@@ -5,6 +5,50 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-beta10] — 2026-05-07
+
+### Runtime conductor watchdog — recovers from post-startup crashes
+
+beta9 confirmed Linux signatures back in working order, but Windows
+testing revealed a third holochain.exe crash class: the conductor can
+crash *after* `start_holochain` has returned. The startup auto-restart
+(beta4) only covers crashes during DNA install; once we report
+"conductor ready" and the vault enters its normal operating loop, a
+later crash in the Holochain conductor leaves nothing to catch it. The
+user sees a healthy-looking vault that silently returns 0 signatures
+because every admin call hits a closed (10054) or refused (10061)
+socket.
+
+beta10 adds a **runtime watchdog**:
+
+- The Lair-keystore passphrase is now cached for the duration of an
+  unlocked session in a `sodoken::LockedArray` (memory-locked pages,
+  zeroed on drop). This lets us restart the conductor without
+  re-prompting. The buffer is cleared on lock and on app exit.
+- A new `ensure_conductor_alive` helper checks the conductor process
+  via `Child::try_wait()`. If it has exited, the helper kills any
+  leftover lair process, runs the full `start_holochain` flow again
+  with the cached credentials, and replaces the stale handle in
+  AppState.
+- Concurrent watchdog calls are serialised by a `tokio::sync::Mutex` so
+  two simultaneously-failing commands don't both spawn a fresh
+  conductor.
+- `get_my_signatures` detects WS-unreachable errors (closed / refused)
+  and runs the watchdog before retrying once. The frontend's existing
+  layout-owned signature fetch is unchanged — recovery happens entirely
+  inside the backend command.
+
+This is a foundational reliability feature, not just a Holochain-bug
+patch. The same mechanism will catch any future crash class, support
+seamless conductor binary upgrades, and recover from runtime hangs or
+resource exhaustion without forcing the user back through unlock.
+
+The terminal-flash issue on Windows (windows appear-then-disappear) is
+unchanged in beta10 and is the next target — beta11 will replace the
+post-spawn `ShowWindow(SW_HIDE)` polling with `STARTUPINFOW.wShowWindow
+= SW_HIDE` set at process-creation time, eliminating the flash
+entirely.
+
 ## [0.5.2-beta9] — 2026-05-07
 
 ### Fix beta8 regression: 0 signatures returned on Linux + Windows
