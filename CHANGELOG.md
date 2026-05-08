@@ -5,6 +5,62 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2-rc1] — 2026-05-08
+
+Release candidate consolidating the v0.5.2 work. No code changes
+relative to beta12 — promoting that build for final-stage verification.
+
+Highlights since v0.5.1:
+
+### Reliability infrastructure (new)
+- **Conductor auto-restart on first-install hiccups.** If the conductor
+  errors during DNA install on a fresh data directory, vault restarts
+  it once and warm-starts against the on-disk state. The user sees a
+  brief "Finishing first-time setup..." and the vault comes up.
+- **Runtime conductor watchdog.** Detects conductor-process exits
+  during normal operation and restarts in-place using cached unlock
+  credentials. The lair passphrase is held in a memory-locked,
+  zeroed-on-drop buffer for the unlocked session and cleared on lock.
+- **Resilient install / enable paths.** WS-reset errors during DNA
+  install are caught, the call retried on a fresh connection, and
+  long compiles tracked via `Child::try_wait()` so the inner retry
+  bails fast when the conductor has actually exited.
+- **App / cell normalisation pass.** A previous interrupted unlock
+  that left an app `Disabled(NeverStarted)` is auto-recovered on the
+  next unlock — no manual lock+unlock required.
+
+### Sign It history
+- **Bundles all five signing-DNA versions** (v1.0–v1.4) and
+  back-installs the older ones on first launch so the user's full
+  signature history is visible end-to-end on a fresh install. Linux
+  + macOS only in this release; gated on Windows (see below).
+
+### Windows
+- **Both sidecar terminals hidden** (`lair-keystore.exe`,
+  `holochain.exe`) via post-spawn `ShowWindow(SW_HIDE)` polling +
+  conhost-parent tracking. Brief flicker may still be visible on
+  the conductor; will be eliminated in a future release.
+- **Sign It UI gated on Windows.** The page shows a clear placeholder
+  message directing users to flowsta.com or other platforms. Other
+  features (vault, identity, connected apps, backups) work normally.
+  The Windows gate will be lifted in a future release.
+
+### File-explorer integration
+- Right-click label changed from *"Sign with Flowsta Vault"* to
+  *"Sign It with Flowsta Vault"* on Linux + Windows.
+
+### CI / build
+- Pinned Windows builds to `windows-2022` runner image
+  (`windows-latest` rolled to a VS 2026 image whose newer MSVC
+  headers broke `aws-lc-sys` C11 atomics).
+- Skip MSI bundle on pre-release tags (Tauri's MSI bundler requires
+  numeric-only pre-release identifiers; NSIS has no such restriction
+  and is what end users install).
+- Mark pre-release tags as GitHub pre-releases so they don't take
+  over the "Latest" slot.
+- Bundle-sync check (`scripts/check-bundle-sync.sh`) regex updated
+  to allow digits in `BUNDLED_*_HAPP_FILE` constant names.
+
 ## [0.5.2-beta12] — 2026-05-07
 
 ### Skip historical signing-DNA backfill on Windows
