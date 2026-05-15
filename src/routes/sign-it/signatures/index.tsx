@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
 import ImageCropper from "~/components/sign-it/ImageCropper";
 import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
+import FileTypeBadge from "~/components/sign-it/FileTypeBadge";
 import { signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
 
@@ -162,13 +163,16 @@ export default component$(() => {
                 {active.map((sig: any, i: number) => (
                   <div key={i} class="rounded-lg border border-gray-700 bg-gray-800 p-4">
                     <div class="flex items-center gap-3 mb-3 min-w-0">
-                      <img
-                        src={sig.thumbnail || getDefaultThumbnail(sig)}
-                        alt=""
-                        width={48}
-                        height={48}
-                        class="h-12 w-12 shrink-0 rounded-lg object-cover"
-                      />
+                      <div class="relative shrink-0">
+                        <img
+                          src={sig.thumbnail || getDefaultThumbnail(sig)}
+                          alt=""
+                          width={48}
+                          height={48}
+                          class="h-12 w-12 rounded-lg object-cover"
+                        />
+                        {sig.thumbnail && <FileTypeBadge hashType={sig.perceptual_hash?.hash_type} />}
+                      </div>
                       <span class="truncate text-sm font-mono text-gray-400 flex-1 min-w-0">
                         {sig.file_hash?.slice(0, 16)}...
                       </span>
