@@ -918,12 +918,14 @@ export default component$(() => {
               </div>
             </div>
 
-            {/* Content Rights for batch */}
+            {/* Content Rights for batch — always visible. Was a collapsed
+                <details> until May 2026 user testing showed people walked
+                past it without expanding. */}
             <div class="mb-4">
-              <details class="rounded-lg border border-gray-700 bg-gray-800">
-                <summary class="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
+              <div class="rounded-lg border border-gray-700 bg-gray-800">
+                <h3 class="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
                   Content Rights (applied to all files)
-                </summary>
+                </h3>
                 <div class="space-y-3 px-4 pb-4 pt-2">
                   <div>
                     <label class="mb-1 block text-xs text-gray-500">AI Generation</label>
@@ -992,7 +994,7 @@ export default component$(() => {
                     )}
                   </div>
                 </div>
-              </details>
+              </div>
             </div>
 
             {/* Sign button */}
@@ -1160,12 +1162,14 @@ export default component$(() => {
               </div>
             )}
 
-            {/* Content Rights (all metadata grouped together) */}
+            {/* Content Rights (all metadata grouped together) — always visible.
+                Was a collapsed <details> until May 2026 user testing showed
+                people walked past it without expanding. */}
             <div class="mb-4">
-              <details class="rounded-lg border border-gray-700 bg-gray-800">
-                <summary class="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
+              <div class="rounded-lg border border-gray-700 bg-gray-800">
+                <h3 class="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
                   Content Rights
-                </summary>
+                </h3>
                 <div class="space-y-3 px-4 pb-4 pt-2">
                   <div>
                     <label class="mb-1 block text-xs text-gray-500">AI Generation</label>
@@ -1259,7 +1263,7 @@ export default component$(() => {
                     )}
                   </div>
                 </div>
-              </details>
+              </div>
             </div>
 
             {/* Sign button */}
