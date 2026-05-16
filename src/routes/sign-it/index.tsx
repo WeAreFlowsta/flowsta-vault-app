@@ -14,6 +14,8 @@ import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { GlassButton } from "~/components/common/GlassButton";
 import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
 import { SignQuotaMeter, type SignQuotaState } from "~/components/sign-it/SignQuotaMeter";
+import FileTypeBadge from "~/components/sign-it/FileTypeBadge";
+import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
 import { pendingSignPathsContext, signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
 
@@ -153,6 +155,10 @@ export default component$(() => {
   const revokeTarget = useSignal<any | null>(null);
   const revokeReason = useSignal("");
   const revoking = useSignal(false);
+
+  // Edit-thumbnail target. Other modal state lives inside the shared
+  // <EditThumbnailModal /> below. Matches /sign-it/signatures/.
+  const editThumbTarget = useSignal<any | null>(null);
 
   // Phase 8: Sign quota (HMAC-signed local cache + online refresh)
   const quota = useSignal<SignQuotaState | null>(null);
@@ -1435,13 +1441,16 @@ export default component$(() => {
                 key={i}
                 class="flex items-center gap-3 rounded-lg border border-gray-700 bg-gray-800 p-3"
               >
-                <img
-                  src={(sig as any).thumbnail || getDefaultThumbnail(sig)}
-                  alt=""
-                  width={40}
-                  height={40}
-                  class="h-10 w-10 shrink-0 rounded-lg object-cover"
-                />
+                <div class="relative shrink-0">
+                  <img
+                    src={(sig as any).thumbnail || getDefaultThumbnail(sig)}
+                    alt=""
+                    width={40}
+                    height={40}
+                    class="h-10 w-10 rounded-lg object-cover"
+                  />
+                  {(sig as any).thumbnail && <FileTypeBadge hashType={sig.perceptual_hash?.hash_type} />}
+                </div>
                 <div class="min-w-0 flex-1">
                   {(sig as any).fileName ? (
                     <p class="truncate text-sm text-white">
@@ -1458,21 +1467,41 @@ export default component$(() => {
                   </p>
                 </div>
                 {sig.action_hash && (
-                  <button
-                    class="shrink-0 rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-red-400 hover:text-red-400 transition-colors"
-                    onClick$={() => {
-                      revokeTarget.value = sig;
-                      revokeReason.value = "";
-                    }}
-                  >
-                    Revoke
-                  </button>
+                  <div class="shrink-0 flex flex-wrap gap-2">
+                    {((sig as any).signing_app_id === "flowsta_signing_v1_3" || (sig as any).signing_app_id === "flowsta_signing_v1_4") && (
+                      <button
+                        class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-amber-400 hover:text-amber-300 transition-colors"
+                        onClick$={() => { editThumbTarget.value = sig; }}
+                      >
+                        Edit thumbnail
+                      </button>
+                    )}
+                    <button
+                      class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-red-400 hover:text-red-400 transition-colors"
+                      onClick$={() => {
+                        revokeTarget.value = sig;
+                        revokeReason.value = "";
+                      }}
+                    >
+                      Revoke
+                    </button>
+                  </div>
                 )}
               </div>
             ))}
           </div>
         )}
       </div>
+
+      <EditThumbnailModal
+        target={editThumbTarget}
+        onSaved$={$((actionHash: string, thumbnail: string) => {
+          recentSignatures.value = recentSignatures.value.map((s: any) =>
+            s.action_hash === actionHash ? { ...s, thumbnail } : s
+          );
+          persistSignaturesCache(recentSignatures.value);
+        })}
+      />
 
       {/* Revocation confirmation dialog */}
       {revokeTarget.value && (

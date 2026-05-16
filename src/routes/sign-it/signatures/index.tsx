@@ -2,9 +2,9 @@ import { component$, useContext, useSignal, $ } from "@builder.io/qwik";
 import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
-import ImageCropper from "~/components/sign-it/ImageCropper";
 import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
 import FileTypeBadge from "~/components/sign-it/FileTypeBadge";
+import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
 import { signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
 
@@ -48,54 +48,9 @@ export default component$(() => {
   const revokeReason = useSignal("");
   const revoking = useSignal(false);
 
-  // Thumbnail edit state
+  // Edit-thumbnail target (which signature is being edited). Other modal
+  // state lives inside the shared <EditThumbnailModal /> below.
   const editThumbTarget = useSignal<any | null>(null);
-  const editThumbImage = useSignal<string | null>(null);
-  const editThumbCanvas = useSignal<HTMLCanvasElement | null>(null);
-  const editThumbSaving = useSignal(false);
-  const editError = useSignal("");
-
-
-  const handleThumbSave = $(async () => {
-    if (!editThumbTarget.value?.action_hash) return;
-    if (!editThumbCanvas.value) {
-      editError.value = "Pick an image first.";
-      return;
-    }
-    editThumbSaving.value = true;
-    editError.value = "";
-
-    try {
-      const thumbnail = editThumbCanvas.value.toDataURL("image/jpeg", 0.7);
-
-      if (thumbnail.length > 15000) {
-        editError.value = "Thumbnail too large. Try a simpler image.";
-        editThumbSaving.value = false;
-        return;
-      }
-
-      await invoke("set_thumbnail", {
-        actionHashHex: editThumbTarget.value.action_hash,
-        thumbnail,
-      });
-
-      // Update local state
-      signatures.value = signatures.value.map((s) =>
-        s.action_hash === editThumbTarget.value?.action_hash
-          ? { ...s, thumbnail }
-          : s
-      );
-      persistSignaturesCache(signatures.value);
-      editThumbTarget.value = null;
-      editThumbImage.value = null;
-      editThumbCanvas.value = null;
-    } catch (e: any) {
-      console.error("Thumbnail save error:", e);
-      editError.value = (typeof e === "string" ? e : e.message) || "Failed to save thumbnail";
-    } finally {
-      editThumbSaving.value = false;
-    }
-  });
 
   const handleRevoke = $(async () => {
     if (!revokeTarget.value?.action_hash) return;
@@ -200,12 +155,7 @@ export default component$(() => {
                           {(sig.signing_app_id === "flowsta_signing_v1_3" || sig.signing_app_id === "flowsta_signing_v1_4") && (
                             <button
                               class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-amber-400 hover:text-amber-300 transition-colors"
-                              onClick$={() => {
-                                editThumbTarget.value = sig;
-                                editThumbImage.value = null;
-                                editThumbCanvas.value = null;
-                                editError.value = "";
-                              }}
+                              onClick$={() => { editThumbTarget.value = sig; }}
                             >
                               Edit thumbnail
                             </button>
@@ -264,98 +214,15 @@ export default component$(() => {
         })()}
       </div>
 
-      {/* Thumbnail edit modal */}
-      {editThumbTarget.value && (
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div class="mx-4 w-full max-w-md rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
-            <h3 class="mb-4 text-base font-semibold text-white">Edit Thumbnail</h3>
-
-            {!editThumbImage.value ? (
-              <label
-                class="flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-600 p-10 transition-colors cursor-pointer hover:border-gray-500 hover:bg-gray-700/30"
-              >
-                <svg class="mb-3 h-10 w-10 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z" />
-                </svg>
-                <p class="text-sm text-gray-400">Click to choose a thumbnail image</p>
-                <input
-                  type="file"
-                  accept="image/*"
-                  class="hidden"
-                  onChange$={(e) => {
-                    const file = (e.target as HTMLInputElement).files?.[0];
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = (ev) => {
-                      editThumbImage.value = ev.target?.result as string;
-                    };
-                    reader.readAsDataURL(file);
-                  }}
-                />
-              </label>
-            ) : (
-              <div>
-                <ImageCropper
-                  imageSrc={editThumbImage.value}
-                  cropShape="square"
-                  outputSize={128}
-                  onCropComplete$={(canvas) => {
-                    editThumbCanvas.value = canvas;
-                  }}
-                />
-                <label class="mt-1 inline-block text-xs text-amber-400 hover:text-amber-300 transition-colors cursor-pointer">
-                  Choose a different image
-                  <input
-                    type="file"
-                    accept="image/*"
-                    class="hidden"
-                    onChange$={(e) => {
-                      const file = (e.target as HTMLInputElement).files?.[0];
-                      if (!file) return;
-                      editThumbCanvas.value = null;
-                      const reader = new FileReader();
-                      reader.onload = (ev) => {
-                        editThumbImage.value = ev.target?.result as string;
-                      };
-                      reader.readAsDataURL(file);
-                    }}
-                  />
-                </label>
-              </div>
-            )}
-
-            {editError.value && (
-              <div class="mt-3 rounded-lg border border-red-800/50 bg-red-900/20 p-2">
-                <p class="text-xs text-red-400">{editError.value}</p>
-              </div>
-            )}
-
-            <div class="mt-4 flex gap-3">
-              <GlassButton
-                variant="secondary"
-                class="flex-1"
-                onClick$={() => {
-                  editThumbTarget.value = null;
-                  editThumbImage.value = null;
-                  editThumbCanvas.value = null;
-                  editError.value = "";
-                }}
-              >
-                Cancel
-              </GlassButton>
-              {editThumbImage.value && (
-                <GlassButton
-                  class="flex-1"
-                  disabled={editThumbSaving.value}
-                  onClick$={handleThumbSave}
-                >
-                  {editThumbSaving.value ? "Saving..." : "Save Thumbnail"}
-                </GlassButton>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <EditThumbnailModal
+        target={editThumbTarget}
+        onSaved$={$((actionHash: string, thumbnail: string) => {
+          signatures.value = signatures.value.map((s) =>
+            s.action_hash === actionHash ? { ...s, thumbnail } : s
+          );
+          persistSignaturesCache(signatures.value);
+        })}
+      />
 
       {/* Revocation confirmation dialog */}
       {revokeTarget.value && (
