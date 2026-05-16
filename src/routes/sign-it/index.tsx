@@ -17,6 +17,7 @@ import { SignQuotaMeter, type SignQuotaState } from "~/components/sign-it/SignQu
 import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
 import RevokeSignatureModal from "~/components/sign-it/RevokeSignatureModal";
 import AmendSignatureModal from "~/components/sign-it/AmendSignatureModal";
+import EditHistoryExpander from "~/components/sign-it/EditHistoryExpander";
 import { pendingSignPathsContext, signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
 
@@ -1549,6 +1550,7 @@ export default component$(() => {
                       {(sig as any).comment}
                     </p>
                   )}
+                  <EditHistoryExpander current={sig as any} allSigs={recentSignatures.value as any} />
                 </div>
                 {sig.action_hash && (
                   <div class="shrink-0 flex flex-wrap gap-2">

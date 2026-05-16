@@ -6,6 +6,7 @@ import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
 import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
 import RevokeSignatureModal from "~/components/sign-it/RevokeSignatureModal";
 import AmendSignatureModal from "~/components/sign-it/AmendSignatureModal";
+import EditHistoryExpander from "~/components/sign-it/EditHistoryExpander";
 import { signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
 
@@ -203,6 +204,7 @@ export default component$(() => {
                         {sig.comment}
                       </p>
                     )}
+                    <EditHistoryExpander current={sig as any} allSigs={signatures.value as any} />
                   </div>
                 ))}
               </div>
