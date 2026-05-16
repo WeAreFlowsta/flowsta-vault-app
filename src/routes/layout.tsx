@@ -7,7 +7,7 @@ import { UnlockScreen } from "~/components/vault/UnlockScreen";
 import { StatusIndicator } from "~/components/vault/StatusIndicator";
 import type { ConnectionStatus } from "~/components/vault/StatusIndicator";
 import { connectionStatusContext, autoLockContext, signaturesContext, pendingSignPathsContext } from "~/lib/context";
-import { hydrateSignaturesCache, persistSignaturesCache } from "~/lib/signatures-cache";
+import { hydrateSignaturesCache, persistSignaturesCache, setActiveSignatureAgent } from "~/lib/signatures-cache";
 import { GlassButton } from "~/components/common/GlassButton";
 
 type AppScreen = "loading" | "setup" | "unlock" | "dashboard";
@@ -116,10 +116,15 @@ export default component$(() => {
     origin: string | null;
   } | null>(null);
 
-  // Fetch profile from unlocked vault for header display
+  // Fetch profile from unlocked vault for header display + register
+  // the active identity with the signatures cache so per-agent reads
+  // and writes work correctly. Called from each of the three paths
+  // that establish a dashboard session (handleUnlockPassword, the
+  // app-startup-already-unlocked branch, and SetupWizard onComplete).
   const fetchProfile = $(async () => {
     try {
       const identity = await invoke<{
+        agent_pub_key: string;
         display_name: string | null;
         profile_picture: string | null;
         web_email: string | null;
@@ -128,6 +133,18 @@ export default component$(() => {
       userProfile.displayName = identity.display_name ?? "";
       userProfile.profilePicture = identity.profile_picture ?? "";
       userProfile.email = identity.web_email ?? "";
+
+      // Scope the signatures cache to this agent_pub_key. If a previous
+      // identity sat in localStorage (Reset Vault → new identity, restore
+      // from a different recovery phrase, multiple users on one machine)
+      // this prevents the old data from being hydrated into the new
+      // session — hydrate returns [] when the cache key doesn't match.
+      setActiveSignatureAgent(identity.agent_pub_key);
+      const cached = hydrateSignaturesCache<any>();
+      if (cached.length > 0 && signaturesSig.value.length === 0) {
+        signaturesSig.value = cached;
+        signaturesLoaded.value = true;
+      }
     } catch {
       // Non-critical — header just won't show profile info
     }
@@ -338,17 +355,11 @@ export default component$(() => {
     });
   });
 
-  // Hydrate signatures from localStorage cache on first mount so that
-  // returning users see their list instantly (Overview count + Sign It list)
-  // without waiting for the conductor cold-start.
-  // eslint-disable-next-line qwik/no-use-visible-task
-  useVisibleTask$(() => {
-    const cached = hydrateSignaturesCache<any>();
-    if (cached.length > 0) {
-      signaturesSig.value = cached;
-      signaturesLoaded.value = true;
-    }
-  });
+  // Note: hydration from localStorage moved into fetchProfile() so it
+  // runs AFTER the active identity is known. On a fresh app launch the
+  // layout mounts before unlock — hydrating here unconditionally would
+  // pull whatever the previous user cached. Per-agent hydration in
+  // fetchProfile is the correct ordering.
 
   // Trigger the first fetch as soon as the conductor reports ready while we
   // are on the dashboard. Each lock/unlock cycle restarts the conductor, so

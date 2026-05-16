@@ -3,6 +3,7 @@ import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
 import { connectionStatusContext, autoLockContext } from "~/lib/context";
+import { clearSignaturesCache } from "~/lib/signatures-cache";
 
 declare const __API_URL__: string;
 declare const __APP_VERSION__: string;
@@ -97,6 +98,13 @@ export default component$(() => {
   const handleResetVault = $(async () => {
     resetting.value = true;
     try {
+      // Wipe the localStorage signatures cache before deleting the vault.
+      // Reset Vault means "wipe everything" from the user's perspective —
+      // and the next identity that unlocks must not see the previous
+      // user's signatures (the per-agent cache key would catch this even
+      // without the explicit clear, but reset is the right moment to be
+      // belt-and-suspenders).
+      clearSignaturesCache();
       await invoke("reset_vault");
       window.location.reload();
     } catch (e) {
