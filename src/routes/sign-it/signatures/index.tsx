@@ -3,7 +3,6 @@ import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
 import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
-import FileTypeBadge from "~/components/sign-it/FileTypeBadge";
 import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
 import { signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
@@ -21,6 +20,21 @@ function getDefaultThumbnail(sig: any): string {
   if (/\.(js|ts|py|rs|go|java|c|cpp|css|html|json|xml|yaml|sh)$/i.test(name)) return "/sign-it/thumbnails/code.svg";
   if (/\.(zip|tar|gz|bz2|7z|rar)$/i.test(name)) return "/sign-it/thumbnails/archive.svg";
   return "/sign-it/thumbnails/file.svg";
+}
+
+/** Human label for `perceptual_hash.hash_type`. Falls back to "File" so
+ * the badge slot stays consistent for documents/code/archives. */
+function fileTypeLabel(hashType: string | null | undefined): string {
+  switch (hashType) {
+    case "ImagePHash":
+      return "Image";
+    case "AudioChromaprint":
+      return "Audio";
+    case "VideoPHash":
+      return "Video";
+    default:
+      return "File";
+  }
 }
 
 function formatRelativeTime(timestampMs: number): string {
@@ -118,22 +132,22 @@ export default component$(() => {
                 {active.map((sig: any, i: number) => (
                   <div key={i} class="rounded-lg border border-gray-700 bg-gray-800 p-4">
                     <div class="flex items-center gap-3 mb-3 min-w-0">
-                      <div class="relative shrink-0">
-                        <img
-                          src={sig.thumbnail || getDefaultThumbnail(sig)}
-                          alt=""
-                          width={48}
-                          height={48}
-                          class="h-12 w-12 rounded-lg object-cover"
-                        />
-                        {sig.thumbnail && <FileTypeBadge hashType={sig.perceptual_hash?.hash_type} />}
-                      </div>
+                      <img
+                        src={sig.thumbnail || getDefaultThumbnail(sig)}
+                        alt=""
+                        width={48}
+                        height={48}
+                        class="h-12 w-12 shrink-0 rounded-lg object-cover"
+                      />
                       <span class="truncate text-sm font-mono text-gray-400 flex-1 min-w-0">
                         {sig.file_hash?.slice(0, 16)}...
                       </span>
                       <span class="ml-2 shrink-0 rounded-full bg-green-900/30 px-2 py-0.5 text-xs text-green-400">Active</span>
                     </div>
                     <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                      <span class="rounded-full bg-gray-700/50 px-2 py-0.5 text-gray-300">
+                        {fileTypeLabel(sig.perceptual_hash?.hash_type)}
+                      </span>
                       {sig.intent && (
                         <span class="rounded-full bg-gray-700/50 px-2 py-0.5">{sig.intent}</span>
                       )}

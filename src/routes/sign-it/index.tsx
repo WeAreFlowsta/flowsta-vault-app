@@ -14,7 +14,6 @@ import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { GlassButton } from "~/components/common/GlassButton";
 import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
 import { SignQuotaMeter, type SignQuotaState } from "~/components/sign-it/SignQuotaMeter";
-import FileTypeBadge from "~/components/sign-it/FileTypeBadge";
 import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
 import { pendingSignPathsContext, signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
@@ -97,6 +96,21 @@ function getDefaultThumbnail(sig: any): string {
   if (/\.(zip|tar|gz|bz2|7z|rar|xz)$/i.test(name)) return "/sign-it/thumbnails/archive.svg";
 
   return "/sign-it/thumbnails/file.svg";
+}
+
+/** Human label for `perceptual_hash.hash_type`. Falls back to "File" so
+ * the badge slot stays consistent for documents/code/archives. */
+function fileTypeLabel(hashType: string | null | undefined): string {
+  switch (hashType) {
+    case "ImagePHash":
+      return "Image";
+    case "AudioChromaprint":
+      return "Audio";
+    case "VideoPHash":
+      return "Video";
+    default:
+      return "File";
+  }
 }
 
 type SigningStep = "idle" | "selected" | "analyzing" | "ready" | "signing" | "done";
@@ -1441,16 +1455,13 @@ export default component$(() => {
                 key={i}
                 class="flex items-center gap-3 rounded-lg border border-gray-700 bg-gray-800 p-3"
               >
-                <div class="relative shrink-0">
-                  <img
-                    src={(sig as any).thumbnail || getDefaultThumbnail(sig)}
-                    alt=""
-                    width={40}
-                    height={40}
-                    class="h-10 w-10 rounded-lg object-cover"
-                  />
-                  {(sig as any).thumbnail && <FileTypeBadge hashType={sig.perceptual_hash?.hash_type} />}
-                </div>
+                <img
+                  src={(sig as any).thumbnail || getDefaultThumbnail(sig)}
+                  alt=""
+                  width={40}
+                  height={40}
+                  class="h-10 w-10 shrink-0 rounded-lg object-cover"
+                />
                 <div class="min-w-0 flex-1">
                   {(sig as any).fileName ? (
                     <p class="truncate text-sm text-white">
@@ -1461,10 +1472,13 @@ export default component$(() => {
                       {sig.file_hash?.slice(0, 16)}...
                     </p>
                   )}
-                  <p class="text-xs text-gray-500">
-                    {sig.signed_at ? formatRelativeTime(sig.signed_at) : ""}
-                    {sig.intent ? ` · ${sig.intent}` : ""}
-                  </p>
+                  <div class="flex flex-wrap items-center gap-1.5 text-xs text-gray-500">
+                    {sig.signed_at && <span>{formatRelativeTime(sig.signed_at)}</span>}
+                    <span class="rounded-full bg-gray-700/50 px-2 py-0.5 text-gray-300">
+                      {fileTypeLabel(sig.perceptual_hash?.hash_type)}
+                    </span>
+                    {sig.intent && <span>· {sig.intent}</span>}
+                  </div>
                 </div>
                 {sig.action_hash && (
                   <div class="shrink-0 flex flex-wrap gap-2">
