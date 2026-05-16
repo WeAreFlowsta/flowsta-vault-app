@@ -2563,6 +2563,11 @@ pub async fn sign_file(
     content_rights: Option<serde_json::Value>,
     integrity_report: Option<serde_json::Value>,
     perceptual_hash: Option<serde_json::Value>,
+    // v1.3+ fields. comment is the signer-declared note; supersedes is
+    // the previous version's action_hash (hex) when amending an existing
+    // signature into a new chain entry.
+    comment: Option<String>,
+    supersedes: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
     // 1. Decode and validate file hash
@@ -2608,6 +2613,17 @@ pub async fn sign_file(
         conductor.as_ref().map(|h| (h.admin_port, h.app_port))
     };
 
+    // Decode supersedes hex to bytes once (any error → reject upfront so
+    // we never commit a partial-payload signature).
+    let supersedes_bytes = if let Some(hex_str) = supersedes.as_deref() {
+        match hex::decode(hex_str) {
+            Ok(bytes) => Some(bytes),
+            Err(_) => return Err("supersedes must be a hex-encoded action_hash".to_string()),
+        }
+    } else {
+        None
+    };
+
     let action_hash = if let Some((admin_port, app_port)) = conductor_ports {
         match commit_signature_to_dht(
             admin_port,
@@ -2620,6 +2636,8 @@ pub async fn sign_file(
             content_rights.as_ref(),
             integrity_report.as_ref(),
             perceptual_hash.as_ref(),
+            comment.as_deref(),
+            supersedes_bytes.as_deref(),
         )
         .await
         {
@@ -2645,6 +2663,8 @@ pub async fn sign_file(
         "ai_generation": ai_generation,
         "content_rights": content_rights,
         "integrity_report": integrity_report,
+        "comment": comment,
+        "supersedes": supersedes,
     }))
 }
 
@@ -3413,6 +3433,11 @@ async fn commit_signature_to_dht(
     content_rights: Option<&serde_json::Value>,
     integrity_report: Option<&serde_json::Value>,
     perceptual_hash: Option<&serde_json::Value>,
+    // v1.3+ optional fields. supersedes is the raw 39-byte action_hash
+    // of the signature this one replaces (chain backpointer). Older DNA
+    // versions ignore unknown fields, so passing None on v1.0–v1.2 is safe.
+    comment: Option<&str>,
+    supersedes: Option<&[u8]>,
 ) -> Result<String, String> {
     use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
         ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
@@ -3506,6 +3531,12 @@ async fn commit_signature_to_dht(
         content_rights: Option<ContentRightsPayload>,
         integrity_report: Option<IntegrityReportPayload>,
         perceptual_hash: Option<PerceptualHashPayload>,
+        // v1.3+ SignatureRecord extensions. Field order doesn't matter
+        // for MessagePack named-field encoding (rmp_serde::to_vec_named).
+        supersedes: Option<holochain_types::prelude::ActionHash>,
+        expires_at: Option<i64>,
+        tags: Option<Vec<String>>,
+        comment: Option<String>,
     }
 
     #[derive(serde::Serialize)]
@@ -3648,6 +3679,10 @@ async fn commit_signature_to_dht(
                     }).collect(),
             })
         }),
+        supersedes: supersedes.map(|b| holochain_types::prelude::ActionHash::from_raw_39(b.to_vec())),
+        expires_at: None,
+        tags: None,
+        comment: comment.map(|s| s.to_string()),
     };
 
     // Encode with MessagePack using the same encoder Holochain uses

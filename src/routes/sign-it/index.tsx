@@ -15,6 +15,8 @@ import { GlassButton } from "~/components/common/GlassButton";
 import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
 import { SignQuotaMeter, type SignQuotaState } from "~/components/sign-it/SignQuotaMeter";
 import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
+import RevokeSignatureModal from "~/components/sign-it/RevokeSignatureModal";
+import AmendSignatureModal from "~/components/sign-it/AmendSignatureModal";
 import { pendingSignPathsContext, signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
 
@@ -165,13 +167,10 @@ export default component$(() => {
   const signResults = useSignal<any[]>([]);
   const isBatch = useSignal(false);
 
-  // Revocation dialog state
+  // Modal targets. Internal state (form values, in-flight flags, errors)
+  // lives inside each shared modal component below.
   const revokeTarget = useSignal<any | null>(null);
-  const revokeReason = useSignal("");
-  const revoking = useSignal(false);
-
-  // Edit-thumbnail target. Other modal state lives inside the shared
-  // <EditThumbnailModal /> below. Matches /sign-it/signatures/.
+  const amendTarget = useSignal<any | null>(null);
   const editThumbTarget = useSignal<any | null>(null);
 
   // Phase 8: Sign quota (HMAC-signed local cache + online refresh)
@@ -470,6 +469,7 @@ export default component$(() => {
     commercialLicensing: "",
     aiTraining: "",
     contactPreference: "",
+    comment: "",
   });
 
   // Tier-aware helper: reads size, validates limits, hashes (with progress),
@@ -672,6 +672,8 @@ export default component$(() => {
             contentRights: contentRights,
             integrityReport: filterReport(entry.integrityReport),
             perceptualHash: entry.perceptualHash || null,
+            comment: metadata.comment.trim() || null,
+            supersedes: null,
           });
           results.push({ ...result, fileName: entry.name, success: true });
           // Phase 8: increment local cache + update meter from cache (authoritative for display)
@@ -704,6 +706,8 @@ export default component$(() => {
           contentRights: contentRights,
           integrityReport: filterReport(integrityReport.value),
           perceptualHash: perceptualHash.value || null,
+          comment: metadata.comment.trim() || null,
+          supersedes: null,
         });
 
         signResult.value = result;
@@ -748,6 +752,10 @@ export default component$(() => {
     existingSignatures.value = [];
     error.value = "";
     thumbnailData.value = null;
+    // Comment is file-specific; clear it between signings (other metadata
+    // stays sticky for the session — most users sign with the same license
+    // repeatedly).
+    metadata.comment = "";
     // Batch state
     fileEntries.value = [];
     signResults.value = [];
@@ -756,26 +764,25 @@ export default component$(() => {
     hashingProgress.value = "";
   });
 
-  const handleRevoke = $(async () => {
-    if (!revokeTarget.value?.action_hash) return;
-    revoking.value = true;
+  // Local mutation when modal-driven revoke succeeds.
+  const onRevoked = $((actionHash: string) => {
+    recentSignatures.value = recentSignatures.value.filter(
+      (s) => s.action_hash !== actionHash
+    );
+    persistSignaturesCache(recentSignatures.value);
+  });
+
+  // After an amend, force a full conductor refresh — the new signature
+  // appears + the API list call computes `superseded_by` from the full
+  // chain, so we can't just append locally.
+  const onAmended = $(async () => {
     try {
-      await invoke("revoke_signature", {
-        actionHashHex: revokeTarget.value.action_hash,
-        reason: revokeReason.value || null,
-      });
-      // Remove from local list
-      recentSignatures.value = recentSignatures.value.filter(
-        (s) => s.action_hash !== revokeTarget.value?.action_hash
-      );
-      persistSignaturesCache(recentSignatures.value);
-      revokeTarget.value = null;
-      revokeReason.value = "";
-    } catch (e) {
-      error.value = `Revocation failed: ${e}`;
-    } finally {
-      revoking.value = false;
-    }
+      const sigs = await invoke<any[]>("get_my_signatures");
+      if (Array.isArray(sigs)) {
+        recentSignatures.value = sigs;
+        persistSignaturesCache(sigs);
+      }
+    } catch { /* conductor not ready */ }
   });
 
   // Windows users see a message + "Open flowsta.com" instead of the full
@@ -1015,6 +1022,28 @@ export default component$(() => {
                   </div>
                 </div>
               </div>
+            </div>
+
+            {/* Optional signer-declared note (applied to all batch files) */}
+            <div class="mb-4">
+              <label class="mb-1 flex items-baseline justify-between text-xs text-gray-500">
+                <span>Note (applied to all files)</span>
+                {metadata.comment.length > 0 && (
+                  <span class="text-[10px] text-gray-500">{metadata.comment.length}/280</span>
+                )}
+              </label>
+              <textarea
+                rows={2}
+                maxLength={280}
+                placeholder="Add a note about this signature"
+                style={{ colorScheme: "dark" }}
+                class="w-full rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-y"
+                value={metadata.comment}
+                onInput$={(e) => { metadata.comment = (e.target as HTMLTextAreaElement).value; }}
+              />
+              <p class="mt-1 text-[11px] italic text-gray-500">
+                This note will be permanently recorded on the public DHT.
+              </p>
             </div>
 
             {/* Sign button */}
@@ -1286,6 +1315,28 @@ export default component$(() => {
               </div>
             </div>
 
+            {/* Optional signer-declared note */}
+            <div class="mb-4">
+              <label class="mb-1 flex items-baseline justify-between text-xs text-gray-500">
+                <span>Note (optional)</span>
+                {metadata.comment.length > 0 && (
+                  <span class="text-[10px] text-gray-500">{metadata.comment.length}/280</span>
+                )}
+              </label>
+              <textarea
+                rows={2}
+                maxLength={280}
+                placeholder="Add a note about this signature"
+                style={{ colorScheme: "dark" }}
+                class="w-full rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-y"
+                value={metadata.comment}
+                onInput$={(e) => { metadata.comment = (e.target as HTMLTextAreaElement).value; }}
+              />
+              <p class="mt-1 text-[11px] italic text-gray-500">
+                This note will be permanently recorded on the public DHT.
+              </p>
+            </div>
+
             {/* Sign button */}
             <div class="flex gap-3">
               <GlassButton variant="secondary" onClick$={resetForm}>
@@ -1447,13 +1498,13 @@ export default component$(() => {
         ) : (
           <div class="space-y-3">
             {recentSignatures.value
-              .filter((s) => !s.revoked)
+              .filter((s) => !s.revoked && !(s as any).superseded_by)
               .sort((a, b) => (b.signed_at || 0) - (a.signed_at || 0))
               .slice(0, 5)
               .map((sig, i) => (
               <div
                 key={i}
-                class="flex items-center gap-3 rounded-lg border border-gray-700 bg-gray-800 p-3"
+                class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-800 p-3"
               >
                 <img
                   src={(sig as any).thumbnail || getDefaultThumbnail(sig)}
@@ -1478,7 +1529,26 @@ export default component$(() => {
                       {fileTypeLabel(sig.perceptual_hash?.hash_type)}
                     </span>
                     {sig.intent && <span>· {sig.intent}</span>}
+                    {(sig as any).expires_at && ((sig as any).expires_at > Date.now() ? (
+                      <span class="rounded-full bg-gray-700/50 px-2 py-0.5 text-gray-300">
+                        Expires {new Date((sig as any).expires_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                      </span>
+                    ) : (
+                      <span class="rounded-full bg-amber-900/30 px-2 py-0.5 text-amber-300">
+                        Expired {new Date((sig as any).expires_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                      </span>
+                    ))}
+                    {(sig as any).tags?.map((tag: string) => (
+                      <span key={tag} class="rounded-full bg-gray-700/30 px-2 py-0.5 text-gray-400">
+                        #{tag}
+                      </span>
+                    ))}
                   </div>
+                  {(sig as any).comment && (
+                    <p class="mt-1 text-xs italic text-gray-400 line-clamp-2" title={(sig as any).comment}>
+                      {(sig as any).comment}
+                    </p>
+                  )}
                 </div>
                 {sig.action_hash && (
                   <div class="shrink-0 flex flex-wrap gap-2">
@@ -1491,11 +1561,14 @@ export default component$(() => {
                       </button>
                     )}
                     <button
+                      class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-sky-400 hover:text-sky-400 transition-colors"
+                      onClick$={() => { amendTarget.value = sig; }}
+                    >
+                      Amend
+                    </button>
+                    <button
                       class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-red-400 hover:text-red-400 transition-colors"
-                      onClick$={() => {
-                        revokeTarget.value = sig;
-                        revokeReason.value = "";
-                      }}
+                      onClick$={() => { revokeTarget.value = sig; }}
                     >
                       Revoke
                     </button>
@@ -1517,54 +1590,8 @@ export default component$(() => {
         })}
       />
 
-      {/* Revocation confirmation dialog */}
-      {revokeTarget.value && (
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
-            <h3 class="mb-2 text-base font-semibold text-white">Revoke Signature</h3>
-            <p class="mb-4 text-xs text-gray-400">
-              This will publicly mark this signature as revoked. The original record stays on the DHT but verifiers will see it as revoked.
-            </p>
-
-            <div class="mb-4 rounded-lg border border-gray-700 bg-gray-900 p-3">
-              <p class="truncate text-xs font-mono text-gray-400">
-                {(revokeTarget.value as any).fileName || revokeTarget.value.file_hash?.slice(0, 24) + "..."}
-              </p>
-            </div>
-
-            <div class="mb-4">
-              <label class="mb-1 block text-xs text-gray-500">Reason (optional)</label>
-              <input
-                type="text"
-                maxLength={280}
-                placeholder="e.g. Replaced with updated version"
-                class="w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-amber-400 focus:outline-none"
-                style={{ colorScheme: "dark" }}
-                value={revokeReason.value}
-                onInput$={(e) => { revokeReason.value = (e.target as HTMLInputElement).value; }}
-              />
-            </div>
-
-            <div class="flex gap-3">
-              <GlassButton
-                variant="secondary"
-                class="flex-1"
-                onClick$={() => { revokeTarget.value = null; }}
-              >
-                Cancel
-              </GlassButton>
-              <GlassButton
-                variant="danger"
-                class="flex-1"
-                disabled={revoking.value}
-                onClick$={handleRevoke}
-              >
-                {revoking.value ? "Revoking..." : "Revoke"}
-              </GlassButton>
-            </div>
-          </div>
-        </div>
-      )}
+      <RevokeSignatureModal target={revokeTarget} onRevoked$={onRevoked} />
+      <AmendSignatureModal target={amendTarget} onAmended$={onAmended} />
     </div>
   );
 });

@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
 import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
 import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
+import RevokeSignatureModal from "~/components/sign-it/RevokeSignatureModal";
+import AmendSignatureModal from "~/components/sign-it/AmendSignatureModal";
 import { signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
 
@@ -58,33 +60,26 @@ export default component$(() => {
   const signatures = sigStore.signatures;
   const loaded = sigStore.loaded;
   const showRevoked = useSignal(false);
-  const revokeTarget = useSignal<any | null>(null);
-  const revokeReason = useSignal("");
-  const revoking = useSignal(false);
 
-  // Edit-thumbnail target (which signature is being edited). Other modal
-  // state lives inside the shared <EditThumbnailModal /> below.
+  // Modal targets. Internal state (form values, in-flight flags, errors)
+  // lives inside each shared modal component below.
+  const revokeTarget = useSignal<any | null>(null);
+  const amendTarget = useSignal<any | null>(null);
   const editThumbTarget = useSignal<any | null>(null);
 
-  const handleRevoke = $(async () => {
-    if (!revokeTarget.value?.action_hash) return;
-    revoking.value = true;
+  const onRevoked = $((actionHash: string) => {
+    signatures.value = signatures.value.filter((s) => s.action_hash !== actionHash);
+    persistSignaturesCache(signatures.value);
+  });
+
+  const onAmended = $(async () => {
     try {
-      await invoke("revoke_signature", {
-        actionHashHex: revokeTarget.value.action_hash,
-        reason: revokeReason.value || null,
-      });
-      signatures.value = signatures.value.filter(
-        (s) => s.action_hash !== revokeTarget.value?.action_hash
-      );
-      persistSignaturesCache(signatures.value);
-      revokeTarget.value = null;
-      revokeReason.value = "";
-    } catch (e) {
-      console.error("Revocation failed:", e);
-    } finally {
-      revoking.value = false;
-    }
+      const sigs = await invoke<any[]>("get_my_signatures");
+      if (Array.isArray(sigs)) {
+        signatures.value = sigs;
+        persistSignaturesCache(sigs);
+      }
+    } catch { /* conductor not ready */ }
   });
 
   // No fetch task here — the layout's signaturesContext already owns the
@@ -121,7 +116,7 @@ export default component$(() => {
             </Link>
           </div>
         ) : (() => {
-          const active = signatures.value.filter((s: any) => !s.revoked)
+          const active = signatures.value.filter((s: any) => !s.revoked && !s.superseded_by)
             .sort((a: any, b: any) => (b.signed_at || 0) - (a.signed_at || 0));
           const revoked = signatures.value.filter((s: any) => s.revoked)
             .sort((a: any, b: any) => (b.signed_at || 0) - (a.signed_at || 0));
@@ -161,6 +156,20 @@ export default component$(() => {
                           {sig.content_rights.license}
                         </span>
                       )}
+                      {sig.expires_at && (sig.expires_at > Date.now() ? (
+                        <span class="rounded-full bg-gray-700/50 px-2 py-0.5 text-gray-300">
+                          Expires {new Date(sig.expires_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                        </span>
+                      ) : (
+                        <span class="rounded-full bg-amber-900/30 px-2 py-0.5 text-amber-300">
+                          Expired {new Date(sig.expires_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                        </span>
+                      ))}
+                      {sig.tags?.map((tag: string) => (
+                        <span key={tag} class="rounded-full bg-gray-700/30 px-2 py-0.5 text-gray-400">
+                          #{tag}
+                        </span>
+                      ))}
                       {sig.signed_at && (
                         <span class="px-1">{formatRelativeTime(sig.signed_at)}</span>
                       )}
@@ -175,14 +184,25 @@ export default component$(() => {
                             </button>
                           )}
                           <button
+                            class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-sky-400 hover:text-sky-400 transition-colors"
+                            onClick$={() => { amendTarget.value = sig; }}
+                          >
+                            Amend
+                          </button>
+                          <button
                             class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-red-400 hover:text-red-400 transition-colors"
-                            onClick$={() => { revokeTarget.value = sig; revokeReason.value = ""; }}
+                            onClick$={() => { revokeTarget.value = sig; }}
                           >
                             Revoke
                           </button>
                         </div>
                       )}
                     </div>
+                    {sig.comment && (
+                      <p class="mt-2 text-xs italic text-gray-400 line-clamp-2" title={sig.comment}>
+                        {sig.comment}
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>
@@ -238,47 +258,8 @@ export default component$(() => {
         })}
       />
 
-      {/* Revocation confirmation dialog */}
-      {revokeTarget.value && (
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
-            <h3 class="mb-2 text-base font-semibold text-white">Revoke Signature</h3>
-            <p class="mb-4 text-xs text-gray-400">
-              This will publicly mark this signature as revoked. The original record stays on the DHT but verifiers will see it as revoked.
-            </p>
-            <div class="mb-4 rounded-lg border border-gray-700 bg-gray-900 p-3">
-              <p class="truncate text-xs font-mono text-gray-400">
-                {revokeTarget.value.file_hash?.slice(0, 24)}...
-              </p>
-            </div>
-            <div class="mb-4">
-              <label class="mb-1 block text-xs text-gray-500">Reason (optional)</label>
-              <input
-                type="text"
-                maxLength={280}
-                placeholder="e.g. Replaced with updated version"
-                class="w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-amber-400 focus:outline-none"
-                style={{ colorScheme: "dark" }}
-                value={revokeReason.value}
-                onInput$={(e) => { revokeReason.value = (e.target as HTMLInputElement).value; }}
-              />
-            </div>
-            <div class="flex gap-3">
-              <GlassButton variant="secondary" class="flex-1" onClick$={() => { revokeTarget.value = null; }}>
-                Cancel
-              </GlassButton>
-              <GlassButton
-                variant="danger"
-                class="flex-1"
-                disabled={revoking.value}
-                onClick$={handleRevoke}
-              >
-                {revoking.value ? "Revoking..." : "Revoke"}
-              </GlassButton>
-            </div>
-          </div>
-        </div>
-      )}
+      <RevokeSignatureModal target={revokeTarget} onRevoked$={onRevoked} />
+      <AmendSignatureModal target={amendTarget} onAmended$={onAmended} />
     </div>
   );
 });
