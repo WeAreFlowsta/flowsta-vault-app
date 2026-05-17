@@ -98,7 +98,7 @@ export default component$<Props>(({ target, onAmended$ }) => {
       if (form.contactPreference) cr.contact_preference = form.contactPreference;
       const contentRights = Object.keys(cr).length > 0 ? cr : null;
 
-      await invoke("sign_file", {
+      const result = await invoke<any>("sign_file", {
         fileHash: target.value.file_hash,
         intent: target.value.intent || "authorship",
         aiGeneration: form.aiGeneration || null,
@@ -108,6 +108,23 @@ export default component$<Props>(({ target, onAmended$ }) => {
         comment: form.comment.trim() || null,
         supersedes: target.value.action_hash,
       });
+      // Carry the original thumbnail across to the new chain head.
+      // Thumbnails are a separate DHT entry keyed by signature action_hash,
+      // so the amended signature would otherwise show the default
+      // file-type SVG even when the original had a custom or auto-
+      // generated thumbnail. Awaited so the refreshed list shows the
+      // thumbnail without a flicker.
+      if (target.value.thumbnail && result?.action_hash) {
+        try {
+          await invoke("set_thumbnail", {
+            actionHashHex: result.action_hash,
+            thumbnail: target.value.thumbnail,
+          });
+        } catch (e) {
+          // Non-blocking — the amend itself succeeded.
+          console.warn("Failed to carry thumbnail to amended signature:", e);
+        }
+      }
       await onAmended$();
       target.value = null;
     } catch (e: any) {
