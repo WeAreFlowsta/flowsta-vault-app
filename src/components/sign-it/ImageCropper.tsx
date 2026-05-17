@@ -56,7 +56,7 @@ export default component$<ImageCropperProps>((props) => {
       if (selection) {
         selection.aspectRatio = 1;
         selection.initialAspectRatio = 1;
-        selection.initialCoverage = 0.9;
+        selection.initialCoverage = 0.95;
         clearInterval(configTimer);
 
         // Size the cropper-canvas to match the image's aspect ratio exactly,
@@ -102,6 +102,35 @@ export default component$<ImageCropperProps>((props) => {
             const w = detail?.width ?? selection.width;
             const h = detail?.height ?? selection.height;
             if (w !== h || w === 0) return;
+
+            // Reject any pending move/resize that would push the selection
+            // outside the cropper-image's visible bounds. Without this the
+            // user can drag the selection into the empty canvas corners
+            // that appear once the image is panned.
+            if (cropperCanvas) {
+              const ci = cropper.getCropperImage() as HTMLElement | null;
+              const imgRect = ci?.getBoundingClientRect();
+              if (imgRect && imgRect.width > 0 && imgRect.height > 0) {
+                const canvasRect = cropperCanvas.getBoundingClientRect();
+                const minX = imgRect.left - canvasRect.left;
+                const minY = imgRect.top - canvasRect.top;
+                const maxX = imgRect.right - canvasRect.left;
+                const maxY = imgRect.bottom - canvasRect.top;
+                const tol = 1;
+                const x = detail?.x ?? selection.x;
+                const y = detail?.y ?? selection.y;
+                if (
+                  x < minX - tol ||
+                  y < minY - tol ||
+                  x + w > maxX + tol ||
+                  y + h > maxY + tol
+                ) {
+                  e.preventDefault();
+                  return;
+                }
+              }
+            }
+
             // $toCanvas reads this.width/this.height synchronously in its
             // Promise executor. cropperjs's $change fires the event BEFORE
             // writing those fields — so wait one microtask for state to
@@ -136,7 +165,7 @@ export default component$<ImageCropperProps>((props) => {
             if (retries++ < 30) requestAnimationFrame(forceCenteredCrop);
             return;
           }
-          const size = Math.min(w, h) * 0.9;
+          const size = Math.min(w, h) * 0.95;
           const x = (w - size) / 2;
           const y = (h - size) / 2;
           selection.$change(x, y, size, size);
@@ -144,6 +173,10 @@ export default component$<ImageCropperProps>((props) => {
 
         const cropperImage = cropper.getCropperImage();
         if (cropperImage) {
+          // Floor scale at fit so users can't shrink the image below the
+          // canvas (which would create empty corners). Wheel/pinch zoom-in
+          // is still allowed for precision crops.
+          (cropperImage as HTMLElement).setAttribute("min-scale", "1");
           cropperImage.$ready((image: HTMLImageElement) => {
             // Re-read the real aspect from cropperImage now that it's loaded,
             // in case the <img> onLoad hadn't fired before we first sized
@@ -206,7 +239,7 @@ export default component$<ImageCropperProps>((props) => {
       </div>
 
       <p class="text-xs text-gray-400 text-center">
-        Drag to position • Scroll to zoom • Pinch to zoom on mobile
+        Drag to position • Drag corners or sides to resize • Scroll or pinch to zoom in
       </p>
     </div>
   );
