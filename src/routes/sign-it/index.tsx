@@ -18,6 +18,7 @@ import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
 import RevokeSignatureModal from "~/components/sign-it/RevokeSignatureModal";
 import AmendSignatureModal from "~/components/sign-it/AmendSignatureModal";
 import EditHistoryExpander from "~/components/sign-it/EditHistoryExpander";
+import { formatLicense, formatAiGeneration } from "~/lib/sign-it-labels";
 import { pendingSignPathsContext, signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
 
@@ -1534,12 +1535,12 @@ export default component$(() => {
                     )}
                     {(sig as any).ai_generation && (sig as any).ai_generation !== "None" && (
                       <span class="rounded-full bg-amber-900/30 px-2 py-0.5 text-amber-400">
-                        AI: {(sig as any).ai_generation}
+                        {formatAiGeneration((sig as any).ai_generation)}
                       </span>
                     )}
                     {(sig as any).content_rights?.license && (
                       <span class="rounded-full bg-sky-900/30 px-2 py-0.5 text-sky-400">
-                        {(sig as any).content_rights.license}
+                        {formatLicense((sig as any).content_rights.license)}
                       </span>
                     )}
                     {(sig as any).expires_at && ((sig as any).expires_at > Date.now() ? (
