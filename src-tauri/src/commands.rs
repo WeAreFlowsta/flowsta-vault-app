@@ -2681,6 +2681,18 @@ struct SignatureEntry {
     content_rights: Option<serde_json::Value>,
     integrity_report: Option<serde_json::Value>,
     perceptual_hash: Option<serde_json::Value>,
+    // v1.3+ fields. Serde defaults keep deserialization working for
+    // pre-v1.3 records (signing v1.0 / v1.1 / v1.2) that don't have them.
+    // `supersedes` decoded as raw bytes to side-step HoloHash-via-msgpack
+    // serde quirks; we hex-encode it for the JSON output ourselves.
+    #[serde(default)]
+    supersedes: Option<Vec<u8>>,
+    #[serde(default)]
+    expires_at: Option<i64>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    comment: Option<String>,
 }
 
 /// Best-effort revocation lookup for one signature. Returns
@@ -2842,6 +2854,10 @@ async fn build_own_signature_json(
         "content_rights": entry.content_rights,
         "integrity_report": entry.integrity_report,
         "perceptual_hash": entry.perceptual_hash,
+        "supersedes": entry.supersedes.as_ref().map(|b| hex::encode(b)),
+        "expires_at": entry.expires_at,
+        "tags": entry.tags,
+        "comment": entry.comment,
         "revoked": revoked,
         "revoked_at": revoked_at,
         "revocation_reason": revocation_reason,
@@ -2877,6 +2893,10 @@ async fn build_linked_signature_json(
         "content_rights": entry.content_rights,
         "integrity_report": entry.integrity_report,
         "perceptual_hash": entry.perceptual_hash,
+        "supersedes": entry.supersedes.as_ref().map(|b| hex::encode(b)),
+        "expires_at": entry.expires_at,
+        "tags": entry.tags,
+        "comment": entry.comment,
         "revoked": false,
         "revoked_at": serde_json::Value::Null,
         "revocation_reason": serde_json::Value::Null,
@@ -3230,6 +3250,34 @@ async fn get_my_signatures_inner(
                 let hash = sig.get("action_hash").and_then(|h| h.as_str()).unwrap_or("").to_string();
                 if !hash.is_empty() && !existing.contains(&hash) {
                     signatures.push(sig);
+                }
+            }
+        }
+    }
+
+    // The chain only stores the forward pointer (`supersedes`); the
+    // frontend filter needs the reverse (`superseded_by`) so amended
+    // records drop out of the active list.
+    let superseded_by_map: std::collections::HashMap<String, String> = signatures
+        .iter()
+        .filter_map(|s| {
+            let action_hash = s.get("action_hash")?.as_str()?.to_string();
+            let supersedes = s.get("supersedes")?.as_str()?.to_string();
+            Some((supersedes, action_hash))
+        })
+        .collect();
+    if !superseded_by_map.is_empty() {
+        for sig in signatures.iter_mut() {
+            let action_hash = match sig.get("action_hash").and_then(|h| h.as_str()) {
+                Some(h) => h.to_string(),
+                None => continue,
+            };
+            if let Some(superseded_by) = superseded_by_map.get(&action_hash) {
+                if let Some(obj) = sig.as_object_mut() {
+                    obj.insert(
+                        "superseded_by".to_string(),
+                        serde_json::Value::String(superseded_by.clone()),
+                    );
                 }
             }
         }

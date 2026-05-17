@@ -112,9 +112,10 @@ export default component$(() => {
 
   const stats = backupStats.value;
   const hasDisplayName = !!id.display_name;
-  const sigCount = sigStore.signatures.value.length;
   const sigsLoaded = sigStore.loaded.value;
-  const activeSigs = sigStore.signatures.value.filter((s: any) => !s.revoked).length;
+  const currentSigs = sigStore.signatures.value.filter((s: any) => !(s as any).superseded_by);
+  const sigCount = currentSigs.length;
+  const activeSigs = currentSigs.filter((s: any) => !s.revoked).length;
   const revokedSigs = sigCount - activeSigs;
   // Sign It is gated on Windows in v0.5.2 (see /sign-it/index.tsx). On
   // Windows the count comes back as 0 because the underlying fetch can't

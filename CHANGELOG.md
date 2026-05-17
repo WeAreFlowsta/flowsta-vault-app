@@ -5,6 +5,53 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] — 2026-05-17
+
+Sign It Bundle A release. Adds the comment field, amend flow, edit
+history, and expiry / tags display agreed in the Sign It Track 1 plan,
+plus several UX refinements landed since v0.5.2.
+
+### Sign It — Bundle A
+- **Comment field** on every signature (≤280 chars). Visible inline
+  on the sign form, on the sign-result screen, and on each signature
+  card.
+- **Amend flow.** Re-sign an existing record under the same chain
+  with a new metadata version; the original entry stays on the DHT
+  (public-permanence guarantee). Wrapped behind a new contextual `…`
+  menu alongside Revoke. Pre-fills license / AI / commercial /
+  AI-training / contact preference from the signature being amended.
+  Carries the original thumbnail across to the new chain head.
+- **Edit-history expander.** Walks the supersedes chain backwards
+  (capped at 20 versions for cycle defence) and renders a diff
+  summary between consecutive versions.
+- **Expiry + tags display.** Signatures list shows an "Expires
+  <date>" badge when `expires_at` is set, and renders tags as small
+  pills. No creation UI yet — display catches signatures populated
+  via API or external tooling.
+- **License + AI-generation badges** on each signature card in the
+  Recent Signatures view, matching the all-signatures listing.
+- **Human-readable labels** throughout (license + AI-generation).
+
+### Sign It — UX from v0.5.2 main
+- **Content rights expanded by default** on the sign form. AI
+  Generation, License, Commercial Licensing, AI Training, and Contact
+  Preference all render inline rather than behind a disclosure.
+- **File-type badge on thumbnails.** When a custom thumbnail is
+  uploaded, a small audio / image / video / file icon overlays the
+  thumbnail corner so the format remains visible. (Default-SVG
+  thumbnails are their own type indicator and don't get the overlay.)
+- **File-type text pill** in the signature metadata row beside the
+  date — works whether a custom thumbnail was uploaded or not.
+- **Edit-Thumbnail parity** on the Recent Signatures view (was
+  previously only available in the all-signatures list).
+
+### Reliability
+- **Identity-keyed signatures cache.** Cache storage keys are now
+  scoped per-agent (`flowsta_vault_sigs_v2_<agent_pub_key>`) so reset
+  Vault → sign in as a different user no longer surfaces the previous
+  user's cached signatures. Reset Vault explicitly clears the cache
+  too.
+
 ## [0.5.2] — 2026-05-11
 
 Stability and signing-history release. Adds reliability infrastructure
