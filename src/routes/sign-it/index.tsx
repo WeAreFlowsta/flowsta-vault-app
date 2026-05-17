@@ -1529,7 +1529,19 @@ export default component$(() => {
                     <span class="rounded-full bg-gray-700/50 px-2 py-0.5 text-gray-300">
                       {fileTypeLabel(sig.perceptual_hash?.hash_type)}
                     </span>
-                    {sig.intent && <span>· {sig.intent}</span>}
+                    {sig.intent && (
+                      <span class="rounded-full bg-gray-700/50 px-2 py-0.5">{sig.intent}</span>
+                    )}
+                    {(sig as any).ai_generation && (sig as any).ai_generation !== "None" && (
+                      <span class="rounded-full bg-amber-900/30 px-2 py-0.5 text-amber-400">
+                        AI: {(sig as any).ai_generation}
+                      </span>
+                    )}
+                    {(sig as any).content_rights?.license && (
+                      <span class="rounded-full bg-sky-900/30 px-2 py-0.5 text-sky-400">
+                        {(sig as any).content_rights.license}
+                      </span>
+                    )}
                     {(sig as any).expires_at && ((sig as any).expires_at > Date.now() ? (
                       <span class="rounded-full bg-gray-700/50 px-2 py-0.5 text-gray-300">
                         Expires {new Date((sig as any).expires_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
