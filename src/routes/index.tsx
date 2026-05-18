@@ -117,6 +117,7 @@ export default component$(() => {
   const sigCount = currentSigs.length;
   const activeSigs = currentSigs.filter((s: any) => !s.revoked).length;
   const revokedSigs = sigCount - activeSigs;
+  const amendedSigs = sigStore.signatures.value.filter((s: any) => (s as any).superseded_by).length;
   // Sign It is gated on Windows in v0.5.2 (see /sign-it/index.tsx). On
   // Windows the count comes back as 0 because the underlying fetch can't
   // run reliably; show "—" with a friendlier subtitle instead of "0 — Sign
@@ -237,9 +238,11 @@ export default component$(() => {
                 ? "Loading..."
                 : sigCount === 0
                   ? "Sign your first file"
-                  : revokedSigs > 0
-                    ? `${activeSigs} active, ${revokedSigs} revoked`
-                    : `${activeSigs} active`}
+                  : [
+                      `${activeSigs} active`,
+                      revokedSigs > 0 ? `${revokedSigs} revoked` : null,
+                      amendedSigs > 0 ? `${amendedSigs} amendment${amendedSigs === 1 ? "" : "s"}` : null,
+                    ].filter(Boolean).join(", ")}
           </p>
         </Link>
 
