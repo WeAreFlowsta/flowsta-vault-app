@@ -922,18 +922,49 @@ async fn check_dna_updates(
 /// Returns the app to the "not initialized" state.
 #[tauri::command]
 pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Stop conductor + lair before touching their data dirs. Without
+    // this we'd leak processes and (on Windows) the dir delete would
+    // fail on the still-open lair socket / conductor files.
+    let handle = state.conductor_handle.lock().unwrap().take();
+    if let Some(h) = handle {
+        h.shutdown();
+    }
+
     // Clear in-memory config
-    let mut config = state.vault_config.lock().unwrap();
-    *config = None;
+    {
+        let mut config = state.vault_config.lock().unwrap();
+        *config = None;
+    }
 
     // Delete vault file from disk
-    let vault_path = state.vault_path.lock().unwrap();
+    let vault_path = state.vault_path.lock().unwrap().clone();
     if vault_path.exists() {
-        std::fs::remove_file(&*vault_path)
+        std::fs::remove_file(&vault_path)
             .map_err(|e| format!("Failed to delete vault file: {}", e))?;
     }
 
-    log::info!("Vault reset — file deleted.");
+    // Delete lair keystore directory — otherwise the next vault create
+    // reuses the old encrypted lair store with a mismatched passphrase,
+    // producing "early eof" failures on lair IPC handshake. The same
+    // device seed also gets reused, which silently breaks isolation
+    // between what should be different identities on the machine.
+    let lair_dir = state.data_dir.join("lair");
+    if lair_dir.exists() {
+        std::fs::remove_dir_all(&lair_dir)
+            .map_err(|e| format!("Failed to delete lair dir: {}", e))?;
+    }
+
+    // Delete conductor data — source chains, installed apps, DHT cache.
+    // Leaving these behind across a reset produces CellDisabled /
+    // agent-key-mismatch errors on the next setup because the cells
+    // are keyed to the prior identity.
+    let conductor_dir = state.data_dir.join("conductor");
+    if conductor_dir.exists() {
+        std::fs::remove_dir_all(&conductor_dir)
+            .map_err(|e| format!("Failed to delete conductor dir: {}", e))?;
+    }
+
+    log::info!("Vault reset — vault file, lair keystore, and conductor data cleared.");
     Ok(())
 }
 

@@ -37,6 +37,10 @@ export default component$(() => {
   const signaturesSig = useSignal<any[]>([]);
   const signaturesLoaded = useSignal(false);
   const signaturesRefreshing = useSignal(false);
+  // True once the post-unlock auto-link has fired the `profile-synced`
+  // event. Until then, an empty get_my_signatures result is "partial"
+  // (linked-agent key not yet cached); after, it's authoritative.
+  const profileSynced = useSignal(false);
   // If refresh is requested while one is already running, mark a follow-up.
   // Important because state may change during the in-flight call (e.g.
   // auto-link caches the linked agent key mid-fetch, so the next round will
@@ -60,7 +64,13 @@ export default component$(() => {
         } catch {
           // Conductor may not be ready yet — caller can retry
         }
-        signaturesLoaded.value = true;
+        // Only promote to "loaded" when we have data OR auto-link has
+        // resolved (so an empty result is truly empty, not a partial
+        // pre-link fetch). Without this gate a freshly-wiped user sees
+        // "0 signatures" briefly before the linked-agent refresh lands.
+        if (signaturesSig.value.length > 0 || profileSynced.value) {
+          signaturesLoaded.value = true;
+        }
       } while (pendingRefresh.value);
     } finally {
       signaturesRefreshing.value = false;
@@ -344,6 +354,7 @@ export default component$(() => {
     // Skipped on Windows in v0.5.2 — see the conductor-ready trigger below.
     const unlistenProfilePromise = listen("profile-synced", () => {
       fetchProfile();
+      profileSynced.value = true;
       const isWindows =
         typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
       if (!isWindows) refreshSignatures();
