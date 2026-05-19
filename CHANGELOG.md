@@ -5,7 +5,36 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.3] — 2026-05-17
+## [0.5.3] — 2026-05-20
+
+### Vault reset + first-load polish (beta2)
+- **Vault reset now actually clears everything.** Previously the
+  "Reset Vault" action in settings deleted the encrypted vault
+  config file but left the lair keystore and the conductor data
+  directory in place. On the next vault create, lair handed back the
+  original device seed but rejected the new vault's passphrase,
+  producing repeated `Failed to connect to lair: early eof` errors.
+  The reset now stops the conductor + lair processes and removes
+  both subdirectories alongside the vault file.
+- **Overview tile no longer flashes "0 signatures" on fresh
+  unlocks.** Signatures load runs twice on every unlock — once when
+  the conductor reports ready, again when the post-unlock auto-link
+  fires `profile-synced`. The first pass briefly returned zero
+  because the linked-agent key wasn't cached yet, producing a brief
+  flash of an inaccurate count before the real number landed.
+  Loading state is now gated on either a non-empty result or
+  `profile-synced` so the skeleton stays visible through the
+  partial-fetch window.
+- **Image cropper UX.** Default crop sits at 95% so the resize
+  handles always have visible margin against the image edge. The
+  selection is clamped to the cropper-image's live bounding rect on
+  every move/resize, so it can't be dragged into the empty corners
+  that appear when the user pans the image. min-scale floored at
+  fit prevents below-fit zoom-out (which otherwise creates those
+  same empty corners). Same component, same fixes, on Vault + the
+  flowsta.com dashboard.
+
+## [0.5.3-beta1] — 2026-05-17
 
 Sign It Bundle A release. Adds the comment field, amend flow, edit
 history, and expiry / tags display agreed in the Sign It Track 1 plan,
