@@ -7,79 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.3] — 2026-05-20
 
-### Vault reset + first-load polish (beta2)
-- **Vault reset now actually clears everything.** Previously the
-  "Reset Vault" action in settings deleted the encrypted vault
-  config file but left the lair keystore and the conductor data
-  directory in place. On the next vault create, lair handed back the
-  original device seed but rejected the new vault's passphrase,
-  producing repeated `Failed to connect to lair: early eof` errors.
-  The reset now stops the conductor + lair processes and removes
-  both subdirectories alongside the vault file.
-- **Overview tile no longer flashes "0 signatures" on fresh
-  unlocks.** Signatures load runs twice on every unlock — once when
-  the conductor reports ready, again when the post-unlock auto-link
-  fires `profile-synced`. The first pass briefly returned zero
-  because the linked-agent key wasn't cached yet, producing a brief
-  flash of an inaccurate count before the real number landed.
-  Loading state is now gated on either a non-empty result or
-  `profile-synced` so the skeleton stays visible through the
-  partial-fetch window.
-- **Image cropper UX.** Default crop sits at 95% so the resize
-  handles always have visible margin against the image edge. The
-  selection is clamped to the cropper-image's live bounding rect on
-  every move/resize, so it can't be dragged into the empty corners
-  that appear when the user pans the image. min-scale floored at
-  fit prevents below-fit zoom-out (which otherwise creates those
-  same empty corners). Same component, same fixes, on Vault + the
-  flowsta.com dashboard.
+A Sign It feature release. Adds comments, amendments, edit history,
+and several display refinements. Also includes a sizable UX pass on
+the image cropper and a fix to Reset Vault that was preventing some
+users from setting up a second identity on the same machine.
 
-## [0.5.3-beta1] — 2026-05-17
+### Sign It — new metadata + edits
+- **Comments on signatures.** Add a note (up to 280 characters) when
+  signing. Visible inline on the signature card in Vault and on each
+  signature's public page.
+- **Amend a signature.** Edit the metadata of a published signature
+  while keeping the original cryptographic record permanent on the
+  public DHT. Open the `…` menu on any of your signatures, choose
+  Amend, change what you need (license, AI declaration, commercial
+  terms, contact preference, comment, thumbnail), and Vault publishes
+  a new version linked to the original. Previous versions stay on
+  the network for verifiers.
+- **Edit history.** Each signature that has been amended shows an
+  expandable history on its card. Open it to walk back through every
+  revision and see what changed.
+- **Expiry and tags shown.** Signatures created via the API or
+  external tooling now display their expiry date as a badge and any
+  tags as pills on the signature card. (Setting expiry/tags from the
+  Vault signing form is on the roadmap.)
+- **Cleaner signing form.** License, AI Generation, Commercial
+  Licensing, AI Training, and Contact Preference now appear inline by
+  default instead of behind a disclosure.
 
-Sign It Bundle A release. Adds the comment field, amend flow, edit
-history, and expiry / tags display agreed in the Sign It Track 1 plan,
-plus several UX refinements landed since v0.5.2.
+### Signature display polish
+- **File-type pill on every signature.** A small badge (Image, Audio,
+  Video, Document) appears next to the date in the signature metadata
+  row, whether you uploaded a custom thumbnail or kept the default.
+- **Small file-type icon overlay** on custom thumbnails, so the
+  format is still visible at a glance.
+- **License + AI badges** on the Overview's Recent Signatures view,
+  matching the All Signatures listing.
+- **Human-readable labels** for license and AI generation throughout
+  ("MIT" instead of `Mit`, "AI-assisted" instead of `AiAssisted`,
+  etc.).
+- **Edit Thumbnail** is now available from the Recent Signatures view
+  as well as from All Signatures.
 
-### Sign It — Bundle A
-- **Comment field** on every signature (≤280 chars). Visible inline
-  on the sign form, on the sign-result screen, and on each signature
-  card.
-- **Amend flow.** Re-sign an existing record under the same chain
-  with a new metadata version; the original entry stays on the DHT
-  (public-permanence guarantee). Wrapped behind a new contextual `…`
-  menu alongside Revoke. Pre-fills license / AI / commercial /
-  AI-training / contact preference from the signature being amended.
-  Carries the original thumbnail across to the new chain head.
-- **Edit-history expander.** Walks the supersedes chain backwards
-  (capped at 20 versions for cycle defence) and renders a diff
-  summary between consecutive versions.
-- **Expiry + tags display.** Signatures list shows an "Expires
-  <date>" badge when `expires_at` is set, and renders tags as small
-  pills. No creation UI yet — display catches signatures populated
-  via API or external tooling.
-- **License + AI-generation badges** on each signature card in the
-  Recent Signatures view, matching the all-signatures listing.
-- **Human-readable labels** throughout (license + AI-generation).
-
-### Sign It — UX from v0.5.2 main
-- **Content rights expanded by default** on the sign form. AI
-  Generation, License, Commercial Licensing, AI Training, and Contact
-  Preference all render inline rather than behind a disclosure.
-- **File-type badge on thumbnails.** When a custom thumbnail is
-  uploaded, a small audio / image / video / file icon overlays the
-  thumbnail corner so the format remains visible. (Default-SVG
-  thumbnails are their own type indicator and don't get the overlay.)
-- **File-type text pill** in the signature metadata row beside the
-  date — works whether a custom thumbnail was uploaded or not.
-- **Edit-Thumbnail parity** on the Recent Signatures view (was
-  previously only available in the all-signatures list).
+### Image cropper UX (thumbnails + profile pictures)
+- **Selection fills the image by default**, with a small margin so
+  the resize handles are visible. The previous default left a
+  noticeable gap on every upload.
+- **Selection can't leave the image.** Dragging the crop rectangle
+  toward an edge stops at the image bounds — no more selections that
+  include empty / transparent space.
+- **Zoom-out below fit is blocked**, eliminating the source of empty
+  canvas corners. Zoom-in for precision crops still works.
 
 ### Reliability
-- **Identity-keyed signatures cache.** Cache storage keys are now
-  scoped per-agent (`flowsta_vault_sigs_v2_<agent_pub_key>`) so reset
-  Vault → sign in as a different user no longer surfaces the previous
-  user's cached signatures. Reset Vault explicitly clears the cache
-  too.
+- **Reset Vault now actually clears everything.** The previous
+  behaviour deleted the encrypted vault file but left the local
+  keystore and conductor data in place. On the next setup, the
+  keystore retained the old encryption keys, producing repeated
+  `Failed to connect to lair` errors and an unreachable conductor.
+  Reset now stops all running processes and removes the keystore and
+  conductor data alongside the vault file.
+- **Signature cache is keyed per identity.** If you reset Vault and
+  set up again as a different identity, you no longer see the
+  previous identity's cached signatures briefly appear on the
+  Overview or All Signatures pages.
+- **Overview no longer flashes "0 signatures" on fresh unlocks.** The
+  loading skeleton now stays visible until the post-unlock identity
+  link completes, so the count goes straight from loading to the
+  correct number.
 
 ## [0.5.2] — 2026-05-11
 
