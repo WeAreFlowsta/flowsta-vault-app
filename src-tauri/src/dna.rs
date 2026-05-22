@@ -644,17 +644,6 @@ pub async fn install_dnas(
     // Backfill historical signing DNA versions so the user sees signatures
     // they made before the current DNA. Best-effort — log warnings, don't
     // fail the unlock if any of them error out.
-    //
-    // Skipped on Windows: every signing-DNA admin call crashes the conductor
-    // with `0xc0000005` (the same access-violation gating Sign It on Windows
-    // as a whole). The historical pass would crash the conductor part-way
-    // through the backfill and leave the vault in a half-installed state
-    // where `setup_app_interface` then fails. Sign It is UI-gated on Windows
-    // anyway (see `/sign-it/index.tsx`), so historical sigs aren't visible
-    // there — no point trying to install them. Holochain 0.6.1 (week of
-    // 2026-05-12) is expected to fix the underlying crash; this gate can be
-    // removed in v0.5.3 when we re-enable Sign It on Windows.
-    #[cfg(not(target_os = "windows"))]
     install_historical_signing_dnas(
         &mut admin_ws,
         admin_port,
@@ -663,15 +652,6 @@ pub async fn install_dnas(
         conductor_child,
     )
     .await;
-    #[cfg(target_os = "windows")]
-    {
-        // Suppress unused-variable warnings on Windows where the call is
-        // disabled. These bindings are otherwise used by the call above.
-        let _ = (&admin_ws, admin_port, resource_dir, &agent_key, &conductor_child);
-        log::info!(
-            "[historical] skipped on Windows (Sign It gated; HC 0.6.1 fix expected)"
-        );
-    }
 
     Ok(InstalledDnas {
         private_app_id,

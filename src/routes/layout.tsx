@@ -360,14 +360,10 @@ export default component$(() => {
     // This event also signals that auto-link is complete, so the cached web
     // agent key is now available — refresh signatures to pick up linked-agent
     // sigs that the first fetch may have missed.
-    //
-    // Skipped on Windows in v0.5.2 — see the conductor-ready trigger below.
     const unlistenProfilePromise = listen("profile-synced", () => {
       fetchProfile();
       profileSynced.value = true;
-      const isWindows =
-        typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
-      if (!isWindows) refreshSignatures();
+      refreshSignatures();
     });
 
     cleanup(() => {
@@ -411,19 +407,10 @@ export default component$(() => {
   // Trigger the first fetch as soon as the conductor reports ready while we
   // are on the dashboard. Each lock/unlock cycle restarts the conductor, so
   // this fires once per unlock (ready transition).
-  //
-  // Skipped on Windows in v0.5.2: Sign It is gated there (see
-  // /sign-it/index.tsx and /index.tsx for the corresponding UI). Calling
-  // get_my_signatures on Windows would touch the signing-DNA admin path,
-  // which currently triggers a conductor crash + watchdog restart loop.
-  // Avoid the noise until the platform-side issue is resolved.
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ track }) => {
     const status = track(() => conductorStatus.value);
     const scr = track(() => screen.value);
-    const isWindows =
-      typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
-    if (isWindows) return;
     if (scr === "dashboard" && status === "ready") {
       refreshSignatures();
     }

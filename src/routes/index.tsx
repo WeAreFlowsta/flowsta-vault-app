@@ -118,13 +118,6 @@ export default component$(() => {
   const activeSigs = currentSigs.filter((s: any) => !s.revoked).length;
   const revokedSigs = sigCount - activeSigs;
   const amendedSigs = sigStore.signatures.value.filter((s: any) => (s as any).superseded_by).length;
-  // Sign It is gated on Windows in v0.5.2 (see /sign-it/index.tsx). On
-  // Windows the count comes back as 0 because the underlying fetch can't
-  // run reliably; show "—" with a friendlier subtitle instead of "0 — Sign
-  // your first file" which would be misleading.
-  const isWindows =
-    typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
-
   // Find most recent backup across all apps
   const lastBackupTime = stats?.apps.reduce(
     (max, app) => Math.max(max, app.last_backup_at),
@@ -223,26 +216,22 @@ export default component$(() => {
             <span class="text-sm font-medium">Signatures</span>
           </div>
           <p class="text-3xl font-bold text-white">
-            {isWindows ? (
-              "—"
-            ) : sigsLoaded ? (
+            {sigsLoaded ? (
               sigCount
             ) : (
               <span class="inline-block h-7 w-10 animate-pulse rounded bg-gray-700 align-middle" />
             )}
           </p>
           <p class="mt-1 text-xs text-gray-500">
-            {isWindows
-              ? "Sign at flowsta.com — coming soon here"
-              : !sigsLoaded
-                ? "Loading..."
-                : sigCount === 0
-                  ? "Sign your first file"
-                  : [
-                      `${activeSigs} active`,
-                      revokedSigs > 0 ? `${revokedSigs} revoked` : null,
-                      amendedSigs > 0 ? `${amendedSigs} amendment${amendedSigs === 1 ? "" : "s"}` : null,
-                    ].filter(Boolean).join(", ")}
+            {!sigsLoaded
+              ? "Loading..."
+              : sigCount === 0
+                ? "Sign your first file"
+                : [
+                    `${activeSigs} active`,
+                    revokedSigs > 0 ? `${revokedSigs} revoked` : null,
+                    amendedSigs > 0 ? `${amendedSigs} amendment${amendedSigs === 1 ? "" : "s"}` : null,
+                  ].filter(Boolean).join(", ")}
           </p>
         </Link>
 
