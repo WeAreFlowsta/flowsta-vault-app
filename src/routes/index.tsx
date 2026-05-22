@@ -118,11 +118,36 @@ export default component$(() => {
   const activeSigs = currentSigs.filter((s: any) => !s.revoked).length;
   const revokedSigs = sigCount - activeSigs;
   const amendedSigs = sigStore.signatures.value.filter((s: any) => (s as any).superseded_by).length;
-  // Find most recent backup across all apps
-  const lastBackupTime = stats?.apps.reduce(
-    (max, app) => Math.max(max, app.last_backup_at),
-    0,
-  ) ?? 0;
+  // Unified Recent Activity feed across signatures + backups + linked apps.
+  // currentSigs already filters out superseded chain entries, so an amended
+  // signature shows once (its latest signed_at) rather than twice.
+  type Activity =
+    | { kind: "signature"; timestamp: number; label: string }
+    | { kind: "backup"; timestamp: number; appName: string }
+    | { kind: "link"; timestamp: number; appName: string };
+  const recentActivities: Activity[] = [];
+  for (const sig of currentSigs as any[]) {
+    if (typeof sig.signed_at === "number" && sig.signed_at > 0) {
+      const label =
+        sig.fileName ||
+        (typeof sig.file_hash === "string" && sig.file_hash.length >= 8
+          ? `${sig.file_hash.slice(0, 8)}…`
+          : "a file");
+      recentActivities.push({ kind: "signature", timestamp: sig.signed_at, label });
+    }
+  }
+  for (const app of stats?.apps ?? []) {
+    if (app.last_backup_at > 0) {
+      recentActivities.push({ kind: "backup", timestamp: app.last_backup_at, appName: app.app_name });
+    }
+  }
+  for (const app of linkedApps.value) {
+    if (app.linked_at > 0) {
+      recentActivities.push({ kind: "link", timestamp: app.linked_at, appName: app.app_name });
+    }
+  }
+  recentActivities.sort((a, b) => b.timestamp - a.timestamp);
+  const recentActivitiesTop = recentActivities.slice(0, 5);
 
   return (
     <div>
@@ -280,49 +305,55 @@ export default component$(() => {
         </Link>
       </div>
 
-      {/* Recent Activity */}
+      {/* Recent Activity — unified feed: signatures, backups, linked apps. */}
       <div class="mb-6 rounded-lg border border-gray-700 bg-gray-900 p-6">
         <h3 class="mb-4 text-sm font-semibold uppercase tracking-wider text-gray-500">
           Recent Activity
         </h3>
 
-        {linkedApps.value.length === 0 && (stats?.total_backups ?? 0) === 0 ? (
+        {recentActivitiesTop.length === 0 ? (
           <p class="py-4 text-center text-sm text-gray-500">
-            No activity yet. Connected apps will show up here.
+            No activity yet — sign a file or connect an app to see it here.
           </p>
         ) : (
           <div class="space-y-3">
-            {/* Most recent backup */}
-            {lastBackupTime > 0 && (() => {
-              const recentApp = stats!.apps.reduce((a, b) =>
-                a.last_backup_at > b.last_backup_at ? a : b
-              );
+            {recentActivitiesTop.map((a, i) => {
+              if (a.kind === "signature") {
+                return (
+                  <div key={`s${i}`} class="flex items-center gap-3">
+                    <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-900/30">
+                      <svg class="h-4 w-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+                      </svg>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate text-sm text-white">
+                        Signed <span class="font-medium">{a.label}</span>
+                      </p>
+                      <p class="text-xs text-gray-500">{timeAgo(a.timestamp)}</p>
+                    </div>
+                  </div>
+                );
+              }
+              if (a.kind === "backup") {
+                return (
+                  <div key={`b${i}`} class="flex items-center gap-3">
+                    <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-900/30">
+                      <svg class="h-4 w-4 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                      </svg>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <p class="text-sm text-white">
+                        <span class="font-medium">{a.appName}</span> backed up data
+                      </p>
+                      <p class="text-xs text-gray-500">{timeAgo(a.timestamp)}</p>
+                    </div>
+                  </div>
+                );
+              }
               return (
-                <div class="flex items-center gap-3">
-                  <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-900/30">
-                    <svg class="h-4 w-4 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                    </svg>
-                  </div>
-                  <div class="min-w-0 flex-1">
-                    <p class="text-sm text-white">
-                      <span class="font-medium">{recentApp.app_name}</span>{" "}
-                      backed up data
-                    </p>
-                    <p class="text-xs text-gray-500">
-                      {timeAgo(recentApp.last_backup_at)}
-                    </p>
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Linked apps (most recent first) */}
-            {[...linkedApps.value]
-              .sort((a, b) => b.linked_at - a.linked_at)
-              .slice(0, 3)
-              .map((app) => (
-                <div key={app.app_agent_pub_key} class="flex items-center gap-3">
+                <div key={`l${i}`} class="flex items-center gap-3">
                   <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-green-900/30">
                     <svg class="h-4 w-4 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
                       <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
@@ -330,15 +361,13 @@ export default component$(() => {
                   </div>
                   <div class="min-w-0 flex-1">
                     <p class="text-sm text-white">
-                      <span class="font-medium">{app.app_name}</span>{" "}
-                      linked identity
+                      <span class="font-medium">{a.appName}</span> linked identity
                     </p>
-                    <p class="text-xs text-gray-500">
-                      {timeAgo(app.linked_at)}
-                    </p>
+                    <p class="text-xs text-gray-500">{timeAgo(a.timestamp)}</p>
                   </div>
                 </div>
-              ))}
+              );
+            })}
           </div>
         )}
       </div>
