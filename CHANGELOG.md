@@ -5,6 +5,29 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-beta1] — 2026-05-22
+
+The Holochain 0.6.1 / Iroh networking release. No feature changes — this is
+the transport upgrade that keeps Vault in sync with the Flowsta network now
+that the production conductors run Holochain 0.6.1.
+
+### Changed
+- **Holochain conductor upgraded to 0.6.1.** The peer-to-peer transport moves
+  from WebRTC to Iroh (kitsune2 0.4.1). Existing vaults upgrade in place on
+  first launch — no migration, your data is read as-is.
+- Bundled conductor binary is now Holochain 0.6.1; `holochain_client` 0.8.1.
+  lair-keystore is unchanged (0.6.3).
+
+### Added
+- **Update banner.** If the Flowsta network reports your Vault is below the
+  minimum supported version, Vault shows a banner with an update link. The
+  vault stays fully usable and your local data is always accessible — but you
+  won't sync with the network until you update.
+
+### Notes
+- Pre-0.6.0 Vaults use the older WebRTC transport and can no longer gossip
+  with the upgraded network. Updating to this build restores sync.
+
 ## [0.5.3] — 2026-05-20
 
 A Sign It feature release. Adds comments, amendments, edit history,
