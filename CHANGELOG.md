@@ -5,6 +5,25 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-beta2] — 2026-05-22
+
+Second 0.6.1 / Iroh beta. Windows Sign It is now enabled, plus two
+refinements spotted during beta1 testing.
+
+### Added
+- **Sign It is now available on Windows.** Holochain 0.6.1 fixes the
+  upstream WASM-compile crash that gated Sign It on Windows since v0.5.2.
+  All three DNAs (private, identity, signing) now install cleanly on
+  Windows on the first launch, and historical signatures load alongside
+  Linux + macOS.
+- **Recent Activity on the Overview now includes signatures.** One
+  unified feed across the top 5 of signatures, app backups, and
+  connected-app links, sorted by time.
+
+### Fixed
+- **Edit Thumbnail button now shows on a freshly-signed entry** without
+  requiring a refresh.
+
 ## [0.6.0-beta1] — 2026-05-22
 
 The Holochain 0.6.1 / Iroh networking release. No feature changes — this is
