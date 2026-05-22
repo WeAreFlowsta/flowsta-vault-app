@@ -123,7 +123,7 @@ jobs:
 
       - name: Build Holochain binaries
         run: |
-          cargo install holochain --version 0.6.0 --locked
+          cargo install holochain --version 0.6.1 --locked
           cargo install lair_keystore --version 0.6.3 --locked
 
       - name: Place Holochain binaries (Unix)
