@@ -2,6 +2,7 @@ import { component$, useSignal, useStore, useVisibleTask$, useContextProvider, $
 import { useLocation, useNavigate, Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-shell";
 import { SetupWizard } from "~/components/vault/SetupWizard";
 import { UnlockScreen } from "~/components/vault/UnlockScreen";
 import { StatusIndicator } from "~/components/vault/StatusIndicator";
@@ -14,6 +15,7 @@ type AppScreen = "loading" | "setup" | "unlock" | "dashboard";
 
 declare const __API_URL__: string;
 declare const __APP_VERSION__: string;
+declare const __WEB_URL__: string;
 
 const navItems = [
   { label: "Overview", href: "/", icon: "home" },
@@ -29,6 +31,14 @@ export default component$(() => {
   useContextProvider(connectionStatusContext, connectionStatus);
   const conductorStatus = useSignal<"stopped" | "starting" | "ready" | "error">("stopped");
   const conductorMessage = useSignal("");
+
+  // Set when the API's dna-versions endpoint reports this build is below
+  // min_vault_version (e.g. once the network moves to a new transport and
+  // old clients can no longer gossip). Holds the required version string.
+  // The banner is advisory — the vault still opens so the user keeps local
+  // access ("warn but allow"). Never cleared within a session: once below
+  // min, still below min until a newer build is installed.
+  const appUpdateRequired = useSignal<string | null>(null);
   const autoLockMinutes = useSignal(15);
   useContextProvider(autoLockContext, autoLockMinutes);
 
@@ -366,6 +376,32 @@ export default component$(() => {
     });
   });
 
+  // Listen for the DNA-updater's verdict on this app version. When the API's
+  // dna-versions endpoint reports a min_vault_version newer than this build,
+  // dna_updater emits `dna-update-status` with status `app_update_required`.
+  // Surface it as a persistent banner: the vault still works (warn but
+  // allow), but the user is told they won't sync with the network until
+  // they update. The other statuses (checking/done) are ignored — `done`
+  // always fires afterwards, so clearing on it would hide the banner.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track, cleanup }) => {
+    const s = track(() => screen.value);
+    if (s !== "dashboard") return;
+
+    const unlistenPromise = listen<{ status: string; min_vault_version?: string }>(
+      "dna-update-status",
+      (event) => {
+        if (event.payload.status === "app_update_required") {
+          appUpdateRequired.value = event.payload.min_vault_version ?? "";
+        }
+      },
+    );
+
+    cleanup(() => {
+      unlistenPromise.then((unlisten) => unlisten());
+    });
+  });
+
   // Note: hydration from localStorage moved into fetchProfile() so it
   // runs AFTER the active identity is known. On a fresh app launch the
   // layout mounts before unlock — hydrating here unconditionally would
@@ -579,6 +615,39 @@ export default component$(() => {
           )}
         </div>
       </header>
+
+      {/* App-update banner — shown when the API reports this build is below
+          min_vault_version. Advisory only: the vault stays usable. */}
+      {appUpdateRequired.value !== null && (
+        <div class="flex items-center gap-3 border-b border-amber-500/40 bg-amber-500/10 px-6 py-2.5">
+          <svg
+            class="h-4 w-4 shrink-0 text-amber-400"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            stroke-width={2}
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+            />
+          </svg>
+          <p class="flex-1 text-xs text-amber-200">
+            A new version of Flowsta Vault is available
+            {appUpdateRequired.value ? ` (v${appUpdateRequired.value} or newer)` : ""}.
+            Until you update you won't sync with the network — your local data
+            stays safe and accessible.
+          </p>
+          <button
+            type="button"
+            class="shrink-0 rounded-md border border-amber-500/50 bg-amber-500/20 px-3 py-1 text-xs font-medium text-amber-100 transition-colors hover:bg-amber-500/30"
+            onClick$={() => open(`${__WEB_URL__}/vault/`)}
+          >
+            Update
+          </button>
+        </div>
+      )}
 
       {/* Below header: sidebar + content. min-h-0 lets the row shrink below
           its content size so <main>'s overflow-y-auto can actually scroll
