@@ -72,6 +72,9 @@ interface SignResult {
   agent_pub_key: string;
   signed_at: number;
   action_hash: string | null;
+  // e.g. "flowsta_signing_v1_4" — needed so per-signature actions like
+  // Edit Thumbnail (gated on v1.3+) appear on freshly-signed entries.
+  signing_app_id: string;
 }
 
 interface FileEntry {

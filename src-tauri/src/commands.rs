@@ -2690,6 +2690,13 @@ pub async fn sign_file(
         "agent_pub_key": agent_pub_key_str,
         "signed_at": now_ms,
         "action_hash": action_hash,
+        // The bundled signing-DNA app id (e.g. "flowsta_signing_v1_4") —
+        // matches what `commit_signature_to_dht` writes to and what
+        // `build_own_signature_json` returns from `get_my_signatures`. The
+        // frontend uses this field to decide which per-signature actions to
+        // show (Edit Thumbnail is gated on v1.3+); without it, freshly-signed
+        // entries spliced into the list lose those actions.
+        "signing_app_id": crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION),
         "intent": intent,
         "ai_generation": ai_generation,
         "content_rights": content_rights,
