@@ -80,7 +80,9 @@ fn find_available_admin_port() -> Result<u16, String> {
 
 /// Generate conductor-config.yaml for the desktop app.
 ///
-/// Uses the Holochain 0.6.0 config format with data_root_path, bootstrap_url, signal_url.
+/// Holochain 0.6.1 / Iroh config format. The config is regenerated from
+/// scratch on every unlock, so an existing 0.6.0 user upgrading to this
+/// build picks up the Iroh format automatically — no on-disk migration.
 /// Uses the lair connection URL for keystore integration.
 pub fn generate_conductor_config(
     conductor_dir: &Path,
@@ -90,12 +92,24 @@ pub fn generate_conductor_config(
     std::fs::create_dir_all(conductor_dir)
         .map_err(|e| format!("Failed to create conductor directory: {}", e))?;
 
-    // Holochain 0.6.0 config format — uses data_root_path (replaces environment_path + db_dir).
-    // Bootstrap/signal URLs default to production. Override at compile time for staging/dev.
+    // Bootstrap/signal URLs default to production. Override at compile time
+    // (option_env! is read at `cargo build` time) for staging/dev — see the
+    // `tauri:dev-staging` script in package.json.
     let bootstrap_url = option_env!("FLOWSTA_BOOTSTRAP_URL")
         .unwrap_or("https://bootstrap.flowsta.com");
     let signal_url = option_env!("FLOWSTA_SIGNAL_URL")
         .unwrap_or("wss://bootstrap.flowsta.com");
+
+    // Iroh's relay is hosted by the same Flowsta bootstrap server as peer
+    // discovery + SBD, so the relay_url is *derived* from the bootstrap URL
+    // rather than carried as a separate env var — that makes it impossible
+    // for a staging build to point its relay at production by accident.
+    // kitsune2 requires the canonical FQDN form: a trailing dot on the host
+    // plus a trailing slash, e.g. https://bootstrap.flowsta.com./
+    let relay_url = format!(
+        "{}./",
+        bootstrap_url.trim_end_matches('/').trim_end_matches('.'),
+    );
 
     // Path values use SINGLE-quoted YAML strings — double-quoted YAML interprets
     // backslash escapes (e.g. "C:\Users\..." reads "\U" as the start of a Unicode
@@ -119,19 +133,14 @@ admin_interfaces:
 network:
   bootstrap_url: {bootstrap_url}
   signal_url: {signal_url}
-  enable_mdns: false
-  enable_relaying: true
-  webrtc_config:
-    ice_servers:
-      - urls: ["stun:stun.cloudflare.com:3478"]
-      - urls: ["stun:stun.l.google.com:19302"]
-db_sync_strategy: Resilient
+  relay_url: {relay_url}
 "#,
         data_root = data_root,
         admin_port = admin_port,
         lair_url = lair_url,
         bootstrap_url = bootstrap_url,
         signal_url = signal_url,
+        relay_url = relay_url,
     );
 
     let config_path = conductor_dir.join("conductor-config.yaml");

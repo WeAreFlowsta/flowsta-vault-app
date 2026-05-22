@@ -56,13 +56,15 @@ reqwest = { version = "0.12", features = ["json"] }
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
 
-# Lair keystore client API (seed import + signing via lair)
-lair_keystore_api = "0.6"
+# Lair keystore client API (seed import + signing via lair).
+# Holochain 0.6.1 pins lair_keystore_api to exactly 0.6.3 — match it so the
+# bundled lair-keystore binary (0.6.3) and this client can never drift.
+lair_keystore_api = "=0.6.3"
 
-# Holochain conductor client (AdminWebsocket for DNA install + AppWebsocket for zome calls)
-# Conductor 0.6.x → Rust client 0.8.x (matches holochain_conductor_api 0.6.0)
-holochain_client = { version = "0.8.0", default-features = false }
-holochain_types = "0.6"
+# Holochain conductor client (AdminWebsocket for DNA install + AppWebsocket for zome calls).
+# Conductor 0.6.1 → Rust client 0.8.1 (released 2026-05-12 for Holochain 0.6.1).
+holochain_client = { version = "=0.8.1", default-features = false }
+holochain_types = "=0.6.1"
 
 # Save dialog
 tauri-plugin-dialog = "2"
