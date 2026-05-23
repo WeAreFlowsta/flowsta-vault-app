@@ -74,10 +74,31 @@ export default component$(() => {
         const startedAt = Date.now();
         try {
           const sigs = await invoke<any[]>("get_my_signatures");
-          if (Array.isArray(sigs)) {
-            signaturesSig.value = sigs;
-            persistSignaturesCache(sigs);
+          if (Array.isArray(sigs) && sigs.length > 0) {
+            // Merge by action_hash rather than replacing. Refreshes
+            // commonly come back with fewer sigs than we have when the
+            // linked-agent path or an older-DNA query times out (or the
+            // user locked mid-round) — those queries simply return Vec
+            // ::new() in Rust and the cache used to get clobbered, losing
+            // data we already had. Merging keeps the missing ones from
+            // cache while letting any updated fields on present sigs
+            // (revoked, superseded_by, thumbnail) win from the new round.
+            const newHashes = new Set(
+              (sigs as any[]).map((s) => s.action_hash).filter(Boolean) as string[],
+            );
+            const merged = [
+              ...sigs,
+              ...signaturesSig.value.filter(
+                (s: any) => s.action_hash && !newHashes.has(s.action_hash),
+              ),
+            ];
+            signaturesSig.value = merged;
+            persistSignaturesCache(merged);
           }
+          // sigs.length === 0: every signing-DNA query came back empty,
+          // most often a cold-start DHT timeout or the CellDisabled race
+          // on unlock. Don't overwrite the cache with []; keep whatever
+          // we have. A later refresh round will fill in.
         } catch {
           // Conductor may not be ready yet — caller can retry
         }

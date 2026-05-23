@@ -5,6 +5,26 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-beta6] — 2026-05-24
+
+Sixth 0.6.1 / Iroh beta. Fixes two cases where signatures appeared,
+then later dropped to fewer or zero after a lock + unlock.
+
+### Fixed
+- **Cell-disabled retry budget bumped 18 s → 45 s on unlock.** On some
+  machines (Windows in particular) cells took ~21 s to come ready after
+  the conductor restarted, just past the previous 18 s budget. After
+  `ensure_apps_enabled` gave up, every signing-DNA auth-creds call
+  returned `CellDisabled` and the round blanked to zero. 15 attempts
+  × 3 s covers the observed slow path with headroom.
+- **Refresh rounds no longer downgrade the signatures cache.** A round
+  that returned fewer signatures than the cache (linked-agent query
+  timed out, the user locked mid-round, the CellDisabled race fired)
+  used to overwrite the cache with the shorter list. It now merges
+  by `action_hash`: the new round's data wins for sigs both contain,
+  cached sigs that the round missed are preserved. Empty results don't
+  touch the cache at all.
+
 ## [0.6.0-beta5] — 2026-05-23
 
 Fifth 0.6.1 / Iroh beta. Follow-up to beta4 — addresses the actual

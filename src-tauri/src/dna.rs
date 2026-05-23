@@ -805,14 +805,15 @@ pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
 
         if let Some(cell_id) = cell_id {
             // Try to authorize credentials — this will fail with CellDisabled
-            // if cells aren't ready. 6 attempts × 3 s sleep gives the
-            // conductor up to ~18 s to bring cells online, which matches the
-            // pre-0.5.2 behaviour. The shorter budget tried in 0.5.2-beta8
-            // caused signatures to come back empty on both Linux and Windows
-            // when cells took longer than 3 s to ready —
-            // `connect_signing_app_ws` would still see CellDisabled and the
-            // per-version sig query returned Vec::new().
-            for attempt in 1..=6 {
+            // if cells aren't ready. Each retry sleeps 3 s; 15 attempts gives
+            // the conductor up to ~45 s, headroom for the Windows unlock path
+            // where cell readiness has been observed at ~21 s (a beta5 log
+            // showed the old 6-attempt / 18 s budget timing out at 18 s with
+            // cells ready 3 s later — the next round then proceeded with
+            // every signing-DNA auth_creds returning CellDisabled, blanking
+            // the result and overwriting the cache with 0 sigs).
+            const MAX_ATTEMPTS: u32 = 15;
+            for attempt in 1..=MAX_ATTEMPTS {
                 match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
                     cell_id: cell_id.clone(),
                     functions: None,
@@ -827,10 +828,10 @@ pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
                     }
                     Err(e) => {
                         let err_str = format!("{}", e);
-                        if err_str.contains("CellDisabled") && attempt < 6 {
+                        if err_str.contains("CellDisabled") && attempt < MAX_ATTEMPTS {
                             log::info!(
-                                "ensure_apps_enabled: cells not ready yet (attempt {}), waiting 3s...",
-                                attempt,
+                                "ensure_apps_enabled: cells not ready yet (attempt {}/{}), waiting 3s...",
+                                attempt, MAX_ATTEMPTS,
                             );
                             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                             // Re-enable all apps before retrying
