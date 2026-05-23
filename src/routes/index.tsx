@@ -249,7 +249,7 @@ export default component$(() => {
           </p>
           <p class="mt-1 text-xs text-gray-500">
             {!sigsLoaded
-              ? "Loading..."
+              ? "Syncing from the network…"
               : sigCount === 0
                 ? "Sign your first file"
                 : [

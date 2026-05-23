@@ -65,6 +65,7 @@ export default component$(() => {
     try {
       do {
         pendingRefresh.value = false;
+        const startedAt = Date.now();
         try {
           const sigs = await invoke<any[]>("get_my_signatures");
           if (Array.isArray(sigs)) {
@@ -74,12 +75,26 @@ export default component$(() => {
         } catch {
           // Conductor may not be ready yet — caller can retry
         }
-        // Only promote to "loaded" when we have data OR auto-link has
-        // resolved (so an empty result is truly empty, not a partial
-        // pre-link fetch). Without this gate a freshly-wiped user sees
-        // "0 signatures" briefly before the linked-agent refresh lands.
-        if (signaturesSig.value.length > 0 || profileSynced.value) {
+        const took = Date.now() - startedAt;
+        // Promote to "loaded" when we have data, OR when auto-link has
+        // resolved AND the refresh returned quickly (a fast empty result
+        // is genuinely empty; a slow empty result means the zome calls
+        // hit the 300s cold-start DHT-fetch timeout, and we should keep
+        // showing "Syncing from the network…" until a later round
+        // actually completes). 10s comfortably separates a warm
+        // conductor (~100ms) from a timed-out round (minutes).
+        const fastEmpty = took < 10_000 && signaturesSig.value.length === 0;
+        if (
+          signaturesSig.value.length > 0 ||
+          (profileSynced.value && fastEmpty)
+        ) {
           signaturesLoaded.value = true;
+        } else if (profileSynced.value && signaturesSig.value.length === 0) {
+          // Slow empty — the round likely hit cold-start DHT timeouts.
+          // Queue another refresh; the conductor has had more time to
+          // warm up by then. Iterates via the pendingRefresh do/while
+          // until we either succeed or get a fast empty.
+          setTimeout(() => { refreshSignatures(); }, 30_000);
         }
       } while (pendingRefresh.value);
     } finally {

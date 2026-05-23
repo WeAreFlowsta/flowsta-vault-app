@@ -13,6 +13,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 
+/// AppWebsocket request timeout for the signature-fetch + sign / revoke /
+/// amend paths. The holochain_websocket default is **60 s** — fine for a
+/// warm conductor, but on first launch with a returning agent the DHT
+/// hasn't yet gossiped the agent's history in, and `get_links` / `get`
+/// calls inside the signing zome can easily exceed a minute waiting for
+/// peer data. The Vault log "Websocket error: Timeout" is exactly this
+/// firing. 300 s covers realistic cold-start DHT warmup; the loading UX
+/// holds the user with a progress message while it runs.
+fn long_request_ws_config() -> Arc<holochain_client::WebsocketConfig> {
+    let mut cfg = holochain_client::WebsocketConfig::CLIENT_DEFAULT;
+    cfg.default_request_timeout = std::time::Duration::from_secs(300);
+    Arc::new(cfg)
+}
+
 // ── Connected Sites tracking ────────────────────────────────────────
 
 /// A site (browser origin) that has made requests to the IPC server.
@@ -2846,8 +2860,9 @@ async fn connect_signing_app_ws(
     };
     let signer = ClientAgentSigner::default();
     signer.add_credentials(cell_id, creds);
-    let app_ws = match AppWebsocket::connect(
+    let app_ws = match AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
+        long_request_ws_config(),
         issued.token, signer.into(),
         Some(ws_origin.into()),
     ).await {
@@ -3063,8 +3078,9 @@ async fn fetch_linked_agent_keys(
     };
     let signer = ClientAgentSigner::default();
     signer.add_credentials(identity_cell_id, creds);
-    let identity_ws = match AppWebsocket::connect(
+    let identity_ws = match AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
+        long_request_ws_config(),
         issued.token, signer.into(),
         Some("flowsta-vault-linked".into()),
     ).await {
@@ -3376,8 +3392,9 @@ pub async fn revoke_signature(
 
     let signer = ClientAgentSigner::default();
     signer.add_credentials(cell_id, credentials);
-    let app_ws = AppWebsocket::connect(
+    let app_ws = AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
+        long_request_ws_config(),
         issued.token, signer.into(),
         Some("flowsta-vault-revoke".into()),
     ).await.map_err(|e| format!("App WS: {}", e))?;
@@ -3469,8 +3486,9 @@ pub async fn set_thumbnail(
 
     let signer = ClientAgentSigner::default();
     signer.add_credentials(cell_id, credentials);
-    let app_ws = AppWebsocket::connect(
+    let app_ws = AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
+        long_request_ws_config(),
         issued.token, signer.into(),
         Some("flowsta-vault-thumb".into()),
     ).await.map_err(|e| format!("App WS: {}", e))?;
@@ -3589,8 +3607,9 @@ async fn commit_signature_to_dht(
     // Connect app WS with a ClientAgentSigner (must have credentials loaded)
     let signer = ClientAgentSigner::default();
     signer.add_credentials(cell_id, credentials);
-    let app_ws = AppWebsocket::connect(
+    let app_ws = AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
+        long_request_ws_config(),
         issued.token,
         signer.into(),
         Some("flowsta-vault-sign".into()),
