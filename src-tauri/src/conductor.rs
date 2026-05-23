@@ -134,6 +134,13 @@ network:
   bootstrap_url: {bootstrap_url}
   signal_url: {signal_url}
   relay_url: {relay_url}
+  # Default is 60s; on a fresh install of a returning agent the local
+  # cell is empty and the signing zome's get_links / get calls hit
+  # kitsune2's request_timeout while the DHT is warming up, returning
+  # `get_links response channel dropped: likely response timeout` to
+  # the zome. 240s comfortably covers a cold-start round so the first
+  # query returns data instead of needing the front-end to retry.
+  request_timeout_s: 240
 "#,
         data_root = data_root,
         admin_port = admin_port,

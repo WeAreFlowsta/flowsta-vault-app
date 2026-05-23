@@ -63,8 +63,14 @@ export default component$(() => {
     }
     signaturesRefreshing.value = true;
     try {
+      // Cap deliberate retries on slow-empty rounds. Each round can take
+      // up to ~conductor.request_timeout_s on a pathological cold-start,
+      // so 2 total attempts keeps the worst case bounded while still
+      // giving the DHT a second chance after warmup.
+      let attempts = 0;
       do {
         pendingRefresh.value = false;
+        attempts++;
         const startedAt = Date.now();
         try {
           const sigs = await invoke<any[]>("get_my_signatures");
@@ -77,24 +83,32 @@ export default component$(() => {
         }
         const took = Date.now() - startedAt;
         // Promote to "loaded" when we have data, OR when auto-link has
-        // resolved AND the refresh returned quickly (a fast empty result
-        // is genuinely empty; a slow empty result means the zome calls
-        // hit the 300s cold-start DHT-fetch timeout, and we should keep
-        // showing "Syncing from the network…" until a later round
-        // actually completes). 10s comfortably separates a warm
-        // conductor (~100ms) from a timed-out round (minutes).
+        // resolved AND the refresh returned quickly (fast empty = genuinely
+        // empty user; slow empty = round hit the cold-start DHT timeout,
+        // so keep "Syncing from the network…" showing). 10s separates a
+        // warm conductor (~100ms) from a timed-out round (minutes).
         const fastEmpty = took < 10_000 && signaturesSig.value.length === 0;
         if (
           signaturesSig.value.length > 0 ||
           (profileSynced.value && fastEmpty)
         ) {
           signaturesLoaded.value = true;
+        } else if (
+          profileSynced.value &&
+          signaturesSig.value.length === 0 &&
+          attempts < 2
+        ) {
+          // Slow empty after the auto-link resolved — most often a
+          // cold-start round where the DHT was still warming up. Queue
+          // one more round back-to-back via the existing do-while; by
+          // now more peer connections + DHT data should be in. Bounded
+          // by `attempts` so we don't loop forever.
+          pendingRefresh.value = true;
         }
-        // Slow empty (likely a cold-start timeout) leaves signaturesLoaded
-        // false on purpose so the dashboard keeps "Syncing from the
-        // network…" instead of flipping to "Sign your first file". The
-        // next refresh trigger (a manual lock + unlock, or the next
-        // conductor-ready transition) will retry against a now-warmer DHT.
+        // Otherwise (slow empty AND already retried once): the loading
+        // state stays at "Syncing from the network…" — the next
+        // conductor-ready / profile-synced / manual lock + unlock will
+        // trigger another refreshSignatures() through the normal path.
       } while (pendingRefresh.value);
     } finally {
       signaturesRefreshing.value = false;

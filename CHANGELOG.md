@@ -5,6 +5,26 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-beta5] — 2026-05-23
+
+Fifth 0.6.1 / Iroh beta. Follow-up to beta4 — addresses the actual
+limiting factor in cold-start signature loads and adds a deliberate
+retry.
+
+### Fixed
+- **Conductor's p2p request timeout bumped 60 s → 240 s** in the
+  generated conductor config. The beta4 log showed signing zome calls
+  failing with `get_links response channel dropped: likely response
+  timeout` long before the WebSocket budget was exhausted — that's
+  kitsune2's own 60 s `request_timeout_s` (the default) firing inside
+  the conductor. 240 s lets a cold-start `get_links` complete before
+  the conductor aborts it, so most fresh installs of a returning agent
+  see signatures land on the first round instead of needing a retry.
+- **Deliberate retry on slow-empty rounds.** Up to one back-to-back
+  retry when the first round returned empty after a long wait — the
+  DHT is materially warmer by then, so the second round usually has
+  data. Bounded so we don't loop indefinitely.
+
 ## [0.6.0-beta4] — 2026-05-23
 
 Fourth 0.6.1 / Iroh beta. UX fixes for "log in on a new device" — when a
