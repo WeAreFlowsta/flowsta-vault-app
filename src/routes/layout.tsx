@@ -89,13 +89,12 @@ export default component$(() => {
           (profileSynced.value && fastEmpty)
         ) {
           signaturesLoaded.value = true;
-        } else if (profileSynced.value && signaturesSig.value.length === 0) {
-          // Slow empty — the round likely hit cold-start DHT timeouts.
-          // Queue another refresh; the conductor has had more time to
-          // warm up by then. Iterates via the pendingRefresh do/while
-          // until we either succeed or get a fast empty.
-          setTimeout(() => { refreshSignatures(); }, 30_000);
         }
+        // Slow empty (likely a cold-start timeout) leaves signaturesLoaded
+        // false on purpose so the dashboard keeps "Syncing from the
+        // network…" instead of flipping to "Sign your first file". The
+        // next refresh trigger (a manual lock + unlock, or the next
+        // conductor-ready transition) will retry against a now-warmer DHT.
       } while (pendingRefresh.value);
     } finally {
       signaturesRefreshing.value = false;

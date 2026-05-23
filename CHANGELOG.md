@@ -5,9 +5,9 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0-beta3] — 2026-05-23
+## [0.6.0-beta4] — 2026-05-23
 
-Third 0.6.1 / Iroh beta. UX fixes for "log in on a new device" — when a
+Fourth 0.6.1 / Iroh beta. UX fixes for "log in on a new device" — when a
 returning agent (same recovery phrase) installs Vault fresh and the local
 cell starts empty, the signing zome's `get_links` / `get` calls wait for
 Iroh peers + DHT data to gossip in. The first launch can take minutes,
@@ -23,9 +23,6 @@ once an early round timed out silently.
   dashboard keeps "Syncing from the network…" showing while rounds are
   still completing slowly; only flips when a round genuinely returns
   empty quickly (truly-empty user) or when signatures arrive.
-- **Auto-retry on slow-empty rounds.** Vault retries in 30 s if a round
-  returned empty after the warm-up window, so signatures appear without
-  the user having to lock + unlock manually.
 - More informative Sign It loading messages through the 75 s – 240 s
   range for long cold-starts.
 
