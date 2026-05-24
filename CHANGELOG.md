@@ -5,6 +5,31 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-beta9] — 2026-05-24
+
+Ninth 0.6.1 / Iroh beta. Two-fold cold-start time cut so a fresh
+install actually finishes refreshing before the user gives up.
+
+### Fixed
+- **`fetch_linked_agent_keys` uses the cached web agent key first**,
+  then dispatches the DHT `get_linked_agents` lookup with a 10 s
+  opportunistic budget instead of letting it sit on the 240 s
+  kitsune2 timeout before falling back. Same in-memory cache it used
+  to wait 240 s to consult.
+- **Per-signature thumbnail + revocation enrichment capped at 15 s
+  each.** On cold DHT every call would otherwise wait the full 240 s
+  before defaulting; in beta8 testing this added 2 + minutes to the
+  refresh after the primary records had already returned. Defaults
+  (no thumbnail, not-revoked) fill in on the next refresh round once
+  gossip catches up.
+
+### Effect
+- Cold-start total time on a returning agent's new device drops from
+  ~6.5 min observed in beta8 to ~4 min (bounded by the primary
+  `get_my_signatures` zome call's own DHT warmup).
+- Warm-DHT refresh is unchanged — both timeouts are well above
+  typical sub-second response times.
+
 ## [0.6.0-beta8] — 2026-05-24
 
 Eighth 0.6.1 / Iroh beta. Splits the signatures fetch into two

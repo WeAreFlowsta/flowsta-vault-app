@@ -2763,14 +2763,23 @@ async fn fetch_revocation_for_action(
         Ok(p) => p,
         Err(_) => return (false, None, None),
     };
-    let result = match app_ws.call_zome(
+    // 15s timeout: enrichment is per-sig and DHT-bound. On cold start
+    // every call would otherwise wait up to 240s (kitsune2 request
+    // timeout) before returning defaults — that's what made beta8 sit
+    // at "Syncing" for an extra 2 min after the primary records came
+    // back (Vault(14) log on 2026-05-24). 15 s is well above warm-DHT
+    // response time (~ms) and well below the cold-DHT wall. Defaults
+    // (not-revoked, no thumbnail) on a timeout fill in on the next
+    // refresh once the DHT has gossiped them.
+    let call = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.into()),
         "signing".into(),
         "get_revocations_for_signature".into(),
         ExternIO::from(payload),
-    ).await {
-        Ok(r) => r,
-        Err(_) => return (false, None, None),
+    );
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(15), call).await {
+        Ok(Ok(r)) => r,
+        _ => return (false, None, None),
     };
     let records: Vec<Record> = match rmp_serde::from_slice(result.as_bytes()) {
         Ok(r) => r,
@@ -2790,7 +2799,9 @@ async fn fetch_revocation_for_action(
     (true, None, None)
 }
 
-/// Best-effort thumbnail lookup. Returns None if missing or any step fails.
+/// Best-effort thumbnail lookup. Returns None if missing, timed out, or
+/// any step fails. The 15 s timeout matches `fetch_revocation_for_action`
+/// — see that doc for the cold-DHT rationale.
 async fn fetch_thumbnail_for_action(
     app_ws: &holochain_client::AppWebsocket,
     role_name: &str,
@@ -2800,12 +2811,16 @@ async fn fetch_thumbnail_for_action(
     use holochain_types::prelude::{Entry, ExternIO, Record};
 
     let payload = rmp_serde::to_vec_named(action_hash).ok()?;
-    let result = app_ws.call_zome(
+    let call = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.into()),
         "signing".into(),
         "get_thumbnail".into(),
         ExternIO::from(payload),
-    ).await.ok()?;
+    );
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), call)
+        .await
+        .ok()?
+        .ok()?;
     let thumb_record: Option<Record> = rmp_serde::from_slice(result.as_bytes()).ok()?;
     let record = thumb_record?;
     if let Some(Entry::App(thumb_entry)) = record.entry().as_option() {
@@ -3080,32 +3095,51 @@ async fn fetch_linked_agent_keys(
         Err(_) => return Vec::new(),
     };
 
-    let mut linked_keys: Vec<AgentPubKey> = match identity_ws.call_zome(
+    // Seed with the cached web agent key immediately. The Vault(14) log
+    // showed `get_linked_agents` waiting the full 240 s kitsune2 timeout
+    // before falling back to this same cache — wasted minutes when the
+    // answer was already in memory. We still try the DHT below to catch
+    // any additional linked agents (rare today; non-web links would only
+    // come from future features), but with a short opportunistic budget.
+    let mut linked_keys: Vec<AgentPubKey> = Vec::new();
+    if let Some(ref cached) = cached_web_agent_key {
+        match base64_standard_decode(cached) {
+            Ok(key_bytes) if key_bytes.len() == 39 => {
+                linked_keys.push(AgentPubKey::from_raw_39(key_bytes));
+                log::info!("Seeded linked agents from cached web agent key");
+            }
+            Ok(key_bytes) => {
+                log::warn!("Cached web agent key is {} bytes, expected 39", key_bytes.len());
+            }
+            Err(_) => log::warn!("Failed to decode cached web agent key"),
+        }
+    }
+
+    // Opportunistic DHT pass — 10 s budget. If gossip has already
+    // landed the link record, we pick up any extras; otherwise we
+    // skip the wait and rely on the cached seed.
+    let dht_call = identity_ws.call_zome(
         ZomeCallTarget::RoleName(identity_role.into()),
         "agent_linking".into(),
         "get_linked_agents".into(),
         ExternIO::from(payload_mp),
-    ).await {
-        Ok(result) => rmp_serde::from_slice(result.as_bytes()).unwrap_or_default(),
-        Err(e) => { log::warn!("get_linked_agents: {}", e); Vec::new() }
-    };
-
-    if linked_keys.is_empty() {
-        if let Some(ref cached) = cached_web_agent_key {
-            log::info!("Identity DNA returned no linked agents, using cached web agent key");
-            match base64_standard_decode(cached) {
-                Ok(key_bytes) if key_bytes.len() == 39 => {
-                    linked_keys.push(AgentPubKey::from_raw_39(key_bytes));
+    );
+    match tokio::time::timeout(std::time::Duration::from_secs(10), dht_call).await {
+        Ok(Ok(result)) => {
+            let extras: Vec<AgentPubKey> = rmp_serde::from_slice(result.as_bytes())
+                .unwrap_or_default();
+            for key in extras {
+                if !linked_keys.contains(&key) {
+                    linked_keys.push(key);
                 }
-                Ok(key_bytes) => {
-                    log::warn!("Cached web agent key is {} bytes, expected 39", key_bytes.len());
-                }
-                Err(_) => log::warn!("Failed to decode cached web agent key"),
             }
         }
-        if linked_keys.is_empty() {
-            log::info!("No linked agents found (no cache available)");
-        }
+        Ok(Err(e)) => log::info!("get_linked_agents zome error (using cached only): {}", e),
+        Err(_) => log::info!("get_linked_agents timed out at 10s (using cached only)"),
+    }
+
+    if linked_keys.is_empty() {
+        log::info!("No linked agents found (no cache, no DHT result)");
     }
     linked_keys
 }
