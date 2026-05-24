@@ -21,6 +21,11 @@ import { formatLicense, formatAiGeneration } from "~/lib/sign-it-labels";
 import { pendingSignPathsContext, signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
 
+// Build-time API URL — vite's `define` injects this as a compile-time
+// global (see vite.config.ts). It is NOT a property on `window`, so any
+// `(window as any).__API_URL__` read is always undefined.
+declare const __API_URL__: string;
+
 // Shared select styling matching Settings auto-lock dropdown
 const selectClass =
   "w-full rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400";
@@ -171,7 +176,7 @@ export default component$(() => {
       const id = await invoke<{ agent_pub_key: string; web_agent_pub_key: string | null }>("get_identity");
       const agentKey = id?.web_agent_pub_key || id?.agent_pub_key;
       if (agentKey) {
-        const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
+        const apiUrl = __API_URL__;
         const resp = await fetch(
           `${apiUrl}/api/v1/sign-it/quota/by-agent?agent_pub_key=${encodeURIComponent(agentKey)}`,
           { cache: "no-store" }
@@ -322,7 +327,7 @@ export default component$(() => {
       // Check existing signatures (API first, local conductor fallback)
       existingSignatures.value = [];
       try {
-        const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
+        const apiUrl = __API_URL__;
         const resp = await fetch(`${apiUrl}/api/v1/sign-it/verify?hash=${hash}`);
         if (resp.ok) {
           const data = await resp.json();
@@ -554,7 +559,7 @@ export default component$(() => {
       // Check for existing signatures (API first, fall back to local conductor)
       existingSignatures.value = [];
       try {
-        const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
+        const apiUrl = __API_URL__;
         const resp = await fetch(`${apiUrl}/api/v1/sign-it/verify?hash=${result.hash}`);
         if (resp.ok) {
           const data = await resp.json();
@@ -668,7 +673,7 @@ export default component$(() => {
             quota.value = { ...(updatedCache as any), source: quota.value?.source || "cache" };
           }
           // Sync to server in background — meter already updated from cache
-          const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
+          const apiUrl = __API_URL__;
           invoke("sync_quota_to_server", { apiUrl, count: 1 }).catch((err) => {
             console.warn("quota sync failed:", err);
           });
@@ -704,7 +709,7 @@ export default component$(() => {
           quota.value = { ...(updatedCache as any), source: quota.value?.source || "cache" };
         }
         // Sync to server in background — meter already updated from cache
-        const apiUrl = (window as any).__API_URL__ || "https://auth-api-staging.flowsta.com";
+        const apiUrl = __API_URL__;
         invoke("sync_quota_to_server", { apiUrl, count: 1 }).catch((err) => {
           console.warn("quota sync failed:", err);
         });

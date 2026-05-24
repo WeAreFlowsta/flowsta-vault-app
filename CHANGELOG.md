@@ -5,6 +5,49 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-rc1] — 2026-05-24
+
+Release candidate. Equivalent to beta11 (with the diagnostic logs
+cleaned up + Recent Activity timestamp + cold-start tile copy) **plus**
+one user-visible bug fix and a revert of beta12.
+
+### Added
+- **Re-fetch signatures when the Vault window regains focus.** Previously
+  the refresh only fired on conductor-ready / profile-synced /
+  lock+unlock — so a signature made on flowsta.com (or another linked
+  device) while Vault was sitting open in the background wouldn't
+  appear until the next unlock cycle. The new `onFocusChanged`
+  listener calls the existing `refreshSignatures` (which coalesces
+  via `pendingRefresh`, so spurious focus events are cheap). Still
+  subject to kitsune2 gossip latency for the new sig to reach
+  Vault's peers.
+
+### Fixed
+- **Sign It quota meter no longer vanishes.** All API calls from
+  `src/routes/sign-it/index.tsx` were reading
+  `(window as any).__API_URL__` — but vite's `define` injects
+  `__API_URL__` as a *compile-time global*, not a `window` property,
+  so the read was always `undefined` and the fallback URL was hard-
+  coded to `auth-api-staging.flowsta.com`. The quota by-agent
+  endpoint on staging returns nothing for production accounts → the
+  fetch returns null → `SignQuotaMeter` returns `null` and the whole
+  widget disappears. Switched all five call sites to read the
+  compile-time `__API_URL__` directly (the pattern `layout.tsx`
+  already used) so requests hit the production API where the user's
+  account actually lives.
+
+### Reverted
+- **beta12's CREATE_SUSPENDED spawn change.** The hypothesis (suspend
+  the child, hide the console window while paused, then ResumeThread)
+  was wrong: Windows allocates the console + creates
+  `PseudoConsoleWindow` only when the CRT runs `AllocConsole` *after*
+  the suspend lifts. The synchronous pre-resume hide pass found
+  nothing to hide across 17 polls / 500 ms, the flash was unchanged,
+  and the 500 ms suspended state broke lair-keystore init on Windows
+  (`Failed to connect to lair: ... (os error 2)`). Reverted to the
+  beta11 async-only post-spawn hide. The ~50 ms × 3 flashes remain;
+  documented in `project_vault_windows_console_flicker.md`.
+
 ## [0.6.0-beta12] — 2026-05-24
 
 Windows-only: eliminate the lair + holochain console window flash on

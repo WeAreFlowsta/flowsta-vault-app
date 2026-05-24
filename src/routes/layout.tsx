@@ -2,6 +2,7 @@ import { component$, useSignal, useStore, useVisibleTask$, useContextProvider, $
 import { useLocation, useNavigate, Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-shell";
 import { SetupWizard } from "~/components/vault/SetupWizard";
 import { UnlockScreen } from "~/components/vault/UnlockScreen";
@@ -460,6 +461,26 @@ export default component$(() => {
       if (!signaturesLoaded.value) refreshSignatures();
     }, 30_000);
     cleanup(() => clearInterval(id));
+  });
+
+  // Re-fetch signatures when the Vault window regains focus. Covers the
+  // case where the user signs something on flowsta.com (or another
+  // device) while Vault is open in the background — without this, the
+  // refresh only fires on conductor-ready / profile-synced / lock+unlock,
+  // so a new linked-agent sig wouldn't appear until the next unlock
+  // cycle. `refreshSignatures` is internally idempotent (coalesces via
+  // pendingRefresh) so spurious focus changes are cheap.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track, cleanup }) => {
+    const scr = track(() => screen.value);
+    if (scr !== "dashboard") return;
+
+    const unlistenPromise = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) refreshSignatures();
+    });
+    cleanup(() => {
+      unlistenPromise.then((unlisten) => unlisten());
+    });
   });
 
   // Listen for the DNA-updater's verdict on this app version. When the API's

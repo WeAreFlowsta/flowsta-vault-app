@@ -1,6 +1,6 @@
 [package]
 name = "flowsta-vault"
-version = "0.6.0-beta12"
+version = "0.6.0-rc1"
 description = "Flowsta Vault - Desktop identity manager powered by Holochain"
 authors = ["Flowsta"]
 license = ""
@@ -87,21 +87,17 @@ thiserror = "1.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
-# Windows-only: spawn with CREATE_SUSPENDED, hide the console window
-# while suspended, then ResumeThread — eliminates the ~50 ms terminal
-# flash that the async post-spawn hide leaves behind. CREATE_NO_WINDOW
-# is still unusable (crashed holochain in v0.5.0 by preventing console-
-# handle allocation — see process_ext.rs).
+# Windows-only: EnumWindows + ShowWindow(SW_HIDE) so the spawned
+# lair-keystore.exe / holochain.exe console windows are hidden post-spawn
+# without using CREATE_NO_WINDOW (which crashed holochain in v0.5.0 by
+# preventing console-handle allocation — see process_ext.rs).
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
-    # Toolhelp32 for parent-PID lookup (conhost children) and for
-    # enumerating threads of a suspended process so we can ResumeThread.
+    # ToolHelp32 for parent-PID lookup — hide thread uses it to find
+    # conhost.exe children of our spawned binaries on Windows.
     "Win32_System_Diagnostics_ToolHelp",
-    # OpenThread + ResumeThread to release the primary thread after
-    # we've hidden the console window of a CREATE_SUSPENDED child.
-    "Win32_System_Threading",
 ] }
 
 # core2 (transitive dep via libflate → libsodium-sys-stable → sodoken → lair)
