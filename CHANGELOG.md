@@ -5,349 +5,111 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0-rc2] — 2026-05-24
+## [0.6.0] — 2026-05-24
 
-### Fixed
-- **Thumbnails no longer flicker / disappear on focus refresh.** beta9
-  added a 15 s `tokio::time::timeout` around per-signature thumbnail
-  and revocation enrichment (`fetch_thumbnail_for_action`,
-  `fetch_revocation_for_action`) to stop cold-DHT enrichment from
-  blocking the main sig query for minutes. The trade-off: when a
-  per-thumb DHT fetch missed that budget, Rust returned
-  `thumbnail: null` for that sig. The frontend's refresh merge then
-  *wholesale-replaced* the matching cached sig — so a sig that
-  previously had a thumbnail in cache lost it. With the rc1
-  focus-refresh hook firing on every Vault foreground, thumbnails
-  flickered.
-- Merge in `layout.tsx` is now field-level for `thumbnail` and the
-  `revoked*` triple: prefer the new round's value if non-null,
-  otherwise keep the cached value. `revoked` is one-way in Holochain
-  (revocation entries are never retracted), so cache's `true` always
-  wins regardless of what the new round saw.
+The Holochain 0.6.1 / Iroh networking release. The peer-to-peer
+transport moves from WebRTC to Iroh (kitsune2 0.4.1), matching the
+upgraded Flowsta network. Existing vaults upgrade in place on first
+launch — no migration, your data is read as-is. Sign It is now
+available on Windows. The bulk of the release polishes the cold-start
+experience: Vault now handles the multi-minute DHT warmup on a
+returning agent's new device cleanly, without flashing partial counts
+or losing thumbnails between refreshes.
 
-## [0.6.0-rc1] — 2026-05-24
+### Holochain 0.6.1 / Iroh transport
+- **Bundled conductor binary is now Holochain 0.6.1**, `holochain_client`
+  0.8.1, kitsune2 0.4.1. lair-keystore unchanged (0.6.3).
+- **Pre-0.6.0 Vaults use the older WebRTC transport** and can no
+  longer gossip with the upgraded network. Updating to this build
+  restores sync.
+- **Update banner.** If the Flowsta network reports your Vault is
+  below the minimum supported version, Vault shows a banner with an
+  update link. The vault stays fully usable and your local data is
+  always accessible — but you won't sync with the network until you
+  update.
 
-Release candidate. Equivalent to beta11 (with the diagnostic logs
-cleaned up + Recent Activity timestamp + cold-start tile copy) **plus**
-one user-visible bug fix and a revert of beta12.
-
-### Added
-- **Re-fetch signatures when the Vault window regains focus.** Previously
-  the refresh only fired on conductor-ready / profile-synced /
-  lock+unlock — so a signature made on flowsta.com (or another linked
-  device) while Vault was sitting open in the background wouldn't
-  appear until the next unlock cycle. The new `onFocusChanged`
-  listener calls the existing `refreshSignatures` (which coalesces
-  via `pendingRefresh`, so spurious focus events are cheap). Still
-  subject to kitsune2 gossip latency for the new sig to reach
-  Vault's peers.
-
-### Fixed
-- **Sign It quota meter no longer vanishes.** All API calls from
-  `src/routes/sign-it/index.tsx` were reading
-  `(window as any).__API_URL__` — but vite's `define` injects
-  `__API_URL__` as a *compile-time global*, not a `window` property,
-  so the read was always `undefined` and the fallback URL was hard-
-  coded to `auth-api-staging.flowsta.com`. The quota by-agent
-  endpoint on staging returns nothing for production accounts → the
-  fetch returns null → `SignQuotaMeter` returns `null` and the whole
-  widget disappears. Switched all five call sites to read the
-  compile-time `__API_URL__` directly (the pattern `layout.tsx`
-  already used) so requests hit the production API where the user's
-  account actually lives.
-
-### Reverted
-- **beta12's CREATE_SUSPENDED spawn change.** The hypothesis (suspend
-  the child, hide the console window while paused, then ResumeThread)
-  was wrong: Windows allocates the console + creates
-  `PseudoConsoleWindow` only when the CRT runs `AllocConsole` *after*
-  the suspend lifts. The synchronous pre-resume hide pass found
-  nothing to hide across 17 polls / 500 ms, the flash was unchanged,
-  and the 500 ms suspended state broke lair-keystore init on Windows
-  (`Failed to connect to lair: ... (os error 2)`). Reverted to the
-  beta11 async-only post-spawn hide. The ~50 ms × 3 flashes remain;
-  documented in `project_vault_windows_console_flicker.md`.
-
-## [0.6.0-beta12] — 2026-05-24
-
-Windows-only: eliminate the lair + holochain console window flash on
-spawn. v0.5.2's approach left a ~50 ms flicker between Windows
-toggling `WS_VISIBLE` on and our async hide thread catching it.
-
-### Changed
-- `process_ext::spawn_hidden` (Windows): now spawns with
-  `CREATE_SUSPENDED` (0x4) via
-  `std::os::windows::process::CommandExt::creation_flags`. The kernel
-  allocates the console (so signing-DNA WASM compile still has a valid
-  console handle — that's what crashed v0.5.0's `CREATE_NO_WINDOW`)
-  but the primary thread is paused before any child code runs.
-- New `windows_hide::hide_console_for_pid_sync` polls
-  `EnumWindows` + `ShowWindow(SW_HIDE)` while the child is suspended,
-  with a 500 ms budget and 25 ms interval. Stops as soon as one
-  visible window is hidden.
-- New `windows_hide::resume_all_threads_for_pid` enumerates the
-  process's threads via Toolhelp32 (`TH32CS_SNAPTHREAD`) and calls
-  `OpenThread(THREAD_SUSPEND_RESUME)` + `ResumeThread` on each. Single
-  primary thread is the expected case; iterating defensively.
-- The existing async-hide thread is retained as a backup for any
-  conhost window that appears post-`ResumeThread` (e.g. ConPTY late
-  init).
-
-### Effect
-- No visible terminal flash on Vault launch on Windows.
-- If the suspended-window hide misses (window appears only after
-  resume), the async backup catches it within ~50 ms — same UX as
-  beta11. Logs show which path hid the window
-  (`[hide:NNNN] sync pre-resume: ...` vs `[hide:NNNN] hid N visible
-  window(s) on iter ...`).
-- No change to Linux / macOS (Windows-only code path).
-
-If this regresses, fall back to v0.6.0-beta11.
-
-## [0.6.0-beta11] — 2026-05-24
-
-Three small fixes; no architectural changes.
-
-### Fixed
-- **Recent Activity timestamps for signatures.** The Overview's Recent
-  Activity feed mixes signatures, backups, and linked-app events
-  through a single `timeAgo(unixSecs)` helper, but `signed_at` is
-  committed by the signing DNA in milliseconds (the other two sources
-  are seconds). Every signature row read "just now". Converted at the
-  call site; signatures now sort and render against the other rows in
-  correct time order.
-- **Overview signature tile caption** changed from `"Syncing from the
-  network…"` to `"Syncing — first load takes a few minutes"` so a
-  first-install user has the expected wait calibrated. (Sign It and
-  All Signatures already cycle through staged messages over the
-  cold-start window via `LoadingSignatures`.)
-
-### Changed
-- Removed the beta10 `[diag:*]` frontend log calls. Behaviour validated
-  on Linux + Windows for fresh install (~5 min DHT cold-start),
-  lock + unlock (instant from in-memory signal), and restart (instant
-  from localStorage cache). `@tauri-apps/plugin-log` + the `log:default`
-  capability are kept for future ad-hoc diagnostics.
-
-## [0.6.0-beta10] — 2026-05-24
-
-Diagnostic-only release. **No behavior change** — same code paths as
-beta9. The frontend signatures refresh now logs its state transitions
-through `tauri-plugin-log` so they land in the same log file as the
-Rust side, making the next investigation evidence-based rather than
-guess-based.
-
-### Added
-- `@tauri-apps/plugin-log` JS bridge + `log:default` capability.
-- Frontend log events tagged `[diag:refresh]`, `[diag:own]`,
-  `[diag:linked]`, `[diag:hydrate]`, `[diag:trigger]`, `[diag:bg]`
-  covering: refreshSignatures enter/exit, each fetchOwn/fetchLinked
-  attempt with elapsed time + result, combined.length per iteration,
-  signaturesSig + signaturesLoaded writes, cache hydrate (cached
-  count, adopt vs skip), profile-synced + conductor-ready triggers,
-  background interval ticks.
-
-### How to read the log
-On Linux: `tail -f ~/.local/share/com.flowsta.vault/logs/flowsta-vault.log`.
-On Windows: `%LOCALAPPDATA%\com.flowsta.vault\logs\flowsta-vault.log`.
-Filter with `grep diag:` (or just search for the bracketed tag) to see
-only the FE refresh story.
-
-## [0.6.0-beta9] — 2026-05-24
-
-Ninth 0.6.1 / Iroh beta. Two-fold cold-start time cut so a fresh
-install actually finishes refreshing before the user gives up.
-
-### Fixed
-- **`fetch_linked_agent_keys` uses the cached web agent key first**,
-  then dispatches the DHT `get_linked_agents` lookup with a 10 s
-  opportunistic budget instead of letting it sit on the 240 s
-  kitsune2 timeout before falling back. Same in-memory cache it used
-  to wait 240 s to consult.
-- **Per-signature thumbnail + revocation enrichment capped at 15 s
-  each.** On cold DHT every call would otherwise wait the full 240 s
-  before defaulting; in beta8 testing this added 2 + minutes to the
-  refresh after the primary records had already returned. Defaults
-  (no thumbnail, not-revoked) fill in on the next refresh round once
-  gossip catches up.
-
-### Effect
-- Cold-start total time on a returning agent's new device drops from
-  ~6.5 min observed in beta8 to ~4 min (bounded by the primary
-  `get_my_signatures` zome call's own DHT warmup).
-- Warm-DHT refresh is unchanged — both timeouts are well above
-  typical sub-second response times.
-
-## [0.6.0-beta8] — 2026-05-24
-
-Eighth 0.6.1 / Iroh beta. Splits the signatures fetch into two
-independent commands so the cold-DHT linked-agent path can't make
-the UI display a partial count.
-
-### Changed
-- **`get_my_signatures` split into `get_my_own_signatures` +
-  `get_my_linked_signatures`.** Own (local source-chain query) and
-  linked (DHT-bound cross-agent query) now run as separate Tauri
-  commands. The combined call is kept for `export_all_data`.
-- **Linked command returns `{signatures, has_linked_agents}`.** Lets
-  the frontend distinguish "no linked accounts" from "linked accounts
-  exist but the DHT hasn't gossiped their sigs yet" — the latter
-  triggers a retry; the former is authoritative.
-- **Linked helpers propagate errors instead of swallowing them.**
-  `query_linked_sigs_for_version` and `query_own_sigs_for_version`
-  now return `Result`; a kitsune2 timeout no longer masquerades as an
-  empty result.
-- **`get_my_linked_signatures` returns `Err` until auto-link has
-  populated the cached web agent key.** Closes a race where the
-  conductor-ready event fired the first refresh before auto-link
-  finished, producing a false "no linked agents" reading.
-
-### Fixed
-- **No partial sig counts shown.** The signatures-loaded gate now
-  promotes only when the linked side returns a confident result
-  (either "no linked agents", non-empty sigs, or three consecutive
-  ok-but-empty attempts). While loading, the count tile shows the
-  skeleton, the Recent Activity feed omits signatures, and the
-  Recent Signatures list shows the loading indicator — even if the
-  own query has already returned.
-- **Background retry every 30 s while not loaded.** A `useVisibleTask$`
-  fires `refreshSignatures()` on a timer until the linked side
-  becomes confident, so a fresh install eventually fills in once the
-  DHT warms up.
-
-### Effect
-- On a fresh install of a returning agent: own sigs are fetched
-  immediately, the UI stays in "Syncing from the network…" until
-  the cold-DHT linked query gossips the linked-agent sigs, then
-  promotes once to the full count. No intermediate partial count.
-- On lock + unlock with a prior cache: the cached count keeps
-  showing throughout the refresh; the cache merge never downgrades.
-
-## [0.6.0-beta7] — 2026-05-24
-
-Seventh 0.6.1 / Iroh beta. Drops the pre-v1.4 signing DNAs from the
-bundle — those versions hold no real signing data (per-user signing-cell
-architecture started at v1.4). Fixes the cold-start slowness at the root.
-
-### Changed
-- **Vault bundles only signing DNA v1.4.** The 4 older `.happ` files
-  (v1.0 / v1.1 / v1.2 / v1.3) are removed from the resource bundle.
-  Vault no longer installs them on first launch.
-- **Signature lookup queries only v1.4.** The cold-start round used to
-  query 5 cells in parallel and wait on the slowest — `get_links` on
-  the empty older cells hit kitsune2's request timeout, blocking the
-  whole round for minutes. Now: one cell, one query.
-- A Vault upgrading from an earlier build keeps the four orphaned older
-  cells in its conductor; they're ignored by the new code path.
-
-### Effect
-- Faster startup (no historical install — ~7 s saved on first launch).
-- Cold-start signature load on a returning agent's new device should
-  now complete in a single round.
-- Installer is ~8 MB smaller.
-
-## [0.6.0-beta6] — 2026-05-24
-
-Sixth 0.6.1 / Iroh beta. Fixes two cases where signatures appeared,
-then later dropped to fewer or zero after a lock + unlock.
-
-### Fixed
-- **Cell-disabled retry budget bumped 18 s → 45 s on unlock.** On some
-  machines (Windows in particular) cells took ~21 s to come ready after
-  the conductor restarted, just past the previous 18 s budget. After
-  `ensure_apps_enabled` gave up, every signing-DNA auth-creds call
-  returned `CellDisabled` and the round blanked to zero. 15 attempts
-  × 3 s covers the observed slow path with headroom.
-- **Refresh rounds no longer downgrade the signatures cache.** A round
-  that returned fewer signatures than the cache (linked-agent query
-  timed out, the user locked mid-round, the CellDisabled race fired)
-  used to overwrite the cache with the shorter list. It now merges
-  by `action_hash`: the new round's data wins for sigs both contain,
-  cached sigs that the round missed are preserved. Empty results don't
-  touch the cache at all.
-
-## [0.6.0-beta5] — 2026-05-23
-
-Fifth 0.6.1 / Iroh beta. Follow-up to beta4 — addresses the actual
-limiting factor in cold-start signature loads and adds a deliberate
-retry.
-
-### Fixed
-- **Conductor's p2p request timeout bumped 60 s → 240 s** in the
-  generated conductor config. The beta4 log showed signing zome calls
-  failing with `get_links response channel dropped: likely response
-  timeout` long before the WebSocket budget was exhausted — that's
-  kitsune2's own 60 s `request_timeout_s` (the default) firing inside
-  the conductor. 240 s lets a cold-start `get_links` complete before
-  the conductor aborts it, so most fresh installs of a returning agent
-  see signatures land on the first round instead of needing a retry.
-- **Deliberate retry on slow-empty rounds.** Up to one back-to-back
-  retry when the first round returned empty after a long wait — the
-  DHT is materially warmer by then, so the second round usually has
-  data. Bounded so we don't loop indefinitely.
-
-## [0.6.0-beta4] — 2026-05-23
-
-Fourth 0.6.1 / Iroh beta. UX fixes for "log in on a new device" — when a
-returning agent (same recovery phrase) installs Vault fresh and the local
-cell starts empty, the signing zome's `get_links` / `get` calls wait for
-Iroh peers + DHT data to gossip in. The first launch can take minutes,
-and the previous betas misreported the wait as "0 — Sign your first file"
-once an early round timed out silently.
-
-### Fixed
-- **Signatures now load on a fresh install of a returning agent.** The
-  Holochain WebSocket request timeout for signature fetch + sign / revoke
-  / amend paths is bumped from 60 s to 300 s, comfortably covering
-  cold-start DHT warmup.
-- **No more misleading "Sign your first file" during cold-start.** The
-  dashboard keeps "Syncing from the network…" showing while rounds are
-  still completing slowly; only flips when a round genuinely returns
-  empty quickly (truly-empty user) or when signatures arrive.
-- More informative Sign It loading messages through the 75 s – 240 s
-  range for long cold-starts.
-
-## [0.6.0-beta2] — 2026-05-22
-
-Second 0.6.1 / Iroh beta. Windows Sign It is now enabled, plus two
-refinements spotted during beta1 testing.
-
-### Added
+### Sign It
 - **Sign It is now available on Windows.** Holochain 0.6.1 fixes the
-  upstream WASM-compile crash that gated Sign It on Windows since v0.5.2.
-  All three DNAs (private, identity, signing) now install cleanly on
-  Windows on the first launch, and historical signatures load alongside
-  Linux + macOS.
-- **Recent Activity on the Overview now includes signatures.** One
-  unified feed across the top 5 of signatures, app backups, and
-  connected-app links, sorted by time.
+  upstream WASM-compile crash that gated Sign It on Windows in 0.5.2.
+  All three DNAs install cleanly on the first launch.
+- **Edit Thumbnail button now shows on a freshly-signed entry**
+  without requiring a refresh.
+- **Sign It quota meter on the Sign It page** now correctly hits the
+  production API. Previously a wiring bug had all five Sign It API
+  calls reading `(window as any).__API_URL__`, which is always
+  undefined — they fell back to a hard-coded staging URL, and the
+  quota widget vanished when staging didn't have the production
+  account's record.
+- **Bundled signing-DNA is v1.4 only.** Vault no longer ships
+  v1.0–v1.3. Those versions hold no real signing data (the per-user
+  signing-cell architecture started at v1.4) and querying empty
+  cells on cold start used to block the whole refresh round.
+  Existing Vaults upgrading from earlier builds keep the four
+  orphaned older cells in their conductor; the new code path
+  ignores them.
 
-### Fixed
-- **Edit Thumbnail button now shows on a freshly-signed entry** without
-  requiring a refresh.
+### Cold-start sync — handles the DHT warmup cleanly
+- **Two independent fetches for your signatures.** Your own
+  signatures (local source-chain query) and your linked accounts'
+  signatures (DHT-bound cross-agent query) run as separate calls
+  in parallel, so the slower linked path never blocks the local one.
+- **Never display a partial count.** The signatures tile stays in
+  "Syncing — first load takes a few minutes" until both fetches
+  authoritatively succeed (either with data or with a confirmed
+  no-data answer). Previously a partial 4-of-6 could appear briefly
+  while the second fetch was still in flight.
+- **First-install cold sync is ~ 4–5 minutes**, then instant from
+  cache on every subsequent unlock or app restart. Cache is keyed
+  per agent and preserved across lock cycles, restarts, and even
+  partial refreshes.
+- **Cache never downgrades.** A refresh round that returns fewer
+  signatures than the cache (linked-agent timeout, mid-refresh
+  lock, cold-DHT cell readiness race) no longer wipes the cache —
+  sigs the round missed are preserved.
+- **Thumbnails and revocation status accumulate.** Per-sig
+  enrichment is bounded at 15 s so the main sig query isn't blocked
+  for minutes; any thumbnail or revocation entry that hasn't
+  gossiped yet returns null this round but the cached value is
+  preserved via a field-level merge. Subsequent refreshes pick up
+  the data as gossip arrives.
+- **Background retry every 30 s** while signatures haven't fully
+  loaded, so a fresh install eventually fills in without user
+  action.
 
-## [0.6.0-beta1] — 2026-05-22
+### Refresh on demand
+- **Window focus triggers a refresh.** Signing on flowsta.com or
+  another linked device while Vault is open in the background now
+  appears as soon as you bring Vault back to the foreground —
+  subject to kitsune2 gossip latency for the new entry to reach
+  your peers.
 
-The Holochain 0.6.1 / Iroh networking release. No feature changes — this is
-the transport upgrade that keeps Vault in sync with the Flowsta network now
-that the production conductors run Holochain 0.6.1.
+### Overview — Recent Activity feed
+- **Unified Recent Activity** across signatures, backups, and
+  linked apps, sorted in time order.
+- **Sig timestamps display correctly.** Signature `signed_at` is
+  committed in milliseconds by the signing DNA; backup + linked-app
+  timestamps are in seconds. The shared `timeAgo` helper assumes
+  seconds, so every signature row was reading "just now". Fixed.
 
-### Changed
-- **Holochain conductor upgraded to 0.6.1.** The peer-to-peer transport moves
-  from WebRTC to Iroh (kitsune2 0.4.1). Existing vaults upgrade in place on
-  first launch — no migration, your data is read as-is.
-- Bundled conductor binary is now Holochain 0.6.1; `holochain_client` 0.8.1.
-  lair-keystore is unchanged (0.6.3).
-
-### Added
-- **Update banner.** If the Flowsta network reports your Vault is below the
-  minimum supported version, Vault shows a banner with an update link. The
-  vault stays fully usable and your local data is always accessible — but you
-  won't sync with the network until you update.
-
-### Notes
-- Pre-0.6.0 Vaults use the older WebRTC transport and can no longer gossip
-  with the upgraded network. Updating to this build restores sync.
+### Reliability — Holochain integration
+- **Conductor request timeout 60 s → 240 s** in the generated
+  conductor config. Cold-DHT zome calls (`get_links`, `get`)
+  routinely exceed a minute on first run waiting for peers to
+  gossip data; the default 60 s budget was firing before the data
+  arrived.
+- **WebSocket request timeout 300 s** on the AppWebsocket used for
+  the signatures fetch path, covering realistic cold-start DHT
+  warmup.
+- **Cell readiness budget 15 × 3 s = 45 s on unlock.** Cells
+  routinely took ~21 s to come ready after the conductor restarted
+  on some Windows machines, just past the previous 18 s budget.
+  After the old budget elapsed, every signing-DNA auth-creds call
+  returned `CellDisabled` and the round blanked to zero.
+- **Auto-link race closed.** The linked-signatures fetch waits for
+  the post-unlock auto-link to populate the cached web agent key
+  before returning an authoritative empty — previously the
+  conductor-ready event could fire the first refresh before
+  auto-link finished, producing a false "no linked agents" reading.
 
 ## [0.5.3] — 2026-05-20
 
