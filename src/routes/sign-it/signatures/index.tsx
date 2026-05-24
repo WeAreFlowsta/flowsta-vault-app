@@ -1,6 +1,5 @@
 import { component$, useContext, useSignal, $ } from "@builder.io/qwik";
 import { Link } from "@builder.io/qwik-city";
-import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
 import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
 import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
@@ -75,13 +74,7 @@ export default component$(() => {
   });
 
   const onAmended = $(async () => {
-    try {
-      const sigs = await invoke<any[]>("get_my_signatures");
-      if (Array.isArray(sigs)) {
-        signatures.value = sigs;
-        persistSignaturesCache(sigs);
-      }
-    } catch { /* conductor not ready */ }
+    await sigStore.refresh();
   });
 
   // No fetch task here — the layout's signaturesContext already owns the

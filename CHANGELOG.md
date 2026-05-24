@@ -5,6 +5,51 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-beta8] — 2026-05-24
+
+Eighth 0.6.1 / Iroh beta. Splits the signatures fetch into two
+independent commands so the cold-DHT linked-agent path can't make
+the UI display a partial count.
+
+### Changed
+- **`get_my_signatures` split into `get_my_own_signatures` +
+  `get_my_linked_signatures`.** Own (local source-chain query) and
+  linked (DHT-bound cross-agent query) now run as separate Tauri
+  commands. The combined call is kept for `export_all_data`.
+- **Linked command returns `{signatures, has_linked_agents}`.** Lets
+  the frontend distinguish "no linked accounts" from "linked accounts
+  exist but the DHT hasn't gossiped their sigs yet" — the latter
+  triggers a retry; the former is authoritative.
+- **Linked helpers propagate errors instead of swallowing them.**
+  `query_linked_sigs_for_version` and `query_own_sigs_for_version`
+  now return `Result`; a kitsune2 timeout no longer masquerades as an
+  empty result.
+- **`get_my_linked_signatures` returns `Err` until auto-link has
+  populated the cached web agent key.** Closes a race where the
+  conductor-ready event fired the first refresh before auto-link
+  finished, producing a false "no linked agents" reading.
+
+### Fixed
+- **No partial sig counts shown.** The signatures-loaded gate now
+  promotes only when the linked side returns a confident result
+  (either "no linked agents", non-empty sigs, or three consecutive
+  ok-but-empty attempts). While loading, the count tile shows the
+  skeleton, the Recent Activity feed omits signatures, and the
+  Recent Signatures list shows the loading indicator — even if the
+  own query has already returned.
+- **Background retry every 30 s while not loaded.** A `useVisibleTask$`
+  fires `refreshSignatures()` on a timer until the linked side
+  becomes confident, so a fresh install eventually fills in once the
+  DHT warms up.
+
+### Effect
+- On a fresh install of a returning agent: own sigs are fetched
+  immediately, the UI stays in "Syncing from the network…" until
+  the cold-DHT linked query gossips the linked-agent sigs, then
+  promotes once to the full count. No intermediate partial count.
+- On lock + unlock with a prior cache: the cached count keeps
+  showing throughout the refresh; the cache merge never downgrades.
+
 ## [0.6.0-beta7] — 2026-05-24
 
 Seventh 0.6.1 / Iroh beta. Drops the pre-v1.4 signing DNAs from the

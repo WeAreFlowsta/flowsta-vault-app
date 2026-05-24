@@ -2958,52 +2958,39 @@ async fn build_linked_signature_json(
 }
 
 /// Query own signatures for one signing DNA version. Per-signature
-/// enrichment runs in parallel.
+/// enrichment runs in parallel. Returns `Err` on a transient failure
+/// (zome call timeout, decode failure) so the caller can distinguish
+/// "no sigs" from "couldn't reach the cell" — that distinction matters
+/// for the frontend's "don't show a partial count" rule.
 async fn query_own_sigs_for_version(
     admin_ws: &holochain_client::AdminWebsocket,
     app_port: u16,
     signing_app: &holochain_client::AppInfo,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, String> {
     use holochain_client::ZomeCallTarget;
     use holochain_types::prelude::{Entry, ExternIO, Record};
 
-    let (app_ws, role_name) = match connect_signing_app_ws(
+    let (app_ws, role_name) = connect_signing_app_ws(
         admin_ws, app_port, signing_app, "flowsta-vault-read",
-    ).await {
-        Some(x) => x,
-        None => return Vec::new(),
-    };
+    ).await.ok_or_else(|| format!("connect_signing_app_ws failed for {}",
+        signing_app.installed_app_id))?;
 
-    let payload_mp = match rmp_serde::to_vec_named(&()) {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!("msgpack ({}): {}", signing_app.installed_app_id, e);
-            return Vec::new();
-        }
-    };
+    let payload_mp = rmp_serde::to_vec_named(&())
+        .map_err(|e| format!("msgpack ({}): {}", signing_app.installed_app_id, e))?;
 
-    let records: Vec<Record> = match app_ws.call_zome(
+    let result = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.clone().into()),
         "signing".into(),
         "get_my_signatures".into(),
         ExternIO::from(payload_mp),
-    ).await {
-        Ok(r) => match rmp_serde::from_slice(r.as_bytes()) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("decode records ({}): {}", signing_app.installed_app_id, e);
-                return Vec::new();
-            }
-        }
-        Err(e) => {
-            log::warn!("get_my_signatures failed for {}: {}", signing_app.installed_app_id, e);
-            return Vec::new();
-        }
-    };
+    ).await.map_err(|e| format!(
+        "get_my_signatures failed for {}: {}", signing_app.installed_app_id, e
+    ))?;
+
+    let records: Vec<Record> = rmp_serde::from_slice(result.as_bytes())
+        .map_err(|e| format!("decode records ({}): {}", signing_app.installed_app_id, e))?;
     log::info!("Got {} signatures from {}", records.len(), signing_app.installed_app_id);
 
-    // Pair each record with its decoded SignatureEntry, dropping any that
-    // fail to deserialise.
     let entries: Vec<(&Record, SignatureEntry)> = records.iter().filter_map(|record| {
         let entry_bytes = match record.entry().as_option() {
             Some(Entry::App(b)) => b,
@@ -3018,7 +3005,7 @@ async fn query_own_sigs_for_version(
         build_own_signature_json(&app_ws, &role_name, record, entry,
             &signing_app.installed_app_id)
     });
-    futures::future::join_all(futures).await
+    Ok(futures::future::join_all(futures).await)
 }
 
 /// Resolve the set of linked agents to query for cross-agent signatures.
@@ -3126,45 +3113,45 @@ async fn fetch_linked_agent_keys(
 /// Query linked agents' signatures for one signing DNA version.
 /// Per-agent calls run serially (typically 1-2 linked agents); per-signature
 /// enrichment within a returned batch runs in parallel.
+///
+/// Returns `Err` if any linked-agent query fails (DHT timeout, WS error)
+/// — the caller needs to distinguish "linked agent has no sigs" from
+/// "we couldn't fetch them yet". A silent `Vec::new()` here was the
+/// root cause of beta7 showing 4/6 on cold-start Windows: when the
+/// cold-DHT `get_signatures_for_agent` timed out, the call returned []
+/// and the frontend treated it as authoritative.
 async fn query_linked_sigs_for_version(
     admin_ws: &holochain_client::AdminWebsocket,
     app_port: u16,
     signing_app: &holochain_client::AppInfo,
     linked_keys: &[holochain_types::prelude::AgentPubKey],
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, String> {
     use holochain_client::ZomeCallTarget;
     use holochain_types::prelude::{Entry, ExternIO, Record};
 
-    let (app_ws, role_name) = match connect_signing_app_ws(
+    let (app_ws, role_name) = connect_signing_app_ws(
         admin_ws, app_port, signing_app, "flowsta-vault-linked-sign",
-    ).await {
-        Some(x) => x,
-        None => return Vec::new(),
-    };
+    ).await.ok_or_else(|| format!("connect_signing_app_ws failed for {}",
+        signing_app.installed_app_id))?;
 
     let mut all = Vec::new();
     for linked_key in linked_keys {
-        let payload = match rmp_serde::to_vec_named(linked_key) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let records: Vec<Record> = match app_ws.call_zome(
+        let payload = rmp_serde::to_vec_named(linked_key)
+            .map_err(|e| format!("encode linked key: {}", e))?;
+        let result = app_ws.call_zome(
             ZomeCallTarget::RoleName(role_name.clone().into()),
             "signing".into(),
             "get_signatures_for_agent".into(),
             ExternIO::from(payload),
-        ).await {
-            Ok(r) => match rmp_serde::from_slice(r.as_bytes()) {
-                Ok(v) => v,
-                Err(_) => continue,
-            }
-            Err(e) => {
-                log::warn!("get_signatures_for_agent failed on {}: {}", signing_app.installed_app_id, e);
-                continue;
-            }
-        };
+        ).await.map_err(|e| format!(
+            "get_signatures_for_agent failed on {}: {}", signing_app.installed_app_id, e
+        ))?;
+        let records: Vec<Record> = rmp_serde::from_slice(result.as_bytes())
+            .map_err(|e| format!("decode linked records ({}): {}",
+                signing_app.installed_app_id, e))?;
         if !records.is_empty() {
-            log::info!("Got {} signatures for linked agent from {}", records.len(), signing_app.installed_app_id);
+            log::info!("Got {} signatures for linked agent from {}",
+                records.len(), signing_app.installed_app_id);
         }
 
         let entries: Vec<(&Record, SignatureEntry)> = records.iter().filter_map(|record| {
@@ -3184,45 +3171,7 @@ async fn query_linked_sigs_for_version(
         let mut sigs: Vec<serde_json::Value> = futures::future::join_all(futures).await;
         all.append(&mut sigs);
     }
-    all
-}
-
-/// Public signatures fetch entry point. On Windows the conductor process
-/// can crash mid-session and the WS connection comes back as either
-/// closed (10054) or refused (10061). On the first such error, we run
-/// the runtime watchdog to bring the conductor back, then retry once.
-/// On other errors, we fail cleanly.
-#[tauri::command]
-pub async fn get_my_signatures(
-    state: State<'_, Arc<AppState>>,
-    app_handle: tauri::AppHandle,
-) -> Result<Vec<serde_json::Value>, String> {
-    match get_my_signatures_inner(state.clone()).await {
-        Ok(sigs) => Ok(sigs),
-        Err(e) => {
-            if !is_conductor_unreachable_error(&e) {
-                return Err(e);
-            }
-            log::warn!(
-                "[get_my_signatures] first attempt failed with conductor-unreachable error ({}) — running watchdog",
-                e,
-            );
-            // Try to bring the conductor back. Best-effort: even if the
-            // watchdog returns Err (e.g. vault was just locked), we still
-            // attempt the retry so the original error message reaches the
-            // caller via the inner call's failure rather than a recovery
-            // failure.
-            if let Err(re) = ensure_conductor_alive(state.inner(), &app_handle).await {
-                log::warn!(
-                    "[get_my_signatures] watchdog could not restart conductor: {} — retrying inner anyway",
-                    re,
-                );
-            }
-            // Brief settle so cell normalization completes.
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            get_my_signatures_inner(state).await
-        }
-    }
+    Ok(all)
 }
 
 /// True if `err` is one of the messages we see when the conductor's
@@ -3237,11 +3186,15 @@ fn is_conductor_unreachable_error(err: &str) -> bool {
         || err.contains("os error 10061")
 }
 
-/// One attempt at fetching signatures. Connects fresh admin / app WebSockets
-/// every call, so a previous reset doesn't carry over.
-async fn get_my_signatures_inner(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<serde_json::Value>, String> {
+/// Shared setup: open admin WS, ensure all apps enabled, list apps and
+/// filter to the bundled signing-DNA version. Returns the admin WS, the
+/// app port, the full app list (linked-agent discovery needs identity
+/// app entries), and the filtered signing apps.
+async fn open_signing_conductor(
+    state: &Arc<AppState>,
+) -> Result<(holochain_client::AdminWebsocket, u16,
+            Vec<holochain_client::AppInfo>,
+            Vec<holochain_client::AppInfo>), String> {
     use holochain_client::AdminWebsocket;
 
     let conductor_ports = {
@@ -3255,31 +3208,228 @@ async fn get_my_signatures_inner(
         Some("flowsta-vault-read".to_string()),
     ).await.map_err(|e| format!("Admin WS: {}", e))?;
 
-    // Ensure all apps are enabled — conductor may disable cells on restart
     crate::dna::ensure_apps_enabled(&admin_ws).await;
 
     let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
     let signing_apps: Vec<_> = apps.iter()
-        // Only query the bundled signing-DNA version. Pre-v1.4 versions hold
-        // no real signing data and querying them on cold start triggered
-        // kitsune2 request timeouts that blocked the whole round on the
-        // slowest of 5 parallel `get_links` calls. A Vault that upgraded
-        // from an earlier build may still have older orphaned cells in its
-        // conductor; this filter ignores them. See `BUNDLED_SIGNING_VERSION`
-        // in dna.rs.
-        .filter(|a| a.installed_app_id == crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION))
+        .filter(|a| a.installed_app_id ==
+            crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION))
+        .cloned()
         .collect();
+    Ok((admin_ws, app_port, apps, signing_apps))
+}
+
+/// Apply the reverse `superseded_by` pointer in place. The chain only
+/// records the forward `supersedes` link; the frontend needs the reverse
+/// so amended records drop out of the active list. Scoped within whatever
+/// batch is passed in.
+fn apply_superseded_by(signatures: &mut [serde_json::Value]) {
+    let map: std::collections::HashMap<String, String> = signatures.iter()
+        .filter_map(|s| {
+            let action_hash = s.get("action_hash")?.as_str()?.to_string();
+            let supersedes = s.get("supersedes")?.as_str()?.to_string();
+            Some((supersedes, action_hash))
+        })
+        .collect();
+    if map.is_empty() { return; }
+    for sig in signatures.iter_mut() {
+        let action_hash = match sig.get("action_hash").and_then(|h| h.as_str()) {
+            Some(h) => h.to_string(),
+            None => continue,
+        };
+        if let Some(superseded_by) = map.get(&action_hash) {
+            if let Some(obj) = sig.as_object_mut() {
+                obj.insert(
+                    "superseded_by".to_string(),
+                    serde_json::Value::String(superseded_by.clone()),
+                );
+            }
+        }
+    }
+}
+
+/// Returns own signatures only. Split from the linked-agent fetch so the
+/// frontend can run both in parallel with independent retry loops; the
+/// linked path is the cold-start bottleneck and shouldn't gate the local
+/// query that resolves in milliseconds. Returns `Err` on any version
+/// failure so the frontend can retry — silently masking failures as `[]`
+/// is what caused beta7 to display a 4/6 partial count on cold start.
+#[tauri::command]
+pub async fn get_my_own_signatures(
+    state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<serde_json::Value>, String> {
+    match get_my_own_signatures_inner(state.inner()).await {
+        Ok(sigs) => Ok(sigs),
+        Err(e) => {
+            if !is_conductor_unreachable_error(&e) { return Err(e); }
+            log::warn!(
+                "[get_my_own_signatures] conductor unreachable ({}) — running watchdog",
+                e,
+            );
+            if let Err(re) = ensure_conductor_alive(state.inner(), &app_handle).await {
+                log::warn!(
+                    "[get_my_own_signatures] watchdog could not restart conductor: {}",
+                    re,
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            get_my_own_signatures_inner(state.inner()).await
+        }
+    }
+}
+
+async fn get_my_own_signatures_inner(
+    state: &Arc<AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let (admin_ws, app_port, _apps, signing_apps) = open_signing_conductor(state).await?;
+    if signing_apps.is_empty() { return Ok(Vec::new()); }
+
+    let results = futures::future::join_all(
+        signing_apps.iter()
+            .map(|app| query_own_sigs_for_version(&admin_ws, app_port, app)),
+    ).await;
+    // Any single-version failure surfaces as Err so the frontend retries.
+    let mut signatures: Vec<serde_json::Value> = Vec::new();
+    for r in results {
+        signatures.extend(r?);
+    }
+    log::info!(
+        "[get_my_own_signatures] {} sig(s) from {} version(s)",
+        signatures.len(), signing_apps.len(),
+    );
+    apply_superseded_by(&mut signatures);
+    Ok(signatures)
+}
+
+/// Wire-format result for `get_my_linked_signatures`. The `has_linked_agents`
+/// flag lets the frontend distinguish two zero-signature cases:
+///   - `has_linked_agents=false`: the agent has no linked accounts — the
+///     empty result is authoritative, frontend can promote to loaded.
+///   - `has_linked_agents=true`: linked accounts exist but returned no
+///     sigs — could be legitimate, or cold-DHT-not-yet-gossiped, so the
+///     frontend should keep retrying.
+#[derive(serde::Serialize)]
+pub struct LinkedSignaturesResult {
+    pub signatures: Vec<serde_json::Value>,
+    pub has_linked_agents: bool,
+}
+
+/// Returns signatures from linked agents only. Split from the own-sigs
+/// fetch — the cold-DHT `get_links` here can take minutes, so it must
+/// not gate the local own-sigs result. Returns `Err` on any sig query
+/// failure (per-version) so the frontend can retry without confusing
+/// "timed out" with "no sigs".
+#[tauri::command]
+pub async fn get_my_linked_signatures(
+    state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
+) -> Result<LinkedSignaturesResult, String> {
+    match get_my_linked_signatures_inner(state.inner()).await {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            if !is_conductor_unreachable_error(&e) { return Err(e); }
+            log::warn!(
+                "[get_my_linked_signatures] conductor unreachable ({}) — running watchdog",
+                e,
+            );
+            if let Err(re) = ensure_conductor_alive(state.inner(), &app_handle).await {
+                log::warn!(
+                    "[get_my_linked_signatures] watchdog could not restart conductor: {}",
+                    re,
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            get_my_linked_signatures_inner(state.inner()).await
+        }
+    }
+}
+
+async fn get_my_linked_signatures_inner(
+    state: &Arc<AppState>,
+) -> Result<LinkedSignaturesResult, String> {
+    let (admin_ws, app_port, apps, signing_apps) = open_signing_conductor(state).await?;
     if signing_apps.is_empty() {
-        return Ok(Vec::new());
+        return Ok(LinkedSignaturesResult {
+            signatures: Vec::new(),
+            has_linked_agents: false,
+        });
     }
 
-    // Phase 1: own signatures across all versions in parallel + linked-agent
-    // key discovery in parallel. Linked-keys path is independent of the
-    // own-sigs path so it can overlap with the cold-DHT warmup.
-    let cached_web_key = {
-        let key = state.linked_web_agent_key.lock().unwrap();
-        key.clone()
-    };
+    let cached_web_key = state.linked_web_agent_key.lock().unwrap().clone();
+    // Auto-link races with the conductor-ready event that drives the
+    // first refresh — if conductor reports ready before auto-link
+    // finishes populating `linked_web_agent_key`, an empty linked_keys
+    // result is a false negative ("not yet ready" misread as
+    // "no linked agents") and the frontend would promote to a 4/6
+    // partial display. Return Err so the frontend retries; the
+    // `profile-synced` event fires the next refresh once auto-link
+    // is done.
+    if cached_web_key.is_none() {
+        return Err("auto-link not yet complete (cached web agent key unset)".to_string());
+    }
+    let linked_keys = fetch_linked_agent_keys(&admin_ws, app_port, &apps, cached_web_key).await;
+    if linked_keys.is_empty() {
+        log::info!("[get_my_linked_signatures] no linked agents — authoritative empty");
+        return Ok(LinkedSignaturesResult {
+            signatures: Vec::new(),
+            has_linked_agents: false,
+        });
+    }
+    log::info!("[get_my_linked_signatures] querying {} linked agent(s)", linked_keys.len());
+
+    let results = futures::future::join_all(
+        signing_apps.iter()
+            .map(|app| query_linked_sigs_for_version(&admin_ws, app_port, app, &linked_keys)),
+    ).await;
+    let mut signatures: Vec<serde_json::Value> = Vec::new();
+    for r in results {
+        signatures.extend(r?);
+    }
+    log::info!("[get_my_linked_signatures] {} sig(s)", signatures.len());
+    apply_superseded_by(&mut signatures);
+    Ok(LinkedSignaturesResult {
+        signatures,
+        has_linked_agents: true,
+    })
+}
+
+/// Combined own + linked fetch, used by `export_all_data` where the
+/// caller wants a single blocking result and is happy to wait. The
+/// interactive UI uses `get_my_own_signatures` + `get_my_linked_signatures`
+/// in parallel instead.
+#[tauri::command]
+pub async fn get_my_signatures(
+    state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<serde_json::Value>, String> {
+    match get_my_signatures_inner(state.inner()).await {
+        Ok(sigs) => Ok(sigs),
+        Err(e) => {
+            if !is_conductor_unreachable_error(&e) { return Err(e); }
+            log::warn!(
+                "[get_my_signatures] conductor unreachable ({}) — running watchdog",
+                e,
+            );
+            if let Err(re) = ensure_conductor_alive(state.inner(), &app_handle).await {
+                log::warn!(
+                    "[get_my_signatures] watchdog could not restart conductor: {}",
+                    re,
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            get_my_signatures_inner(state.inner()).await
+        }
+    }
+}
+
+async fn get_my_signatures_inner(
+    state: &Arc<AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let (admin_ws, app_port, apps, signing_apps) = open_signing_conductor(state).await?;
+    if signing_apps.is_empty() { return Ok(Vec::new()); }
+
+    let cached_web_key = state.linked_web_agent_key.lock().unwrap().clone();
     let own_future = futures::future::join_all(
         signing_apps.iter()
             .map(|app| query_own_sigs_for_version(&admin_ws, app_port, app)),
@@ -3287,21 +3437,27 @@ async fn get_my_signatures_inner(
     let keys_future = fetch_linked_agent_keys(&admin_ws, app_port, &apps, cached_web_key);
     let (own_results, linked_keys) = tokio::join!(own_future, keys_future);
 
-    let mut signatures: Vec<serde_json::Value> = own_results.into_iter().flatten().collect();
+    // Best-effort: this combined call is for `export_all_data` where a
+    // missing per-version result shouldn't fail the whole export.
+    let mut signatures: Vec<serde_json::Value> = own_results.into_iter()
+        .filter_map(|r| r.ok())
+        .flatten()
+        .collect();
     log::info!(
         "Loaded {} own signatures from {} signing DNA version(s)",
         signatures.len(), signing_apps.len(),
     );
 
-    // Phase 2: linked-agent sigs (now that we have the keys). Parallelised
-    // across the same set of signing DNA versions.
     if !linked_keys.is_empty() {
         log::info!("Found {} linked agent(s), querying their signatures", linked_keys.len());
         let linked_results = futures::future::join_all(
             signing_apps.iter()
                 .map(|app| query_linked_sigs_for_version(&admin_ws, app_port, app, &linked_keys)),
         ).await;
-        let linked_sigs: Vec<serde_json::Value> = linked_results.into_iter().flatten().collect();
+        let linked_sigs: Vec<serde_json::Value> = linked_results.into_iter()
+            .filter_map(|r| r.ok())
+            .flatten()
+            .collect();
         if !linked_sigs.is_empty() {
             log::info!("Found {} signatures from linked agents", linked_sigs.len());
             let existing: std::collections::HashSet<String> = signatures.iter()
@@ -3316,34 +3472,7 @@ async fn get_my_signatures_inner(
         }
     }
 
-    // The chain only stores the forward pointer (`supersedes`); the
-    // frontend filter needs the reverse (`superseded_by`) so amended
-    // records drop out of the active list.
-    let superseded_by_map: std::collections::HashMap<String, String> = signatures
-        .iter()
-        .filter_map(|s| {
-            let action_hash = s.get("action_hash")?.as_str()?.to_string();
-            let supersedes = s.get("supersedes")?.as_str()?.to_string();
-            Some((supersedes, action_hash))
-        })
-        .collect();
-    if !superseded_by_map.is_empty() {
-        for sig in signatures.iter_mut() {
-            let action_hash = match sig.get("action_hash").and_then(|h| h.as_str()) {
-                Some(h) => h.to_string(),
-                None => continue,
-            };
-            if let Some(superseded_by) = superseded_by_map.get(&action_hash) {
-                if let Some(obj) = sig.as_object_mut() {
-                    obj.insert(
-                        "superseded_by".to_string(),
-                        serde_json::Value::String(superseded_by.clone()),
-                    );
-                }
-            }
-        }
-    }
-
+    apply_superseded_by(&mut signatures);
     log::info!("Total signatures (own + linked): {}", signatures.len());
     Ok(signatures)
 }

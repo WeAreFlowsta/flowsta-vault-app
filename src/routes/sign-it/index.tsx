@@ -759,16 +759,12 @@ export default component$(() => {
   });
 
   // After an amend, force a full conductor refresh — the new signature
-  // appears + the API list call computes `superseded_by` from the full
-  // chain, so we can't just append locally.
+  // appears + `superseded_by` is computed from the full chain, so we
+  // can't just append locally. Delegating to the shared refresh keeps
+  // the "wait for own + linked to both settle before updating the UI"
+  // behavior so the count never flickers down mid-round.
   const onAmended = $(async () => {
-    try {
-      const sigs = await invoke<any[]>("get_my_signatures");
-      if (Array.isArray(sigs)) {
-        recentSignatures.value = sigs;
-        persistSignaturesCache(sigs);
-      }
-    } catch { /* conductor not ready */ }
+    await sigStore.refresh();
   });
 
   return (
@@ -1426,7 +1422,7 @@ export default component$(() => {
           <h3 class="text-sm font-semibold uppercase tracking-wider text-gray-500">
             Recent Signatures
           </h3>
-          {recentSignatures.value.length > 0 && (
+          {signaturesLoaded.value && recentSignatures.value.length > 0 && (
             <Link
               href="/sign-it/signatures/"
               class="text-xs text-amber-400 hover:text-amber-300"
@@ -1436,14 +1432,12 @@ export default component$(() => {
           )}
         </div>
 
-        {recentSignatures.value.length === 0 ? (
-          !signaturesLoaded.value ? (
-            <LoadingSignatures />
-          ) : (
-            <p class="py-4 text-center text-sm text-gray-500">
-              No signatures yet. Sign a file above to get started.
-            </p>
-          )
+        {!signaturesLoaded.value ? (
+          <LoadingSignatures />
+        ) : recentSignatures.value.length === 0 ? (
+          <p class="py-4 text-center text-sm text-gray-500">
+            No signatures yet. Sign a file above to get started.
+          </p>
         ) : (
           <div class="space-y-3">
             {recentSignatures.value

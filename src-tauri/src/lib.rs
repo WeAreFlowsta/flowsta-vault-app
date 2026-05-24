@@ -298,6 +298,8 @@ pub fn run() {
             commands::increment_quota_used,
             commands::sync_quota_to_server,
             commands::get_my_signatures,
+            commands::get_my_own_signatures,
+            commands::get_my_linked_signatures,
             commands::revoke_signature,
             commands::get_linked_third_party_apps,
             commands::get_all_linked_app_scopes,

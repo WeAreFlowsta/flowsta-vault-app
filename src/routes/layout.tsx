@@ -47,10 +47,6 @@ export default component$(() => {
   const signaturesSig = useSignal<any[]>([]);
   const signaturesLoaded = useSignal(false);
   const signaturesRefreshing = useSignal(false);
-  // True once the post-unlock auto-link has fired the `profile-synced`
-  // event. Until then, an empty get_my_signatures result is "partial"
-  // (linked-agent key not yet cached); after, it's authoritative.
-  const profileSynced = useSignal(false);
   // If refresh is requested while one is already running, mark a follow-up.
   // Important because state may change during the in-flight call (e.g.
   // auto-link caches the linked agent key mid-fetch, so the next round will
@@ -63,73 +59,101 @@ export default component$(() => {
     }
     signaturesRefreshing.value = true;
     try {
-      // Cap deliberate retries on slow-empty rounds. Each round can take
-      // up to ~conductor.request_timeout_s on a pathological cold-start,
-      // so 2 total attempts keeps the worst case bounded while still
-      // giving the DHT a second chance after warmup.
-      let attempts = 0;
+      // Own + linked are dispatched as two independent Tauri commands so
+      // the cold-DHT linked path can't block the fast local own query.
+      // The displayed count is NOT updated until linked is *confident*
+      // — showing 4 when the truth is 6 (linked still warming) reads
+      // as a buggy regression to the user. A background interval (set
+      // up below) keeps re-firing this until linked succeeds.
+
+      // Own: local source-chain query, retry on Err.
+      const fetchOwn = async (): Promise<any[]> => {
+        for (let i = 0; i < 3; i++) {
+          try {
+            const r = await invoke<any[]>("get_my_own_signatures");
+            return Array.isArray(r) ? r : [];
+          } catch {
+            if (i < 2) await new Promise((r) => setTimeout(r, 2_000));
+          }
+        }
+        return [];
+      };
+
+      // Linked: DHT-bound, can take minutes on cold start. Up to 3 attempts
+      // per refresh; the outer background retry keeps trying across refreshes.
+      // `confident = true` means we trust the result enough to display:
+      //   - has_linked_agents = false → authoritative no-linked (no web account)
+      //   - has_linked_agents = true AND sigs.length > 0 → got real data
+      //   - all 3 attempts returned ok-but-empty → genuine zero-sig user
+      // `confident = false` means at least one attempt threw (DHT timeout
+      // or unreachable), so the empty result could be a cold-DHT false
+      // negative — keep retrying via the background interval.
+      const fetchLinked = async (): Promise<{ sigs: any[]; confident: boolean }> => {
+        let lastRes: { signatures: any[]; has_linked_agents: boolean } | null = null;
+        let allAttemptsOk = true;
+        for (let i = 0; i < 3; i++) {
+          try {
+            const r = await invoke<{ signatures: any[]; has_linked_agents: boolean }>(
+              "get_my_linked_signatures",
+            );
+            lastRes = r;
+            if (!r.has_linked_agents) return { sigs: [], confident: true };
+            if (r.signatures.length > 0) return { sigs: r.signatures, confident: true };
+          } catch {
+            allAttemptsOk = false;
+          }
+          if (i < 2) await new Promise((r) => setTimeout(r, 5_000));
+        }
+        if (lastRes && !lastRes.has_linked_agents) return { sigs: [], confident: true };
+        if (allAttemptsOk) return { sigs: [], confident: true };
+        return { sigs: lastRes?.signatures ?? [], confident: false };
+      };
+
       do {
         pendingRefresh.value = false;
-        attempts++;
-        const startedAt = Date.now();
-        try {
-          const sigs = await invoke<any[]>("get_my_signatures");
-          if (Array.isArray(sigs) && sigs.length > 0) {
-            // Merge by action_hash rather than replacing. Refreshes
-            // commonly come back with fewer sigs than we have when the
-            // linked-agent path or an older-DNA query times out (or the
-            // user locked mid-round) — those queries simply return Vec
-            // ::new() in Rust and the cache used to get clobbered, losing
-            // data we already had. Merging keeps the missing ones from
-            // cache while letting any updated fields on present sigs
-            // (revoked, superseded_by, thumbnail) win from the new round.
-            const newHashes = new Set(
-              (sigs as any[]).map((s) => s.action_hash).filter(Boolean) as string[],
-            );
-            const merged = [
-              ...sigs,
-              ...signaturesSig.value.filter(
-                (s: any) => s.action_hash && !newHashes.has(s.action_hash),
-              ),
-            ];
-            signaturesSig.value = merged;
-            persistSignaturesCache(merged);
-          }
-          // sigs.length === 0: every signing-DNA query came back empty,
-          // most often a cold-start DHT timeout or the CellDisabled race
-          // on unlock. Don't overwrite the cache with []; keep whatever
-          // we have. A later refresh round will fill in.
-        } catch {
-          // Conductor may not be ready yet — caller can retry
+
+        const [own, linkedRes] = await Promise.all([fetchOwn(), fetchLinked()]);
+
+        // Own wins over linked on hash collision (own has accurate
+        // revocation; linked-agent builds always set revoked: false).
+        const ownHashes = new Set(
+          own.map((s) => s.action_hash).filter(Boolean) as string[],
+        );
+        const combined = [
+          ...own,
+          ...linkedRes.sigs.filter(
+            (s) => s.action_hash && !ownHashes.has(s.action_hash),
+          ),
+        ];
+
+        if (combined.length > 0) {
+          // Merge by action_hash — new round wins for present hashes,
+          // any missing-from-this-round sigs are preserved from the
+          // existing signal so a not-confident linked round can't
+          // clobber cached linked data from a prior session.
+          const newHashes = new Set(
+            combined.map((s) => s.action_hash).filter(Boolean) as string[],
+          );
+          const merged = [
+            ...combined,
+            ...signaturesSig.value.filter(
+              (s: any) => s.action_hash && !newHashes.has(s.action_hash),
+            ),
+          ];
+          signaturesSig.value = merged;
+          persistSignaturesCache(merged);
         }
-        const took = Date.now() - startedAt;
-        // Promote to "loaded" when we have data, OR when auto-link has
-        // resolved AND the refresh returned quickly (fast empty = genuinely
-        // empty user; slow empty = round hit the cold-start DHT timeout,
-        // so keep "Syncing from the network…" showing). 10s separates a
-        // warm conductor (~100ms) from a timed-out round (minutes).
-        const fastEmpty = took < 10_000 && signaturesSig.value.length === 0;
-        if (
-          signaturesSig.value.length > 0 ||
-          (profileSynced.value && fastEmpty)
-        ) {
+
+        // Promote to "loaded" only when linked is confident. If linked
+        // isn't confident, stay in "Syncing from the network…" — the
+        // background retry interval will fire this again until it is.
+        // Exception: if the cache already has data from a prior session
+        // and that data covers everything this round produced, the user
+        // shouldn't see "Syncing" — the cache count is authoritative
+        // until linked succeeds and possibly bumps it up.
+        if (linkedRes.confident) {
           signaturesLoaded.value = true;
-        } else if (
-          profileSynced.value &&
-          signaturesSig.value.length === 0 &&
-          attempts < 2
-        ) {
-          // Slow empty after the auto-link resolved — most often a
-          // cold-start round where the DHT was still warming up. Queue
-          // one more round back-to-back via the existing do-while; by
-          // now more peer connections + DHT data should be in. Bounded
-          // by `attempts` so we don't loop forever.
-          pendingRefresh.value = true;
         }
-        // Otherwise (slow empty AND already retried once): the loading
-        // state stays at "Syncing from the network…" — the next
-        // conductor-ready / profile-synced / manual lock + unlock will
-        // trigger another refreshSignatures() through the normal path.
       } while (pendingRefresh.value);
     } finally {
       signaturesRefreshing.value = false;
@@ -411,7 +435,6 @@ export default component$(() => {
     // sigs that the first fetch may have missed.
     const unlistenProfilePromise = listen("profile-synced", () => {
       fetchProfile();
-      profileSynced.value = true;
       refreshSignatures();
     });
 
@@ -419,6 +442,24 @@ export default component$(() => {
       unlistenPromise.then((unlisten) => unlisten());
       unlistenProfilePromise.then((unlisten) => unlisten());
     });
+  });
+
+  // Background retry for the signatures fetch. On a fresh install with
+  // a returning agent, the cold-DHT `get_signatures_for_agent` query
+  // for linked-agent sigs can take minutes to gossip in. Each refresh
+  // tries up to 3 times internally; while linked hasn't returned a
+  // confident result, signaturesLoaded stays false and this interval
+  // re-fires the refresh every 30s. Stops as soon as linked succeeds.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track, cleanup }) => {
+    const s = track(() => screen.value);
+    const loaded = track(() => signaturesLoaded.value);
+    if (s !== "dashboard" || loaded) return;
+
+    const id = setInterval(() => {
+      if (!signaturesLoaded.value) refreshSignatures();
+    }, 30_000);
+    cleanup(() => clearInterval(id));
   });
 
   // Listen for the DNA-updater's verdict on this app version. When the API's

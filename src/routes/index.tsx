@@ -126,14 +126,19 @@ export default component$(() => {
     | { kind: "backup"; timestamp: number; appName: string }
     | { kind: "link"; timestamp: number; appName: string };
   const recentActivities: Activity[] = [];
-  for (const sig of currentSigs as any[]) {
-    if (typeof sig.signed_at === "number" && sig.signed_at > 0) {
-      const label =
-        sig.fileName ||
-        (typeof sig.file_hash === "string" && sig.file_hash.length >= 8
-          ? `${sig.file_hash.slice(0, 8)}…`
-          : "a file");
-      recentActivities.push({ kind: "signature", timestamp: sig.signed_at, label });
+  // Only surface sigs in the activity feed once linked has settled —
+  // otherwise we'd leak the same partial count the Signatures tile is
+  // hiding behind "Syncing from the network…".
+  if (sigsLoaded) {
+    for (const sig of currentSigs as any[]) {
+      if (typeof sig.signed_at === "number" && sig.signed_at > 0) {
+        const label =
+          sig.fileName ||
+          (typeof sig.file_hash === "string" && sig.file_hash.length >= 8
+            ? `${sig.file_hash.slice(0, 8)}…`
+            : "a file");
+        recentActivities.push({ kind: "signature", timestamp: sig.signed_at, label });
+      }
     }
   }
   for (const app of stats?.apps ?? []) {
