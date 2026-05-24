@@ -3260,7 +3260,14 @@ async fn get_my_signatures_inner(
 
     let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
     let signing_apps: Vec<_> = apps.iter()
-        .filter(|a| a.installed_app_id.starts_with("flowsta_signing_v"))
+        // Only query the bundled signing-DNA version. Pre-v1.4 versions hold
+        // no real signing data and querying them on cold start triggered
+        // kitsune2 request timeouts that blocked the whole round on the
+        // slowest of 5 parallel `get_links` calls. A Vault that upgraded
+        // from an earlier build may still have older orphaned cells in its
+        // conductor; this filter ignores them. See `BUNDLED_SIGNING_VERSION`
+        // in dna.rs.
+        .filter(|a| a.installed_app_id == crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION))
         .collect();
     if signing_apps.is_empty() {
         return Ok(Vec::new());

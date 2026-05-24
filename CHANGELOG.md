@@ -5,6 +5,29 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-beta7] — 2026-05-24
+
+Seventh 0.6.1 / Iroh beta. Drops the pre-v1.4 signing DNAs from the
+bundle — those versions hold no real signing data (per-user signing-cell
+architecture started at v1.4). Fixes the cold-start slowness at the root.
+
+### Changed
+- **Vault bundles only signing DNA v1.4.** The 4 older `.happ` files
+  (v1.0 / v1.1 / v1.2 / v1.3) are removed from the resource bundle.
+  Vault no longer installs them on first launch.
+- **Signature lookup queries only v1.4.** The cold-start round used to
+  query 5 cells in parallel and wait on the slowest — `get_links` on
+  the empty older cells hit kitsune2's request timeout, blocking the
+  whole round for minutes. Now: one cell, one query.
+- A Vault upgrading from an earlier build keeps the four orphaned older
+  cells in its conductor; they're ignored by the new code path.
+
+### Effect
+- Faster startup (no historical install — ~7 s saved on first launch).
+- Cold-start signature load on a returning agent's new device should
+  now complete in a single round.
+- Installer is ~8 MB smaller.
+
 ## [0.6.0-beta6] — 2026-05-24
 
 Sixth 0.6.1 / Iroh beta. Fixes two cases where signatures appeared,
