@@ -5,6 +5,26 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-rc2] — 2026-05-24
+
+### Fixed
+- **Thumbnails no longer flicker / disappear on focus refresh.** beta9
+  added a 15 s `tokio::time::timeout` around per-signature thumbnail
+  and revocation enrichment (`fetch_thumbnail_for_action`,
+  `fetch_revocation_for_action`) to stop cold-DHT enrichment from
+  blocking the main sig query for minutes. The trade-off: when a
+  per-thumb DHT fetch missed that budget, Rust returned
+  `thumbnail: null` for that sig. The frontend's refresh merge then
+  *wholesale-replaced* the matching cached sig — so a sig that
+  previously had a thumbnail in cache lost it. With the rc1
+  focus-refresh hook firing on every Vault foreground, thumbnails
+  flickered.
+- Merge in `layout.tsx` is now field-level for `thumbnail` and the
+  `revoked*` triple: prefer the new round's value if non-null,
+  otherwise keep the cached value. `revoked` is one-way in Holochain
+  (revocation entries are never retracted), so cache's `true` always
+  wins regardless of what the new round saw.
+
 ## [0.6.0-rc1] — 2026-05-24
 
 Release candidate. Equivalent to beta11 (with the diagnostic logs

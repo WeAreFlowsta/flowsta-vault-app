@@ -132,11 +132,39 @@ export default component$(() => {
           // any missing-from-this-round sigs are preserved from the
           // existing signal so a not-confident linked round can't
           // clobber cached linked data from a prior session.
+          //
+          // Field-level merge for sigs in both new + cache: prefer the
+          // new round's data overall, but preserve cached `thumbnail`
+          // and `revoked*` when the new round returned null. Those
+          // fields go through Rust's per-sig enrichment which has a
+          // 15 s `tokio::time::timeout` cap (commands.rs) — on cold
+          // DHT the per-thumb / per-revocation fetch can blow past
+          // that budget and return null even when gossip has the data.
+          // Without this, thumbnails flicker between filled and empty
+          // as focus-driven refreshes race the enrichment budget.
+          // `revoked` is one-way in Holochain (revocation entries
+          // never get retracted) so cache's `true` always wins.
+          const cachedByHash = new Map<string, any>(
+            signaturesSig.value
+              .filter((s: any) => s.action_hash)
+              .map((s: any) => [s.action_hash as string, s]),
+          );
+          const enriched = combined.map((newSig: any) => {
+            const old = cachedByHash.get(newSig.action_hash);
+            if (!old) return newSig;
+            return {
+              ...newSig,
+              thumbnail: newSig.thumbnail ?? old.thumbnail,
+              revoked: old.revoked || newSig.revoked,
+              revoked_at: newSig.revoked_at ?? old.revoked_at,
+              revocation_reason: newSig.revocation_reason ?? old.revocation_reason,
+            };
+          });
           const newHashes = new Set(
-            combined.map((s) => s.action_hash).filter(Boolean) as string[],
+            enriched.map((s: any) => s.action_hash).filter(Boolean) as string[],
           );
           const merged = [
-            ...combined,
+            ...enriched,
             ...signaturesSig.value.filter(
               (s: any) => s.action_hash && !newHashes.has(s.action_hash),
             ),
