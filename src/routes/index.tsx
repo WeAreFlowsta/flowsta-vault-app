@@ -137,7 +137,15 @@ export default component$(() => {
           (typeof sig.file_hash === "string" && sig.file_hash.length >= 8
             ? `${sig.file_hash.slice(0, 8)}…`
             : "a file");
-        recentActivities.push({ kind: "signature", timestamp: sig.signed_at, label });
+        // `signed_at` is committed by the signing DNA in milliseconds
+        // (commands.rs uses `as_millis()`), but `timeAgo` + the other
+        // activity sources (backups, links) deal in seconds — convert
+        // so the merged feed sorts and renders correctly.
+        recentActivities.push({
+          kind: "signature",
+          timestamp: Math.floor(sig.signed_at / 1000),
+          label,
+        });
       }
     }
   }
@@ -254,7 +262,7 @@ export default component$(() => {
           </p>
           <p class="mt-1 text-xs text-gray-500">
             {!sigsLoaded
-              ? "Syncing from the network…"
+              ? "Syncing — first load takes a few minutes"
               : sigCount === 0
                 ? "Sign your first file"
                 : [

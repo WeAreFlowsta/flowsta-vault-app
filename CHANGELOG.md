@@ -5,6 +5,31 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-beta11] — 2026-05-24
+
+Three small fixes; no architectural changes.
+
+### Fixed
+- **Recent Activity timestamps for signatures.** The Overview's Recent
+  Activity feed mixes signatures, backups, and linked-app events
+  through a single `timeAgo(unixSecs)` helper, but `signed_at` is
+  committed by the signing DNA in milliseconds (the other two sources
+  are seconds). Every signature row read "just now". Converted at the
+  call site; signatures now sort and render against the other rows in
+  correct time order.
+- **Overview signature tile caption** changed from `"Syncing from the
+  network…"` to `"Syncing — first load takes a few minutes"` so a
+  first-install user has the expected wait calibrated. (Sign It and
+  All Signatures already cycle through staged messages over the
+  cold-start window via `LoadingSignatures`.)
+
+### Changed
+- Removed the beta10 `[diag:*]` frontend log calls. Behaviour validated
+  on Linux + Windows for fresh install (~5 min DHT cold-start),
+  lock + unlock (instant from in-memory signal), and restart (instant
+  from localStorage cache). `@tauri-apps/plugin-log` + the `log:default`
+  capability are kept for future ad-hoc diagnostics.
+
 ## [0.6.0-beta10] — 2026-05-24
 
 Diagnostic-only release. **No behavior change** — same code paths as

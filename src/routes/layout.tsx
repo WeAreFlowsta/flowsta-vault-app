@@ -3,7 +3,6 @@ import { useLocation, useNavigate, Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-shell";
-import { info as logInfo, warn as logWarn } from "@tauri-apps/plugin-log";
 import { SetupWizard } from "~/components/vault/SetupWizard";
 import { UnlockScreen } from "~/components/vault/UnlockScreen";
 import { StatusIndicator } from "~/components/vault/StatusIndicator";
@@ -54,10 +53,8 @@ export default component$(() => {
   // pick up linked-agent sigs that the current call missed).
   const pendingRefresh = useSignal(false);
   const refreshSignatures = $(async () => {
-    logInfo(`[diag:refresh] enter refreshSignatures (refreshing=${signaturesRefreshing.value}, loaded=${signaturesLoaded.value}, sigCount=${signaturesSig.value.length})`);
     if (signaturesRefreshing.value) {
       pendingRefresh.value = true;
-      logInfo(`[diag:refresh] already in flight — set pendingRefresh=true, return`);
       return;
     }
     signaturesRefreshing.value = true;
@@ -72,19 +69,13 @@ export default component$(() => {
       // Own: local source-chain query, retry on Err.
       const fetchOwn = async (): Promise<any[]> => {
         for (let i = 0; i < 3; i++) {
-          const t0 = Date.now();
-          logInfo(`[diag:own] attempt ${i + 1}/3 — invoking get_my_own_signatures`);
           try {
             const r = await invoke<any[]>("get_my_own_signatures");
-            const len = Array.isArray(r) ? r.length : -1;
-            logInfo(`[diag:own] attempt ${i + 1} OK in ${Date.now() - t0}ms — got ${len} sig(s)`);
             return Array.isArray(r) ? r : [];
-          } catch (e) {
-            logWarn(`[diag:own] attempt ${i + 1} threw after ${Date.now() - t0}ms: ${String(e).slice(0, 200)}`);
+          } catch {
             if (i < 2) await new Promise((r) => setTimeout(r, 2_000));
           }
         }
-        logWarn(`[diag:own] all 3 attempts exhausted, returning []`);
         return [];
       };
 
@@ -101,51 +92,27 @@ export default component$(() => {
         let lastRes: { signatures: any[]; has_linked_agents: boolean } | null = null;
         let allAttemptsOk = true;
         for (let i = 0; i < 3; i++) {
-          const t0 = Date.now();
-          logInfo(`[diag:linked] attempt ${i + 1}/3 — invoking get_my_linked_signatures`);
           try {
             const r = await invoke<{ signatures: any[]; has_linked_agents: boolean }>(
               "get_my_linked_signatures",
             );
             lastRes = r;
-            logInfo(`[diag:linked] attempt ${i + 1} OK in ${Date.now() - t0}ms — sigs=${r.signatures.length} has_linked=${r.has_linked_agents}`);
-            if (!r.has_linked_agents) {
-              logInfo(`[diag:linked] no linked agents — confident empty, return`);
-              return { sigs: [], confident: true };
-            }
-            if (r.signatures.length > 0) {
-              logInfo(`[diag:linked] got ${r.signatures.length} sigs — confident, return`);
-              return { sigs: r.signatures, confident: true };
-            }
-            logInfo(`[diag:linked] has linked but empty — keep trying`);
-          } catch (e) {
+            if (!r.has_linked_agents) return { sigs: [], confident: true };
+            if (r.signatures.length > 0) return { sigs: r.signatures, confident: true };
+          } catch {
             allAttemptsOk = false;
-            logWarn(`[diag:linked] attempt ${i + 1} threw after ${Date.now() - t0}ms: ${String(e).slice(0, 200)}`);
           }
           if (i < 2) await new Promise((r) => setTimeout(r, 5_000));
         }
-        if (lastRes && !lastRes.has_linked_agents) {
-          logInfo(`[diag:linked] exhausted — last result had no linked agents, confident empty`);
-          return { sigs: [], confident: true };
-        }
-        if (allAttemptsOk) {
-          logInfo(`[diag:linked] exhausted — all 3 attempts ok-but-empty, treating as confident`);
-          return { sigs: [], confident: true };
-        }
-        logWarn(`[diag:linked] exhausted — had errors, NOT confident (sigs=${lastRes?.signatures?.length ?? 0})`);
+        if (lastRes && !lastRes.has_linked_agents) return { sigs: [], confident: true };
+        if (allAttemptsOk) return { sigs: [], confident: true };
         return { sigs: lastRes?.signatures ?? [], confident: false };
       };
 
-      let iter = 0;
       do {
-        iter++;
         pendingRefresh.value = false;
-        logInfo(`[diag:refresh] iteration ${iter} start — dispatching fetchOwn + fetchLinked in parallel`);
-        const tIter = Date.now();
 
         const [own, linkedRes] = await Promise.all([fetchOwn(), fetchLinked()]);
-
-        logInfo(`[diag:refresh] iter ${iter} both resolved in ${Date.now() - tIter}ms — own=${own.length}, linked.sigs=${linkedRes.sigs.length}, linked.confident=${linkedRes.confident}`);
 
         // Own wins over linked on hash collision (own has accurate
         // revocation; linked-agent builds always set revoked: false).
@@ -158,7 +125,6 @@ export default component$(() => {
             (s) => s.action_hash && !ownHashes.has(s.action_hash),
           ),
         ];
-        logInfo(`[diag:refresh] iter ${iter} combined.length=${combined.length} (cache had ${signaturesSig.value.length})`);
 
         if (combined.length > 0) {
           // Merge by action_hash — new round wins for present hashes,
@@ -176,30 +142,21 @@ export default component$(() => {
           ];
           signaturesSig.value = merged;
           persistSignaturesCache(merged);
-          logInfo(`[diag:refresh] iter ${iter} merged signaturesSig.value=${merged.length}, persisted cache`);
-        } else {
-          logInfo(`[diag:refresh] iter ${iter} combined empty — cache NOT touched (sig=${signaturesSig.value.length})`);
         }
+        // combined.length === 0: both queries came back empty after
+        // their own retries. Don't overwrite the cache — keep whatever
+        // we had.
 
         // Promote to "loaded" only when linked is confident. If linked
-        // isn't confident, stay in "Syncing from the network…" — the
-        // background retry interval will fire this again until it is.
-        // Exception: if the cache already has data from a prior session
-        // and that data covers everything this round produced, the user
-        // shouldn't see "Syncing" — the cache count is authoritative
-        // until linked succeeds and possibly bumps it up.
+        // isn't confident, stay in "Syncing — first load takes a few
+        // minutes" — the background retry interval will fire this
+        // again until it is.
         if (linkedRes.confident) {
-          const wasLoaded = signaturesLoaded.value;
           signaturesLoaded.value = true;
-          logInfo(`[diag:refresh] iter ${iter} PROMOTED signaturesLoaded ${wasLoaded}->true`);
-        } else {
-          logInfo(`[diag:refresh] iter ${iter} NOT promoting loaded (linked not confident); pendingRefresh=${pendingRefresh.value}`);
         }
       } while (pendingRefresh.value);
-      logInfo(`[diag:refresh] do-while loop exited after ${iter} iteration(s)`);
     } finally {
       signaturesRefreshing.value = false;
-      logInfo(`[diag:refresh] exit refreshSignatures (sigCount=${signaturesSig.value.length}, loaded=${signaturesLoaded.value})`);
     }
   });
   useContextProvider(signaturesContext, {
@@ -277,13 +234,9 @@ export default component$(() => {
       // session — hydrate returns [] when the cache key doesn't match.
       setActiveSignatureAgent(identity.agent_pub_key);
       const cached = hydrateSignaturesCache<any>();
-      logInfo(`[diag:hydrate] agent=${identity.agent_pub_key.slice(0, 12)}… cached=${cached.length}, current signaturesSig=${signaturesSig.value.length}`);
       if (cached.length > 0 && signaturesSig.value.length === 0) {
         signaturesSig.value = cached;
         signaturesLoaded.value = true;
-        logInfo(`[diag:hydrate] adopted cache (${cached.length} sigs) — set loaded=true`);
-      } else {
-        logInfo(`[diag:hydrate] skipped adopt (cached=${cached.length}, currentSig=${signaturesSig.value.length})`);
       }
     } catch {
       // Non-critical — header just won't show profile info
@@ -481,7 +434,6 @@ export default component$(() => {
     // agent key is now available — refresh signatures to pick up linked-agent
     // sigs that the first fetch may have missed.
     const unlistenProfilePromise = listen("profile-synced", () => {
-      logInfo(`[diag:trigger] profile-synced event — calling refreshSignatures`);
       fetchProfile();
       refreshSignatures();
     });
@@ -503,16 +455,11 @@ export default component$(() => {
     const s = track(() => screen.value);
     const loaded = track(() => signaturesLoaded.value);
     if (s !== "dashboard" || loaded) return;
-    logInfo(`[diag:bg] interval armed (screen=${s}, loaded=${loaded})`);
 
     const id = setInterval(() => {
-      logInfo(`[diag:bg] tick — loaded=${signaturesLoaded.value}, refreshing=${signaturesRefreshing.value}`);
       if (!signaturesLoaded.value) refreshSignatures();
     }, 30_000);
-    cleanup(() => {
-      logInfo(`[diag:bg] interval cleared`);
-      clearInterval(id);
-    });
+    cleanup(() => clearInterval(id));
   });
 
   // Listen for the DNA-updater's verdict on this app version. When the API's
@@ -554,9 +501,7 @@ export default component$(() => {
   useVisibleTask$(({ track }) => {
     const status = track(() => conductorStatus.value);
     const scr = track(() => screen.value);
-    logInfo(`[diag:trigger] conductor-status changed: status=${status}, screen=${scr}`);
     if (scr === "dashboard" && status === "ready") {
-      logInfo(`[diag:trigger] conductor ready on dashboard — calling refreshSignatures`);
       refreshSignatures();
     }
   });
