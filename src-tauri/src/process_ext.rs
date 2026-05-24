@@ -18,7 +18,7 @@
 //! terminations on macOS / Windows can still leak children. Job Objects
 //! (Windows) and kqueue (macOS) remain TODO.
 //!
-//! ## Why post-spawn hide instead of `CREATE_NO_WINDOW`
+//! ## Why CREATE_SUSPENDED instead of `CREATE_NO_WINDOW`
 //!
 //! v0.5.0 set `CREATE_NO_WINDOW` (0x08000000) on Windows to suppress the
 //! console windows. That flag does more than hide the window — it prevents
@@ -28,14 +28,20 @@
 //! dereferences the (null) console handle. v0.5.1 reverted to default flags
 //! to restore reliable installs but at the cost of visible terminals.
 //!
-//! v0.5.2's approach: spawn normally so the console is allocated and
-//! handles work, then enumerate the new process's top-level windows and
-//! `ShowWindow(SW_HIDE)` each one. There's a brief flash (~50ms) while we
-//! find and hide the window, but no crashes. The polled hide thread retries
-//! for up to 2 seconds, so even if the window appears late we still catch
-//! it. To eliminate the flash entirely, a future change could spawn with
-//! `CREATE_SUSPENDED` via raw `CreateProcessW`, hide the window, then
-//! `ResumeThread` — much more invasive and not necessary for the MVP.
+//! v0.5.2 took the post-spawn approach: spawn normally, then enumerate the
+//! new process's top-level windows in a background thread and
+//! `ShowWindow(SW_HIDE)` each one. No crashes, but ~50 ms visibility
+//! flicker between the OS toggling `WS_VISIBLE` on and our next poll
+//! catching it.
+//!
+//! Current approach: spawn with `CREATE_SUSPENDED` (0x4). The kernel
+//! creates the process and its primary thread, allocates the console
+//! (so handles are valid — no `0xc0000005`), then pauses the primary
+//! thread before any child code runs. We then synchronously poll for
+//! the console window (up to ~500 ms), `ShowWindow(SW_HIDE)` it before
+//! any paint can happen, and `ResumeThread` the primary thread. The
+//! async post-spawn hide is retained as a backup for the case where
+//! conhost spawns its window after we resume.
 
 use std::io;
 use std::process::{Child, Command};
@@ -77,9 +83,46 @@ impl CommandExt for Command {
 
     #[cfg(target_os = "windows")]
     fn spawn_hidden(&mut self) -> io::Result<Child> {
-        let child = self.spawn()?;
+        use std::os::windows::process::CommandExt as _;
+        use std::time::{Duration, Instant};
+
+        /// `CREATE_SUSPENDED` from `CreateProcessW` flags. Defined inline
+        /// to avoid pulling another `windows-sys` feature just for one
+        /// constant.
+        const CREATE_SUSPENDED: u32 = 0x0000_0004;
+
+        let started = Instant::now();
+        let child = self.creation_flags(CREATE_SUSPENDED).spawn()?;
         let pid = child.id();
-        log::info!("[hide] spawned child pid {pid}, dispatching async hide thread");
+        log::info!("[hide] spawned suspended child pid {pid}");
+
+        // Synchronous best-effort hide while the primary thread is paused.
+        // 500 ms budget — long enough for the kernel to create the console
+        // window after CreateProcessW returns, short enough that we don't
+        // delay conductor startup by much. Polled at 25 ms intervals
+        // (tighter than the async path's 50 ms).
+        let sync_result = windows_hide::hide_console_for_pid_sync(
+            pid,
+            Duration::from_millis(500),
+            Duration::from_millis(25),
+        );
+        log::info!(
+            "[hide:{pid}] sync pre-resume: hides={}, visible_hides={}, iters={}, {}ms",
+            sync_result.hides,
+            sync_result.visible_hides,
+            sync_result.iters,
+            started.elapsed().as_millis(),
+        );
+
+        // Release the primary thread (which CREATE_SUSPENDED paused). At
+        // this point the process has only its primary thread, but loop
+        // through all threads of the pid defensively.
+        let resumed = windows_hide::resume_all_threads_for_pid(pid);
+        log::info!("[hide:{pid}] resumed {resumed} thread(s)");
+
+        // Backup async-hide pass in case conhost spawns its visible
+        // window only after ResumeThread (e.g. ConPTY late-init). Cheap
+        // when nothing is left to hide — SW_HIDE is idempotent.
         windows_hide::hide_console_for_pid_async(pid);
         Ok(child)
     }
@@ -120,8 +163,9 @@ mod windows_hide {
     use windows_sys::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
+        TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
     };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible, ShowWindow, SW_HIDE,
     };
@@ -291,6 +335,98 @@ mod windows_hide {
             first_class,
             first_via_parent_class,
         }
+    }
+
+    /// Result of the synchronous pre-resume hide pass.
+    pub(super) struct SyncHideResult {
+        pub hides: u32,
+        pub visible_hides: u32,
+        pub iters: u32,
+    }
+
+    /// Synchronous version of the async hide loop, used while a
+    /// `CREATE_SUSPENDED` child is paused. Polls `EnumWindows` until
+    /// either the budget is exhausted *or* we've successfully hidden
+    /// a visible window in this call (one hit is usually enough; the
+    /// async backup pass picks up any late conhost window after
+    /// `ResumeThread`). Returns counts for logging.
+    pub(super) fn hide_console_for_pid_sync(
+        pid: u32,
+        budget: Duration,
+        poll_interval: Duration,
+    ) -> SyncHideResult {
+        let started = Instant::now();
+        let deadline = started + budget;
+        let mut iters: u32 = 0;
+        let mut hides: u32 = 0;
+        let mut visible_hides: u32 = 0;
+        while Instant::now() < deadline {
+            iters += 1;
+            let parent_map = build_parent_map();
+            let pass = try_hide_once(pid, &parent_map);
+            hides += pass.hides;
+            visible_hides += pass.hides_while_visible;
+            if pass.hides_while_visible > 0 {
+                // Got a visible window — likely the console host. Stop
+                // here; further polling just adds latency. Anything new
+                // after ResumeThread is the async path's job.
+                break;
+            }
+            std::thread::sleep(poll_interval);
+        }
+        SyncHideResult { hides, visible_hides, iters }
+    }
+
+    /// Enumerate threads owned by `pid` via Toolhelp32 and `ResumeThread`
+    /// each one. Used after spawning with `CREATE_SUSPENDED` to release
+    /// the (single) primary thread. Returns the count of threads we
+    /// successfully resumed. Logs but does not propagate errors —
+    /// failing to resume would leave the conductor hung, but there's
+    /// no recovery action the caller can take here.
+    pub(super) fn resume_all_threads_for_pid(pid: u32) -> u32 {
+        let mut resumed: u32 = 0;
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snap.is_null() || snap == INVALID_HANDLE_VALUE {
+                log::warn!("[hide:{pid}] thread snapshot failed; cannot resume");
+                return 0;
+            }
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            if Thread32First(snap, &mut entry) != 0 {
+                loop {
+                    if entry.th32OwnerProcessID == pid {
+                        let handle = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                        if !handle.is_null() {
+                            // ResumeThread returns the previous suspend
+                            // count; -1 (u32::MAX) signals failure. One
+                            // call is enough because CREATE_SUSPENDED
+                            // adds exactly one suspend.
+                            let prev = ResumeThread(handle);
+                            if prev != u32::MAX {
+                                resumed += 1;
+                            } else {
+                                log::warn!(
+                                    "[hide:{pid}] ResumeThread failed for tid {}",
+                                    entry.th32ThreadID,
+                                );
+                            }
+                            CloseHandle(handle);
+                        } else {
+                            log::warn!(
+                                "[hide:{pid}] OpenThread failed for tid {}",
+                                entry.th32ThreadID,
+                            );
+                        }
+                    }
+                    if Thread32Next(snap, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snap);
+        }
+        resumed
     }
 
     pub(super) fn hide_console_for_pid_async(pid: u32) {

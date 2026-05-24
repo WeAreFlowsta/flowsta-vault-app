@@ -5,6 +5,42 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-beta12] — 2026-05-24
+
+Windows-only: eliminate the lair + holochain console window flash on
+spawn. v0.5.2's approach left a ~50 ms flicker between Windows
+toggling `WS_VISIBLE` on and our async hide thread catching it.
+
+### Changed
+- `process_ext::spawn_hidden` (Windows): now spawns with
+  `CREATE_SUSPENDED` (0x4) via
+  `std::os::windows::process::CommandExt::creation_flags`. The kernel
+  allocates the console (so signing-DNA WASM compile still has a valid
+  console handle — that's what crashed v0.5.0's `CREATE_NO_WINDOW`)
+  but the primary thread is paused before any child code runs.
+- New `windows_hide::hide_console_for_pid_sync` polls
+  `EnumWindows` + `ShowWindow(SW_HIDE)` while the child is suspended,
+  with a 500 ms budget and 25 ms interval. Stops as soon as one
+  visible window is hidden.
+- New `windows_hide::resume_all_threads_for_pid` enumerates the
+  process's threads via Toolhelp32 (`TH32CS_SNAPTHREAD`) and calls
+  `OpenThread(THREAD_SUSPEND_RESUME)` + `ResumeThread` on each. Single
+  primary thread is the expected case; iterating defensively.
+- The existing async-hide thread is retained as a backup for any
+  conhost window that appears post-`ResumeThread` (e.g. ConPTY late
+  init).
+
+### Effect
+- No visible terminal flash on Vault launch on Windows.
+- If the suspended-window hide misses (window appears only after
+  resume), the async backup catches it within ~50 ms — same UX as
+  beta11. Logs show which path hid the window
+  (`[hide:NNNN] sync pre-resume: ...` vs `[hide:NNNN] hid N visible
+  window(s) on iter ...`).
+- No change to Linux / macOS (Windows-only code path).
+
+If this regresses, fall back to v0.6.0-beta11.
+
 ## [0.6.0-beta11] — 2026-05-24
 
 Three small fixes; no architectural changes.
