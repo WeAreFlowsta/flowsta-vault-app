@@ -5,6 +5,30 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-beta10] — 2026-05-24
+
+Diagnostic-only release. **No behavior change** — same code paths as
+beta9. The frontend signatures refresh now logs its state transitions
+through `tauri-plugin-log` so they land in the same log file as the
+Rust side, making the next investigation evidence-based rather than
+guess-based.
+
+### Added
+- `@tauri-apps/plugin-log` JS bridge + `log:default` capability.
+- Frontend log events tagged `[diag:refresh]`, `[diag:own]`,
+  `[diag:linked]`, `[diag:hydrate]`, `[diag:trigger]`, `[diag:bg]`
+  covering: refreshSignatures enter/exit, each fetchOwn/fetchLinked
+  attempt with elapsed time + result, combined.length per iteration,
+  signaturesSig + signaturesLoaded writes, cache hydrate (cached
+  count, adopt vs skip), profile-synced + conductor-ready triggers,
+  background interval ticks.
+
+### How to read the log
+On Linux: `tail -f ~/.local/share/com.flowsta.vault/logs/flowsta-vault.log`.
+On Windows: `%LOCALAPPDATA%\com.flowsta.vault\logs\flowsta-vault.log`.
+Filter with `grep diag:` (or just search for the bracketed tag) to see
+only the FE refresh story.
+
 ## [0.6.0-beta9] — 2026-05-24
 
 Ninth 0.6.1 / Iroh beta. Two-fold cold-start time cut so a fresh
