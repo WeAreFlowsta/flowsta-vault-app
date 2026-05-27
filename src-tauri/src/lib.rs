@@ -19,17 +19,27 @@ use std::sync::Arc;
 /// Resolve a sidecar binary path.
 ///
 /// In production (bundled app), binaries are next to the main executable
-/// (e.g. Contents/MacOS/holochain on macOS). In development, they're on PATH
-/// via cargo install.
+/// (e.g. Contents/MacOS/vault-holochain on macOS). In development, look
+/// inside `src-tauri/binaries/` first (matching how CI populates that
+/// directory) so devs don't need a `vault-`-prefixed binary on PATH.
 pub fn resolve_sidecar_bin(name: &str) -> PathBuf {
     if cfg!(debug_assertions) {
-        // Dev mode: use PATH (cargo-installed binary)
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let binaries = std::path::Path::new(manifest).join("binaries");
+        let prefix = format!("{}-", name);
+        if let Ok(entries) = std::fs::read_dir(&binaries) {
+            for entry in entries.flatten() {
+                if let Some(s) = entry.file_name().to_str() {
+                    if s.starts_with(&prefix) {
+                        return entry.path();
+                    }
+                }
+            }
+        }
         return PathBuf::from(name);
     }
-    // Production: binary is next to our executable
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // On Windows, binaries have .exe extension
             let candidate = if cfg!(target_os = "windows") {
                 dir.join(format!("{}.exe", name))
             } else {
@@ -40,7 +50,6 @@ pub fn resolve_sidecar_bin(name: &str) -> PathBuf {
             }
         }
     }
-    // Fallback to PATH
     PathBuf::from(name)
 }
 use tauri::{

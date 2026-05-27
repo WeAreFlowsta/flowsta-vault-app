@@ -118,7 +118,7 @@ pub fn start_lair_process(
     let config_path = lair_dir.join("lair-keystore-config.yaml");
     let is_first_run = !config_path.exists();
 
-    let lair_bin = crate::resolve_sidecar_bin("lair-keystore");
+    let lair_bin = crate::resolve_sidecar_bin("vault-lair-keystore");
     log::info!("Using lair-keystore binary: {:?}", lair_bin);
 
     if is_first_run {

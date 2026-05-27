@@ -178,7 +178,7 @@ pub fn start_conductor_process(
     let stderr_file = std::fs::File::create(&stderr_path)
         .map_err(|e| format!("Failed to create conductor stderr log: {}", e))?;
 
-    let holochain_bin = crate::resolve_sidecar_bin("holochain");
+    let holochain_bin = crate::resolve_sidecar_bin("vault-holochain");
     log::info!("Using holochain binary: {:?}", holochain_bin);
 
     // Hide the conductor's console window on Windows via post-spawn
