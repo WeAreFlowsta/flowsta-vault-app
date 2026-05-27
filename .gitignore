@@ -49,3 +49,8 @@ src-tauri/gen/
 src-tauri/Cargo.lock
 src-tauri/binaries/
 src-tauri/.cargo/config.toml
+
+# Local-only build infrastructure not meant for the repo
+src-tauri/.cargo/config.toml.staging
+src-tauri/certs/
+src-tauri/vendor/

@@ -33,7 +33,20 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+
+/// Bring the Vault window to the foreground so a freshly-emitted consent
+/// dialog isn't hidden behind the third-party app the user just clicked.
+/// Best-effort: silently no-ops if the main window can't be resolved
+/// (shouldn't happen, but we don't want a focus failure to block the
+/// actual request).
+fn raise_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
 use tower_http::cors::CorsLayer;
 
 /// Shared state for the IPC server (references the main AppState).
@@ -456,6 +469,7 @@ async fn authenticate_handler(
             "reason": req.reason,
         });
 
+        raise_window(&state.app_handle);
         let _ = state.app_handle.emit("auth-request", event_payload);
 
         // Wait for user response with 60s timeout
@@ -809,6 +823,7 @@ async fn link_identity_handler(
         "replacing_existing": replacing_existing,
     });
 
+    raise_window(&state.app_handle);
     let _ = state.app_handle.emit("link-identity-request", event_payload);
 
     // Wait for user response with 60s timeout
@@ -1605,6 +1620,7 @@ async fn sign_document_handler(
         "label": req.label,
         "origin": origin,
     });
+    raise_window(&state.app_handle);
     let _ = state.app_handle.emit("document-sign-request", event_payload);
 
     // 7. Wait for user response with 60s timeout
