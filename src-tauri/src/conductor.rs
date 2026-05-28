@@ -111,6 +111,29 @@ pub fn generate_conductor_config(
         bootstrap_url.trim_end_matches('/').trim_end_matches('.'),
     );
 
+    // Optional auth material for bootstraps that require it (Flowsta's
+    // own bootstrap once `--authentication-hook-server` is on). Same value
+    // goes into both `base64_auth_material_bootstrap` and
+    // `base64_auth_material_relay` because the unified bootstrap+signal+
+    // relay server still treats those as independent auth flows in
+    // kitsune2.
+    //
+    // Encoding: base64::engine::general_purpose::STANDARD (standard
+    // alphabet, REQUIRED `=` padding). The Holochain conductor docstring
+    // claims url-safe-no-pad but the actual decoder is STANDARD — see
+    // BOOTSTRAP_AUTH_PLAN.md for the gory details.
+    //
+    // Empty / unset env var → field omitted from the YAML, conductor
+    // talks to bootstrap anonymously (works fine until the server flips
+    // to required-auth).
+    let auth_lines = match option_env!("FLOWSTA_AUTH_MATERIAL") {
+        Some(material) if !material.is_empty() => format!(
+            "  base64_auth_material_bootstrap: \"{m}\"\n  base64_auth_material_relay: \"{m}\"\n",
+            m = material,
+        ),
+        _ => String::new(),
+    };
+
     // Path values use SINGLE-quoted YAML strings — double-quoted YAML interprets
     // backslash escapes (e.g. "C:\Users\..." reads "\U" as the start of a Unicode
     // escape and bombs out at the first non-hex character). Single-quoted strings
@@ -134,7 +157,7 @@ network:
   bootstrap_url: {bootstrap_url}
   signal_url: {signal_url}
   relay_url: {relay_url}
-  # Default is 60s; on a fresh install of a returning agent the local
+{auth_lines}  # Default is 60s; on a fresh install of a returning agent the local
   # cell is empty and the signing zome's get_links / get calls hit
   # kitsune2's request_timeout while the DHT is warming up, returning
   # `get_links response channel dropped: likely response timeout` to
@@ -148,6 +171,7 @@ network:
         bootstrap_url = bootstrap_url,
         signal_url = signal_url,
         relay_url = relay_url,
+        auth_lines = auth_lines,
     );
 
     let config_path = conductor_dir.join("conductor-config.yaml");
