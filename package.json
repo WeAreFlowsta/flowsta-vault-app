@@ -22,7 +22,7 @@
     "start": "vite --open --mode ssr",
     "qwik": "qwik",
     "tauri": "tauri",
-    "tauri:dev-staging": "VITE_API_URL=https://auth-api-staging.flowsta.com VITE_WEB_URL=https://ourtest.flowsta.com FLOWSTA_API_URL=https://auth-api-staging.flowsta.com FLOWSTA_BOOTSTRAP_URL=https://bootstrap-staging.flowsta.com FLOWSTA_SIGNAL_URL=wss://bootstrap-staging.flowsta.com tauri dev --config '{\"identifier\":\"com.flowsta.vault.staging\",\"productName\":\"Flowsta Vault (Staging)\"}'"
+    "tauri:dev-staging": "VITE_API_URL=https://auth-api-staging.flowsta.com VITE_WEB_URL=https://ourtest.flowsta.com FLOWSTA_API_URL=https://auth-api-staging.flowsta.com FLOWSTA_BOOTSTRAP_URL=https://bootstrap-staging.flowsta.com FLOWSTA_SIGNAL_URL=wss://bootstrap-staging.flowsta.com FLOWSTA_AUTH_MATERIAL=eyJjbGllbnRfaWQiOiJmbG93c3RhX2FwcF9iZGZmZDBjMTcwOTBiZDRkMzEyMWUwZjZkZGUzMmE0MDJjYWNmMTk3NmNiYjIzNDgzODA1MDAyZTJkNmE0Zjk0In0= tauri dev --config '{\"identifier\":\"com.flowsta.vault.staging\",\"productName\":\"Flowsta Vault (Staging)\"}'"
   },
   "devDependencies": {
     "@builder.io/qwik": "^1.19.0",

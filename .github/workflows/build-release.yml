@@ -228,6 +228,13 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # base64(STANDARD) of {"client_id":"<vault-prod-app>"} — written
+          # into base64_auth_material_bootstrap AND _relay by conductor.rs.
+          # Safe to ship before bootstrap.flowsta.com is flipped to
+          # required-auth: an auth-material set against an open bootstrap
+          # is a no-op. client_id is a public identifier; the secret just
+          # keeps it out of the workflow file.
+          FLOWSTA_AUTH_MATERIAL: ${{ secrets.FLOWSTA_AUTH_MATERIAL_PRODUCTION }}
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '-' }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

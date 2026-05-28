@@ -133,6 +133,12 @@ jobs:
           FLOWSTA_API_URL: ${{ vars.STAGING_API_URL }}
           FLOWSTA_BOOTSTRAP_URL: ${{ vars.STAGING_BOOTSTRAP_URL }}
           FLOWSTA_SIGNAL_URL: ${{ vars.STAGING_SIGNAL_URL }}
+          # base64(STANDARD) of {"client_id":"<vault-staging-app>"} — same value
+          # goes into both base64_auth_material_bootstrap and _relay in the
+          # conductor config. Vault Staging registered as a Holochain app in
+          # dev-staging.flowsta.com. client_id is a public identifier; the
+          # secret just keeps the value out of the workflow file for cleanliness.
+          FLOWSTA_AUTH_MATERIAL: ${{ secrets.FLOWSTA_AUTH_MATERIAL_STAGING }}
           VITE_API_URL: ${{ vars.STAGING_API_URL }}
           VITE_WEB_URL: ${{ vars.STAGING_WEB_URL }}
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '-' }}
