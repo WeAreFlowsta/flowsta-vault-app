@@ -19,6 +19,11 @@ interface BackupStats {
   apps: BackupAppSummary[];
 }
 
+interface BackupRecordSummary {
+  counts_by_entry_type: Record<string, number>;
+  total_records: number;
+}
+
 interface BackupMeta {
   client_id: string;
   app_name: string;
@@ -26,6 +31,23 @@ interface BackupMeta {
   created_at: number;
   data_size: number;
   content_type: string;
+  summary?: BackupRecordSummary | null;
+}
+
+/**
+ * Format a BackupRecordSummary as "12 polls, 38 votes". Pluralises
+ * lowercase entry-type names; returns null when nothing to show.
+ */
+function formatSummary(s: BackupRecordSummary | null | undefined): string | null {
+  if (!s || s.total_records === 0) return null;
+  const parts = Object.entries(s.counts_by_entry_type)
+    .filter(([, n]) => n > 0)
+    .map(([t, n]) => {
+      const lower = t.toLowerCase();
+      const plural = n === 1 ? lower : `${lower}s`;
+      return `${n} ${plural}`;
+    });
+  return parts.length > 0 ? parts.join(", ") : null;
 }
 
 interface VaultIdentity {
@@ -420,6 +442,7 @@ export default component$(() => {
                             const labelKey = `${backup.client_id}:${backup.label || "latest"}`;
                             const isExporting = exportingLabel.value === labelKey;
                             const isDeleteConfirm = deleteSingleConfirm.value === labelKey;
+                            const summaryLabel = formatSummary(backup.summary);
 
                             return (
                               <div
@@ -433,6 +456,12 @@ export default component$(() => {
                                   <p class="text-xs text-gray-500">
                                     {formatDateTime(backup.created_at)} &middot;{" "}
                                     {formatBytes(backup.data_size)}
+                                    {summaryLabel && (
+                                      <>
+                                        {" "}&middot;{" "}
+                                        <span class="text-gray-400">{summaryLabel}</span>
+                                      </>
+                                    )}
                                   </p>
                                 </div>
 

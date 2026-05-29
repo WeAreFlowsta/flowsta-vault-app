@@ -2378,7 +2378,30 @@ pub fn list_app_backup_details(
     crate::backup::list_app_backups(&state.data_dir, &client_id)
 }
 
-/// Export (decrypt) a single backup by client_id + label.
+/// Export (decrypt) a single app's backup, packaged to help the user
+/// exercise their CAL §4.2.1 portability rights — **for any Holochain app
+/// that backs up to Flowsta Vault**, not just Flowsta's own apps.
+///
+/// The Cryptographic Autonomy License obligates every app shipping under it
+/// to provide users a portable copy of their User Data along with the
+/// cryptographic seeds/keys needed to use the data independently. Vault is
+/// the storage layer for third-party Holochain apps' backups; this export
+/// gives those apps' users a self-contained file that includes:
+///   - the user's Flowsta device seed + agent public key (these are
+///     what Vault holds and the obligation Vault discharges directly),
+///   - the app metadata (name + client_id),
+///   - the backup itself with the canonical-shape `human_readable` view of
+///     each record promoted to plain JSON, and
+///   - per-section `_readme` text + the CAL-1.0 citation.
+///
+/// What this export does NOT include is any private key the third-party app
+/// generated outside Vault — e.g. an independent Holochain agent key that
+/// authored the records but was never derived from the Flowsta seed. If an
+/// app needs to expose such keys to satisfy its own CAL §4.2.1 obligation
+/// it must include them in the canonical backup payload it sends to Vault;
+/// the SDK passes through arbitrary top-level fields (alongside `cells[]`
+/// and `_summary`) so an app can add e.g. an `app_keys` block and Vault
+/// will inline it here verbatim under `backup.data`.
 #[tauri::command]
 pub fn export_single_backup(
     client_id: String,
@@ -2388,22 +2411,73 @@ pub fn export_single_backup(
     let label_ref = label.as_deref();
     let (data, meta) = crate::backup::retrieve_backup(&state, &client_id, label_ref)?;
 
-    let data_value = if meta.content_type.contains("json") {
-        serde_json::from_slice(&data)
-            .unwrap_or_else(|_| serde_json::Value::String(hex::encode(&data)))
+    // Vault identity + keys, same source as export_all_data.
+    let config = {
+        let config = state.vault_config.lock().unwrap();
+        config.as_ref().ok_or("Vault is locked")?.clone()
+    };
+    let device_seed_hex = config.device_seed.as_ref().map(hex::encode);
+
+    // Parse the backup data + canonicalise the human-readable view if it
+    // follows the SDK's canonical shape; otherwise pass through unchanged.
+    let parsed_data = if meta.content_type.contains("json") {
+        serde_json::from_slice::<serde_json::Value>(&data).ok()
     } else {
-        serde_json::Value::String(hex::encode(&data))
+        None
+    };
+    let data_value = match parsed_data {
+        Some(json) if crate::backup::is_canonical_backup(&json) => {
+            crate::backup::canonicalize_for_export(&json)
+        }
+        Some(json) => json,
+        None => serde_json::Value::String(hex::encode(&data)),
     };
 
     Ok(serde_json::json!({
-        "label": meta.label,
-        "app_name": meta.app_name,
-        "created_at": meta.created_at,
-        "data_size": meta.data_size,
-        "content_type": meta.content_type,
-        "data": data_value,
+        "_readme": concat!(
+            "This file is a single-app export of your data from Flowsta Vault. ",
+            "It contains the cryptographic keys you need to use this data ",
+            "on any other Holochain conductor, plus the data itself in ",
+            "plain-readable JSON. KEEP THIS FILE SAFE — anyone with the ",
+            "device_seed can sign as you on the Holochain network.",
+        ),
+        "format": {
+            "version": "1.0",
+            "exported_at": crate::backup::iso_now(),
+            "license": "Cryptographic Autonomy License v1.0 (CAL-1.0)",
+            "license_clause": "§4.2.1 No Withholding User Data",
+        },
+        "you": {
+            "_readme": "Your Flowsta identity. The DID is your decentralised identifier; the agent_pub_key is your Holochain network address.",
+            "display_name": config.display_name,
+            "did": config.did,
+            "agent_pub_key": config.agent_pub_key,
+        },
+        "keys": {
+            "_readme": concat!(
+                "Your private cryptographic keys. With this seed you can ",
+                "recreate the same Holochain identity on any conductor and ",
+                "re-author backed-up data. NEVER share these.",
+            ),
+            "device_seed_hex": device_seed_hex,
+            "agent_pub_key_full_b64": config.agent_pub_key_raw_b64,
+        },
+        "app": {
+            "_readme": "The app this backup belongs to.",
+            "name": meta.app_name,
+            "client_id": client_id,
+        },
+        "backup": {
+            "_readme": "Your app data backup. Each record below is one thing you authored.",
+            "label": meta.label,
+            "saved_at": meta.created_at,
+            "size_bytes": meta.data_size,
+            "content_type": meta.content_type,
+            "data": data_value,
+        },
     }))
 }
+
 
 /// Delete a single backup by client_id + label.
 #[tauri::command]

@@ -34,7 +34,7 @@ fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
-fn iso_now() -> String {
+pub fn iso_now() -> String {
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -102,6 +102,22 @@ pub struct BackupMeta {
     pub data_size: usize,
     /// MIME type hint for the data (default: application/json).
     pub content_type: String,
+    /// Per-entry-type counts extracted from canonical-shape payloads at save
+    /// time. None for legacy / non-canonical backups. Lets the Your Data UI
+    /// show "12 polls, 38 votes" without decrypting the payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<BackupRecordSummary>,
+}
+
+/// Per-entry-type record counts. Pulled from a canonical-shape payload's
+/// top-level `_summary` field at save time and persisted with the backup
+/// metadata so the Your Data UI can render counts without decryption.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct BackupRecordSummary {
+    /// Counts keyed by entry type name (e.g. "Poll": 12, "Vote": 38).
+    pub counts_by_entry_type: std::collections::BTreeMap<String, usize>,
+    /// Total record count across all entry types.
+    pub total_records: usize,
 }
 
 /// Summary of all backups for one app.
@@ -112,6 +128,10 @@ pub struct AppBackupSummary {
     pub backup_count: usize,
     pub total_size: usize,
     pub last_backup_at: i64,
+    /// Per-entry-type counts from the most recent canonical-shape backup,
+    /// or None for legacy backups / when no backup metadata has a summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_summary: Option<BackupRecordSummary>,
 }
 
 /// Overall backup stats for the vault.
@@ -281,6 +301,10 @@ pub fn save_backup(
     // Encrypt
     let (ciphertext, nonce_bytes) = encrypt_with_key(data, &backup_key)?;
 
+    // Extract the canonical-shape summary if present, so the Your Data UI can
+    // render per-entry-type counts without decrypting the backup.
+    let summary = extract_summary_if_canonical(data);
+
     let meta = BackupMeta {
         client_id: client_id.to_string(),
         app_name: app_name.to_string(),
@@ -288,6 +312,7 @@ pub fn save_backup(
         created_at: unix_now(),
         data_size: data.len(),
         content_type: content_type.unwrap_or("application/json").to_string(),
+        summary,
     };
 
     let encrypted = EncryptedBackup {
@@ -432,6 +457,7 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
             let mut last_at = 0i64;
             let mut app_name = dir_name.clone();
             let mut client_id = dir_name.clone();
+            let mut latest_summary: Option<BackupRecordSummary> = None;
 
             if let Ok(files) = std::fs::read_dir(entry.path()) {
                 for file in files.filter_map(|f| f.ok()) {
@@ -447,6 +473,7 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
                                 last_at = enc.meta.created_at;
                                 app_name = enc.meta.app_name.clone();
                                 client_id = enc.meta.client_id.clone();
+                                latest_summary = enc.meta.summary.clone();
                             }
                         }
                     }
@@ -462,6 +489,7 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
                     backup_count: app_backups,
                     total_size: app_size,
                     last_backup_at: last_at,
+                    latest_summary,
                 });
             }
         }
@@ -522,6 +550,71 @@ pub fn delete_backup(data_dir: &Path, client_id: &str, label: Option<&str>) -> R
     Ok(())
 }
 
+/// Extract `_summary.counts_by_entry_type` from a canonical-shape JSON payload.
+/// Returns None for non-JSON, non-canonical, or missing-summary cases.
+fn extract_summary_if_canonical(data: &[u8]) -> Option<BackupRecordSummary> {
+    let payload: serde_json::Value = serde_json::from_slice(data).ok()?;
+    if !is_canonical_backup(&payload) {
+        return None;
+    }
+    let summary_obj = payload.get("_summary")?.as_object()?;
+    let total_records = summary_obj.get("totalRecords")?.as_u64()? as usize;
+    let counts_obj = summary_obj.get("countsByEntryType")?.as_object()?;
+    let mut counts = std::collections::BTreeMap::new();
+    for (k, v) in counts_obj {
+        if let Some(n) = v.as_u64() {
+            counts.insert(k.clone(), n as usize);
+        }
+    }
+    Some(BackupRecordSummary {
+        counts_by_entry_type: counts,
+        total_records,
+    })
+}
+
+/// Detect a canonical-shape backup (v1 + `cells[].records[]` per GENERIC_BACKUP_PLAN.md).
+pub fn is_canonical_backup(payload: &serde_json::Value) -> bool {
+    payload
+        .get("version")
+        .and_then(|v| v.as_u64())
+        == Some(1)
+        && payload.get("cells").and_then(|c| c.as_array()).is_some()
+}
+
+/// Reshape a canonical-shape backup so the user's CAL §4.2.1 export contains
+/// the human_readable view of each record (plain English) rather than the
+/// signed raw_record bytes.
+///
+/// Preserves every top-level field present in the input payload so apps can
+/// include extension blocks (e.g. an `app_keys` slot for app-specific seeds
+/// the CAL obliges them to expose) and have those blocks survive the export.
+pub fn canonicalize_for_export(payload: &serde_json::Value) -> serde_json::Value {
+    let mut result = payload.clone();
+
+    // Only rewrite `cells[].records[]` — every other top-level key passes
+    // through untouched.
+    if let Some(cells) = result.get_mut("cells").and_then(|v| v.as_array_mut()) {
+        for cell in cells.iter_mut() {
+            if let Some(records) = cell.get_mut("records").and_then(|v| v.as_array_mut()) {
+                for record in records.iter_mut() {
+                    let entry_type = record.get("entryType").cloned().unwrap_or(serde_json::Value::Null);
+                    let action_hash = record.get("actionHash").cloned().unwrap_or(serde_json::Value::Null);
+                    let created_at_ms = record.get("createdAtMs").cloned().unwrap_or(serde_json::Value::Null);
+                    let human = record.get("human_readable").cloned().unwrap_or(serde_json::Value::Null);
+                    *record = serde_json::json!({
+                        "entry_type": entry_type,
+                        "action_hash": action_hash,
+                        "created_at_ms": created_at_ms,
+                        "human_readable": human,
+                    });
+                }
+            }
+        }
+    }
+
+    result
+}
+
 /// Export all vault data (identity + keys + backups) as a single JSON blob.
 /// Includes cryptographic key material for CAL (Cryptographic Autonomy License)
 /// compliance — users must be able to independently recreate their identity
@@ -547,13 +640,24 @@ pub fn export_all_data(
             let label = meta.label.as_deref().unwrap_or("latest");
             match retrieve_backup(app_state, &app_summary.client_id, Some(label)) {
                 Ok((data, backup_meta)) => {
-                    // Try to parse as JSON for nice formatting, fall back to hex
-                    let data_value = if backup_meta.content_type.contains("json") {
-                        serde_json::from_slice(&data).unwrap_or_else(|_| {
-                            serde_json::Value::String(hex::encode(&data))
-                        })
+                    // Parse the payload to JSON, hex-fallback for non-JSON content.
+                    let parsed_data = if backup_meta.content_type.contains("json") {
+                        serde_json::from_slice::<serde_json::Value>(&data).ok()
                     } else {
-                        serde_json::Value::String(hex::encode(&data))
+                        None
+                    };
+
+                    // For canonical-shape backups (version: 1 + cells[].records[]),
+                    // pull each record's human_readable view into the export. This
+                    // is what the CAL §4.2.1 user-data-export users actually read.
+                    // For legacy/non-canonical payloads, inline as-is (existing
+                    // behaviour) so backwards compat is preserved.
+                    let data_value = match parsed_data {
+                        Some(json) if is_canonical_backup(&json) => {
+                            canonicalize_for_export(&json)
+                        }
+                        Some(json) => json,
+                        None => serde_json::Value::String(hex::encode(&data)),
                     };
 
                     snapshots.push(serde_json::json!({
@@ -669,8 +773,11 @@ pub fn export_all_data(
         "app_data": {
             "_readme": concat!(
                 "Decrypted data backups stored by connected Holochain apps. ",
-                "Each app can store multiple snapshots. The data is yours — ",
-                "you can import it into any compatible app.",
+                "Each app can store multiple snapshots. The Cryptographic ",
+                "Autonomy License (§4.2.1 — \"No Withholding User Data\") ",
+                "guarantees you full ownership of this data: you can take ",
+                "this export to any compatible Holochain app and use it ",
+                "independently of Flowsta or the app's original developer.",
             ),
             "total_apps": stats.app_count,
             "total_snapshots": stats.total_backups,

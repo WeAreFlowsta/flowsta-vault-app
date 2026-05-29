@@ -18,11 +18,34 @@ interface VaultIdentity {
   web_agent_pub_key: string | null;
 }
 
+interface BackupRecordSummary {
+  counts_by_entry_type: Record<string, number>;
+  total_records: number;
+}
+
 interface BackupStats {
   app_count: number;
   total_backups: number;
   total_size: number;
-  apps: { app_name: string; last_backup_at: number }[];
+  apps: {
+    app_name: string;
+    last_backup_at: number;
+    /** Latest backup's per-entry-type summary, if canonical-shape. */
+    latest_summary?: BackupRecordSummary | null;
+  }[];
+}
+
+/** "12 polls, 38 votes" or null if nothing to show. */
+function formatSummary(s: BackupRecordSummary | null | undefined): string | null {
+  if (!s || s.total_records === 0) return null;
+  const parts = Object.entries(s.counts_by_entry_type)
+    .filter(([, n]) => n > 0)
+    .map(([t, n]) => {
+      const lower = t.toLowerCase();
+      const plural = n === 1 ? lower : `${lower}s`;
+      return `${n} ${plural}`;
+    });
+  return parts.length > 0 ? parts.join(", ") : null;
 }
 
 interface LinkedApp {
@@ -123,7 +146,7 @@ export default component$(() => {
   // signature shows once (its latest signed_at) rather than twice.
   type Activity =
     | { kind: "signature"; timestamp: number; label: string }
-    | { kind: "backup"; timestamp: number; appName: string }
+    | { kind: "backup"; timestamp: number; appName: string; summary?: BackupRecordSummary | null }
     | { kind: "link"; timestamp: number; appName: string };
   const recentActivities: Activity[] = [];
   // Only surface sigs in the activity feed once linked has settled —
@@ -151,7 +174,12 @@ export default component$(() => {
   }
   for (const app of stats?.apps ?? []) {
     if (app.last_backup_at > 0) {
-      recentActivities.push({ kind: "backup", timestamp: app.last_backup_at, appName: app.app_name });
+      recentActivities.push({
+        kind: "backup",
+        timestamp: app.last_backup_at,
+        appName: app.app_name,
+        summary: app.latest_summary,
+      });
     }
   }
   for (const app of linkedApps.value) {
@@ -315,6 +343,11 @@ export default component$(() => {
               ? `${formatBytes(stats.total_size)} across ${stats.app_count} app${stats.app_count !== 1 ? "s" : ""}`
               : "No backups yet"}
           </p>
+          {stats && stats.apps.length > 0 && (
+            <p class="mt-0.5 text-xs italic text-gray-600">
+              Last backup {timeAgo(Math.max(...stats.apps.map((a) => a.last_backup_at)))}
+            </p>
+          )}
         </Link>
       </div>
 
@@ -349,6 +382,7 @@ export default component$(() => {
                 );
               }
               if (a.kind === "backup") {
+                const summaryLabel = formatSummary(a.summary);
                 return (
                   <div key={`b${i}`} class="flex items-center gap-3">
                     <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-900/30">
@@ -358,7 +392,10 @@ export default component$(() => {
                     </div>
                     <div class="min-w-0 flex-1">
                       <p class="text-sm text-white">
-                        <span class="font-medium">{a.appName}</span> backed up data
+                        <span class="font-medium">{a.appName}</span>{" "}
+                        {summaryLabel
+                          ? <>backed up <span class="text-gray-400">{summaryLabel}</span></>
+                          : "backed up data"}
                       </p>
                       <p class="text-xs text-gray-500">{timeAgo(a.timestamp)}</p>
                     </div>
