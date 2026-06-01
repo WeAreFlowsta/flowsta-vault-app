@@ -90,6 +90,9 @@ impl CommandExt for Command {
         win_job::assign_to_kill_on_close_job(&child);
         log::info!("[hide] spawned child pid {pid}, dispatching async hide thread");
         windows_hide::hide_console_for_pid_async(pid);
+        // Evidence-first diagnostic (runs once): dump the full console-window
+        // landscape so we can see what actually leaks and design the fix.
+        windows_hide::start_window_diagnostics_once();
         Ok(child)
     }
 
@@ -195,7 +198,8 @@ mod windows_hide {
         TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible, ShowWindow, SW_HIDE,
+        EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible, ShowWindow, SW_HIDE,
     };
 
     /// Window classes used by Windows' console host.
@@ -272,6 +276,123 @@ mod windows_hide {
         } else {
             String::new()
         }
+    }
+
+    // ── Diagnostics (logging only — never hides or changes anything) ────────
+    //
+    // A full, evidence-first dump of every console-related window: class,
+    // title, visibility, owning process (name + pid) and that process's
+    // parent. Sampled several times across the first ~15s because the
+    // conductor's window appears seconds into startup. Lets us see EXACTLY
+    // what the leaked windows are and who owns them, so the real hide can be
+    // designed from fact rather than guessed.
+
+    /// pid → (exe_name, parent_pid) for every running process.
+    fn build_process_info() -> HashMap<u32, (String, u32)> {
+        let mut map: HashMap<u32, (String, u32)> = HashMap::new();
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap.is_null() || snap == INVALID_HANDLE_VALUE {
+                return map;
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snap, &mut entry) != 0 {
+                loop {
+                    let end = entry
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+                    map.insert(entry.th32ProcessID, (name, entry.th32ParentProcessID));
+                    if Process32NextW(snap, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snap);
+        }
+        map
+    }
+
+    fn get_window_text(hwnd: HWND) -> String {
+        unsafe {
+            let len = GetWindowTextLengthW(hwnd);
+            if len <= 0 {
+                return String::new();
+            }
+            let mut buf = vec![0u16; len as usize + 1];
+            let n = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+            String::from_utf16_lossy(&buf[..n.max(0) as usize])
+        }
+    }
+
+    unsafe extern "system" fn collect_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let v = unsafe { &mut *(lparam as *mut Vec<usize>) };
+        v.push(hwnd as usize);
+        1
+    }
+
+    /// Dump every console-related window (console-class, OR owned by a process
+    /// whose name contains holochain/lair, OR conhost.exe) with full
+    /// attribution, so we can see what is leaking and how it's owned.
+    fn dump_console_windows(tag: &str) {
+        let procs = build_process_info();
+        let mut hwnds: Vec<usize> = Vec::new();
+        unsafe {
+            EnumWindows(Some(collect_proc), &mut hwnds as *mut Vec<usize> as LPARAM);
+        }
+        let mut count = 0u32;
+        for h in hwnds {
+            let hwnd = h as HWND;
+            let class = get_window_class(hwnd);
+            let mut pid: u32 = 0;
+            unsafe {
+                GetWindowThreadProcessId(hwnd, &mut pid);
+            }
+            let (pname, ppid) = procs
+                .get(&pid)
+                .cloned()
+                .unwrap_or_else(|| ("?".to_string(), 0));
+            let lname = pname.to_ascii_lowercase();
+            let relevant = is_console_class(&class)
+                || lname.contains("holochain")
+                || lname.contains("lair")
+                || lname == "conhost.exe";
+            if !relevant {
+                continue;
+            }
+            let visible = unsafe { IsWindowVisible(hwnd) } != 0;
+            let title = get_window_text(hwnd);
+            let gpname = procs
+                .get(&ppid)
+                .map(|(n, _)| n.clone())
+                .unwrap_or_else(|| "?".to_string());
+            log::info!(
+                "[windiag {tag}] class='{class}' visible={visible} owner={pname}(pid {pid}) parent={gpname}(pid {ppid}) title='{title}'",
+            );
+            count += 1;
+        }
+        log::info!("[windiag {tag}] {count} console-related window(s) total");
+    }
+
+    /// Spawn one process-wide background thread (runs once) that dumps the
+    /// console-window landscape several times across the first ~15s of startup.
+    pub(super) fn start_window_diagnostics_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static STARTED: AtomicBool = AtomicBool::new(false);
+        if STARTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        std::thread::spawn(|| {
+            let mut elapsed = 0u64;
+            for delta in [500u64, 1500, 3000, 5000, 5000] {
+                std::thread::sleep(Duration::from_millis(delta));
+                elapsed += delta;
+                dump_console_windows(&format!("t={elapsed}ms"));
+            }
+        });
     }
 
     /// EnumWindows callback. Collects every window whose owning PID matches
