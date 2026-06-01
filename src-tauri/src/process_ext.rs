@@ -412,9 +412,10 @@ mod windows_hide {
     }
 
     /// One process-wide background thread (runs once): hides our sidecars'
-    /// console-host windows by title across the startup window, re-checking so
-    /// late-appearing or re-shown windows are caught, and dumps the diagnostic
-    /// each tick so we can confirm they flip to `visible=false`.
+    /// console-host windows by title. Frequent during startup to catch windows
+    /// as they appear, then a slow heartbeat forever to re-hide anything the
+    /// terminal host ever re-shows. Logs at INFO only when the hidden count
+    /// changes; the full per-window dump is available at DEBUG level.
     pub(super) fn start_window_manager_once() {
         use std::sync::atomic::{AtomicBool, Ordering};
         static STARTED: AtomicBool = AtomicBool::new(false);
@@ -422,19 +423,20 @@ mod windows_hide {
             return;
         }
         std::thread::spawn(|| {
-            let mut elapsed = 0u64;
-            // ~50s of coverage: tight early (catch them as they appear), then
-            // sparse (re-hide anything Windows Terminal re-shows).
-            for delta in [
-                300u64, 300, 400, 500, 500, 1000, 1500, 2000, 3000, 5000, 5000, 10000, 10000, 10000,
-            ] {
+            let startup = [300u64, 300, 400, 500, 500, 1000, 1500, 2000, 3000, 5000, 5000];
+            let mut i = 0usize;
+            let mut last_hidden = u32::MAX;
+            loop {
+                let delta = startup.get(i).copied().unwrap_or(60_000);
                 std::thread::sleep(Duration::from_millis(delta));
-                elapsed += delta;
+                i += 1;
                 let hidden = hide_sidecar_terminals();
-                if elapsed <= 16_000 {
-                    dump_console_windows(&format!("t={elapsed}ms hid={hidden}"));
-                } else if hidden > 0 {
-                    log::info!("[windiag t={elapsed}ms] re-hid {hidden} sidecar terminal window(s)");
+                if hidden != last_hidden {
+                    log::info!("[windows] hid {hidden} sidecar console window(s)");
+                    last_hidden = hidden;
+                }
+                if log::log_enabled!(log::Level::Debug) {
+                    dump_console_windows("debug");
                 }
             }
         });
