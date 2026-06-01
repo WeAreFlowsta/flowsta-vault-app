@@ -39,7 +39,10 @@ use tauri::{Emitter, Manager};
 /// can put it back afterwards (see `restore_window`).
 #[derive(Clone, Copy)]
 struct PriorWindowState {
-    was_minimized: bool,
+    /// Was Vault the focused/foreground app when the request arrived? If so the
+    /// user was actively in Vault and we leave it where it is. Otherwise Vault
+    /// only came forward FOR this consent, so we tuck it away afterwards.
+    was_focused: bool,
     was_visible: bool,
 }
 
@@ -47,38 +50,45 @@ struct PriorWindowState {
 /// isn't hidden behind the third-party app the user just clicked. Returns the
 /// window's prior state so the caller can restore it once the user has
 /// responded. Best-effort: no-ops if the main window can't be resolved.
+///
+/// NOTE: on Wayland the compositor will NOT let a background app raise itself
+/// in response to a non-user-initiated request — it shows a "<app> is ready"
+/// notification instead. There's no API workaround; this is by design.
 fn raise_window(app: &tauri::AppHandle) -> Option<PriorWindowState> {
     let win = app.get_webview_window("main")?;
     let prior = PriorWindowState {
-        was_minimized: win.is_minimized().unwrap_or(false),
+        was_focused: win.is_focused().unwrap_or(false),
         was_visible: win.is_visible().unwrap_or(true),
     };
     let _ = win.unminimize();
     let _ = win.show();
     // set_focus() alone does NOT raise the window on Linux/Wayland (and is
     // unreliable on macOS for a background app). Briefly toggling
-    // always-on-top forces it to the foreground on every platform — same trick
-    // the tray "Open" handler uses.
+    // always-on-top forces it forward where the OS allows it — same trick the
+    // tray "Open" handler uses.
     let _ = win.set_always_on_top(true);
     let _ = win.set_focus();
     let _ = win.set_always_on_top(false);
     Some(prior)
 }
 
-/// Put the Vault window back the way it was before `raise_window` — so that
-/// approving (or denying) a request from another app returns focus to THAT
-/// app instead of leaving Vault parked in front. Only tucks away if Vault was
-/// hidden/minimized to begin with; if the user already had it open, we leave
-/// it where it is.
+/// Put Vault back the way it was before `raise_window` — so that approving (or
+/// denying) a request from another app returns focus to THAT app instead of
+/// leaving Vault parked in front. If Vault was already the focused app the user
+/// was using, we leave it. Otherwise we minimize (or re-hide) it; minimizing
+/// the foreground window hands focus to the app behind it (the caller).
 fn restore_window(app: &tauri::AppHandle, prior: Option<PriorWindowState>) {
     let Some(prior) = prior else { return };
+    if prior.was_focused {
+        return;
+    }
     let Some(win) = app.get_webview_window("main") else {
         return;
     };
-    if prior.was_minimized {
-        let _ = win.minimize();
-    } else if !prior.was_visible {
+    if !prior.was_visible {
         let _ = win.hide();
+    } else {
+        let _ = win.minimize();
     }
 }
 use tower_http::cors::CorsLayer;
