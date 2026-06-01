@@ -35,16 +35,50 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
-/// Bring the Vault window to the foreground so a freshly-emitted consent
-/// dialog isn't hidden behind the third-party app the user just clicked.
-/// Best-effort: silently no-ops if the main window can't be resolved
-/// (shouldn't happen, but we don't want a focus failure to block the
-/// actual request).
-fn raise_window(app: &tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
+/// What the Vault window looked like before a consent request raised it, so we
+/// can put it back afterwards (see `restore_window`).
+#[derive(Clone, Copy)]
+struct PriorWindowState {
+    was_minimized: bool,
+    was_visible: bool,
+}
+
+/// Bring the Vault window to the foreground so a freshly-emitted consent dialog
+/// isn't hidden behind the third-party app the user just clicked. Returns the
+/// window's prior state so the caller can restore it once the user has
+/// responded. Best-effort: no-ops if the main window can't be resolved.
+fn raise_window(app: &tauri::AppHandle) -> Option<PriorWindowState> {
+    let win = app.get_webview_window("main")?;
+    let prior = PriorWindowState {
+        was_minimized: win.is_minimized().unwrap_or(false),
+        was_visible: win.is_visible().unwrap_or(true),
+    };
+    let _ = win.unminimize();
+    let _ = win.show();
+    // set_focus() alone does NOT raise the window on Linux/Wayland (and is
+    // unreliable on macOS for a background app). Briefly toggling
+    // always-on-top forces it to the foreground on every platform — same trick
+    // the tray "Open" handler uses.
+    let _ = win.set_always_on_top(true);
+    let _ = win.set_focus();
+    let _ = win.set_always_on_top(false);
+    Some(prior)
+}
+
+/// Put the Vault window back the way it was before `raise_window` — so that
+/// approving (or denying) a request from another app returns focus to THAT
+/// app instead of leaving Vault parked in front. Only tucks away if Vault was
+/// hidden/minimized to begin with; if the user already had it open, we leave
+/// it where it is.
+fn restore_window(app: &tauri::AppHandle, prior: Option<PriorWindowState>) {
+    let Some(prior) = prior else { return };
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    if prior.was_minimized {
+        let _ = win.minimize();
+    } else if !prior.was_visible {
+        let _ = win.hide();
     }
 }
 use tower_http::cors::CorsLayer;
@@ -823,13 +857,14 @@ async fn link_identity_handler(
         "replacing_existing": replacing_existing,
     });
 
-    raise_window(&state.app_handle);
+    let prior = raise_window(&state.app_handle);
     let _ = state.app_handle.emit("link-identity-request", event_payload);
 
     // Wait for user response with 60s timeout
     let approved = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => {
+            restore_window(&state.app_handle, prior);
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(IpcError {
@@ -839,7 +874,8 @@ async fn link_identity_handler(
             ));
         }
         Err(_) => {
-            // Timeout — clean up pending request
+            // Timeout — clean up pending request and tuck Vault back.
+            restore_window(&state.app_handle, prior);
             let mut pending_link = state.app_state.pending_link_identity.lock().unwrap();
             *pending_link = None;
             return Err((
@@ -851,6 +887,10 @@ async fn link_identity_handler(
             ));
         }
     };
+
+    // User has responded (approve or deny) — return Vault to its prior state so
+    // focus goes back to the calling app instead of leaving Vault in front.
+    restore_window(&state.app_handle, prior);
 
     if !approved {
         return Err((
