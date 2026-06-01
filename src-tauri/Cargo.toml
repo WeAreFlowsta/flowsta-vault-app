@@ -1,6 +1,6 @@
 [package]
 name = "flowsta-vault"
-version = "0.6.1-beta3"
+version = "0.6.1-beta4"
 description = "Flowsta Vault - Desktop identity manager powered by Holochain"
 authors = ["Flowsta"]
 license = ""
@@ -98,6 +98,12 @@ windows-sys = { version = "0.59", features = [
     # ToolHelp32 for parent-PID lookup — hide thread uses it to find
     # conhost.exe children of our spawned binaries on Windows.
     "Win32_System_Diagnostics_ToolHelp",
+    # Kill-on-close Job Object so sidecars die with the app (see process_ext.rs).
+    # CreateJobObjectW needs Win32_Security (SECURITY_ATTRIBUTES), and
+    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds Threading::IO_COUNTERS.
+    "Win32_System_JobObjects",
+    "Win32_Security",
+    "Win32_System_Threading",
 ] }
 
 # core2 (transitive dep via libflate → libsodium-sys-stable → sodoken → lair)

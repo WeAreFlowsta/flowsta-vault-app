@@ -79,6 +79,15 @@ impl CommandExt for Command {
     fn spawn_hidden(&mut self) -> io::Result<Child> {
         let child = self.spawn()?;
         let pid = child.id();
+        // Tie the sidecar to a kill-on-close Job Object so it dies when THIS
+        // app process exits — clean quit, crash, or force-kill. Windows has no
+        // PR_SET_PDEATHSIG equivalent, so without this the conductor/lair
+        // children orphan on app close, leaving their console windows open and
+        // their admin ports + lair sockets locked. For the Vault this matters
+        // more than for client apps: the conductor watchdog restarts on
+        // failure, so orphans multiply during instability and can crash-loop
+        // the conductor.
+        win_job::assign_to_kill_on_close_job(&child);
         log::info!("[hide] spawned child pid {pid}, dispatching async hide thread");
         windows_hide::hide_console_for_pid_async(pid);
         Ok(child)
@@ -87,6 +96,69 @@ impl CommandExt for Command {
     #[cfg(not(target_os = "windows"))]
     fn spawn_hidden(&mut self) -> io::Result<Child> {
         self.spawn()
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod win_job {
+    //! Kill-on-close Job Object: the Windows stand-in for Linux's
+    //! `PR_SET_PDEATHSIG`. Every sidecar (`vault-holochain`,
+    //! `vault-lair-keystore`) is assigned to one process-wide job that has
+    //! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The app process owns the only
+    //! handle to that job, so when it exits — gracefully, by crash, or by
+    //! Task Manager — Windows closes the handle and terminates every process
+    //! still in the job. No more orphaned conductors holding ports/sockets and
+    //! leaving console windows open.
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    // Stored as isize so the HANDLE is Send + Sync inside the static. Created
+    // once, lazily; reused for every sidecar.
+    static JOB: OnceLock<isize> = OnceLock::new();
+
+    fn job_handle() -> HANDLE {
+        let h = *JOB.get_or_init(|| unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                log::error!("[job] CreateJobObjectW failed — sidecars won't auto-kill on exit");
+                return 0;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+            {
+                log::error!("[job] SetInformationJobObject(KILL_ON_JOB_CLOSE) failed");
+            }
+            job as isize
+        });
+        h as HANDLE
+    }
+
+    pub(super) fn assign_to_kill_on_close_job(child: &Child) {
+        let job = job_handle();
+        if job.is_null() {
+            return;
+        }
+        unsafe {
+            if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
+                log::warn!(
+                    "[job] failed to assign pid {} to kill-on-close job (orphan possible)",
+                    child.id(),
+                );
+            }
+        }
     }
 }
 
