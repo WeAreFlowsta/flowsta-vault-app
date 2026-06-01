@@ -1,10 +1,11 @@
-import { component$, useContext, useSignal, useVisibleTask$ } from "@builder.io/qwik";
+import { component$, useComputed$, useContext, useSignal, useVisibleTask$ } from "@builder.io/qwik";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { CopyButton } from "~/components/ui/CopyButton";
 import { signaturesContext } from "~/lib/context";
+import { dedupeLinkedApps } from "~/lib/linked-apps";
 
 interface VaultIdentity {
   agent_pub_key: string;
@@ -52,6 +53,7 @@ interface LinkedApp {
   app_name: string;
   app_agent_pub_key: string;
   linked_at: number;
+  client_id?: string | null;
 }
 
 function formatBytes(bytes: number): string {
@@ -76,6 +78,9 @@ export default component$(() => {
   const identity = useSignal<VaultIdentity | null>(null);
   const backupStats = useSignal<BackupStats | null>(null);
   const linkedApps = useSignal<LinkedApp[]>([]);
+  // One entry per distinct app (collapses multiple installs/agents of the
+  // same app — see dedupeLinkedApps).
+  const connectedApps = useComputed$(() => dedupeLinkedApps(linkedApps.value));
   const loading = useSignal(true);
   const showFullDid = useSignal(false);
 
@@ -313,14 +318,12 @@ export default component$(() => {
             <span class="text-sm font-medium">Connected Apps</span>
           </div>
           <p class="text-3xl font-bold text-white">
-            {linkedApps.value.length}
+            {connectedApps.value.length}
           </p>
           <p class="mt-1 text-xs text-gray-500">
-            {linkedApps.value.length === 0
+            {connectedApps.value.length === 0
               ? "No apps linked yet"
-              : linkedApps.value.length === 1
-                ? linkedApps.value[0].app_name
-                : `${linkedApps.value.map((a) => a.app_name).join(", ")}`}
+              : connectedApps.value.map((a) => a.app_name).join(", ")}
           </p>
         </Link>
 

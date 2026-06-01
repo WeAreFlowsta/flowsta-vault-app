@@ -1,9 +1,10 @@
-import { component$, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
+import { component$, useComputed$, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { CopyButton } from "~/components/ui/CopyButton";
 import { GlassButton } from "~/components/common/GlassButton";
+import { dedupeLinkedApps } from "~/lib/linked-apps";
 
 declare const __API_URL__: string;
 
@@ -46,6 +47,10 @@ export default component$(() => {
   const linkedApps = useSignal<
     { app_name: string; app_agent_pub_key: string; linked_at: number; client_id: string | null }[]
   >([]);
+  // One row per distinct app — collapses multiple installs/agents of the same
+  // app (e.g. a reinstalled ProofPoll) into a single entry. Display-only; the
+  // raw per-agent list above still backs scopes + per-agent revocation.
+  const dedupedApps = useComputed$(() => dedupeLinkedApps(linkedApps.value));
   // Granted scopes per app, keyed by client_id
   const appScopes = useSignal<Record<string, string[]>>({});
 
@@ -157,11 +162,15 @@ export default component$(() => {
     }
   });
 
-  const handleRevokeLinkedApp = $(async (appAgentPubKey: string) => {
+  // Revoke every agent linked for one app (the deduped row may cover several
+  // installs/devices — revoking the app should unlink all of them).
+  const handleRevokeLinkedApp = $(async (appAgentPubKeys: string[]) => {
     try {
-      await invoke("revoke_linked_third_party_app", { appAgentPubKey });
+      for (const appAgentPubKey of appAgentPubKeys) {
+        await invoke("revoke_linked_third_party_app", { appAgentPubKey });
+      }
       linkedApps.value = linkedApps.value.filter(
-        (a) => a.app_agent_pub_key !== appAgentPubKey,
+        (a) => !appAgentPubKeys.includes(a.app_agent_pub_key),
       );
     } catch (err) {
       console.error("Failed to revoke linked app:", err);
@@ -275,7 +284,7 @@ export default component$(() => {
         <div class="mb-4 flex items-center justify-between">
           <h3 class="text-lg font-semibold text-white">Apps & Sites</h3>
           <span class="text-xs text-gray-500">
-            {linkedApps.value.length + connectedSites.value.length} connected
+            {dedupedApps.value.length + connectedSites.value.length} connected
           </span>
         </div>
 
@@ -291,9 +300,10 @@ export default component$(() => {
           </div>
         ) : (
           <div class="space-y-2">
-            {/* Identity-linked apps first */}
-            {linkedApps.value.map((app) => {
+            {/* Identity-linked apps first (one row per app, installs collapsed) */}
+            {dedupedApps.value.map((app) => {
               const scopes = (app.client_id ? appScopes.value[app.client_id] : null) ?? [];
+              const deviceCount = app.agent_keys.length;
               const scopeLabels: Record<string, string> = {
                 openid: "Identity",
                 display_name: "Display name",
@@ -307,7 +317,7 @@ export default component$(() => {
               const visibleScopes = scopes.filter((s) => s !== "openid");
               return (
                 <div
-                  key={`app-${app.app_agent_pub_key}`}
+                  key={`app-${app.client_id ?? app.app_name}`}
                   class="rounded-lg border border-blue-800/50 bg-blue-900/10 px-4 py-3"
                 >
                   <div class="flex items-center justify-between gap-3">
@@ -323,9 +333,13 @@ export default component$(() => {
                       </div>
                       <div class="mt-1 flex items-center gap-3 text-xs text-gray-500">
                         <span>Linked {new Date(app.linked_at * 1000).toLocaleDateString()}</span>
-                        <code class="truncate font-mono">
-                          {app.app_agent_pub_key.substring(0, 8)}...{app.app_agent_pub_key.substring(app.app_agent_pub_key.length - 6)}
-                        </code>
+                        {deviceCount > 1 ? (
+                          <span>{deviceCount} devices</span>
+                        ) : (
+                          <code class="truncate font-mono">
+                            {app.agent_keys[0].substring(0, 8)}...{app.agent_keys[0].substring(app.agent_keys[0].length - 6)}
+                          </code>
+                        )}
                       </div>
                       {visibleScopes.length > 0 && (
                         <div class="mt-2 flex flex-wrap gap-1">
@@ -342,7 +356,7 @@ export default component$(() => {
                     </div>
                     <GlassButton
                       variant="danger"
-                      onClick$={() => handleRevokeLinkedApp(app.app_agent_pub_key)}
+                      onClick$={() => handleRevokeLinkedApp(app.agent_keys)}
                     >
                       Revoke
                     </GlassButton>

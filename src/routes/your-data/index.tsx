@@ -3,6 +3,7 @@ import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { CopyButton } from "~/components/ui/CopyButton";
 import { GlassButton } from "~/components/common/GlassButton";
+import { dedupeLinkedApps } from "~/lib/linked-apps";
 
 interface BackupAppSummary {
   client_id: string;
@@ -128,11 +129,14 @@ export default component$(() => {
       const [id, stats, apps] = await Promise.all([
         invoke<VaultIdentity>("get_identity"),
         invoke<BackupStats>("get_backup_stats"),
-        invoke<{ app_name: string }[]>("get_linked_third_party_apps"),
+        invoke<{ app_name: string; app_agent_pub_key: string; linked_at: number; client_id: string | null }[]>(
+          "get_linked_third_party_apps",
+        ),
       ]);
       identity.value = id;
       backupStats.value = stats;
-      linkedAppsCount.value = apps.length;
+      // Count distinct apps, not per-install agent links.
+      linkedAppsCount.value = dedupeLinkedApps(apps).length;
     } catch (e) {
       console.error("Failed to load your data:", e);
     } finally {
