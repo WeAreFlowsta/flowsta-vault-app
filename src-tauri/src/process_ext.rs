@@ -90,9 +90,9 @@ impl CommandExt for Command {
         win_job::assign_to_kill_on_close_job(&child);
         log::info!("[hide] spawned child pid {pid}, dispatching async hide thread");
         windows_hide::hide_console_for_pid_async(pid);
-        // Evidence-first diagnostic (runs once): dump the full console-window
-        // landscape so we can see what actually leaks and design the fix.
-        windows_hide::start_window_diagnostics_once();
+        // Hide our sidecars' console-host windows (Windows Terminal / conhost)
+        // by title, and log the result so we can confirm they're hidden.
+        windows_hide::start_window_manager_once();
         Ok(child)
     }
 
@@ -377,9 +377,45 @@ mod windows_hide {
         log::info!("[windiag {tag}] {count} console-related window(s) total");
     }
 
-    /// Spawn one process-wide background thread (runs once) that dumps the
-    /// console-window landscape several times across the first ~15s of startup.
-    pub(super) fn start_window_diagnostics_once() {
+    /// Substrings (lower-case) identifying THIS app's sidecar host windows.
+    /// On Windows 11 with Windows Terminal as the default terminal, our console
+    /// sidecars are hosted by `WindowsTerminal.exe` in a visible
+    /// `CASCADIA_HOSTING_WINDOW_CLASS` window whose title is the full path to
+    /// the sidecar binary — so the title (not the owning process) is how we
+    /// find them. The classic `conhost` window titles the same way.
+    const SIDECAR_TITLE_MARKERS: &[&str] = &["vault-holochain", "vault-lair-keystore"];
+
+    /// Hide every console-host window whose title names one of our sidecars,
+    /// regardless of which process owns it (it's usually `WindowsTerminal.exe`,
+    /// not us). `ShowWindow` works cross-process. Returns how many we hid.
+    fn hide_sidecar_terminals() -> u32 {
+        let mut hwnds: Vec<usize> = Vec::new();
+        unsafe {
+            EnumWindows(Some(collect_proc), &mut hwnds as *mut Vec<usize> as LPARAM);
+        }
+        let mut hidden = 0u32;
+        for h in hwnds {
+            let hwnd = h as HWND;
+            let class = get_window_class(hwnd);
+            if !is_console_class(&class) {
+                continue;
+            }
+            let title = get_window_text(hwnd).to_ascii_lowercase();
+            if SIDECAR_TITLE_MARKERS.iter().any(|m| title.contains(m)) {
+                unsafe {
+                    ShowWindow(hwnd, SW_HIDE);
+                }
+                hidden += 1;
+            }
+        }
+        hidden
+    }
+
+    /// One process-wide background thread (runs once): hides our sidecars'
+    /// console-host windows by title across the startup window, re-checking so
+    /// late-appearing or re-shown windows are caught, and dumps the diagnostic
+    /// each tick so we can confirm they flip to `visible=false`.
+    pub(super) fn start_window_manager_once() {
         use std::sync::atomic::{AtomicBool, Ordering};
         static STARTED: AtomicBool = AtomicBool::new(false);
         if STARTED.swap(true, Ordering::SeqCst) {
@@ -387,10 +423,19 @@ mod windows_hide {
         }
         std::thread::spawn(|| {
             let mut elapsed = 0u64;
-            for delta in [500u64, 1500, 3000, 5000, 5000] {
+            // ~50s of coverage: tight early (catch them as they appear), then
+            // sparse (re-hide anything Windows Terminal re-shows).
+            for delta in [
+                300u64, 300, 400, 500, 500, 1000, 1500, 2000, 3000, 5000, 5000, 10000, 10000, 10000,
+            ] {
                 std::thread::sleep(Duration::from_millis(delta));
                 elapsed += delta;
-                dump_console_windows(&format!("t={elapsed}ms"));
+                let hidden = hide_sidecar_terminals();
+                if elapsed <= 16_000 {
+                    dump_console_windows(&format!("t={elapsed}ms hid={hidden}"));
+                } else if hidden > 0 {
+                    log::info!("[windiag t={elapsed}ms] re-hid {hidden} sidecar terminal window(s)");
+                }
             }
         });
     }
