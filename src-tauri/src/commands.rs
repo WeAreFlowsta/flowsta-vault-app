@@ -978,7 +978,42 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
             .map_err(|e| format!("Failed to delete conductor dir: {}", e))?;
     }
 
-    log::info!("Vault reset — vault file, lair keystore, and conductor data cleared.");
+    // Full erase: also remove the local app data so a reset is a true clean
+    // slate, not just an identity reset. `backups/` holds OTHER apps' user data
+    // (e.g. a linked app's exported records) and these JSON files list which
+    // apps are connected and what they can access — none of it should survive a
+    // wipe the user intends as "erase everything from this device".
+    for name in [
+        "linked-apps.json",
+        "verified-apps.json",
+        "linked-app-scopes.json",
+        "mau-events.enc",
+        "quota_cache.json",
+        ".quota.key",
+    ] {
+        let p = state.data_dir.join(name);
+        if p.exists() {
+            if let Err(e) = std::fs::remove_file(&p) {
+                log::warn!("reset: failed to remove {}: {}", name, e);
+            }
+        }
+    }
+    let backups_dir = state.data_dir.join("backups");
+    if backups_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&backups_dir) {
+            log::warn!("reset: failed to remove backups dir: {}", e);
+        }
+    }
+
+    // Clear the matching in-memory state so the UI reflects the wipe at once.
+    state.connected_sites.lock().unwrap().clear();
+    state.approved_apps.lock().unwrap().clear();
+    state.linked_third_party_apps.lock().unwrap().clear();
+    state.verified_apps.lock().unwrap().clear();
+    state.linked_app_scopes.lock().unwrap().clear();
+    *state.linked_web_agent_key.lock().unwrap() = None;
+
+    log::info!("Vault fully erased — identity, keys, conductor data, app links, scopes, and backups cleared.");
     Ok(())
 }
 

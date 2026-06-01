@@ -302,8 +302,11 @@ export default component$(() => {
           <div class="rounded-lg border border-red-900/50 bg-red-950/20 p-6">
             <h3 class="mb-2 text-lg font-semibold text-white">Reset Vault</h3>
             <p class="mb-4 text-sm text-gray-400">
-              Remove all local keys and data. You'll need your recovery phrase
-              to set up again. Your Flowsta account is not affected.
+              Erases everything stored on this device — your identity keys,
+              conductor data, and every connected app's links and saved
+              backups. Your identity and signatures come back when you set up
+              again with your recovery phrase. Your Flowsta account is not
+              affected.
             </p>
 
             {!showResetConfirm.value ? (
@@ -318,7 +321,9 @@ export default component$(() => {
             ) : (
               <div>
                 <p class="mb-3 text-sm font-medium text-red-400">
-                  Are you sure? This cannot be undone.
+                  This permanently erases this device — including connected apps
+                  and their backups — and cannot be undone. Only your recovery
+                  phrase can restore your identity.
                 </p>
                 <div class="flex gap-3">
                   <GlassButton
@@ -326,7 +331,7 @@ export default component$(() => {
                     disabled={resetting.value}
                     onClick$={handleResetVault}
                   >
-                    {resetting.value ? "Resetting..." : "Yes, Reset Vault"}
+                    {resetting.value ? "Erasing..." : "Yes, erase everything"}
                   </GlassButton>
                   <GlassButton
                     variant="secondary"
