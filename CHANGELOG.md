@@ -5,6 +5,40 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] — 2026-06-01
+
+A polish release focused on the cross-app sign-in experience and Windows.
+Existing vaults upgrade in place — no migration.
+
+### Sign-in & Connected Apps
+- The approval dialog **reliably comes to the front** when an app asks to
+  connect — on macOS and Linux as well as Windows (previously it could open
+  behind the app you were in).
+- **Focus returns to the app you came from** after you approve or deny,
+  instead of leaving you on the Vault window.
+- **Connected Apps shows one entry per app.** An app installed on several
+  devices (or reinstalled) no longer appears many times; revoking it unlinks
+  all of that app's connections at once.
+
+### Windows
+- **No more stray console windows** from the bundled Holochain/lair processes
+  — including when your default terminal is Windows Terminal.
+- **Background processes shut down with the app** instead of being left
+  running after you quit.
+
+### Privacy
+- **"Reset Vault" is now a true full erase** — it also clears connected-app
+  links, granted permissions, and saved app backups, so resetting a device is
+  a genuine clean slate. The confirmation spells out exactly what's removed;
+  your identity and signatures still come back with your recovery phrase.
+
+### Networking & developers
+- Vault now presents the access credential the Flowsta network's bootstrap
+  requires (gated since shortly after 0.6.0), keeping peer discovery working
+  on the current network.
+- **Data-export (CAL) support** for apps built on Vault, to help them meet
+  Cryptographic Autonomy License obligations.
+
 ## [0.6.0] — 2026-05-24
 
 The Holochain 0.6.1 / Iroh networking release. The peer-to-peer

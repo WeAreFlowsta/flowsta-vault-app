@@ -19,7 +19,18 @@ For full documentation, visit [docs.flowsta.com/vault](https://docs.flowsta.com/
 - **Local Holochain conductor** — Runs Identity DNA and Private DNA on your device
 - **Agent linking** — Cryptographic attestations (`IsSamePersonEntry`) on the DHT prove your desktop and web identities are the same person. No server trust required.
 - **IPC server** — Local HTTP server on `localhost:27777` for SDK communication with third-party apps
-- **Auto-backups** — CAL-compliant source chain backup support
+- **App backups & full data export** — Connected apps store their data (and the keys to use it) encrypted in your Vault, on your device. Export all of it anytime as a Cryptographic Autonomy License (CAL) compliant copy you can take anywhere.
+
+## Your data, your keys
+
+Flowsta Vault is where the apps you connect keep their data — and where you stay in control of it.
+
+- **Apps back up to your Vault, locally.** Through the IPC server, a connected app can store an encrypted backup of its data in your Vault. Backups are scoped per app, encrypted at rest, and never leave your machine — there is no Flowsta cloud holding your data.
+- **Backups are CAL-complete.** Each one includes not just your *data* but the *cryptographic keys to operate it* — the Cryptographic Autonomy License (CAL-1.0) §4.2.1 promise. You can take your data to any compatible system and keep using it, with no lock-in.
+- **Export everything, anytime.** The **Your Data** screen has an **Export All Data** button that produces one CAL-1.0 export of every connected app's data plus the key material, in a readable, portable form. (Backups live on your device, so exporting is how you keep a copy off it.)
+- **Recovery.** Your identity restores from your 24-word recovery phrase, and your on-network data re-syncs from the DHT; apps can also pull their backup back from your Vault.
+
+Developer API: `POST /backup`, `GET /backup/list`, `POST /backup/retrieve`, `POST /backup/delete` on `localhost:27777` — see the [Vault IPC reference](https://docs.flowsta.com/vault/ipc-reference).
 
 ## Architecture
 
