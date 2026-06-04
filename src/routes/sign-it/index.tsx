@@ -17,6 +17,7 @@ import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
 import RevokeSignatureModal from "~/components/sign-it/RevokeSignatureModal";
 import AmendSignatureModal from "~/components/sign-it/AmendSignatureModal";
 import EditHistoryExpander from "~/components/sign-it/EditHistoryExpander";
+import Callout from "~/components/dashboard/Callout";
 import { formatLicense, formatAiGeneration } from "~/lib/sign-it-labels";
 import { pendingSignPathsContext, signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
@@ -904,6 +905,10 @@ export default component$(() => {
                   Content Rights (applied to all files)
                 </h3>
                 <div class="space-y-3 px-4 pb-4 pt-2">
+                  <Callout intent="info">
+                    <p>Add optional details about your work below — they're published as lasting public proof that you created it and how you allow it to be used.</p>
+                    <p class="mt-2">Everything is stored permanently on Flowsta's tamper-proof network, built on Holochain. No one can change or delete it, not even us.</p>
+                  </Callout>
                   <div>
                     <label class="mb-1 block text-xs text-gray-500">AI Generation</label>
                     <select style={{ colorScheme: "dark" }} class={selectClass} value={metadata.aiGeneration}
@@ -974,26 +979,37 @@ export default component$(() => {
               </div>
             </div>
 
-            {/* Optional signer-declared note (applied to all batch files) */}
+            {/* Optional signer-declared note (applied to all batch files) —
+                boxed like Content Rights, guidance pulled into a callout. */}
             <div class="mb-4">
-              <label class="mb-1 flex items-baseline justify-between text-xs text-gray-500">
-                <span>Note (applied to all files)</span>
-                {metadata.comment.length > 0 && (
-                  <span class="text-[10px] text-gray-500">{metadata.comment.length}/280</span>
-                )}
-              </label>
-              <textarea
-                rows={2}
-                maxLength={280}
-                placeholder="Add a note about this signature"
-                style={{ colorScheme: "dark" }}
-                class="w-full rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-y"
-                value={metadata.comment}
-                onInput$={(e) => { metadata.comment = (e.target as HTMLTextAreaElement).value; }}
-              />
-              <p class="mt-1 text-[11px] italic text-gray-500">
-                This note will be permanently recorded on the public DHT.
-              </p>
+              <div class="rounded-lg border border-gray-700 bg-gray-800">
+                <h3 class="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
+                  Public Note (applied to all files)
+                </h3>
+                <div class="space-y-3 px-4 pb-4 pt-2">
+                  <Callout intent="info">
+                    <p>Add an optional public note or description of the work you're signing.</p>
+                    <p class="mt-2">This could be the name of your work and who it's by. Anything that you'd publicly like to associate with the work you are signing.</p>
+                  </Callout>
+                  <div>
+                    {metadata.comment.length > 0 && (
+                      <div class="mb-1 flex justify-end">
+                        <span class="text-[10px] text-gray-500">{metadata.comment.length}/280</span>
+                      </div>
+                    )}
+                    <textarea
+                      rows={2}
+                      maxLength={280}
+                      aria-label="Public note"
+                      placeholder="Type the note or description here"
+                      style={{ colorScheme: "dark" }}
+                      class="w-full rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-y"
+                      value={metadata.comment}
+                      onInput$={(e) => { metadata.comment = (e.target as HTMLTextAreaElement).value; }}
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Sign button */}
@@ -1170,6 +1186,10 @@ export default component$(() => {
                   Content Rights
                 </h3>
                 <div class="space-y-3 px-4 pb-4 pt-2">
+                  <Callout intent="info">
+                    <p>Add optional details about your work below — they're published as lasting public proof that you created it and how you allow it to be used.</p>
+                    <p class="mt-2">Everything is stored permanently on Flowsta's tamper-proof network, built on Holochain. No one can change or delete it, not even us.</p>
+                  </Callout>
                   <div>
                     <label class="mb-1 block text-xs text-gray-500">AI Generation</label>
                     <select
@@ -1265,26 +1285,37 @@ export default component$(() => {
               </div>
             </div>
 
-            {/* Optional signer-declared note */}
+            {/* Optional signer-declared note — boxed like Content Rights, with
+                the guidance pulled up into a callout above the field. */}
             <div class="mb-4">
-              <label class="mb-1 flex items-baseline justify-between text-xs text-gray-500">
-                <span>Note (optional)</span>
-                {metadata.comment.length > 0 && (
-                  <span class="text-[10px] text-gray-500">{metadata.comment.length}/280</span>
-                )}
-              </label>
-              <textarea
-                rows={2}
-                maxLength={280}
-                placeholder="Add a note about this signature"
-                style={{ colorScheme: "dark" }}
-                class="w-full rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-y"
-                value={metadata.comment}
-                onInput$={(e) => { metadata.comment = (e.target as HTMLTextAreaElement).value; }}
-              />
-              <p class="mt-1 text-[11px] italic text-gray-500">
-                This note will be permanently recorded on the public DHT.
-              </p>
+              <div class="rounded-lg border border-gray-700 bg-gray-800">
+                <h3 class="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
+                  Public Note
+                </h3>
+                <div class="space-y-3 px-4 pb-4 pt-2">
+                  <Callout intent="info">
+                    <p>Add an optional public note or description of the work you're signing.</p>
+                    <p class="mt-2">This could be the name of your work and who it's by. Anything that you'd publicly like to associate with the work you are signing.</p>
+                  </Callout>
+                  <div>
+                    {metadata.comment.length > 0 && (
+                      <div class="mb-1 flex justify-end">
+                        <span class="text-[10px] text-gray-500">{metadata.comment.length}/280</span>
+                      </div>
+                    )}
+                    <textarea
+                      rows={2}
+                      maxLength={280}
+                      aria-label="Public note"
+                      placeholder="Type the note or description here"
+                      style={{ colorScheme: "dark" }}
+                      class="w-full rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-y"
+                      value={metadata.comment}
+                      onInput$={(e) => { metadata.comment = (e.target as HTMLTextAreaElement).value; }}
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Sign button */}
