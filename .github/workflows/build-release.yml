@@ -312,6 +312,51 @@ jobs:
               }
             }
 
+      # Hash every published asset (after the renames above, so the names in
+      # SHA256SUMS.txt match the final download filenames) and attach the
+      # checksums file to the release. Lets users verify a downloaded binary
+      # with `sha256sum -c SHA256SUMS.txt`.
+      - name: Generate SHA256 checksums
+        uses: actions/github-script@v8
+        env:
+          release_id: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const crypto = require('crypto');
+            const releaseId = Number(process.env.release_id);
+            const { owner, repo } = context.repo;
+
+            const { data: assets } = await github.rest.repos.listReleaseAssets({
+              owner, repo, release_id: releaseId, per_page: 100,
+            });
+
+            // Drop a stale checksums file from a previous run so the re-upload
+            // below doesn't collide on the asset name.
+            for (const a of assets) {
+              if (a.name === 'SHA256SUMS.txt') {
+                await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: a.id });
+              }
+            }
+
+            const lines = [];
+            for (const a of assets) {
+              if (a.name === 'SHA256SUMS.txt') continue;
+              const res = await github.request(
+                'GET /repos/{owner}/{repo}/releases/assets/{asset_id}',
+                { owner, repo, asset_id: a.id, headers: { accept: 'application/octet-stream' } }
+              );
+              const hash = crypto.createHash('sha256').update(Buffer.from(res.data)).digest('hex');
+              lines.push(`${hash}  ${a.name}`);
+              console.log(`${hash}  ${a.name}`);
+            }
+            lines.sort();
+
+            await github.rest.repos.uploadReleaseAsset({
+              owner, repo, release_id: releaseId,
+              name: 'SHA256SUMS.txt',
+              data: lines.join('\n') + '\n',
+            });
+
       - name: Publish release
         uses: actions/github-script@v8
         env:
