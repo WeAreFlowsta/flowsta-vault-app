@@ -94,7 +94,7 @@ export default component$(() => {
         <h1 class="text-2xl font-bold text-white">All Signatures</h1>
       </div>
 
-      <div class="rounded-lg border border-gray-700 bg-gray-900 p-6">
+      <div class="rounded-xl border border-gray-700 bg-[#15203a] p-6">
         {!loaded.value ? (
           <LoadingSignatures />
         ) : signatures.value.length === 0 ? (
@@ -120,7 +120,7 @@ export default component$(() => {
               {/* Active signatures */}
               <div class="space-y-3">
                 {active.map((sig: any, i: number) => (
-                  <div key={i} class="rounded-lg border border-gray-700 bg-gray-800 p-4">
+                  <div key={i} class="rounded-xl border border-gray-700 bg-white/[0.06] p-4">
                     <div class="flex items-center gap-3 mb-3 min-w-0">
                       <img
                         src={sig.thumbnail || getDefaultThumbnail(sig)}
@@ -215,7 +215,7 @@ export default component$(() => {
                   {showRevoked.value && (
                     <div class="mt-3 space-y-3">
                       {revoked.map((sig: any, i: number) => (
-                        <div key={i} class="rounded-lg border border-red-900/30 bg-gray-800/50 p-4 opacity-60">
+                        <div key={i} class="rounded-xl border border-red-900/30 bg-black/30 p-4 opacity-60">
                           <div class="flex items-center justify-between mb-2">
                             <span class="truncate text-sm font-mono text-gray-500 line-through">
                               {sig.file_hash?.slice(0, 16)}...

@@ -29,7 +29,7 @@ declare const __API_URL__: string;
 
 // Shared select styling matching Settings auto-lock dropdown
 const selectClass =
-  "w-full rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400";
+  "w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400";
 
 function formatRelativeTime(timestampMs: number): string {
   const now = Date.now();
@@ -778,7 +778,7 @@ export default component$(() => {
       <h1 class="mb-6 text-2xl font-bold text-white">Sign It</h1>
 
       {/* ── Sign a File section ────────────────────────────────── */}
-      <div class="mb-6 rounded-lg border border-gray-700 bg-gray-900 p-6">
+      <div class="mb-6 rounded-xl border border-gray-700 bg-[#15203a] p-6">
         <h3 class="mb-4 text-sm font-semibold uppercase tracking-wider text-gray-500">
           Sign Files
         </h3>
@@ -791,7 +791,7 @@ export default component$(() => {
                 "relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-8 transition-colors cursor-pointer",
                 isDragOver.value
                   ? "border-amber-400 bg-amber-500/10"
-                  : "border-gray-600 hover:border-gray-500 hover:bg-gray-800/50",
+                  : "border-gray-600 hover:border-gray-500 hover:bg-white/[0.06]",
               ].join(" ")}
               onClick$={handleFilePick}
             >
@@ -872,7 +872,7 @@ export default component$(() => {
         {(step.value === "ready" || step.value === "signing") && isBatch.value && (
           <div>
             {/* Batch file list */}
-            <div class="mb-4 rounded-lg border border-gray-700 bg-gray-800 p-4">
+            <div class="mb-4 rounded-lg border border-gray-700 bg-white/[0.06] p-4">
               <div class="flex items-center justify-between mb-3">
                 <p class="text-sm font-medium text-white">
                   {fileEntries.value.length} file{fileEntries.value.length !== 1 ? "s" : ""} ready to sign
@@ -900,7 +900,7 @@ export default component$(() => {
                 <details> until May 2026 user testing showed people walked
                 past it without expanding. */}
             <div class="mb-4">
-              <div class="rounded-lg border border-gray-700 bg-gray-800">
+              <div class="rounded-lg border border-gray-700 bg-white/[0.06]">
                 <h3 class="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
                   Content Rights (applied to all files)
                 </h3>
@@ -982,7 +982,7 @@ export default component$(() => {
             {/* Optional signer-declared note (applied to all batch files) —
                 boxed like Content Rights, guidance pulled into a callout. */}
             <div class="mb-4">
-              <div class="rounded-lg border border-gray-700 bg-gray-800">
+              <div class="rounded-lg border border-gray-700 bg-white/[0.06]">
                 <h3 class="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
                   Public Note (applied to all files)
                 </h3>
@@ -1003,7 +1003,7 @@ export default component$(() => {
                       aria-label="Public note"
                       placeholder="Type the note or description here"
                       style={{ colorScheme: "dark" }}
-                      class="w-full rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-y"
+                      class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-y"
                       value={metadata.comment}
                       onInput$={(e) => { metadata.comment = (e.target as HTMLTextAreaElement).value; }}
                     />
@@ -1031,7 +1031,7 @@ export default component$(() => {
         {(step.value === "ready" || step.value === "signing") && !isBatch.value && (
           <div>
             {/* Single file info */}
-            <div class="mb-4 rounded-lg border border-gray-700 bg-gray-800 p-4">
+            <div class="mb-4 rounded-lg border border-gray-700 bg-white/[0.06] p-4">
               <div class="flex items-center gap-3">
                 <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-500/20">
                   <svg class="h-5 w-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
@@ -1060,7 +1060,7 @@ export default component$(() => {
                 (i) => i.severity === "Info"
               );
               return (
-                <div class="mb-4 rounded-lg border border-gray-700 bg-gray-800 p-4">
+                <div class="mb-4 rounded-lg border border-gray-700 bg-white/[0.06] p-4">
                   <h4 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">
                     File Analysis
                   </h4>
@@ -1121,7 +1121,7 @@ export default component$(() => {
                 steganography / metadata checks because they need the whole
                 file in RAM. */}
             {!isBatch.value && integrityReport.value === null && fileSize.value > ANALYSIS_LIMIT && (
-              <div class="mb-4 rounded-lg border border-gray-700 bg-gray-800 p-4">
+              <div class="mb-4 rounded-lg border border-gray-700 bg-white/[0.06] p-4">
                 <h4 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">
                   File Analysis
                 </h4>
@@ -1181,7 +1181,7 @@ export default component$(() => {
                 Was a collapsed <details> until May 2026 user testing showed
                 people walked past it without expanding. */}
             <div class="mb-4">
-              <div class="rounded-lg border border-gray-700 bg-gray-800">
+              <div class="rounded-lg border border-gray-700 bg-white/[0.06]">
                 <h3 class="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
                   Content Rights
                 </h3>
@@ -1288,7 +1288,7 @@ export default component$(() => {
             {/* Optional signer-declared note — boxed like Content Rights, with
                 the guidance pulled up into a callout above the field. */}
             <div class="mb-4">
-              <div class="rounded-lg border border-gray-700 bg-gray-800">
+              <div class="rounded-lg border border-gray-700 bg-white/[0.06]">
                 <h3 class="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
                   Public Note
                 </h3>
@@ -1309,7 +1309,7 @@ export default component$(() => {
                       aria-label="Public note"
                       placeholder="Type the note or description here"
                       style={{ colorScheme: "dark" }}
-                      class="w-full rounded-md border border-gray-600 bg-gray-800 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-y"
+                      class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-gray-200 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-y"
                       value={metadata.comment}
                       onInput$={(e) => { metadata.comment = (e.target as HTMLTextAreaElement).value; }}
                     />
@@ -1350,7 +1350,7 @@ export default component$(() => {
               )}
             </div>
 
-            <div class="mb-4 max-h-48 overflow-y-auto space-y-2 rounded-lg border border-gray-700 bg-gray-800 p-4">
+            <div class="mb-4 max-h-48 overflow-y-auto space-y-2 rounded-lg border border-gray-700 bg-white/[0.06] p-4">
               {signResults.value.map((r: any, i: number) => (
                 <div key={i} class="flex items-center gap-2 text-xs">
                   {r.success ? (
@@ -1381,7 +1381,7 @@ export default component$(() => {
               <p class="text-xs text-gray-400">{fileName.value}</p>
             </div>
 
-            <div class="mb-4 space-y-3 rounded-lg border border-gray-700 bg-gray-800 p-4">
+            <div class="mb-4 space-y-3 rounded-lg border border-gray-700 bg-white/[0.06] p-4">
               <div>
                 <div class="mb-1 flex items-center justify-between">
                   <span class="text-xs text-gray-500">File Hash</span>
@@ -1453,7 +1453,7 @@ export default component$(() => {
       </div>
 
       {/* ── Recent Signatures section ─────────────────────────── */}
-      <div class="rounded-lg border border-gray-700 bg-gray-900 p-6">
+      <div class="rounded-xl border border-gray-700 bg-[#15203a] p-6">
         <div class="mb-4 flex items-center justify-between">
           <h3 class="text-sm font-semibold uppercase tracking-wider text-gray-500">
             Recent Signatures
@@ -1483,7 +1483,7 @@ export default component$(() => {
               .map((sig, i) => (
               <div
                 key={i}
-                class="flex items-start gap-3 rounded-lg border border-gray-700 bg-gray-800 p-3"
+                class="flex items-start gap-3 rounded-lg border border-gray-700 bg-white/[0.06] p-3"
               >
                 <img
                   src={(sig as any).thumbnail || getDefaultThumbnail(sig)}
