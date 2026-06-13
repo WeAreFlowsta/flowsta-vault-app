@@ -94,11 +94,13 @@ export default component$(() => {
         <h1 class="text-2xl font-bold text-white">All Signatures</h1>
       </div>
 
-      <div class="rounded-xl border border-gray-700 bg-[#15203a] p-6">
+      <div>
         {!loaded.value ? (
-          <LoadingSignatures />
+          <div class="rounded-xl border border-gray-700 bg-[#15203a] p-6 flex items-center justify-center">
+            <LoadingSignatures />
+          </div>
         ) : signatures.value.length === 0 ? (
-          <div class="py-8 text-center">
+          <div class="rounded-xl border border-gray-700 bg-[#15203a] p-8 text-center">
             <svg class="mx-auto mb-3 h-10 w-10 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
               <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
             </svg>
@@ -120,7 +122,7 @@ export default component$(() => {
               {/* Active signatures */}
               <div class="space-y-3">
                 {active.map((sig: any, i: number) => (
-                  <div key={i} class="rounded-xl border border-gray-700 bg-white/[0.06] p-4">
+                  <div key={i} class="rounded-xl border border-gray-700 bg-[#15203a] p-4">
                     <div class="flex items-center gap-3 mb-3 min-w-0">
                       <img
                         src={sig.thumbnail || getDefaultThumbnail(sig)}
@@ -215,7 +217,7 @@ export default component$(() => {
                   {showRevoked.value && (
                     <div class="mt-3 space-y-3">
                       {revoked.map((sig: any, i: number) => (
-                        <div key={i} class="rounded-xl border border-red-900/30 bg-black/30 p-4 opacity-60">
+                        <div key={i} class="rounded-xl border border-red-900/30 bg-[#15203a] p-4 opacity-60">
                           <div class="flex items-center justify-between mb-2">
                             <span class="truncate text-sm font-mono text-gray-500 line-through">
                               {sig.file_hash?.slice(0, 16)}...

@@ -1453,7 +1453,7 @@ export default component$(() => {
       </div>
 
       {/* ── Recent Signatures section ─────────────────────────── */}
-      <div class="rounded-xl border border-gray-700 bg-[#15203a] p-6">
+      <div>
         <div class="mb-4 flex items-center justify-between">
           <h3 class="text-sm font-semibold uppercase tracking-wider text-gray-500">
             Recent Signatures
@@ -1469,9 +1469,11 @@ export default component$(() => {
         </div>
 
         {!signaturesLoaded.value ? (
-          <LoadingSignatures />
+          <div class="rounded-xl border border-gray-700 bg-[#15203a] p-6 flex items-center justify-center">
+            <LoadingSignatures />
+          </div>
         ) : recentSignatures.value.length === 0 ? (
-          <p class="py-4 text-center text-sm text-gray-500">
+          <p class="rounded-xl border border-gray-700 bg-[#15203a] p-6 text-center text-sm text-gray-500">
             No signatures yet. Sign a file above to get started.
           </p>
         ) : (
@@ -1483,7 +1485,7 @@ export default component$(() => {
               .map((sig, i) => (
               <div
                 key={i}
-                class="flex items-start gap-3 rounded-lg border border-gray-700 bg-white/[0.06] p-3"
+                class="flex items-start gap-3 rounded-xl border border-gray-700 bg-[#15203a] p-3"
               >
                 <img
                   src={(sig as any).thumbnail || getDefaultThumbnail(sig)}
