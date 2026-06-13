@@ -912,6 +912,18 @@ async fn link_identity_handler(
         ));
     }
 
+    // Linking is the stronger consent: treat it as an authenticate
+    // approval for this session too (same in-memory lifetime as the
+    // dialog's "remember" option), so a link immediately followed by an
+    // /authenticate — the standard third-party sign-in sequence — shows
+    // ONE dialog instead of two.
+    if let Some(ref orig) = origin {
+        let mut apps = state.app_state.approved_apps.lock().unwrap();
+        if !apps.contains(orig) {
+            apps.push(orig.clone());
+        }
+    }
+
     // User approved — extract signing material from vault config (scoped to drop lock)
     let (seed_arr, vault_ed25519_pub, vault_agent_39) = {
         let config = state.app_state.vault_config.lock().unwrap();
