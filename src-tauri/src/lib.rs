@@ -148,15 +148,43 @@ pub fn run() {
                 log::info!("Queued {} file(s) from launch args", count);
             }
 
-            // Start IPC server in background (needs AppHandle for event emission)
+            // Start the IPC server on its OWN dedicated thread + tokio
+            // runtime, isolated from the main async runtime that the
+            // Holochain conductor runs on. Rationale: in 0.6.1 the IPC
+            // server shared the conductor's runtime, so heavy post-unlock
+            // conductor work (cell enablement, agent-link queries) could
+            // starve the IPC accept loop until it permanently wedged
+            // (connections piled in the accept queue; /status went dark).
+            // A separate runtime means conductor churn can never block the
+            // IPC accept loop. (Surfaced building Your Own AI's Vault
+            // sign-in — see build-docs current/VAULT_NEXT_RELEASE.md.)
             let ipc_state = app_state.clone();
             let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                match ipc_server::start_ipc_server(ipc_state, app_handle).await {
-                    Ok(port) => log::info!("IPC server started on port {}", port),
-                    Err(e) => log::error!("Failed to start IPC server: {}", e),
-                }
-            });
+            std::thread::Builder::new()
+                .name("flowsta-ipc".into())
+                .spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(4)
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            log::error!("Failed to build IPC runtime: {}", e);
+                            return;
+                        }
+                    };
+                    rt.block_on(async move {
+                        match ipc_server::start_ipc_server(ipc_state, app_handle).await {
+                            Ok(port) => log::info!("IPC server started on port {} (dedicated runtime)", port),
+                            Err(e) => log::error!("Failed to start IPC server: {}", e),
+                        }
+                        // start_ipc_server spawns the serve task and returns
+                        // the port; keep this runtime alive so that task runs.
+                        std::future::pending::<()>().await;
+                    });
+                })
+                .expect("failed to spawn IPC server thread");
 
             // Catch SIGTERM / SIGINT (Ctrl+C, system shutdown, dpkg postinst kill,
             // `kill <pid>`) and route them through app.exit() so RunEvent::Exit
