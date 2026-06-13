@@ -118,14 +118,14 @@ export default component$(() => {
     return (
       <div>
         <div class="mb-6 h-8 w-32 animate-pulse rounded bg-gray-700" />
-        <div class="mb-6 animate-pulse rounded-lg border border-gray-700 bg-gray-900 p-6">
+        <div class="mb-6 animate-pulse rounded-lg border border-gray-700 bg-[#15203a] p-6">
           <div class="mb-3 h-4 w-24 rounded bg-gray-700" />
           <div class="mb-2 h-4 w-full rounded bg-gray-700" />
           <div class="h-4 w-3/4 rounded bg-gray-700" />
         </div>
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
           {[1, 2, 3].map((i) => (
-            <div key={i} class="animate-pulse rounded-lg border border-gray-700 bg-gray-900 p-4">
+            <div key={i} class="animate-pulse rounded-lg border border-gray-700 bg-[#15203a] p-4">
               <div class="mb-2 h-3 w-20 rounded bg-gray-700" />
               <div class="h-6 w-12 rounded bg-gray-700" />
             </div>
@@ -200,7 +200,7 @@ export default component$(() => {
       <h1 class="mb-6 text-2xl font-bold text-white">Overview</h1>
 
       {/* Identity Card */}
-      <div class="mb-6 rounded-lg border border-gray-700 bg-gray-900 p-6">
+      <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
         <div class="flex items-start justify-between">
           <div class="flex items-center gap-4">
             {/* Avatar */}
@@ -249,7 +249,7 @@ export default component$(() => {
         </div>
 
         {/* DID */}
-        <div class="mt-4 rounded-lg bg-gray-800/50 px-4 py-3">
+        <div class="mt-4 rounded-lg bg-black/30 px-4 py-3">
           <div class="flex items-center justify-between mb-1">
             <span class="text-xs font-medium text-gray-500">DID</span>
             <button
@@ -278,7 +278,7 @@ export default component$(() => {
         {/* Signatures */}
         <Link
           href="/sign-it/"
-          class="rounded-lg border border-gray-700 bg-gray-900 p-5 transition-colors hover:border-gray-600 hover:bg-gray-800/80"
+          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
         >
           <div class="mb-3 flex items-center gap-2 text-gray-400">
             <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
@@ -309,7 +309,7 @@ export default component$(() => {
         {/* Connected Apps */}
         <Link
           href="/identities/"
-          class="rounded-lg border border-gray-700 bg-gray-900 p-5 transition-colors hover:border-gray-600 hover:bg-gray-800/80"
+          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
         >
           <div class="mb-3 flex items-center gap-2 text-gray-400">
             <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
@@ -330,7 +330,7 @@ export default component$(() => {
         {/* Backups */}
         <Link
           href="/your-data/"
-          class="rounded-lg border border-gray-700 bg-gray-900 p-5 transition-colors hover:border-gray-600 hover:bg-gray-800/80"
+          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
         >
           <div class="mb-3 flex items-center gap-2 text-gray-400">
             <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
@@ -355,7 +355,7 @@ export default component$(() => {
       </div>
 
       {/* Recent Activity — unified feed: signatures, backups, linked apps. */}
-      <div class="mb-6 rounded-lg border border-gray-700 bg-gray-900 p-6">
+      <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
         <h3 class="mb-4 text-sm font-semibold uppercase tracking-wider text-gray-500">
           Recent Activity
         </h3>

@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { CopyButton } from "~/components/ui/CopyButton";
 import { GlassButton } from "~/components/common/GlassButton";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
+import Callout from "~/components/dashboard/Callout";
 
 interface BackupAppSummary {
   client_id: string;
@@ -279,7 +280,7 @@ export default component$(() => {
       <h1 class="mb-6 text-2xl font-bold text-white">Your Data</h1>
 
       {/* Identity Summary */}
-      <div class="mb-6 rounded-lg border border-gray-700 bg-gray-900 p-6">
+      <div class="mb-6 rounded-xl border border-gray-700 bg-[#15203a] p-6">
         <h3 class="mb-4 text-lg font-semibold text-white">Identity</h3>
         {id && (
           <div class="space-y-3 text-sm">
@@ -332,7 +333,7 @@ export default component$(() => {
       </div>
 
       {/* App Backups */}
-      <div class="mb-6 rounded-lg border border-gray-700 bg-gray-900 p-6">
+      <div class="mb-6 rounded-xl border border-gray-700 bg-[#15203a] p-6">
         <div class="mb-4 flex items-center justify-between">
           <h3 class="text-lg font-semibold text-white">App Backups</h3>
           {backupStats.value.app_count > 0 && (
@@ -344,7 +345,7 @@ export default component$(() => {
         </div>
 
         {backupStats.value.apps.length === 0 ? (
-          <div class="rounded-lg border border-gray-800 bg-gray-800/50 p-8 text-center">
+          <div class="rounded-lg border border-gray-800 bg-black/30 p-8 text-center">
             <div class="mb-2 text-3xl text-gray-600">
               <svg
                 class="mx-auto h-10 w-10"
@@ -373,7 +374,7 @@ export default component$(() => {
               return (
                 <div
                   key={app.client_id}
-                  class="rounded-lg border border-gray-700 bg-gray-800/50 overflow-hidden"
+                  class="rounded-lg border border-gray-700 bg-black/30 overflow-hidden"
                 >
                   {/* App header row */}
                   <div class="flex items-center justify-between p-4">
@@ -433,7 +434,7 @@ export default component$(() => {
 
                   {/* Expanded: individual backups */}
                   {isExpanded && (
-                    <div class="border-t border-gray-700 bg-gray-900/50">
+                    <div class="border-t border-gray-700 bg-black/30">
                       {loadingBackups.value ? (
                         <div class="flex items-center justify-center py-4">
                           <div class="h-5 w-5 animate-spin rounded-full border-2 border-gray-600 border-t-amber-400"></div>
@@ -528,7 +529,7 @@ export default component$(() => {
       </div>
 
       {/* Export */}
-      <div class="rounded-lg border border-gray-700 bg-gray-900 p-6">
+      <div class="rounded-xl border border-gray-700 bg-[#15203a] p-6">
         <h3 class="mb-2 text-lg font-semibold text-white">Export All Data</h3>
         <p class="mb-4 text-sm text-gray-400">
           Download a complete copy of your vault — your identity, cryptographic
@@ -536,22 +537,21 @@ export default component$(() => {
           everything you need to recreate your Flowsta identity independently.
         </p>
 
-        <div class="mb-4 rounded-lg border border-yellow-700/50 bg-yellow-900/20 p-3">
-          <p class="text-sm text-yellow-400 font-medium mb-1">
-            This file will contain your private keys
-          </p>
-          <p class="text-xs text-yellow-400/70">
-            Your export includes the cryptographic seed that proves your
-            identity on the network. Store it somewhere safe and never share
-            it — anyone with this file could sign as you.
-          </p>
+        <div class="mb-4">
+          <Callout intent="warning" title="This file will contain your private keys">
+            <p>
+              Your export includes the cryptographic seed that proves your
+              identity on the network. Store it somewhere safe and never share
+              it — anyone with this file could sign as you.
+            </p>
+          </Callout>
         </div>
 
         {exportSuccess.value && (
-          <div class="mb-4 rounded-lg border border-green-700/50 bg-green-900/20 p-3">
-            <p class="text-sm text-green-400">
-              Export downloaded successfully. Keep it somewhere safe!
-            </p>
+          <div class="mb-4">
+            <Callout intent="success">
+              <p>Export downloaded successfully. Keep it somewhere safe!</p>
+            </Callout>
           </div>
         )}
 

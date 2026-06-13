@@ -205,7 +205,7 @@ export default component$(() => {
         <div class="mb-6 h-8 w-48 animate-pulse rounded bg-gray-700" />
         <div class="space-y-4">
           {[1, 2].map((i) => (
-            <div key={i} class="animate-pulse rounded-lg border border-gray-700 bg-gray-900 p-6">
+            <div key={i} class="animate-pulse rounded-lg border border-gray-700 bg-[#15203a] p-6">
               <div class="mb-3 h-4 w-32 rounded bg-gray-700" />
               <div class="h-4 w-full rounded bg-gray-700" />
             </div>
@@ -220,7 +220,7 @@ export default component$(() => {
       <h1 class="mb-6 text-2xl font-bold text-white">Connected Apps</h1>
 
       {/* Flowsta Web Account */}
-      <div class="mb-6 rounded-lg border border-gray-700 bg-gray-900 p-6">
+      <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
         <div class="mb-3 flex items-center gap-2">
           <svg class="h-5 w-5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
@@ -247,7 +247,7 @@ export default component$(() => {
             </div>
           </div>
         ) : linkStatus.value === "linking" ? (
-          <div class="flex items-center gap-3 rounded-lg border border-gray-700 bg-gray-900/50 p-4">
+          <div class="flex items-center gap-3 rounded-lg border border-gray-700 bg-black/30 p-4">
             <div class="h-5 w-5 animate-spin rounded-full border-2 border-gray-600 border-t-amber-400" />
             <div>
               <p class="text-sm text-gray-300">Linking with web account...</p>
@@ -261,7 +261,7 @@ export default component$(() => {
                 <span class="text-xs text-red-400">{linkMessage.value}</span>
               </div>
             )}
-            <div class="flex items-center justify-between rounded-lg border border-dashed border-gray-600 bg-gray-900/50 p-4">
+            <div class="flex items-center justify-between rounded-lg border border-dashed border-gray-600 bg-black/30 p-4">
               <div>
                 <p class="text-sm text-gray-400">Not linked yet</p>
                 <p class="text-xs text-gray-500">
@@ -280,7 +280,7 @@ export default component$(() => {
       </div>
 
       {/* Apps & Sites list */}
-      <div class="rounded-lg border border-gray-700 bg-gray-900 p-6">
+      <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
         <div class="mb-4 flex items-center justify-between">
           <h3 class="text-lg font-semibold text-white">Apps & Sites</h3>
           <span class="text-xs text-gray-500">
@@ -289,7 +289,7 @@ export default component$(() => {
         </div>
 
         {linkedApps.value.length === 0 && connectedSites.value.length === 0 ? (
-          <div class="rounded-lg border border-dashed border-gray-600 bg-gray-900/50 p-8 text-center">
+          <div class="rounded-lg border border-dashed border-gray-600 bg-black/30 p-8 text-center">
             <svg class="mx-auto mb-3 h-8 w-8 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
               <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
             </svg>
@@ -346,7 +346,7 @@ export default component$(() => {
                           {visibleScopes.map((scope) => (
                             <span
                               key={scope}
-                              class="rounded-full border border-gray-700 bg-gray-800/80 px-2 py-0.5 text-[10px] text-gray-400"
+                              class="rounded-full border border-gray-700 bg-black/30 px-2 py-0.5 text-[10px] text-gray-400"
                             >
                               {scopeLabels[scope] ?? scope}
                             </span>
@@ -373,7 +373,7 @@ export default component$(() => {
                   "flex items-center justify-between rounded-lg border px-4 py-3",
                   site.trusted
                     ? "border-green-800/50 bg-green-900/10"
-                    : "border-gray-700 bg-gray-800/50",
+                    : "border-gray-700 bg-black/30",
                 ].join(" ")}
               >
                 <div class="min-w-0 flex-1">
@@ -439,7 +439,7 @@ export default component$(() => {
       </div>
 
       {/* Web connected sites info */}
-      <div class="mt-6 rounded-lg border border-gray-700 bg-gray-800/50 p-4">
+      <div class="mt-6 rounded-lg border border-gray-700 bg-black/30 p-4">
         <div class="flex items-start gap-3">
           <svg class="h-5 w-5 text-gray-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />

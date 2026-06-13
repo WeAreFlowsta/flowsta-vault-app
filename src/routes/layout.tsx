@@ -706,7 +706,7 @@ export default component$(() => {
 
   // Dashboard: full-width header at top, then sidebar + content below
   return (
-    <div class="flex h-screen flex-col bg-gray-800">
+    <div class="flex h-screen flex-col bg-gray-900">
       {/* Full-width header */}
       <header class="sticky top-0 z-40 w-full border-b border-gray-700 bg-gray-900">
         <div class="flex items-center justify-between py-3 px-6">

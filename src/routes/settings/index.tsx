@@ -1,4 +1,5 @@
 import { component$, useSignal, useContext, $ } from "@builder.io/qwik";
+import Callout from "~/components/dashboard/Callout";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
@@ -149,7 +150,7 @@ export default component$(() => {
       {activeTab.value === "general" && (
         <div class="space-y-6">
           {/* Change password */}
-          <div class="rounded-lg border border-gray-700 bg-gray-900 p-6">
+          <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
             <h3 class="mb-2 text-lg font-semibold text-white">
               Change Password
             </h3>
@@ -159,10 +160,10 @@ export default component$(() => {
             </p>
 
             {!isOnline && (
-              <div class="mb-4 rounded-lg border border-yellow-700/50 bg-yellow-900/20 p-3">
-                <p class="text-sm text-yellow-400">
-                  You must be online to change your password.
-                </p>
+              <div class="mb-4">
+                <Callout intent="warning">
+                  <p>You must be online to change your password.</p>
+                </Callout>
               </div>
             )}
 
@@ -270,7 +271,7 @@ export default component$(() => {
           </div>
 
           {/* Auto-lock */}
-          <div class="rounded-lg border border-gray-700 bg-gray-900 p-6">
+          <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
             <h3 class="mb-2 text-lg font-semibold text-white">Auto-Lock</h3>
             <p class="mb-4 text-sm text-gray-400">
               Automatically lock the vault after a period of inactivity.
@@ -350,7 +351,7 @@ export default component$(() => {
 
       {/* About tab */}
       {activeTab.value === "about" && (
-        <div class="rounded-lg border border-gray-700 bg-gray-900 p-6">
+        <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
           <h3 class="mb-4 text-lg font-semibold text-white">
             About Flowsta Vault
           </h3>
