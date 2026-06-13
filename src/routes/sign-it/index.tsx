@@ -91,6 +91,23 @@ interface FileEntry {
 }
 
 /** Get the default thumbnail SVG path based on available signature data. */
+/**
+ * Keep only Warning/Critical concerns from an integrity report. Pure
+ * helper kept at module scope so it's never captured into a Qwik closure
+ * (a component-scoped function would fail serialization).
+ */
+function filterReport(report: IntegrityReport | null) {
+  if (!report) return null;
+  const concerns = report.issues_found.filter(
+    (i) => i.severity === "Warning" || i.severity === "Critical"
+  );
+  return {
+    checks_performed: report.checks_performed,
+    issues_found: concerns,
+    checked_at: report.checked_at,
+  };
+}
+
 function getDefaultThumbnail(sig: any): string {
   // Check perceptual hash type first (most reliable)
   const hashType = sig.perceptual_hash?.hash_type;
@@ -614,17 +631,6 @@ export default component$(() => {
     return Object.keys(cr).length > 0 ? cr : null;
   });
 
-  const filterReport = (report: IntegrityReport | null) => {
-    if (!report) return null;
-    const concerns = report.issues_found.filter(
-      (i) => i.severity === "Warning" || i.severity === "Critical"
-    );
-    return {
-      checks_performed: report.checks_performed,
-      issues_found: concerns,
-      checked_at: report.checked_at,
-    };
-  };
 
   const handleSign = $(async () => {
     // Phase 8: refresh quota first (online preferred, fallback to cache)
