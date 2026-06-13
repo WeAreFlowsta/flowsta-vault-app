@@ -3490,6 +3490,22 @@ pub async fn get_my_linked_signatures(
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<LinkedSignaturesResult, String> {
+    // DEBUG (wedge hunt): concurrency gauge. If this logs >1 in flight, two
+    // signature refreshes are running at once — the likely source of the
+    // "source chain head has moved" collisions and the conductor load that
+    // correlates with the IPC wedge. Remove once diagnosed.
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static SIG_INFLIGHT: AtomicI64 = AtomicI64::new(0);
+    let n = SIG_INFLIGHT.fetch_add(1, Ordering::Relaxed) + 1;
+    log::info!("[sig-refresh] -> get_my_linked_signatures (concurrent={})", n);
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let left = SIG_INFLIGHT.fetch_sub(1, Ordering::Relaxed) - 1;
+            log::info!("[sig-refresh] <- get_my_linked_signatures (concurrent={})", left);
+        }
+    }
+    let _g = Guard;
     match get_my_linked_signatures_inner(state.inner()).await {
         Ok(r) => Ok(r),
         Err(e) => {

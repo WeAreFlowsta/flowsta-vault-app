@@ -33,7 +33,14 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tauri::{Emitter, Manager};
+
+/// DEBUG (0.7.0-beta wedge hunt): number of IPC requests currently being
+/// handled. The heartbeat in lib.rs logs this; if it climbs and stays up,
+/// handlers are entering but not completing (blocked). Logged per-request
+/// by `trace_request` below.
+pub static IPC_INFLIGHT: AtomicI64 = AtomicI64::new(0);
 
 /// What the Vault window looked like before a consent request raised it, so we
 /// can put it back afterwards (see `restore_window`).
@@ -1824,6 +1831,20 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 
 /// Start the IPC server on localhost.
 /// Tries ports 27777, 27778, 27779 in order.
+/// DEBUG (wedge hunt): per-request entry/exit tracing + in-flight gauge.
+async fn trace_request(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+    let n = IPC_INFLIGHT.fetch_add(1, Ordering::Relaxed) + 1;
+    log::info!("[ipc] -> {} (inflight={})", path, n);
+    let resp = next.run(req).await;
+    let left = IPC_INFLIGHT.fetch_sub(1, Ordering::Relaxed) - 1;
+    log::info!("[ipc] <- {} status={} (inflight={})", path, resp.status().as_u16(), left);
+    resp
+}
+
 pub async fn start_ipc_server(
     app_state: Arc<AppState>,
     app_handle: tauri::AppHandle,
@@ -1860,6 +1881,11 @@ pub async fn start_ipc_server(
         .route("/backup/retrieve", post(backup_retrieve_handler))
         .route("/backup/delete", post(backup_delete_handler))
         .layer(cors)
+        // DEBUG (wedge hunt): log every request entering/leaving a handler
+        // with the in-flight count. A "-> path" with no matching "<- path"
+        // is the handler that's blocking; a climbing inflight means handlers
+        // aren't completing. Remove once the wedge is fixed.
+        .layer(axum::middleware::from_fn(trace_request))
         .with_state(ipc_state);
 
     // Try ports in sequence

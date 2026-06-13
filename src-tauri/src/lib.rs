@@ -179,6 +179,24 @@ pub fn run() {
                             Ok(port) => log::info!("IPC server started on port {} (dedicated runtime)", port),
                             Err(e) => log::error!("Failed to start IPC server: {}", e),
                         }
+                        // DEBUG (wedge hunt): heartbeat on the dedicated IPC
+                        // runtime. If ticks STOP while /status is dead, the
+                        // runtime itself is starved/blocked (all 4 workers
+                        // stuck). If ticks CONTINUE but /status is dead, the
+                        // accept loop or a handler is the culprit (cross-ref
+                        // the [ipc] -> / <- request logs). Remove with the fix.
+                        tokio::spawn(async {
+                            let mut n: u64 = 0;
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                n += 1;
+                                log::info!(
+                                    "[ipc-hb] tick {} inflight={}",
+                                    n,
+                                    ipc_server::IPC_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed)
+                                );
+                            }
+                        });
                         // start_ipc_server spawns the serve task and returns
                         // the port; keep this runtime alive so that task runs.
                         std::future::pending::<()>().await;
