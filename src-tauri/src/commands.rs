@@ -210,19 +210,28 @@ impl AppState {
 
     /// Persist the current linked apps list to disk.
     pub fn save_linked_apps(&self) {
-        let apps = self.linked_third_party_apps.lock().unwrap();
-        let path = self.data_dir.join("linked-apps.json");
-        if let Ok(json) = serde_json::to_string_pretty(&*apps) {
-            let _ = std::fs::write(path, json);
+        // Serialize under the lock, then RELEASE it before the blocking
+        // disk write — holding a std Mutex across std::fs::write makes
+        // concurrent readers (e.g. /status polling get_scopes_for_origin)
+        // block worker threads, which under load can starve the IPC
+        // accept loop. Clone-then-write keeps the critical section tiny.
+        let json = {
+            let apps = self.linked_third_party_apps.lock().unwrap();
+            serde_json::to_string_pretty(&*apps)
+        };
+        if let Ok(json) = json {
+            let _ = std::fs::write(self.data_dir.join("linked-apps.json"), json);
         }
     }
 
     /// Persist the granted scopes store to disk.
     pub fn save_linked_app_scopes(&self) {
-        let scopes = self.linked_app_scopes.lock().unwrap();
-        let path = self.data_dir.join("linked-app-scopes.json");
-        if let Ok(json) = serde_json::to_string_pretty(&*scopes) {
-            let _ = std::fs::write(path, json);
+        let json = {
+            let scopes = self.linked_app_scopes.lock().unwrap();
+            serde_json::to_string_pretty(&*scopes)
+        };
+        if let Ok(json) = json {
+            let _ = std::fs::write(self.data_dir.join("linked-app-scopes.json"), json);
         }
     }
 }
