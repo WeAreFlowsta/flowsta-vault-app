@@ -472,6 +472,19 @@ pub fn unlock_vault(
 /// Lock the vault (clear in-memory config and stop conductor).
 #[tauri::command]
 pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Cancel any open approval dialog: deny the waiting IPC request so it
+    // returns immediately instead of hanging (and can never be approved
+    // against a now-locked vault). The calling app sees a clean denial.
+    if let Some(req) = state.pending_auth.lock().unwrap().take() {
+        let _ = req.responder.send(false);
+    }
+    if let Some(req) = state.pending_document_sign.lock().unwrap().take() {
+        let _ = req.responder.send(false);
+    }
+
+    // Session approvals don't outlive an unlock session.
+    state.approved_apps.lock().unwrap().clear();
+
     // Clear MAU state before clearing vault config (needs device_seed)
     crate::mau::clear_mau_state(&state);
 
