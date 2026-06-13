@@ -5,6 +5,31 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0-beta1] — 2026-06-13
+
+Beta. A reliability and design release. Existing vaults upgrade in place — no migration.
+
+### Apps & sign-in
+- **Signing in to Flowsta apps is far more reliable.** The local connection apps
+  use to talk to Vault now runs independently of Vault's own network activity,
+  so it no longer stalls while Vault is busy right after you unlock — which
+  could previously leave an app's sign-in hanging.
+- **One approval instead of two** the first time an app both links your identity
+  and signs you in: approving the link now also approves that sign-in for the
+  session.
+- **Locking Vault cleanly dismisses any open approval request** instead of
+  leaving it waiting.
+
+### Appearance
+- **Refreshed look across the app.** Identities, Settings, Your Data, the
+  dashboard, and Sign It now share one consistent surface style, with clearer
+  depth between cards and backgrounds.
+- **Sign It signature lists restyled** so each signature reads as its own card.
+
+### Downloads
+- **Release downloads now include a SHA256SUMS file** so you can verify what you
+  downloaded.
+
 ## [0.6.1] — 2026-06-01
 
 A polish release focused on the cross-app sign-in experience and Windows.
