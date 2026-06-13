@@ -5,6 +5,15 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0-beta2] — 2026-06-13
+
+Beta. Fixes a sign-in hang.
+
+### Apps & sign-in
+- **Fixed: signing in to an app could hang after you approved it.** Approving
+  a sign-in now completes reliably for apps that identify themselves with a
+  developer client ID.
+
 ## [0.7.0-beta1] — 2026-06-13
 
 Beta. A reliability and design release. Existing vaults upgrade in place — no migration.
