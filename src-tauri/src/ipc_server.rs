@@ -564,23 +564,33 @@ async fn authenticate_handler(
     }
 
     // User approved — build response
-    let config = state.app_state.vault_config.lock().unwrap();
-    let config = config.as_ref().ok_or_else(|| {
+    // Extract identity + seed, then RELEASE the vault_config lock before
+    // any further work. record_mau_event_if_needed (below) re-locks
+    // vault_config, and std::sync::Mutex is non-reentrant — holding the
+    // guard across that call self-deadlocks the handler. This bit: an
+    // /authenticate carrying a client_id hung forever (handler entered,
+    // never returned, the request thread stuck on the second lock).
+    let (agent_pub_key, did, device_seed) = {
+        let config = state.app_state.vault_config.lock().unwrap();
+        let config = config.as_ref().ok_or_else(|| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "vault_locked".into(),
+                    description: Some("Vault was locked during approval.".into()),
+                }),
+            )
+        })?;
         (
-            StatusCode::FORBIDDEN,
-            Json(IpcError {
-                error: "vault_locked".into(),
-                description: Some("Vault was locked during approval.".into()),
-            }),
+            config.agent_pub_key.clone(),
+            config.did.clone(),
+            config.device_seed.clone(),
         )
-    })?;
-
-    let agent_pub_key = config.agent_pub_key.clone();
-    let did = config.did.clone();
+    };
 
     // Sign the challenge if provided
     let signature = if let Some(ref challenge_b64) = req.challenge {
-        let device_seed = config.device_seed.as_ref().ok_or_else(|| {
+        let device_seed = device_seed.as_ref().ok_or_else(|| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(IpcError {
@@ -610,7 +620,7 @@ async fn authenticate_handler(
         None
     };
 
-    // Record MAU event if client_id was provided
+    // Record MAU event if client_id was provided (vault_config lock released)
     if let Some(ref client_id) = req.client_id {
         crate::mau::record_mau_event_if_needed(&state.app_state, client_id);
     }
