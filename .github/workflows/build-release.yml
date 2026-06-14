@@ -162,7 +162,7 @@ jobs:
           }
 
       - name: Install frontend dependencies
-        run: npm install
+        run: npm ci
 
       - name: Import Apple certificate (macOS)
         if: runner.os == 'macOS'
@@ -225,7 +225,7 @@ jobs:
           echo "extra=$EXTRA" >> "$GITHUB_OUTPUT"
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # base64(STANDARD) of {"client_id":"<vault-prod-app>"} — written

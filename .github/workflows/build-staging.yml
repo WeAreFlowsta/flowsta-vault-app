@@ -99,7 +99,7 @@ jobs:
           }
 
       - name: Install frontend dependencies
-        run: npm install
+        run: npm ci
 
       - name: Import Apple certificate (macOS)
         if: runner.os == 'macOS'
@@ -127,7 +127,7 @@ jobs:
           echo -n "$APPLE_API_KEY_PATH" | base64 --decode -o ~/private_keys/AuthKey_${APPLE_API_KEY}.p8
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FLOWSTA_API_URL: ${{ vars.STAGING_API_URL }}

@@ -46,7 +46,9 @@ lerna-debug.log*
 # Rust / Tauri
 src-tauri/target/
 src-tauri/gen/
-src-tauri/Cargo.lock
+# Cargo.lock is committed (this is an application, not a library) so the build
+# toolchain — including the bundler that generates the Windows installer — is
+# reproducible and doesn't drift between releases.
 src-tauri/binaries/
 src-tauri/.cargo/config.toml
 
