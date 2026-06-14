@@ -5,42 +5,25 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0-beta3] — 2026-06-14
+## [0.7.0] — 2026-06-14
 
-Beta. Builds on beta2 (the sign-in hang fix).
-
-### Connected apps
-- **The Overview's connected-apps list now updates live.** When an app links or
-  you revoke one, it appears or disappears immediately instead of only after you
-  reload the page.
-
-### Under the hood
-- **More consistent installers.** The build toolchain is now pinned, so the
-  Windows installer behaves the same from one release to the next.
-
-## [0.7.0-beta2] — 2026-06-13
-
-Beta. Fixes a sign-in hang.
-
-### Apps & sign-in
-- **Fixed: signing in to an app could hang after you approved it.** Approving
-  a sign-in now completes reliably for apps that identify themselves with a
-  developer client ID.
-
-## [0.7.0-beta1] — 2026-06-13
-
-Beta. A reliability and design release. Existing vaults upgrade in place — no migration.
+A reliability and design release. Existing vaults upgrade in place — no migration.
 
 ### Apps & sign-in
 - **Signing in to Flowsta apps is far more reliable.** The local connection apps
   use to talk to Vault now runs independently of Vault's own network activity,
-  so it no longer stalls while Vault is busy right after you unlock — which
-  could previously leave an app's sign-in hanging.
+  so it no longer stalls while Vault is busy right after you unlock. This also
+  fixes a hang where signing in could get stuck after you approved it.
 - **One approval instead of two** the first time an app both links your identity
   and signs you in: approving the link now also approves that sign-in for the
   session.
 - **Locking Vault cleanly dismisses any open approval request** instead of
   leaving it waiting.
+
+### Connected apps
+- **The Overview's connected-apps list updates live.** When an app links or you
+  revoke one, it appears or disappears immediately instead of only after you
+  reload the page.
 
 ### Appearance
 - **Refreshed look across the app.** Identities, Settings, Your Data, the
@@ -49,8 +32,12 @@ Beta. A reliability and design release. Existing vaults upgrade in place — no 
 - **Sign It signature lists restyled** so each signature reads as its own card.
 
 ### Downloads
-- **Release downloads now include a SHA256SUMS file** so you can verify what you
+- **Release downloads include a SHA256SUMS file** so you can verify what you
   downloaded.
+
+### Under the hood
+- **More consistent installers.** The build toolchain is now pinned, so the
+  Windows installer behaves the same from one release to the next.
 
 ## [0.6.1] — 2026-06-01
 
