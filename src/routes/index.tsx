@@ -112,6 +112,18 @@ export default component$(() => {
       } catch { /* ignore */ }
     });
     cleanup(() => unlisten());
+
+    // Keep the connected-apps list live: the IPC server emits these when an app
+    // links or is revoked, so refetch instead of waiting for a manual reload.
+    const refreshApps = async () => {
+      try {
+        linkedApps.value = await invoke<LinkedApp[]>("get_linked_third_party_apps");
+      } catch { /* Vault may be locked */ }
+    };
+    const unlistenAdded = await listen("linked-app-added", refreshApps);
+    const unlistenRevoked = await listen("linked-app-revoked", refreshApps);
+    cleanup(() => unlistenAdded());
+    cleanup(() => unlistenRevoked());
   });
 
   if (loading.value) {
