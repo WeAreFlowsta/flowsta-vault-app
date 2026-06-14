@@ -5,6 +5,19 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0-beta3] — 2026-06-14
+
+Beta. Builds on beta2 (the sign-in hang fix).
+
+### Connected apps
+- **The Overview's connected-apps list now updates live.** When an app links or
+  you revoke one, it appears or disappears immediately instead of only after you
+  reload the page.
+
+### Under the hood
+- **More consistent installers.** The build toolchain is now pinned, so the
+  Windows installer behaves the same from one release to the next.
+
 ## [0.7.0-beta2] — 2026-06-13
 
 Beta. Fixes a sign-in hang.
