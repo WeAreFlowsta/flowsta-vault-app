@@ -694,7 +694,17 @@ export default component$(() => {
     return (
       <UnlockScreen
         onUnlock$={handleUnlockPassword}
-        onResetVault$={() => {
+        onResetVault$={async () => {
+          // Must WIPE on disk (vault.enc + lair keystore + conductor), not
+          // just navigate — otherwise the next create/restore inherits the
+          // old lair keystore under a mismatched passphrase and the conductor
+          // crashes on connect (ConnectionReset → "Connection refused"). The
+          // Settings reset already does this; the lock-screen path must too.
+          try {
+            await invoke("reset_vault");
+          } catch (e) {
+            console.error("reset_vault failed:", e);
+          }
           screen.value = "setup";
         }}
       />
