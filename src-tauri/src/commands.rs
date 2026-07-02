@@ -302,6 +302,7 @@ pub fn setup_vault(
     web_username: Option<String>,
     display_name: Option<String>,
     profile_picture: Option<String>,
+    hosting_model: Option<String>,
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SetupResult, String> {
@@ -360,6 +361,7 @@ pub fn setup_vault(
         private_dna_version: Some(crate::dna::BUNDLED_PRIVATE_VERSION.to_string()),
         identity_dna_version: Some(crate::dna::BUNDLED_IDENTITY_VERSION.to_string()),
         conductor_version: Some("0.6.0".to_string()),
+        hosting_model,
     };
 
     // Encrypt and save (with unencrypted display identifier for unlock screen)
@@ -729,7 +731,12 @@ fn spawn_conductor_startup(
                         let should_link = {
                             let config = state.vault_config.lock().unwrap();
                             if let Some(cfg) = config.as_ref() {
-                                cfg.recovery_lookup_hash.is_some()
+                                // Device-hosted identities have no separate web
+                                // agent to link to (the device key IS the account
+                                // key) — auto-link would resolve its own key and
+                                // try to link an agent to itself.
+                                cfg.hosting_model.as_deref() != Some("device-hosted")
+                                    && cfg.recovery_lookup_hash.is_some()
                                     && cfg.device_seed.is_some()
                                     && cfg.agent_pub_key_raw_b64.is_some()
                             } else {

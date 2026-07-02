@@ -7,22 +7,32 @@ interface SetupWizardProps {
   onComplete$: QRL<() => void>;
 }
 
-type Step = "signin" | "twofa" | "no-phrase" | "phrase" | "progress" | "done";
+type Step =
+  | "choose"
+  | "create-form"
+  | "create-phrase"
+  | "restore-phrase"
+  | "signin"
+  | "twofa"
+  | "no-phrase"
+  | "phrase"
+  | "progress"
+  | "done";
 
 declare const __API_URL__: string;
 declare const __WEB_URL__: string;
 const WEB_PHRASE_URL = `${__WEB_URL__}/dashboard/settings/password/`;
 
 function stepToCircle(s: Step): number {
-  if (s === "signin" || s === "twofa") return 0;
-  if (s === "no-phrase" || s === "phrase") return 1;
+  if (s === "choose" || s === "create-form" || s === "signin" || s === "twofa") return 0;
+  if (s === "create-phrase" || s === "restore-phrase" || s === "no-phrase" || s === "phrase") return 1;
   return 2;
 }
 
 const circleLabels = ["Connect", "Verify Identity", "Ready"];
 
 export const SetupWizard = component$<SetupWizardProps>((props) => {
-  const step = useSignal<Step>("signin");
+  const step = useSignal<Step>("choose");
   const email = useSignal("");
   const loginPassword = useSignal("");
   const tfaCode = useSignal("");
@@ -36,6 +46,19 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const progressMessage = useSignal("");
   const result = useStore({ agentPubKey: "", did: "" });
   const showTechDetails = useSignal(false);
+
+  // Create-new-identity state (R1 Track B)
+  const createEmail = useSignal("");
+  const createDisplayName = useSignal("");
+  const createPassword = useSignal("");
+  const createPassword2 = useSignal("");
+  const newMnemonic = useSignal("");
+  const verifyIndices = useSignal<number[]>([]);
+  const verifyWords = useStore<{ [k: number]: string }>({});
+  const phraseSaved = useSignal(false);
+  // Restore-from-phrase state (B6)
+  const restorePassword = useSignal("");
+  const restorePassword2 = useSignal("");
 
   // Fetch profile (displayName, profilePicture) from GET /auth/me
   const fetchProfile = $(async (token: string) => {
@@ -258,6 +281,172 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
     }
   });
 
+  // ── Create new identity (B1/B2/B4/B5) ──
+
+  const handleCreateForm = $(async () => {
+    error.value = "";
+    const em = createEmail.value.trim();
+    if (!em.includes("@") || em.length < 5) {
+      error.value = "Please enter a valid email address.";
+      return;
+    }
+    if (createPassword.value.length < 10) {
+      error.value = "Vault password must be at least 10 characters.";
+      return;
+    }
+    if (createPassword.value !== createPassword2.value) {
+      error.value = "Passwords don't match.";
+      return;
+    }
+    loading.value = true;
+    try {
+      // B1: fresh 24-word phrase from OS entropy, generated on-device.
+      newMnemonic.value = await invoke<string>("generate_new_mnemonic");
+      // B4: pick 3 random words the user must type back (proves it's written down)
+      const picks = new Set<number>();
+      while (picks.size < 3) picks.add(Math.floor(Math.random() * 24));
+      verifyIndices.value = [...picks].sort((a, b) => a - b);
+      verifyIndices.value.forEach((i) => (verifyWords[i] = ""));
+      phraseSaved.value = false;
+      step.value = "create-phrase";
+    } catch (e) {
+      error.value = String(e);
+    } finally {
+      loading.value = false;
+    }
+  });
+
+  const handleCreateFinish = $(async () => {
+    error.value = "";
+    const words = newMnemonic.value.split(" ");
+    for (const i of verifyIndices.value) {
+      if ((verifyWords[i] ?? "").trim().toLowerCase() !== words[i]) {
+        error.value = `Word #${i + 1} doesn't match. Check what you wrote down.`;
+        return;
+      }
+    }
+    loading.value = true;
+    step.value = "progress";
+    try {
+      // B5: register the device pubkey with Flowsta (A3) — zero API cells.
+      progressMessage.value = "Registering your identity with Flowsta...";
+      await invoke("register_device_identity", {
+        apiUrl: __API_URL__,
+        mnemonic: newMnemonic.value,
+        email: createEmail.value.trim(),
+        displayName: createDisplayName.value.trim() || null,
+      });
+
+      progressMessage.value = "Deriving keys and encrypting vault...";
+      const setupResult = await invoke<{ agent_pub_key: string; did: string }>(
+        "setup_vault",
+        {
+          mnemonic: newMnemonic.value,
+          password: createPassword.value,
+          webAgentPubKey: null,
+          webEmail: createEmail.value.trim(),
+          webUsername: null,
+          displayName: createDisplayName.value.trim() || null,
+          profilePicture: null,
+          hostingModel: "device-hosted",
+        }
+      );
+
+      webUser.email = createEmail.value.trim();
+      newMnemonic.value = "";
+      createPassword.value = "";
+      createPassword2.value = "";
+      result.agentPubKey = setupResult.agent_pub_key;
+      result.did = setupResult.did;
+      step.value = "done";
+    } catch (e) {
+      const msg = String(e);
+      step.value = msg.includes("registration_failed") ? "create-form" : "create-phrase";
+      if (msg.includes("email_already_registered")) {
+        error.value = "An account already exists for this email. Sign in with your Flowsta account instead, or use a different email.";
+      } else if (msg.includes("agent_key_already_registered")) {
+        error.value = "This identity is already registered. Use 'Restore from recovery phrase' instead.";
+      } else {
+        error.value = msg;
+      }
+    } finally {
+      loading.value = false;
+    }
+  });
+
+  // ── Restore from phrase (B6) ──
+
+  const handleRestoreDevice = $(async () => {
+    error.value = "";
+    const trimmed = mnemonic.value.trim().toLowerCase().replace(/\s+/g, " ");
+    mnemonic.value = trimmed;
+    if (!trimmed) return;
+    if (restorePassword.value.length < 10) {
+      error.value = "Vault password must be at least 10 characters.";
+      return;
+    }
+    if (restorePassword.value !== restorePassword2.value) {
+      error.value = "Passwords don't match.";
+      return;
+    }
+    loading.value = true;
+    try {
+      const valid = await invoke<boolean>("validate_recovery_phrase", { mnemonic: trimmed });
+      if (!valid) {
+        error.value = "Invalid recovery phrase. Please check your words.";
+        loading.value = false;
+        return;
+      }
+
+      step.value = "progress";
+      progressMessage.value = "Verifying your identity with Flowsta...";
+      // Proves key ownership via A4 and fetches the account's public profile.
+      const account = await invoke<{
+        did: string;
+        agent_pub_key: string;
+        display_name: string | null;
+        username: string | null;
+        profile_picture: string | null;
+      }>("restore_device_identity", { apiUrl: __API_URL__, mnemonic: trimmed });
+
+      progressMessage.value = "Rebuilding your vault on this device...";
+      const setupResult = await invoke<{ agent_pub_key: string; did: string }>(
+        "setup_vault",
+        {
+          mnemonic: trimmed,
+          password: restorePassword.value,
+          webAgentPubKey: null,
+          webEmail: null,
+          webUsername: account.username,
+          displayName: account.display_name,
+          profilePicture: account.profile_picture,
+          hostingModel: "device-hosted",
+        }
+      );
+
+      mnemonic.value = "";
+      restorePassword.value = "";
+      restorePassword2.value = "";
+      result.agentPubKey = setupResult.agent_pub_key;
+      result.did = setupResult.did;
+      step.value = "done";
+    } catch (e) {
+      const msg = String(e);
+      step.value = "restore-phrase";
+      if (msg.includes("unknown_agent_key")) {
+        error.value = "No Vault-created identity found for this phrase. If you signed up on flowsta.com, use 'Sign in with your Flowsta account' instead.";
+      } else if (msg.includes("not_device_hosted")) {
+        error.value = "This phrase belongs to a flowsta.com web account. Use 'Sign in with your Flowsta account' to restore it.";
+      } else if (msg.includes("account_blocked")) {
+        error.value = "This account is blocked. Contact support.";
+      } else {
+        error.value = msg;
+      }
+    } finally {
+      loading.value = false;
+    }
+  });
+
   const currentCircle = stepToCircle(step.value);
 
   return (
@@ -302,6 +491,233 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </div>
           ))}
         </div>
+
+        {/* ── Step 0: Choose path ── */}
+        {step.value === "choose" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="mb-2 text-2xl font-bold text-white">Welcome to Flowsta Vault</h2>
+            <p class="mb-6 text-sm text-gray-400">
+              Your identity and keys live on this device — not on anyone's server.
+            </p>
+
+            <div class="flex flex-col gap-3">
+              <GlassButton onClick$={() => { error.value = ""; step.value = "create-form"; }}>
+                Create a new identity
+              </GlassButton>
+              <GlassButton variant="secondary" onClick$={() => { error.value = ""; step.value = "restore-phrase"; }}>
+                Restore from recovery phrase
+              </GlassButton>
+              <GlassButton variant="secondary" onClick$={() => { error.value = ""; step.value = "signin"; }}>
+                Sign in with your Flowsta account
+              </GlassButton>
+            </div>
+
+            <p class="mt-6 text-xs text-gray-500">
+              New here? "Create a new identity" makes a fresh self-custody identity in about a minute.
+              Already have a flowsta.com account? Use "Sign in with your Flowsta account".
+            </p>
+          </div>
+        )}
+
+        {/* ── Create 1: Account details (B2/B3) ── */}
+        {step.value === "create-form" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="mb-2 text-2xl font-bold text-white">Create Your Identity</h2>
+            <p class="mb-6 text-sm text-gray-400">
+              Your keys are generated on this device and never leave it. Flowsta
+              only receives your public key and email.
+            </p>
+
+            <form preventdefault:submit onSubmit$={handleCreateForm}>
+              <div class="mb-4">
+                <label class="mb-1 block text-xs font-medium text-gray-400">Email</label>
+                <input
+                  type="email"
+                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                  placeholder="you@example.com"
+                  value={createEmail.value}
+                  autoFocus
+                  onInput$={(e) => { createEmail.value = (e.target as HTMLInputElement).value; error.value = ""; }}
+                />
+                <p class="mt-1 text-xs text-gray-500">Used to verify your account and for account notices.</p>
+              </div>
+
+              <div class="mb-4">
+                <label class="mb-1 block text-xs font-medium text-gray-400">Display name (optional)</label>
+                <input
+                  type="text"
+                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                  placeholder="How you appear to others"
+                  value={createDisplayName.value}
+                  onInput$={(e) => { createDisplayName.value = (e.target as HTMLInputElement).value; }}
+                />
+              </div>
+
+              <div class="mb-4">
+                <label class="mb-1 block text-xs font-medium text-gray-400">Vault password</label>
+                <input
+                  type="password"
+                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                  placeholder="At least 10 characters"
+                  value={createPassword.value}
+                  onInput$={(e) => { createPassword.value = (e.target as HTMLInputElement).value; error.value = ""; }}
+                />
+              </div>
+
+              <div class="mb-4">
+                <label class="mb-1 block text-xs font-medium text-gray-400">Confirm vault password</label>
+                <input
+                  type="password"
+                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                  placeholder="Repeat your password"
+                  value={createPassword2.value}
+                  onInput$={(e) => { createPassword2.value = (e.target as HTMLInputElement).value; error.value = ""; }}
+                />
+                <p class="mt-1 text-xs text-gray-500">
+                  Unlocks your vault on this device. It is not a Flowsta account password.
+                </p>
+              </div>
+
+              {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
+
+              <div class="flex justify-between">
+                <GlassButton variant="secondary" onClick$={() => { error.value = ""; step.value = "choose"; }}>
+                  Back
+                </GlassButton>
+                <GlassButton
+                  type="submit"
+                  disabled={loading.value || !createEmail.value.trim() || !createPassword.value || !createPassword2.value}
+                >
+                  {loading.value ? "Preparing..." : "Continue"}
+                </GlassButton>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* ── Create 2: Recovery phrase (B4) ── */}
+        {step.value === "create-phrase" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="mb-2 text-2xl font-bold text-white">Save Your Recovery Phrase</h2>
+            <p class="mb-4 text-sm text-gray-400">
+              These 24 words are your identity. Write them down and store them somewhere safe — on paper, not on this computer.
+            </p>
+            <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+              <p class="text-xs text-amber-300">
+                This phrase is currently the <strong>only</strong> way to recover your identity.
+                Flowsta never sees it and cannot recover it for you. Lose the phrase and this
+                device, and your identity is gone.
+              </p>
+            </div>
+
+            <div class="mb-4 grid grid-cols-3 gap-2 rounded-md bg-gray-900 p-4">
+              {newMnemonic.value.split(" ").map((word, i) => (
+                <div key={i} class="flex items-baseline gap-1.5">
+                  <span class="w-5 text-right font-mono text-[10px] text-gray-500">{i + 1}.</span>
+                  <span class="font-mono text-sm text-white">{word}</span>
+                </div>
+              ))}
+            </div>
+
+            {!phraseSaved.value ? (
+              <GlassButton onClick$={() => { phraseSaved.value = true; error.value = ""; }}>
+                I've written it down
+              </GlassButton>
+            ) : (
+              <div>
+                <p class="mb-3 text-sm text-gray-400">
+                  Confirm by typing these words from what you wrote down:
+                </p>
+                <div class="mb-4 flex flex-col gap-3">
+                  {verifyIndices.value.map((i) => (
+                    <div key={i} class="flex items-center gap-3">
+                      <span class="w-20 text-xs text-gray-400">Word #{i + 1}</span>
+                      <input
+                        type="text"
+                        autoComplete="off"
+                        class="flex-1 rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm font-mono text-white focus:border-amber-400 focus:outline-none"
+                        value={verifyWords[i] ?? ""}
+                        onInput$={(e) => { verifyWords[i] = (e.target as HTMLInputElement).value; error.value = ""; }}
+                      />
+                    </div>
+                  ))}
+                </div>
+
+                {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
+
+                <div class="flex justify-between">
+                  <GlassButton variant="secondary" onClick$={() => { phraseSaved.value = false; error.value = ""; }}>
+                    Show phrase again
+                  </GlassButton>
+                  <GlassButton
+                    disabled={loading.value || verifyIndices.value.some((i) => !(verifyWords[i] ?? "").trim())}
+                    onClick$={handleCreateFinish}
+                  >
+                    {loading.value ? "Creating..." : "Create my identity"}
+                  </GlassButton>
+                </div>
+              </div>
+            )}
+
+            {error.value && !phraseSaved.value && (
+              <p class="mt-4 text-sm text-red-400">{error.value}</p>
+            )}
+          </div>
+        )}
+
+        {/* ── Restore from phrase (B6) ── */}
+        {step.value === "restore-phrase" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="mb-2 text-2xl font-bold text-white">Restore Your Identity</h2>
+            <p class="mb-4 text-sm text-gray-400">
+              Enter the 24-word recovery phrase of an identity created in Vault.
+              Your key is re-derived on this device and proven to Flowsta — no password needed.
+            </p>
+
+            <textarea
+              class="mb-4 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-none"
+              rows={4}
+              placeholder="word1 word2 word3 ... word24"
+              value={mnemonic.value}
+              onInput$={(e) => { mnemonic.value = (e.target as HTMLTextAreaElement).value; error.value = ""; }}
+            />
+
+            <div class="mb-4">
+              <label class="mb-1 block text-xs font-medium text-gray-400">New vault password</label>
+              <input
+                type="password"
+                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                placeholder="At least 10 characters"
+                value={restorePassword.value}
+                onInput$={(e) => { restorePassword.value = (e.target as HTMLInputElement).value; error.value = ""; }}
+              />
+            </div>
+            <div class="mb-4">
+              <label class="mb-1 block text-xs font-medium text-gray-400">Confirm vault password</label>
+              <input
+                type="password"
+                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                placeholder="Repeat your password"
+                value={restorePassword2.value}
+                onInput$={(e) => { restorePassword2.value = (e.target as HTMLInputElement).value; error.value = ""; }}
+              />
+            </div>
+
+            {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
+
+            <div class="flex justify-between">
+              <GlassButton variant="secondary" onClick$={() => { mnemonic.value = ""; error.value = ""; step.value = "choose"; }}>
+                Back
+              </GlassButton>
+              <GlassButton
+                disabled={loading.value || !mnemonic.value.trim() || !restorePassword.value || !restorePassword2.value}
+                onClick$={handleRestoreDevice}
+              >
+                {loading.value ? "Restoring..." : "Restore"}
+              </GlassButton>
+            </div>
+          </div>
+        )}
 
         {/* ── Step 1: Sign In ── */}
         {step.value === "signin" && (
@@ -359,7 +775,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               <div class="flex items-center justify-between">
                 <button
                   type="button"
-                  onClick$={() => open("https://flowsta.com")}
+                  onClick$={() => { error.value = ""; step.value = "create-form"; }}
                   class="text-xs text-amber-400 hover:text-amber-300 transition-colors"
                 >
                   Don't have an account?
@@ -376,6 +792,13 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 </GlassButton>
               </div>
             </form>
+
+            <button
+              class="mt-4 text-xs text-gray-500 hover:text-gray-400"
+              onClick$={() => { error.value = ""; step.value = "choose"; }}
+            >
+              ← Other options
+            </button>
           </div>
         )}
 

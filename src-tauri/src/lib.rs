@@ -1,6 +1,7 @@
 mod backup;
 mod commands;
 mod conductor;
+mod device_identity;
 mod dna;
 mod dna_updater;
 pub mod file_analyzer;
@@ -290,6 +291,10 @@ pub fn run() {
             commands::get_conductor_status,
             commands::get_vault_status,
             commands::setup_vault,
+            device_identity::generate_new_mnemonic,
+            device_identity::register_device_identity,
+            device_identity::vault_grant_login,
+            device_identity::restore_device_identity,
             commands::unlock_vault,
             commands::lock_vault,
             commands::reset_vault,

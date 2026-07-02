@@ -85,6 +85,12 @@ pub struct VaultConfig {
     /// Stored for future conductor upgrade detection.
     #[serde(default)]
     pub conductor_version: Option<String>,
+
+    /// Hosting model: `Some("device-hosted")` for identities created in Vault
+    /// (R1 Track B — no web password, no API cells; auth via Vault-grant).
+    /// `None` = legacy restore-from-web vault (custodial web account).
+    #[serde(default)]
+    pub hosting_model: Option<String>,
 }
 
 /// Encrypted vault on disk (serialized as JSON).
@@ -311,6 +317,7 @@ mod tests {
             private_dna_version: Some("1.10".to_string()),
             identity_dna_version: Some("1.3".to_string()),
             conductor_version: Some("0.6.0".to_string()),
+            hosting_model: None,
         };
 
         let encrypted = encrypt_vault(&config, "test-password-123").unwrap();
@@ -351,6 +358,7 @@ mod tests {
             private_dna_version: None,
             identity_dna_version: None,
             conductor_version: None,
+            hosting_model: None,
         };
 
         let encrypted = encrypt_vault(&config, "correct-password").unwrap();
