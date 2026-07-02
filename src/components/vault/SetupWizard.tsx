@@ -56,6 +56,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const verifyIndices = useSignal<number[]>([]);
   const verifyWords = useStore<{ [k: number]: string }>({});
   const phraseSaved = useSignal(false);
+  const copied = useSignal(false);
   // Restore-from-phrase state (B6)
   const restorePassword = useSignal("");
   const restorePassword2 = useSignal("");
@@ -617,6 +618,29 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   <span class="font-mono text-sm text-white">{word}</span>
                 </div>
               ))}
+            </div>
+
+            {/* Copy the clean, space-separated phrase (no numbers) so users
+                don't transcribe it by hand from the numbered grid. */}
+            <div class="mb-4 flex items-center gap-3">
+              <button
+                type="button"
+                class="text-xs text-amber-400 hover:text-amber-300 transition-colors"
+                onClick$={async () => {
+                  try {
+                    await navigator.clipboard.writeText(newMnemonic.value);
+                    copied.value = true;
+                    setTimeout(() => { copied.value = false; }, 2000);
+                  } catch (e) {
+                    console.error("clipboard write failed:", e);
+                  }
+                }}
+              >
+                {copied.value ? "Copied ✓" : "Copy phrase"}
+              </button>
+              <span class="text-[10px] text-gray-500">
+                Paste into a password manager. Clear your clipboard afterward.
+              </span>
             </div>
 
             {!phraseSaved.value ? (
