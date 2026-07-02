@@ -354,5 +354,29 @@ mod tests {
             "unknown phrase must be rejected: {:?}",
             miss.as_ref().err()
         );
+
+        // C3: the web phrase-reset path must refuse this device-hosted account.
+        // The server recomputes the lookup hash from the phrase, so this uses
+        // the real cross-language derivation — a faithful end-to-end check.
+        let reset = reqwest::Client::new()
+            .post(format!("{}/auth/reset-password-with-phrase", STAGING))
+            .json(&serde_json::json!({
+                "recoveryPhrase": mnemonic,
+                "newPassword": "irrelevant-should-be-refused-1",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            reset.status().as_u16(),
+            403,
+            "device-hosted phrase-reset must be refused"
+        );
+        let reset_body: serde_json::Value = reset.json().await.unwrap();
+        assert_eq!(
+            reset_body["error"], "device_hosted_account",
+            "reset refusal reason: {:?}",
+            reset_body
+        );
     }
 }
