@@ -432,13 +432,37 @@ async fn start_holochain_attempt(
         fail_with_lair_cleanup!(e);
     }
 
-    // 3. Connect to lair.
+    // 3. Connect to lair. The socket FILE appears before lair is actually
+    // accepting connections, so wait_for_lair_socket can pass while a connect
+    // still races and gets ConnectionReset. Retry the connect (against the same
+    // healthy lair process) with a short backoff before giving up — this is the
+    // common cold-start failure on slower/dev machines.
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
         message: "Connecting to lair-keystore...".into(),
     });
-    let lair_client = match lair::connect_to_lair(&connection_url, &passphrase).await {
-        Ok(c) => c,
-        Err(e) => fail_with_lair_cleanup!(e),
+    let lair_client = {
+        const MAX_ATTEMPTS: u32 = 6;
+        let mut last_err = String::new();
+        let mut connected = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match lair::connect_to_lair(&connection_url, &passphrase).await {
+                Ok(c) => { connected = Some(c); break; }
+                Err(e) => {
+                    last_err = e;
+                    if attempt < MAX_ATTEMPTS {
+                        log::warn!(
+                            "[lair:connect] attempt {}/{} failed ({}), retrying…",
+                            attempt, MAX_ATTEMPTS, last_err
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    }
+                }
+            }
+        }
+        match connected {
+            Some(c) => c,
+            None => fail_with_lair_cleanup!(last_err),
+        }
     };
     log::info!("Connected to lair-keystore");
 
