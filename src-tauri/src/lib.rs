@@ -95,6 +95,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        // flowsta:// scheme (R1 E2) — lets a browser wake a closed-but-installed
+        // Vault for "Sign in with your Vault". On Linux/Windows the URL arrives
+        // as a single-instance arg (handled below → window focus); on macOS via
+        // RunEvent::Opened. Registration is declared in tauri.conf.json.
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // Another instance tried to launch. Skip the binary-name arg, then
             // queue any file paths and bring the existing window to front.

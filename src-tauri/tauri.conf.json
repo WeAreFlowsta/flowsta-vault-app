@@ -72,6 +72,11 @@
   "plugins": {
     "shell": {
       "open": true
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["flowsta"]
+      }
     }
   }
 }
