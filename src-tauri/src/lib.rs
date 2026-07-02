@@ -95,11 +95,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        // flowsta:// scheme (R1 E2) — lets a browser wake a closed-but-installed
-        // Vault for "Sign in with your Vault". On Linux/Windows the URL arrives
-        // as a single-instance arg (handled below → window focus); on macOS via
-        // RunEvent::Opened. Registration is declared in tauri.conf.json.
-        .plugin(tauri_plugin_deep_link::init())
+        // ⚠️ ORDER MATTERS: single-instance MUST be registered before deep-link
+        // on Linux/Windows — deep-link forwards flowsta:// URLs through the
+        // single-instance callback. Registering deep-link first wedges startup.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // Another instance tried to launch. Skip the binary-name arg, then
             // queue any file paths and bring the existing window to front.
@@ -114,6 +112,11 @@ pub fn run() {
                 let _ = window.set_always_on_top(false);
             }
         }))
+        // flowsta:// scheme (R1 E2) — registered AFTER single-instance so URL
+        // forwarding works. Lets a browser wake a closed-but-installed Vault
+        // for "Sign in with your Vault"; the single-instance callback above
+        // focuses the window on wake. macOS delivers via RunEvent::Opened.
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
