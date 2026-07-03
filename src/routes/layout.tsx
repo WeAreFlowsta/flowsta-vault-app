@@ -238,6 +238,23 @@ export default component$(() => {
     origin: string | null;
   } | null>(null);
 
+  // Relay login (R2 F2) — approve a sign-in happening on another device.
+  // The approval screen is ALWAYS shown (no remember option): cross-device
+  // approval is the phishing surface, the screen is the defense.
+  const pendingRelayClaim = useSignal<{
+    app_name: string;
+    ua_family: string | null;
+    ip_prefix: string | null;
+    expires_in: number;
+  } | null>(null);
+  const relayCodeModal = useSignal(false);
+  const relayCodeInput = useSignal("");
+  const relayBusy = useSignal(false);
+  const relayError = useSignal<string | null>(null);
+  const relayApprovedFlash = useSignal(false);
+  // A flowsta:// code that arrived while locked — processed after unlock.
+  const queuedRelayCode = useSignal<string | null>(null);
+
   // Fetch profile from unlocked vault for header display + register
   // the active identity with the signatures cache so per-agent reads
   // and writes work correctly. Called from each of the three paths
@@ -292,6 +309,12 @@ export default component$(() => {
     await fetchProfile();
     screen.value = "dashboard";
     checkConnectivity();
+    // Process a relay sign-in code that arrived while locked (R2 F2).
+    if (queuedRelayCode.value) {
+      const code = queuedRelayCode.value;
+      queuedRelayCode.value = null;
+      startRelayClaim(code);
+    }
     try {
       autoLockMinutes.value = await invoke<number>("get_auto_lock_minutes");
     } catch { /* use default */ }
@@ -405,6 +428,39 @@ export default component$(() => {
     }>("document-sign-request", (event) => {
       pendingDocumentSign.value = event.payload;
     });
+
+    cleanup(() => {
+      unlistenPromise.then((unlisten) => unlisten());
+    });
+  });
+
+  // Relay login codes arriving via flowsta:// (R2 F3). Unlocked → claim and
+  // show the approval screen; locked → queue client-side and banner the
+  // unlock screen. Registered on every screen (deep links arrive any time).
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ cleanup }) => {
+    const route = (code: string) => {
+      if (screen.value === "dashboard") {
+        startRelayClaim(code);
+      } else {
+        queuedRelayCode.value = code;
+      }
+    };
+
+    const unlistenPromise = listen<string>("relay-code-received", (event) => {
+      // The Rust side also queued it; drain that copy so a stale code isn't
+      // re-processed at the next unlock.
+      invoke<string | null>("take_pending_relay_code").catch(() => {});
+      route(event.payload);
+    });
+
+    // Drain a code that arrived before the frontend mounted (app woken by
+    // the deep link itself).
+    invoke<string | null>("take_pending_relay_code")
+      .then((code) => {
+        if (code) route(code);
+      })
+      .catch(() => {});
 
     cleanup(() => {
       unlistenPromise.then((unlisten) => unlisten());
@@ -619,6 +675,59 @@ export default component$(() => {
     }
   });
 
+  // Claim a relay code (typed or deep-linked) and open the approval screen.
+  const startRelayClaim = $(async (rawCode: string) => {
+    relayBusy.value = true;
+    relayError.value = null;
+    try {
+      const claim = await invoke<{
+        app_name: string;
+        ua_family: string | null;
+        ip_prefix: string | null;
+        expires_in: number;
+      }>("relay_claim", { apiUrl: __API_URL__, userCode: rawCode });
+      pendingRelayClaim.value = claim;
+      relayCodeModal.value = false;
+      relayCodeInput.value = "";
+    } catch (e: any) {
+      const s = String(e);
+      relayError.value = s.includes("code_not_found")
+        ? "That code wasn't found — it may have expired. Get a fresh code on your other device."
+        : s.includes("already_claimed")
+          ? "That code was already used. If that wasn't you, deny the request on your other device and get a fresh code."
+          : s.includes("invalid_code")
+            ? "Codes are 8 letters, shown as XXXX-XXXX."
+            : s.includes("vault_locked")
+              ? "Unlock your Vault first."
+              : "Couldn't check that code — are you online?";
+      // Surface the error in the code modal (also for the deep-link path).
+      relayCodeModal.value = true;
+    } finally {
+      relayBusy.value = false;
+    }
+  });
+
+  const handleRelayResponse = $(async (approved: boolean) => {
+    const wasApproving = approved;
+    pendingRelayClaim.value = null;
+    try {
+      if (approved) {
+        await invoke("relay_approve", { apiUrl: __API_URL__ });
+        relayApprovedFlash.value = true;
+        setTimeout(() => (relayApprovedFlash.value = false), 5000);
+      } else {
+        await invoke("relay_deny", { apiUrl: __API_URL__ });
+      }
+    } catch (e) {
+      console.error("Relay response failed:", e);
+      if (wasApproving) {
+        relayError.value =
+          "Approval failed — the request may have expired. Get a fresh code on your other device.";
+        relayCodeModal.value = true;
+      }
+    }
+  });
+
   // Check vault status on mount
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async () => {
@@ -692,22 +801,33 @@ export default component$(() => {
 
   if (screen.value === "unlock") {
     return (
-      <UnlockScreen
-        onUnlock$={handleUnlockPassword}
-        onResetVault$={async () => {
-          // Must WIPE on disk (vault.enc + lair keystore + conductor), not
-          // just navigate — otherwise the next create/restore inherits the
-          // old lair keystore under a mismatched passphrase and the conductor
-          // crashes on connect (ConnectionReset → "Connection refused"). The
-          // Settings reset already does this; the lock-screen path must too.
-          try {
-            await invoke("reset_vault");
-          } catch (e) {
-            console.error("reset_vault failed:", e);
-          }
-          screen.value = "setup";
-        }}
-      />
+      <>
+        {queuedRelayCode.value && (
+          <div class="fixed top-0 inset-x-0 z-50 bg-amber-500/15 border-b border-amber-500/40 px-4 py-3 text-center">
+            <p class="text-sm text-amber-200">
+              A sign-in from another device is waiting — unlock your Vault to
+              review it. The code expires about five minutes after it was
+              requested.
+            </p>
+          </div>
+        )}
+        <UnlockScreen
+          onUnlock$={handleUnlockPassword}
+          onResetVault$={async () => {
+            // Must WIPE on disk (vault.enc + lair keystore + conductor), not
+            // just navigate — otherwise the next create/restore inherits the
+            // old lair keystore under a mismatched passphrase and the conductor
+            // crashes on connect (ConnectionReset → "Connection refused"). The
+            // Settings reset already does this; the lock-screen path must too.
+            try {
+              await invoke("reset_vault");
+            } catch (e) {
+              console.error("reset_vault failed:", e);
+            }
+            screen.value = "setup";
+          }}
+        />
+      </>
     );
   }
 
@@ -860,6 +980,20 @@ export default component$(() => {
             </div>
             <button
               type="button"
+              class="mb-2 flex w-full items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-300 transition-colors"
+              onClick$={() => {
+                relayError.value = null;
+                relayCodeInput.value = "";
+                relayCodeModal.value = true;
+              }}
+            >
+              <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
+              </svg>
+              Approve a sign-in
+            </button>
+            <button
+              type="button"
               class="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-300 transition-colors"
               onClick$={async () => {
                 // Cache is intentionally NOT cleared here. Signature metadata
@@ -885,6 +1019,144 @@ export default component$(() => {
           </div>
         </main>
       </div>
+
+      {/* Relay login: enter-code modal (R2 F2) */}
+      {relayCodeModal.value && !pendingRelayClaim.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
+            <h3 class="mb-1 text-base font-semibold text-white">
+              Approve a sign-in
+            </h3>
+            <p class="mb-4 text-xs text-gray-400">
+              Signing in on a phone or another browser? Enter the code it
+              shows you.
+            </p>
+            <input
+              type="text"
+              value={relayCodeInput.value}
+              placeholder="XXXX-XXXX"
+              autoCapitalize="characters"
+              autocorrect="off"
+              spellcheck={false}
+              maxLength={9}
+              class="mb-3 w-full rounded-lg border border-gray-600 bg-gray-900 px-4 py-3 text-center font-mono text-lg tracking-widest text-white placeholder-gray-600 focus:border-amber-400 focus:outline-none"
+              onInput$={(_, el) => {
+                relayCodeInput.value = el.value;
+              }}
+              onKeyDown$={(e) => {
+                if (e.key === "Enter" && relayCodeInput.value.trim() && !relayBusy.value) {
+                  startRelayClaim(relayCodeInput.value);
+                }
+              }}
+            />
+            {relayError.value && (
+              <p class="mb-3 text-xs text-red-300">{relayError.value}</p>
+            )}
+            <div class="flex gap-3">
+              <GlassButton
+                variant="secondary"
+                class="flex-1"
+                onClick$={() => {
+                  relayCodeModal.value = false;
+                  relayError.value = null;
+                }}
+              >
+                Cancel
+              </GlassButton>
+              <GlassButton
+                class="flex-1"
+                disabled={relayBusy.value || !relayCodeInput.value.trim()}
+                onClick$={() => startRelayClaim(relayCodeInput.value)}
+              >
+                {relayBusy.value ? "Checking…" : "Continue"}
+              </GlassButton>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Relay login: approval dialog (R2 F2). Deliberately NO remember
+          option — every cross-device sign-in is reviewed. */}
+      {pendingRelayClaim.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
+            <div class="mb-4 flex items-center gap-3">
+              <div class="flex h-10 w-10 items-center justify-center rounded-full bg-amber-500/20">
+                <svg
+                  class="h-5 w-5 text-amber-400"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  stroke-width={2}
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"
+                  />
+                </svg>
+              </div>
+              <div>
+                <h3 class="text-base font-semibold text-white">
+                  Sign in on another device?
+                </h3>
+                <p class="text-xs text-gray-400">
+                  A sign-in is waiting for your approval
+                </p>
+              </div>
+            </div>
+
+            <div class="mb-4 space-y-2 rounded-lg border border-gray-700 bg-gray-900 p-3">
+              <div>
+                <span class="text-xs text-gray-500">Signs you in to</span>
+                <p class="text-sm font-medium text-white">
+                  {pendingRelayClaim.value.app_name}
+                </p>
+              </div>
+              <div>
+                <span class="text-xs text-gray-500">Where</span>
+                <p class="text-sm text-gray-300">
+                  {pendingRelayClaim.value.ua_family || "A browser"}
+                  {pendingRelayClaim.value.ip_prefix
+                    ? ` near ${pendingRelayClaim.value.ip_prefix}.x.x`
+                    : ""}
+                </p>
+              </div>
+            </div>
+
+            <p class="mb-4 text-xs text-amber-200/90">
+              Only approve if YOU just requested this on your other device.
+              If someone asked you to enter a code for them, deny it — that is
+              a scam.
+            </p>
+
+            <div class="flex gap-3">
+              <GlassButton
+                variant="secondary"
+                class="flex-1"
+                onClick$={() => handleRelayResponse(false)}
+              >
+                Deny
+              </GlassButton>
+              <GlassButton
+                class="flex-1"
+                onClick$={() => handleRelayResponse(true)}
+              >
+                Approve
+              </GlassButton>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Relay login: success flash */}
+      {relayApprovedFlash.value && (
+        <div class="fixed bottom-6 right-6 z-50 rounded-lg border border-green-500/40 bg-green-500/15 px-4 py-3 shadow-xl">
+          <p class="text-sm text-green-200">
+            Approved — your other device is now signed in.
+          </p>
+        </div>
+      )}
 
       {/* Auth approval dialog overlay */}
       {pendingAuth.value && (
