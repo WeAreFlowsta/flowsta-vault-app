@@ -9,6 +9,8 @@
 //! - `flowsta-sync-encryption` — cross-device sync encryption key (future)
 //! - `flowsta-sync-anchor` — DHT sync anchor lookup key (future)
 //! - `flowsta-recovery-lookup` — recovery phrase lookup hash (existing, used by API)
+//! - `flowsta-data-encryption-v1` — DNA v2 Sealed-record symmetric key (R2)
+//! - `flowsta-private-network-v2` — per-user private-DHT network seed (R2)
 
 use bip39::Mnemonic;
 use blake2::digest::{consts::U32, Digest};
@@ -29,6 +31,19 @@ pub const WEB_IDENTITY_CONSTANT: &str = "flowsta-holochain-identity";
 /// Recovery lookup hash constant (for agent key discovery during linking).
 /// The API uses this in `recoveryPhrase.js` line 252.
 pub const RECOVERY_LOOKUP_CONSTANT: &str = "flowsta-recovery-lookup";
+
+/// Symmetric data-encryption key for the encrypted private DNA v2
+/// ("Sealed" records, R2 encrypt-before-gossip). Phrase-derived so every
+/// device computes the same key — multi-device gossip decrypts without key
+/// exchange (per-device AGENT keys differ by design; this key does not).
+/// JS reference: `recoveryPhrase.js` deriveDataEncryptionKey.
+pub const DATA_ENCRYPTION_CONSTANT: &str = "flowsta-data-encryption-v1";
+
+/// Per-user private-DHT network seed for DNA v2 installs (hex of the derived
+/// 32 bytes). All the user's devices derive the same seed → same private
+/// network with zero coordination; different users → disjoint networks.
+/// JS reference: `recoveryPhrase.js` derivePrivateNetworkSeed.
+pub const PRIVATE_NETWORK_SEED_CONSTANT: &str = "flowsta-private-network-v2";
 
 #[derive(Error, Debug)]
 pub enum KeyDerivationError {
@@ -91,6 +106,17 @@ pub fn derive_device_keypair(mnemonic_str: &str) -> Result<SigningKey, KeyDeriva
 /// discover the web agent's pub key without revealing the mnemonic.
 pub fn derive_recovery_lookup_hash(mnemonic_str: &str) -> Result<String, KeyDerivationError> {
     let seed = derive_seed(mnemonic_str, RECOVERY_LOOKUP_CONSTANT)?;
+    Ok(hex::encode(seed))
+}
+
+/// Derive the 32-byte symmetric data-encryption key for DNA v2 Sealed records.
+pub fn derive_data_encryption_key(mnemonic_str: &str) -> Result<[u8; 32], KeyDerivationError> {
+    derive_seed(mnemonic_str, DATA_ENCRYPTION_CONSTANT)
+}
+
+/// Derive the per-user private-DHT network seed (hex string) for DNA v2 installs.
+pub fn derive_private_network_seed(mnemonic_str: &str) -> Result<String, KeyDerivationError> {
+    let seed = derive_seed(mnemonic_str, PRIVATE_NETWORK_SEED_CONSTANT)?;
     Ok(hex::encode(seed))
 }
 
@@ -435,6 +461,39 @@ mod tests {
             lookup_hash,
             "48cd5576e3f9693029baa0d6d4169638177cbfb9419ab4de98a8f1d5373cd519"
         );
+    }
+
+    /// Cross-language verification for the R2 (DNA v2) derivations.
+    /// Hex values produced by `api/src/services/recoveryPhrase.js`
+    /// deriveDataEncryptionKey / derivePrivateNetworkSeed on 2026-07-03.
+    #[test]
+    fn test_cross_language_r2_derivations_match_javascript() {
+        // flowsta-data-encryption-v1 (Sealed-record symmetric key)
+        let data_key = derive_data_encryption_key(TEST_MNEMONIC).unwrap();
+        assert_eq!(
+            hex::encode(data_key),
+            "401c869a469f2ce675ec080f5bddd514233512816afa9c93b658260ca4f72ab4"
+        );
+
+        // flowsta-private-network-v2 (per-user network seed)
+        let net_seed = derive_private_network_seed(TEST_MNEMONIC).unwrap();
+        assert_eq!(
+            net_seed,
+            "968d4bb05b710dfcb30cf9c5fbafcacec67591305135cfd93ebaf4a11f110497"
+        );
+
+        // Domain separation: the new constants must not collide with each
+        // other or any existing derivation.
+        let device_seed = derive_seed(TEST_MNEMONIC, DEVICE_1_CONSTANT).unwrap();
+        let web_seed = derive_seed(TEST_MNEMONIC, WEB_IDENTITY_CONSTANT).unwrap();
+        let lookup_seed = derive_seed(TEST_MNEMONIC, RECOVERY_LOOKUP_CONSTANT).unwrap();
+        let all = [data_key, device_seed, web_seed, lookup_seed];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "derivation constants must yield distinct keys");
+            }
+        }
+        assert_ne!(hex::encode(data_key), net_seed);
     }
 
     #[test]
