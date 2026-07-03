@@ -155,6 +155,14 @@ pub struct AppState {
     /// ("Sign with Flowsta Vault" right-click) before the frontend was ready
     /// to handle them. Drained by `take_pending_sign_paths`.
     pub pending_sign_paths: Mutex<Vec<std::path::PathBuf>>,
+    /// A relay-login code that arrived via flowsta:// while the vault was
+    /// locked or before the frontend mounted (R2 F3). Drained by
+    /// `take_pending_relay_code`.
+    pub pending_relay_code: Mutex<Option<String>>,
+    /// The claimed relay session between claim and approve/deny (R2 F2).
+    /// Held Rust-side so approve signs the server-issued challenge, never a
+    /// frontend-supplied one.
+    pub pending_relay_claim: Mutex<Option<crate::relay_login::RelayClaim>>,
     /// Lair-keystore passphrase, held while the vault is unlocked so the
     /// runtime watchdog can restart the conductor without re-prompting
     /// the user. Stored in a `sodoken::LockedArray` (memory-locked pages,
@@ -194,6 +202,8 @@ impl AppState {
             backup_key: Mutex::new(None),
             linked_web_agent_key: Mutex::new(None),
             pending_sign_paths: Mutex::new(Vec::new()),
+            pending_relay_code: Mutex::new(None),
+            pending_relay_claim: Mutex::new(None),
             unlock_passphrase: Mutex::new(None),
             conductor_restart_lock: tokio::sync::Mutex::new(()),
         }

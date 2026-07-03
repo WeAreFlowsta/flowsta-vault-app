@@ -11,6 +11,7 @@ mod lair;
 mod mau;
 mod process_ext;
 mod quota_cache;
+mod relay_login;
 mod vault;
 
 use commands::AppState;
@@ -99,17 +100,29 @@ pub fn run() {
         // on Linux/Windows — deep-link forwards flowsta:// URLs through the
         // single-instance callback. Registering deep-link first wedges startup.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            // Another instance tried to launch. Skip the binary-name arg, then
-            // queue any file paths and bring the existing window to front.
-            let paths = commands::extract_sign_paths_from_args(args.iter().skip(1));
+            // Another instance tried to launch. flowsta:// URLs MUST be
+            // routed before sign-file extraction — an auth deep link misread
+            // as a file path would silently do nothing (R2 round-5 catch 7).
+            let (urls, rest): (Vec<&String>, Vec<&String>) = args
+                .iter()
+                .skip(1)
+                .partition(|a| relay_login::is_flowsta_url(a));
+            for url in &urls {
+                relay_login::handle_flowsta_url(app, url);
+            }
+            // Skip the binary-name arg, then queue any file paths and bring
+            // the existing window to front.
+            let paths = commands::extract_sign_paths_from_args(rest.into_iter());
             if !paths.is_empty() {
                 enqueue_sign_paths(app, paths);
-            } else if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_always_on_top(true);
-                let _ = window.set_focus();
-                let _ = window.set_always_on_top(false);
+            } else if urls.is_empty() {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_always_on_top(true);
+                    let _ = window.set_focus();
+                    let _ = window.set_always_on_top(false);
+                }
             }
         }))
         // flowsta:// scheme (R1 E2) — registered AFTER single-instance so URL
@@ -303,6 +316,10 @@ pub fn run() {
             device_identity::register_device_identity,
             device_identity::vault_grant_login,
             device_identity::restore_device_identity,
+            relay_login::relay_claim,
+            relay_login::relay_approve,
+            relay_login::relay_deny,
+            relay_login::take_pending_relay_code,
             commands::unlock_vault,
             commands::lock_vault,
             commands::reset_vault,
@@ -380,11 +397,16 @@ pub fn run() {
                 // handled in the setup hook + single-instance callback.
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 tauri::RunEvent::Opened { urls } => {
-                    let strings: Vec<String> = urls
+                    // flowsta:// first (R2 F3) — see the single-instance
+                    // callback for why the order is load-bearing.
+                    let (deep_links, rest): (Vec<String>, Vec<String>) = urls
                         .iter()
                         .map(|u| u.as_str().to_string())
-                        .collect();
-                    let paths = commands::extract_sign_paths_from_args(strings);
+                        .partition(|s| relay_login::is_flowsta_url(s));
+                    for url in &deep_links {
+                        relay_login::handle_flowsta_url(app_handle, url);
+                    }
+                    let paths = commands::extract_sign_paths_from_args(rest);
                     enqueue_sign_paths(app_handle, paths);
                 }
                 _ => {}
