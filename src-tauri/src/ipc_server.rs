@@ -364,6 +364,24 @@ async fn sign_handler(
                 )
             })?;
 
+            // Reserved-prefix refusal: Flowsta auth protocols (vault-grant
+            // login, relay login, identity registration) verify raw Ed25519
+            // signatures over `flowsta-…`-prefixed canonical strings. If this
+            // generic surface signed such a payload, a linked app could mint
+            // a REAL session as the vault owner. Only the dedicated native
+            // flows (which show their own approval UI) may sign these.
+            if payload.starts_with(b"flowsta-") {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(IpcError {
+                        error: "reserved_prefix".into(),
+                        description: Some(
+                            "Payloads with the reserved 'flowsta-' prefix cannot be signed via /sign.".into(),
+                        ),
+                    }),
+                ));
+            }
+
             // Sign
             let signature = sign_with_device_seed(&seed_arr, &payload);
 
@@ -1657,6 +1675,19 @@ async fn sign_document_handler(
             Json(IpcError {
                 error: "invalid_file_hash".into(),
                 description: Some("file_hash must be exactly 64 hex characters (32 bytes SHA-256)".into()),
+            }),
+        ));
+    }
+    // Reserved-prefix refusal (same rule as /sign): a crafted 32-byte ASCII
+    // "hash" must never yield a signature over a flowsta- auth payload.
+    if hash_bytes.starts_with(b"flowsta-") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "reserved_prefix".into(),
+                description: Some(
+                    "Hashes with the reserved 'flowsta-' prefix cannot be signed.".into(),
+                ),
             }),
         ));
     }
