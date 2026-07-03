@@ -365,6 +365,7 @@ pub fn run() {
             commands::get_pending_link_identity,
             commands::respond_link_identity_request,
             commands::respond_document_sign_request,
+            commands::respond_raw_sign_request,
             commands::get_pending_document_sign,
             commands::hash_file,
             commands::cancel_hash,

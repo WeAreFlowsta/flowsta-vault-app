@@ -97,6 +97,17 @@ pub struct PendingDocumentSignRequest {
     pub responder: tokio::sync::oneshot::Sender<bool>,
 }
 
+/// A pending generic /sign request awaiting user approval (linked apps
+/// signing arbitrary payloads outside the post-link ceremony window).
+pub struct PendingRawSignRequest {
+    pub id: String,
+    pub app_name: String,
+    pub origin: Option<String>,
+    pub sign_type: String,
+    pub payload_bytes: usize,
+    pub responder: tokio::sync::oneshot::Sender<bool>,
+}
+
 /// A third-party app that has been linked via /link-identity.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LinkedThirdPartyApp {
@@ -128,6 +139,12 @@ pub struct AppState {
     pub pending_link_identity: Mutex<Option<PendingLinkIdentityRequest>>,
     /// A pending /sign-document request waiting for user approval.
     pub pending_document_sign: Mutex<Option<PendingDocumentSignRequest>>,
+    /// A pending generic /sign request waiting for user approval.
+    pub pending_raw_sign: Mutex<Option<PendingRawSignRequest>>,
+    /// Origins whose /link-identity approval is recent enough that the
+    /// immediate follow-up /sign of the agent-pair payload (the linking
+    /// ceremony) proceeds without a second dialog.
+    pub recent_link_approvals: Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// Origins the user has chosen to auto-approve for /authenticate.
     pub approved_apps: Mutex<Vec<String>>,
     /// Third-party apps linked via /link-identity.
@@ -192,6 +209,8 @@ impl AppState {
             pending_auth: Mutex::new(None),
             pending_link_identity: Mutex::new(None),
             pending_document_sign: Mutex::new(None),
+            pending_raw_sign: Mutex::new(None),
+            recent_link_approvals: Mutex::new(std::collections::HashMap::new()),
             approved_apps: Mutex::new(Vec::new()),
             linked_third_party_apps: Mutex::new(linked_apps),
             conductor_handle: Mutex::new(None),
@@ -2300,6 +2319,19 @@ pub fn respond_document_sign_request(
     let req = pending.take().ok_or("No pending document-sign request")?;
 
     let _ = req.responder.send(approved);
+    Ok(())
+}
+
+/// Respond to a pending generic /sign approval dialog.
+#[tauri::command]
+pub fn respond_raw_sign_request(
+    approved: bool,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let mut pending = state.pending_raw_sign.lock().unwrap();
+    if let Some(req) = pending.take() {
+        let _ = req.responder.send(approved);
+    }
     Ok(())
 }
 

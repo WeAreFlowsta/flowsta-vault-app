@@ -308,36 +308,105 @@ async fn sign_handler(
     // Record MAU for linked third-party apps making sign requests
     crate::mau::record_mau_for_origin(&state.app_state, origin.as_deref());
 
-    // Get vault config (must be unlocked)
-    let config = state.app_state.vault_config.lock().unwrap();
-    let config = config.as_ref().ok_or_else(|| {
-        (
-            StatusCode::FORBIDDEN,
-            Json(IpcError {
-                error: "vault_locked".into(),
-                description: Some("Vault is locked. Unlock it first.".into()),
-            }),
-        )
-    })?;
+    // Get signing material in a scoped block — the config guard must not
+    // live across the approval await below (non-Send).
+    let (seed_arr, agent_pub_key, did) = {
+        let config_guard = state.app_state.vault_config.lock().unwrap();
+        let config = config_guard.as_ref().ok_or_else(|| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "vault_locked".into(),
+                    description: Some("Vault is locked. Unlock it first.".into()),
+                }),
+            )
+        })?;
+        let device_seed = config.device_seed.as_ref().ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(IpcError {
+                    error: "no_device_seed".into(),
+                    description: Some(
+                        "Vault was created before signing support. Please re-create it.".into(),
+                    ),
+                }),
+            )
+        })?;
+        let mut seed_arr = [0u8; 32];
+        seed_arr.copy_from_slice(device_seed);
+        (seed_arr, config.agent_pub_key.clone(), config.did.clone())
+    };
 
-    // Get device seed for signing
-    let device_seed = config.device_seed.as_ref().ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(IpcError {
-                error: "no_device_seed".into(),
-                description: Some(
-                    "Vault was created before signing support. Please re-create it.".into(),
-                ),
-            }),
-        )
-    })?;
+    // Per-action approval: signing with the user's identity key is never
+    // silent. Exception: within the post-link ceremony window, the linking
+    // flow's agent-pair signature proceeds on the strength of the link
+    // approval the user just gave (one dialog for the ceremony, not two).
+    let in_ceremony_window = origin
+        .as_deref()
+        .map(|o| {
+            let map = state.app_state.recent_link_approvals.lock().unwrap();
+            map.get(o)
+                .map(|t| t.elapsed() < std::time::Duration::from_secs(120))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
 
-    let mut seed_arr = [0u8; 32];
-    seed_arr.copy_from_slice(device_seed);
+    if !in_ceremony_window {
+        let app_name = origin_to_client_id(&state.app_state, origin.as_deref())
+            .and_then(|cid| {
+                let apps = state.app_state.linked_third_party_apps.lock().unwrap();
+                apps.iter().find(|a| a.client_id.as_deref() == Some(cid.as_str())).map(|a| a.app_name.clone())
+            })
+            .or_else(|| origin.clone())
+            .unwrap_or_else(|| "Unknown app".to_string());
+        let payload_bytes = req
+            .bytes
+            .as_ref()
+            .map(|b| b.len() * 3 / 4)
+            .unwrap_or_default();
 
-    let agent_pub_key = config.agent_pub_key.clone();
-    let did = config.did.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        let request_id = format!("rawsign-{}", unix_now());
+        {
+            let mut pending = state.app_state.pending_raw_sign.lock().unwrap();
+            *pending = Some(crate::commands::PendingRawSignRequest {
+                id: request_id.clone(),
+                app_name: app_name.clone(),
+                origin: origin.clone(),
+                sign_type: req.sign_type.clone(),
+                payload_bytes,
+                responder: tx,
+            });
+        }
+        let event_payload = serde_json::json!({
+            "id": request_id,
+            "app_name": app_name,
+            "origin": origin,
+            "sign_type": req.sign_type,
+            "payload_bytes": payload_bytes,
+        });
+        raise_window(&state.app_handle);
+        let _ = state.app_handle.emit("raw-sign-request", event_payload);
+
+        let approved = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                let mut pending = state.app_state.pending_raw_sign.lock().unwrap();
+                *pending = None;
+                false
+            }
+        };
+        if !approved {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "user_denied".into(),
+                    description: Some("The user did not approve this signing request.".into()),
+                }),
+            ));
+        }
+    }
 
     match req.sign_type.as_str() {
         "bytes" => {
@@ -499,6 +568,13 @@ async fn authenticate_handler(
     };
 
     let approved = if auto_approved {
+        // Surface auto-approved authentications so they are visible, not
+        // silent — the user chose "remember" (or linked the app), but a
+        // sign-in as them should never happen invisibly.
+        let _ = state.app_handle.emit(
+            "auth-auto-approved",
+            serde_json::json!({ "app_name": req.app_name, "origin": origin }),
+        );
         true
     } else {
         // Create oneshot channel for approval dialog
@@ -950,6 +1026,17 @@ async fn link_identity_handler(
         if !apps.contains(orig) {
             apps.push(orig.clone());
         }
+    }
+    // Open the linking-ceremony window: the immediate follow-up /sign of the
+    // agent-pair payload proceeds without a second dialog. Outside this
+    // window, /sign shows per-action approval.
+    if let Some(ref orig) = origin {
+        state
+            .app_state
+            .recent_link_approvals
+            .lock()
+            .unwrap()
+            .insert(orig.clone(), std::time::Instant::now());
     }
 
     // User approved — extract signing material from vault config (scoped to drop lock)

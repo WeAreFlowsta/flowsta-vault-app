@@ -238,6 +238,17 @@ export default component$(() => {
     origin: string | null;
   } | null>(null);
 
+  // Generic /sign approval (linked apps signing outside the linking ceremony)
+  const pendingRawSign = useSignal<{
+    id: string;
+    app_name: string;
+    origin: string | null;
+    sign_type: string;
+    payload_bytes: number;
+  } | null>(null);
+  // Transient notice when a remembered app authenticated without a dialog.
+  const autoApprovedNotice = useSignal<string | null>(null);
+
   // Relay login — approve a sign-in happening on another device.
   // The approval screen is ALWAYS shown (no remember option): cross-device
   // approval is the phishing surface, the screen is the defense.
@@ -431,6 +442,31 @@ export default component$(() => {
 
     cleanup(() => {
       unlistenPromise.then((unlisten) => unlisten());
+    });
+  });
+
+  // Generic /sign approvals + auto-approved authentication notices
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ cleanup }) => {
+    const unlistenSign = listen<{
+      id: string;
+      app_name: string;
+      origin: string | null;
+      sign_type: string;
+      payload_bytes: number;
+    }>("raw-sign-request", (event) => {
+      pendingRawSign.value = event.payload;
+    });
+    const unlistenAuto = listen<{ app_name: string; origin: string | null }>(
+      "auth-auto-approved",
+      (event) => {
+        autoApprovedNotice.value = event.payload.app_name || event.payload.origin || "A linked app";
+        setTimeout(() => (autoApprovedNotice.value = null), 6000);
+      },
+    );
+    cleanup(() => {
+      unlistenSign.then((u) => u());
+      unlistenAuto.then((u) => u());
     });
   });
 
@@ -672,6 +708,16 @@ export default component$(() => {
       console.error("Failed to respond to document-sign request:", e);
     } finally {
       pendingDocumentSign.value = null;
+    }
+  });
+
+  const handleRawSignResponse = $(async (approved: boolean) => {
+    try {
+      await invoke("respond_raw_sign_request", { approved });
+    } catch (e) {
+      console.error("Failed to respond to sign request:", e);
+    } finally {
+      pendingRawSign.value = null;
     }
   });
 
@@ -1019,6 +1065,58 @@ export default component$(() => {
           </div>
         </main>
       </div>
+
+      {/* Generic /sign approval dialog */}
+      {pendingRawSign.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
+            <div class="mb-4 flex items-center gap-3">
+              <div class="flex h-10 w-10 items-center justify-center rounded-full bg-amber-500/20">
+                <svg class="h-5 w-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                </svg>
+              </div>
+              <div>
+                <h3 class="text-base font-semibold text-white">Signing Request</h3>
+                <p class="text-xs text-gray-400">A linked app wants a signature</p>
+              </div>
+            </div>
+            <div class="mb-4 space-y-2 rounded-lg border border-gray-700 bg-gray-900 p-3">
+              <div>
+                <span class="text-xs text-gray-500">App</span>
+                <p class="text-sm font-medium text-white">{pendingRawSign.value.app_name}</p>
+              </div>
+              <div>
+                <span class="text-xs text-gray-500">What</span>
+                <p class="text-sm text-gray-300">
+                  Sign {pendingRawSign.value.payload_bytes > 0 ? `${pendingRawSign.value.payload_bytes} bytes of data` : "data"} with your identity key
+                </p>
+              </div>
+            </div>
+            <p class="mb-4 text-xs text-amber-200/90">
+              Only approve if you expect this app to be signing something
+              right now. A signature made with your key speaks as you.
+            </p>
+            <div class="flex gap-3">
+              <GlassButton variant="secondary" class="flex-1" onClick$={() => handleRawSignResponse(false)}>
+                Deny
+              </GlassButton>
+              <GlassButton class="flex-1" onClick$={() => handleRawSignResponse(true)}>
+                Approve
+              </GlassButton>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Auto-approved authentication notice */}
+      {autoApprovedNotice.value && (
+        <div class="fixed bottom-6 left-6 z-50 rounded-lg border border-sky-500/40 bg-sky-500/15 px-4 py-3 shadow-xl">
+          <p class="text-sm text-sky-200">
+            {autoApprovedNotice.value} signed in with your identity (remembered app).
+          </p>
+        </div>
+      )}
 
       {/* Relay login: enter-code modal */}
       {relayCodeModal.value && !pendingRelayClaim.value && (
