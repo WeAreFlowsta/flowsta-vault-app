@@ -1194,6 +1194,10 @@ pub async fn authenticate_web_account(
         .json(&serde_json::json!({
             "emailOrUsername": email_or_username,
             "password": password,
+            // Marks this as the Vault app's sign-in: after the cutover
+            // closes the web password door, this path must keep working so
+            // remaining custodial accounts can complete their upgrade.
+            "vault_migration": true,
         }))
         .send()
         .await

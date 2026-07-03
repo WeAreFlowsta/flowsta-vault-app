@@ -1073,14 +1073,146 @@ mod tests {
     // Mirrors the API-side migration e2e (register → server phrase → device
     // key from THE SAME phrase → pair-sig link → lossless export → local
     // decrypt → flip → password dies / vault-grant lives / DID preserved →
-    // revert) through THIS module's functions. The on-device conductor
-    // import is exercised in the GUI walkthrough instead.
+    // revert) through THIS module's functions, plus the account-variant
+    // matrix (two-factor, lost phrase, username sign-in, existing
+    // signatures). The on-device conductor import is exercised in the GUI
+    // walkthrough instead.
     //
     // Run explicitly: cargo test --lib migration -- --ignored
+    const STAGING: &str = "https://auth-api-staging.flowsta.com";
+
+    fn unique_suffix() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// Register a synthetic custodial user (creates real API cells) → JWT.
+    async fn register_staging(
+        client: &reqwest::Client,
+        email: &str,
+        password: &str,
+        display_name: &str,
+    ) -> String {
+        let resp = client
+            .post(format!("{}/auth/register", STAGING))
+            .json(&serde_json::json!({
+                "email": email,
+                "password": password,
+                "confirmPassword": password,
+                "displayName": display_name,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 201, "register");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        body["token"].as_str().unwrap().to_string()
+    }
+
+    struct DeviceIdentity {
+        seed: [u8; 32],
+        key_39: [u8; 39],
+        key_b64: String,
+        lookup_hash: String,
+    }
+
+    fn derive_device(mnemonic: &str) -> DeviceIdentity {
+        let seed = derive_seed(mnemonic, DEVICE_1_CONSTANT).unwrap();
+        let pub_key = derive_device_keypair(mnemonic)
+            .unwrap()
+            .verifying_key()
+            .to_bytes();
+        let key_39 = construct_agent_pub_key_bytes(&pub_key);
+        DeviceIdentity {
+            seed,
+            key_b64: base64_standard_encode(&key_39),
+            key_39,
+            lookup_hash: derive_recovery_lookup_hash(mnemonic).unwrap().to_lowercase(),
+        }
+    }
+
+    /// Link + flip using an already-fetched export as ground truth.
+    /// (The export/flip/revert endpoints share one tight rate limiter on
+    /// staging — each test must spend exactly one export.)
+    async fn link_and_flip(
+        jwt: &str,
+        user_id: &str,
+        export: &ExportResult,
+        device: &DeviceIdentity,
+    ) {
+        let web_bytes = base64_standard_decode(&export.web_agent_b64).unwrap();
+        let mut web_39 = [0u8; 39];
+        web_39.copy_from_slice(&web_bytes);
+
+        verify_lookup_binding(STAGING, &device.lookup_hash, &web_39)
+            .await
+            .expect("lookup binding");
+        link_device_key(STAGING, &device.seed, &device.key_39, &web_39, &device.lookup_hash)
+            .await
+            .expect("link");
+        let cells = complete_flip(STAGING, jwt, user_id, &device.seed, &device.key_b64)
+            .await
+            .expect("flip");
+        assert!(!cells.is_empty(), "cells disabled: {:?}", cells);
+    }
+
+    /// RFC 4648 base32 decode (uppercase, padding ignored) — for the TOTP
+    /// secret the two-factor setup endpoint returns.
+    fn b32_decode(input: &str) -> Vec<u8> {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let mut bits = 0u32;
+        let mut nbits = 0u8;
+        let mut out = Vec::new();
+        for c in input.trim_end_matches('=').bytes() {
+            let v = ALPHABET
+                .iter()
+                .position(|&a| a == c.to_ascii_uppercase())
+                .expect("invalid base32") as u32;
+            bits = (bits << 5) | v;
+            nbits += 5;
+            if nbits >= 8 {
+                nbits -= 8;
+                out.push((bits >> nbits) as u8);
+            }
+        }
+        out
+    }
+
+    /// otplib-compatible TOTP: HMAC-SHA1, 30-second step, 6 digits.
+    /// Sleeps past the step boundary when close, so a code computed here is
+    /// still valid when the server checks it.
+    async fn totp_now(secret_b32: &str) -> String {
+        use hmac::{Hmac, Mac};
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        if now % 30 >= 27 {
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let counter = (now / 30).to_be_bytes();
+        let mut mac =
+            <Hmac<sha1::Sha1> as Mac>::new_from_slice(&b32_decode(secret_b32)).unwrap();
+        mac.update(&counter);
+        let digest = mac.finalize().into_bytes();
+        let offset = (digest[19] & 0x0f) as usize;
+        let code = ((u32::from(digest[offset]) & 0x7f) << 24
+            | u32::from(digest[offset + 1]) << 16
+            | u32::from(digest[offset + 2]) << 8
+            | u32::from(digest[offset + 3]))
+            % 1_000_000;
+        format!("{:06}", code)
+    }
+
     #[tokio::test]
     #[ignore]
     async fn migration_flow_against_staging() {
-        const STAGING: &str = "https://auth-api-staging.flowsta.com";
         let client = reqwest::Client::new();
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1214,5 +1346,348 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status().as_u16(), 200, "password login restored after revert");
+    }
+
+    /// Two-factor account variant: enable real TOTP on the account, sign in
+    /// the way the wizard does (temp token + code), migrate, and confirm the
+    /// 2FA material decrypts into vault-local form. Post-flip, the device
+    /// key is the auth factor — no TOTP challenge on Vault-grant.
+    #[tokio::test]
+    #[ignore]
+    async fn migration_2fa_user_against_staging() {
+        let client = reqwest::Client::new();
+        let suffix = unique_suffix();
+        let email = format!("migvault2fa-{}@example.com", suffix);
+        let password = format!("Migration-2FA-{}!x", suffix);
+        let jwt = register_staging(&client, &email, &password, "Mig 2FA").await;
+
+        let phrase = migration_new_phrase(STAGING.into(), jwt.clone(), password.clone())
+            .await
+            .expect("phrase");
+        let mnemonic = normalize_mnemonic(&phrase);
+        let device = derive_device(&mnemonic);
+
+        // Enable 2FA with a real TOTP round-trip.
+        let resp = client
+            .post(format!("{}/api/v1/2fa/setup", STAGING))
+            .bearer_auth(&jwt)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "2fa setup");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let secret = body["secret"].as_str().expect("totp secret").to_string();
+
+        let code = totp_now(&secret).await;
+        let resp = client
+            .post(format!("{}/api/v1/2fa/verify-setup", STAGING))
+            .bearer_auth(&jwt)
+            .json(&serde_json::json!({ "code": code, "password": password }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "2fa verify-setup: {:?}",
+            resp.text().await
+        );
+
+        // Sign in exactly as the wizard does: password → temp token → code.
+        let auth = crate::commands::authenticate_web_account(
+            STAGING.into(),
+            email.clone(),
+            password.clone(),
+        )
+        .await
+        .expect("password step");
+        assert!(auth.requires_2fa, "2FA challenge expected");
+        let temp = auth.temp_token.expect("temp token");
+        let code = totp_now(&secret).await;
+        let auth = crate::commands::authenticate_2fa(STAGING.into(), temp, code)
+            .await
+            .expect("2fa step");
+        let jwt2 = auth.token.expect("2fa session token");
+
+        // Export with the 2FA session; the TOTP material must decrypt into
+        // vault-local form (never sealed).
+        let export = fetch_export(STAGING, &jwt2).await.expect("export");
+        let mapped = map_bundle(&export.data, &password, &mnemonic).expect("map");
+        let totp = mapped.totp.as_ref().expect("totp present in export");
+        assert_eq!(totp.secret, secret, "TOTP secret survives the round trip");
+        assert_eq!(totp.backup_codes.len(), 8, "backup codes");
+        assert!(totp.enabled);
+        assert!(
+            !mapped.records.iter().any(|r| r.entry_type == "totp_config"),
+            "TOTP must not become a sealed record"
+        );
+
+        let me = fetch_me(STAGING, &jwt2).await.unwrap();
+        let did_before = me.did.clone();
+        link_and_flip(&jwt2, &me.user_id, &export, &device).await;
+
+        // Password login dies BEFORE the 2FA challenge.
+        let resp = client
+            .post(format!("{}/auth/login", STAGING))
+            .json(&serde_json::json!({ "emailOrUsername": email, "password": password }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 403, "password+2FA login 403 post-flip");
+
+        let grant =
+            crate::device_identity::vault_grant_with_seed(STAGING, &device.seed, &device.key_b64)
+                .await
+                .expect("vault-grant post-flip");
+        assert_eq!(grant.did, did_before, "DID preserved");
+
+        // Revert restores the custodial 2FA flow intact.
+        let resp = client
+            .post(format!("{}/auth/migration/revert", STAGING))
+            .bearer_auth(&grant.token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "revert");
+        let auth = crate::commands::authenticate_web_account(STAGING.into(), email, password)
+            .await
+            .expect("post-revert password step");
+        assert!(auth.requires_2fa, "2FA challenge restored after revert");
+    }
+
+    /// Lost-phrase variant: re-minting the phrase re-binds the account's
+    /// lookup hash — the old phrase stops resolving and is rejected by the
+    /// stored-blob comparison; the new phrase migrates cleanly.
+    #[tokio::test]
+    #[ignore]
+    async fn migration_lost_phrase_rebind_against_staging() {
+        let client = reqwest::Client::new();
+        let suffix = unique_suffix();
+        let email = format!("migvaultlost-{}@example.com", suffix);
+        let password = format!("Migration-Lost-{}!x", suffix);
+        let jwt = register_staging(&client, &email, &password, "Mig Lost").await;
+
+        let phrase1 = migration_new_phrase(STAGING.into(), jwt.clone(), password.clone())
+            .await
+            .expect("first phrase");
+        let phrase2 = migration_new_phrase(STAGING.into(), jwt.clone(), password.clone())
+            .await
+            .expect("re-minted phrase");
+        let old = normalize_mnemonic(&phrase1);
+        let new = normalize_mnemonic(&phrase2);
+        assert_ne!(old, new, "re-mint must produce a fresh phrase");
+
+        let export = fetch_export(STAGING, &jwt).await.expect("export");
+        let web_bytes = base64_standard_decode(&export.web_agent_b64).unwrap();
+        let mut web_39 = [0u8; 39];
+        web_39.copy_from_slice(&web_bytes);
+
+        // The lost phrase is dead on both checks…
+        assert!(
+            map_bundle(&export.data, &password, &old)
+                .unwrap_err()
+                .contains("phrase_mismatch"),
+            "old phrase rejected by blob comparison"
+        );
+        let old_device = derive_device(&old);
+        assert!(
+            verify_lookup_binding(STAGING, &old_device.lookup_hash, &web_39)
+                .await
+                .is_err(),
+            "old lookup hash no longer resolves to the account"
+        );
+
+        // …and the new phrase migrates.
+        let mapped = map_bundle(&export.data, &password, &new).expect("new phrase maps");
+        assert_eq!(mapped.email, email, "email decrypts");
+        let device = derive_device(&new);
+        let me = fetch_me(STAGING, &jwt).await.unwrap();
+        let did_before = me.did.clone();
+        link_and_flip(&jwt, &me.user_id, &export, &device).await;
+
+        let grant =
+            crate::device_identity::vault_grant_with_seed(STAGING, &device.seed, &device.key_b64)
+                .await
+                .expect("vault-grant post-flip");
+        assert_eq!(grant.did, did_before, "DID preserved");
+    }
+
+    /// Username sign-in entry: the wizard's sign-in accepts a username, the
+    /// username survives migration, and username+password login dies with
+    /// the flip too.
+    #[tokio::test]
+    #[ignore]
+    async fn migration_username_entry_against_staging() {
+        let client = reqwest::Client::new();
+        let suffix = unique_suffix();
+        let email = format!("migvaultuser-{}@example.com", suffix);
+        let password = format!("Migration-User-{}!x", suffix);
+        let username = format!("migvault{}", suffix); // ≥8 chars = free tier
+        let jwt = register_staging(&client, &email, &password, "Mig User").await;
+
+        let resp = client
+            .put(format!("{}/auth/username", STAGING))
+            .bearer_auth(&jwt)
+            .json(&serde_json::json!({ "username": username }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "set username: {:?}",
+            resp.text().await
+        );
+
+        // Sign in BY USERNAME through the wizard's own command.
+        let auth = crate::commands::authenticate_web_account(
+            STAGING.into(),
+            username.clone(),
+            password.clone(),
+        )
+        .await
+        .expect("username login");
+        assert!(!auth.requires_2fa);
+        let jwt = auth.token.expect("session token");
+
+        let phrase = migration_new_phrase(STAGING.into(), jwt.clone(), password.clone())
+            .await
+            .expect("phrase");
+        let mnemonic = normalize_mnemonic(&phrase);
+        let device = derive_device(&mnemonic);
+
+        let export = fetch_export(STAGING, &jwt).await.expect("export");
+        let mapped = map_bundle(&export.data, &password, &mnemonic).expect("map");
+        assert_eq!(
+            mapped.username.as_deref(),
+            Some(username.as_str()),
+            "username present in the exported profile"
+        );
+
+        let me = fetch_me(STAGING, &jwt).await.unwrap();
+        let did_before = me.did.clone();
+        link_and_flip(&jwt, &me.user_id, &export, &device).await;
+
+        // Username+password login dies with the flip…
+        let dead = crate::commands::authenticate_web_account(
+            STAGING.into(),
+            username.clone(),
+            password.clone(),
+        )
+        .await;
+        assert!(dead.is_err(), "username login must be refused post-flip");
+
+        // …and the username survives on the device-hosted account.
+        let grant =
+            crate::device_identity::vault_grant_with_seed(STAGING, &device.seed, &device.key_b64)
+                .await
+                .expect("vault-grant post-flip");
+        assert_eq!(grant.did, did_before, "DID preserved");
+        assert_eq!(
+            grant.username.as_deref(),
+            Some(username.as_str()),
+            "username preserved post-flip"
+        );
+    }
+
+    /// Existing-signatures variant: a signature made while custodial must
+    /// still verify — with the signer identity resolved — after the account
+    /// flips to device-hosting (signatures live on the shared DHT and the
+    /// old key stays attributable through the agent link graph).
+    #[tokio::test]
+    #[ignore]
+    async fn migration_signatures_continuity_against_staging() {
+        use sha2::{Digest, Sha256};
+        let client = reqwest::Client::new();
+        let suffix = unique_suffix();
+        let email = format!("migvaultsig-{}@example.com", suffix);
+        let password = format!("Migration-Sig-{}!x", suffix);
+        let jwt = register_staging(&client, &email, &password, "Mig Signer").await;
+
+        let phrase = migration_new_phrase(STAGING.into(), jwt.clone(), password.clone())
+            .await
+            .expect("phrase");
+        let mnemonic = normalize_mnemonic(&phrase);
+        let device = derive_device(&mnemonic);
+        let me = fetch_me(STAGING, &jwt).await.unwrap();
+        let did_before = me.did.clone();
+
+        // Sign a document while custodial (the API signs through the
+        // account's hosted cell — exactly what existing users have done).
+        // No `intent` field: the route's default maps to a valid zome enum
+        // variant; arbitrary strings are rejected by the zome.
+        let file_hash = hex::encode(Sha256::digest(format!("migration-sig-test-{}", suffix)));
+        let resp = client
+            .post(format!("{}/api/v1/sign-it/sign", STAGING))
+            .bearer_auth(&jwt)
+            .json(&serde_json::json!({ "file_hash": file_hash }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "custodial sign: {:?}",
+            resp.text().await
+        );
+
+        // Signer-identity resolution walks the identity DNA — a freshly
+        // registered account's records need DHT warmup, so poll rather than
+        // assert on the first read.
+        let verify_resolved = |hash: String, deadline_secs: u64| {
+            let client = client.clone();
+            async move {
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(deadline_secs);
+                loop {
+                    let resp = client
+                        .get(format!("{}/api/v1/sign-it/verify?hash={}", STAGING, hash))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(resp.status().as_u16(), 200, "verify");
+                    let body: serde_json::Value = resp.json().await.unwrap();
+                    if body["count"].as_i64() == Some(1)
+                        && body["signatures"][0]["signer_did"].as_str().is_some()
+                    {
+                        return body;
+                    }
+                    if std::time::Instant::now() > deadline {
+                        return body; // let the caller's asserts report what's missing
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                }
+            }
+        };
+
+        let before = verify_resolved(file_hash.clone(), 60).await;
+        assert_eq!(before["count"].as_i64(), Some(1), "one signature pre-flip");
+        assert_eq!(
+            before["signatures"][0]["signer_did"].as_str(),
+            Some(did_before.as_str()),
+            "signer DID resolves pre-flip"
+        );
+
+        let export = fetch_export(STAGING, &jwt).await.expect("export");
+        map_bundle(&export.data, &password, &mnemonic).expect("map");
+        link_and_flip(&jwt, &me.user_id, &export, &device).await;
+
+        // The signature must still verify AND still attribute to the same
+        // identity after the flip.
+        let after = verify_resolved(file_hash.clone(), 60).await;
+        assert_eq!(after["count"].as_i64(), Some(1), "signature survives the flip");
+        assert_eq!(
+            after["signatures"][0]["signer_did"].as_str(),
+            Some(did_before.as_str()),
+            "signer DID still resolves post-flip"
+        );
+
+        let grant =
+            crate::device_identity::vault_grant_with_seed(STAGING, &device.seed, &device.key_b64)
+                .await
+                .expect("vault-grant post-flip");
+        assert_eq!(grant.did, did_before, "DID preserved");
     }
 }
