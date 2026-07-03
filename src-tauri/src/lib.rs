@@ -9,6 +9,7 @@ mod ipc_server;
 mod key_derivation;
 mod lair;
 mod mau;
+mod migration;
 mod process_ext;
 mod quota_cache;
 mod relay_login;
@@ -335,6 +336,8 @@ pub fn run() {
             relay_login::take_pending_relay_code,
             sealed::sealed_store,
             sealed::sealed_list,
+            migration::migration_new_phrase,
+            migration::migrate_custodial_account,
             commands::unlock_vault,
             commands::lock_vault,
             commands::reset_vault,

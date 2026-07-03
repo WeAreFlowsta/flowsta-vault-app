@@ -16,6 +16,11 @@ type Step =
   | "twofa"
   | "no-phrase"
   | "phrase"
+  | "upgrade-offer"
+  | "migrate-phrase"
+  | "migrate-ceremony"
+  | "migrate-confirm"
+  | "migrate-done"
   | "progress"
   | "done";
 
@@ -24,8 +29,11 @@ declare const __WEB_URL__: string;
 const WEB_PHRASE_URL = `${__WEB_URL__}/dashboard/settings/password/`;
 
 function stepToCircle(s: Step): number {
-  if (s === "choose" || s === "create-form" || s === "signin" || s === "twofa") return 0;
-  if (s === "create-phrase" || s === "restore-phrase" || s === "no-phrase" || s === "phrase") return 1;
+  if (s === "choose" || s === "create-form" || s === "signin" || s === "twofa" || s === "upgrade-offer") return 0;
+  if (
+    s === "create-phrase" || s === "restore-phrase" || s === "no-phrase" || s === "phrase" ||
+    s === "migrate-phrase" || s === "migrate-ceremony" || s === "migrate-confirm"
+  ) return 1;
   return 2;
 }
 
@@ -61,6 +69,16 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const restorePassword = useSignal("");
   const restorePassword2 = useSignal("");
 
+  // Account-upgrade (migration) state
+  const hasWebPhrase = useSignal(false);
+  const migSummary = useStore({
+    recordsMigrated: 0,
+    totpMoved: false,
+    cellsDisabled: 0,
+    email: "",
+    did: "",
+  });
+
   // Fetch profile (displayName, profilePicture) from GET /auth/me
   const fetchProfile = $(async (token: string) => {
     if (!token) return;
@@ -77,11 +95,13 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
     }
   });
 
-  // After successful sign-in, check if user has a recovery phrase
+  // After successful sign-in: remember whether the account has a recovery
+  // phrase, then offer the account upgrade before the legacy link path.
   const checkPhraseAndProceed = $(async (token: string) => {
     if (!token) {
       console.warn("No JWT token — skipping phrase status check");
-      step.value = "phrase";
+      hasWebPhrase.value = true;
+      step.value = "upgrade-offer";
       return;
     }
 
@@ -95,16 +115,134 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       });
 
       console.log("Recovery phrase status:", status);
-
-      if (!status.has_recovery_phrase) {
-        step.value = "no-phrase";
-      } else {
-        step.value = "phrase";
-      }
+      hasWebPhrase.value = status.has_recovery_phrase;
     } catch (e) {
-      // If check fails (e.g. offline or bad token), proceed to phrase entry anyway
+      // If the check fails (e.g. offline), assume a phrase exists — the
+      // migration flow verifies it against the account anyway.
       console.error("Recovery phrase status check failed:", e);
-      step.value = "phrase";
+      hasWebPhrase.value = true;
+    }
+    step.value = "upgrade-offer";
+  });
+
+  // Legacy path: keep the web account custodial and just link this device.
+  const proceedToLinkOnly = $(() => {
+    error.value = "";
+    step.value = hasWebPhrase.value ? "phrase" : "no-phrase";
+  });
+
+  // Cohort-2 / lost-phrase: the server mints (or re-mints) the account's
+  // phrase and binds its lookup hash; the user then does the write-down
+  // ceremony with it and it becomes the seed of their device identity.
+  const startMigrationCeremony = $(async () => {
+    error.value = "";
+    loading.value = true;
+    try {
+      newMnemonic.value = await invoke<string>("migration_new_phrase", {
+        apiUrl: __API_URL__,
+        jwt: jwt.value,
+        password: loginPassword.value,
+      });
+      const picks = new Set<number>();
+      while (picks.size < 3) picks.add(Math.floor(Math.random() * 24));
+      verifyIndices.value = [...picks].sort((a, b) => a - b);
+      verifyIndices.value.forEach((i) => (verifyWords[i] = ""));
+      phraseSaved.value = false;
+      step.value = "migrate-ceremony";
+    } catch (e) {
+      error.value = String(e);
+    } finally {
+      loading.value = false;
+    }
+  });
+
+  const handleMigratePhraseContinue = $(async () => {
+    error.value = "";
+    const trimmed = mnemonic.value.trim().toLowerCase().replace(/\s+/g, " ");
+    mnemonic.value = trimmed;
+    if (!trimmed) return;
+    const valid = await invoke<boolean>("validate_recovery_phrase", { mnemonic: trimmed });
+    if (!valid) {
+      error.value = "Invalid recovery phrase. Please check your words.";
+      return;
+    }
+    step.value = "migrate-confirm";
+  });
+
+  const handleMigrateCeremonyFinish = $(() => {
+    error.value = "";
+    const words = newMnemonic.value.split(" ");
+    for (const i of verifyIndices.value) {
+      if ((verifyWords[i] ?? "").trim().toLowerCase() !== words[i]) {
+        error.value = `Word #${i + 1} doesn't match. Check what you wrote down.`;
+        return;
+      }
+    }
+    mnemonic.value = newMnemonic.value;
+    step.value = "migrate-confirm";
+  });
+
+  const handleRunMigration = $(async () => {
+    error.value = "";
+    loading.value = true;
+    step.value = "progress";
+    progressMessage.value = "Starting your account upgrade…";
+
+    const { listen } = await import("@tauri-apps/api/event");
+    const unlisten = await listen<{ stage: string; message: string }>(
+      "migration-progress",
+      (event) => {
+        progressMessage.value = event.payload.message;
+      }
+    );
+
+    try {
+      const summary = await invoke<{
+        records_migrated: number;
+        sessions_skipped: number;
+        totp_moved: boolean;
+        cells_disabled: string[];
+        backup_label: string;
+        email: string;
+        did: string;
+        agent_pub_key: string;
+      }>("migrate_custodial_account", {
+        apiUrl: __API_URL__,
+        jwt: jwt.value,
+        password: loginPassword.value,
+        mnemonic: mnemonic.value,
+      });
+
+      migSummary.recordsMigrated = summary.records_migrated;
+      migSummary.totpMoved = summary.totp_moved;
+      migSummary.cellsDisabled = summary.cells_disabled.length;
+      migSummary.email = summary.email;
+      migSummary.did = summary.did;
+      result.agentPubKey = summary.agent_pub_key;
+      result.did = summary.did;
+      webUser.email = summary.email;
+
+      mnemonic.value = "";
+      newMnemonic.value = "";
+      loginPassword.value = "";
+      step.value = "migrate-done";
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("phrase_mismatch")) {
+        error.value =
+          "This isn't the recovery phrase on file for this account. Check your words, or use \"I lost my recovery phrase\" to get a new one.";
+        step.value = "migrate-phrase";
+      } else if (msg.includes("lookup_hash_not_found") || msg.includes("export_missing_phrase")) {
+        error.value =
+          "This account's recovery phrase needs to be re-created before upgrading. Use \"I lost my recovery phrase\" to get a new one.";
+        step.value = "migrate-phrase";
+      } else {
+        error.value = msg;
+        step.value = "migrate-confirm";
+      }
+    } finally {
+      unlisten();
+      loading.value = false;
     }
   });
 
@@ -984,6 +1122,286 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 {loading.value ? "Verifying..." : "Continue"}
               </GlassButton>
             </div>
+          </div>
+        )}
+
+        {/* ── Upgrade offer: shown right after a custodial sign-in ── */}
+        {step.value === "upgrade-offer" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="mb-2 text-2xl font-bold text-white">Upgrade Your Account</h2>
+            <p class="mb-4 text-sm text-gray-400">
+              Right now your keys and personal data live on Flowsta's servers.
+              Upgrading moves them into this Vault — your identity and data
+              belong to this device, and only you can unlock them.
+            </p>
+            <ul class="mb-6 list-disc space-y-1 pl-5 text-xs text-gray-400">
+              <li>Your personal data moves into an encrypted vault on this device.</li>
+              <li>You keep the same identity, username, and signatures.</li>
+              <li>You'll sign in with Vault instead of a password.</li>
+            </ul>
+
+            {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
+
+            <div class="flex flex-col gap-3">
+              <GlassButton
+                disabled={loading.value}
+                onClick$={() => {
+                  error.value = "";
+                  if (hasWebPhrase.value) {
+                    mnemonic.value = "";
+                    step.value = "migrate-phrase";
+                  } else {
+                    startMigrationCeremony();
+                  }
+                }}
+              >
+                {loading.value ? "Preparing..." : "Upgrade to this device"}
+              </GlassButton>
+              <GlassButton variant="secondary" onClick$={proceedToLinkOnly}>
+                Not now — just connect this device
+              </GlassButton>
+            </div>
+
+            <p class="mt-6 text-xs text-gray-500">
+              Upgrading takes a few minutes. You can keep using your account
+              as usual afterward — only the way you sign in changes.
+            </p>
+          </div>
+        )}
+
+        {/* ── Upgrade: enter the existing recovery phrase ── */}
+        {step.value === "migrate-phrase" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="mb-2 text-2xl font-bold text-white">Enter Your Recovery Phrase</h2>
+            <p class="mb-4 text-sm text-gray-400">
+              Your 24-word recovery phrase becomes the seed of your device
+              identity. It stays on this device and is verified against your
+              account before anything changes.
+            </p>
+
+            <textarea
+              class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-none"
+              rows={4}
+              placeholder="word1 word2 word3 ... word24"
+              value={mnemonic.value}
+              onInput$={(e) => {
+                mnemonic.value = (e.target as HTMLTextAreaElement).value;
+                error.value = "";
+              }}
+            />
+
+            <button
+              type="button"
+              class="mb-4 text-xs text-amber-400 hover:text-amber-300 transition-colors"
+              disabled={loading.value}
+              onClick$={startMigrationCeremony}
+            >
+              I lost my recovery phrase — create a new one
+            </button>
+
+            {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
+
+            <div class="flex justify-between">
+              <GlassButton
+                variant="secondary"
+                onClick$={() => { mnemonic.value = ""; error.value = ""; step.value = "upgrade-offer"; }}
+              >
+                Back
+              </GlassButton>
+              <GlassButton
+                disabled={loading.value || !mnemonic.value.trim()}
+                onClick$={handleMigratePhraseContinue}
+              >
+                Continue
+              </GlassButton>
+            </div>
+          </div>
+        )}
+
+        {/* ── Upgrade: new-phrase ceremony (no phrase yet / lost phrase) ── */}
+        {step.value === "migrate-ceremony" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="mb-2 text-2xl font-bold text-white">Save Your Recovery Phrase</h2>
+            <p class="mb-4 text-sm text-gray-400">
+              These 24 words are now your identity. Write them down and store
+              them somewhere safe — on paper, not on this computer.
+            </p>
+            <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+              <p class="text-xs text-amber-300">
+                After the upgrade this phrase is the <strong>only</strong> way to
+                recover your identity. Flowsta cannot recover it for you.
+              </p>
+            </div>
+
+            <div class="mb-4 grid grid-cols-3 gap-2 rounded-md bg-gray-900 p-4">
+              {newMnemonic.value.split(" ").map((word, i) => (
+                <div key={i} class="flex items-baseline gap-1.5">
+                  <span class="w-5 text-right font-mono text-[10px] text-gray-500">{i + 1}.</span>
+                  <span class="font-mono text-sm text-white">{word}</span>
+                </div>
+              ))}
+            </div>
+
+            <div class="mb-4 flex items-center gap-3">
+              <button
+                type="button"
+                class="text-xs text-amber-400 hover:text-amber-300 transition-colors"
+                onClick$={async () => {
+                  try {
+                    await navigator.clipboard.writeText(newMnemonic.value);
+                    copied.value = true;
+                    setTimeout(() => { copied.value = false; }, 2000);
+                  } catch (e) {
+                    console.error("clipboard write failed:", e);
+                  }
+                }}
+              >
+                {copied.value ? "Copied ✓" : "Copy phrase"}
+              </button>
+              <span class="text-[10px] text-gray-500">
+                Paste into a password manager. Clear your clipboard afterward.
+              </span>
+            </div>
+
+            {!phraseSaved.value ? (
+              <GlassButton onClick$={() => { phraseSaved.value = true; error.value = ""; }}>
+                I've written it down
+              </GlassButton>
+            ) : (
+              <div>
+                <p class="mb-3 text-sm text-gray-400">
+                  Confirm by typing these words from what you wrote down:
+                </p>
+                <div class="mb-4 flex flex-col gap-3">
+                  {verifyIndices.value.map((i) => (
+                    <div key={i} class="flex items-center gap-3">
+                      <span class="w-20 text-xs text-gray-400">Word #{i + 1}</span>
+                      <input
+                        type="text"
+                        autoComplete="off"
+                        class="flex-1 rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm font-mono text-white focus:border-amber-400 focus:outline-none"
+                        value={verifyWords[i] ?? ""}
+                        onInput$={(e) => { verifyWords[i] = (e.target as HTMLInputElement).value; error.value = ""; }}
+                      />
+                    </div>
+                  ))}
+                </div>
+
+                {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
+
+                <div class="flex justify-between">
+                  <GlassButton variant="secondary" onClick$={() => { phraseSaved.value = false; error.value = ""; }}>
+                    Show phrase again
+                  </GlassButton>
+                  <GlassButton
+                    disabled={verifyIndices.value.some((i) => !(verifyWords[i] ?? "").trim())}
+                    onClick$={handleMigrateCeremonyFinish}
+                  >
+                    Continue
+                  </GlassButton>
+                </div>
+              </div>
+            )}
+
+            {error.value && !phraseSaved.value && (
+              <p class="mt-4 text-sm text-red-400">{error.value}</p>
+            )}
+          </div>
+        )}
+
+        {/* ── Upgrade: explicit consent before anything changes ── */}
+        {step.value === "migrate-confirm" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="mb-2 text-2xl font-bold text-white">Ready to Upgrade</h2>
+            <p class="mb-4 text-sm text-gray-400">
+              Here's what happens next — nothing changes until every step has
+              succeeded:
+            </p>
+            <ol class="mb-4 list-decimal space-y-1 pl-5 text-xs text-gray-400">
+              <li>Your account data is downloaded and decrypted on this device only.</li>
+              <li>It's re-encrypted with keys from your recovery phrase and stored in your vault.</li>
+              <li>An encrypted backup is saved on this device.</li>
+              <li>Your account switches to signing in with this Vault.</li>
+            </ol>
+            <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+              <p class="text-xs text-amber-300">
+                After the upgrade, your web password no longer signs you in —
+                it becomes this vault's unlock password instead. Signing in on
+                other browsers and devices happens through this Vault.
+              </p>
+            </div>
+
+            {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
+
+            <div class="flex justify-between">
+              <GlassButton
+                variant="secondary"
+                onClick$={() => {
+                  error.value = "";
+                  step.value = hasWebPhrase.value ? "migrate-phrase" : "upgrade-offer";
+                }}
+              >
+                Back
+              </GlassButton>
+              <GlassButton disabled={loading.value} onClick$={handleRunMigration}>
+                {loading.value ? "Upgrading..." : "Upgrade my account"}
+              </GlassButton>
+            </div>
+          </div>
+        )}
+
+        {/* ── Upgrade complete ── */}
+        {step.value === "migrate-done" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8 text-center">
+            <div class="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full bg-green-600/20">
+              <svg class="h-6 w-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            <h2 class="mb-2 text-xl font-bold text-white">Your Account Lives Here Now</h2>
+            <p class="mb-6 text-sm text-gray-400">
+              Your identity and data moved into this Vault. Password sign-in is
+              off — from now on, you approve sign-ins here.
+            </p>
+
+            <div class="mb-6 rounded-lg bg-gray-900 p-4 text-left">
+              {migSummary.email && (
+                <div class="mb-3">
+                  <span class="text-xs font-medium text-gray-400">Account</span>
+                  <p class="text-sm text-white">{migSummary.email}</p>
+                </div>
+              )}
+              <div class="mb-3">
+                <span class="text-xs font-medium text-gray-400">Moved to this device</span>
+                <p class="text-sm text-white">
+                  {migSummary.recordsMigrated} records
+                  {migSummary.totpMoved ? " · 2FA settings" : ""}
+                  {" · encrypted local backup"}
+                </p>
+              </div>
+              <button
+                class="text-xs text-gray-500 hover:text-gray-400"
+                onClick$={() => { showTechDetails.value = !showTechDetails.value; }}
+              >
+                {showTechDetails.value ? "Hide" : "Show"} technical details
+              </button>
+              {showTechDetails.value && (
+                <div class="mt-3 space-y-3 border-t border-gray-800 pt-3">
+                  <div>
+                    <span class="text-xs font-medium text-gray-400">DID (unchanged)</span>
+                    <p class="font-mono text-sm text-sky-400 break-all">{migSummary.did}</p>
+                  </div>
+                  <div>
+                    <span class="text-xs font-medium text-gray-400">Device Agent Key</span>
+                    <p class="font-mono text-sm text-gray-300 break-all">{result.agentPubKey}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <GlassButton onClick$={props.onComplete$}>
+              Open Dashboard
+            </GlassButton>
           </div>
         )}
 

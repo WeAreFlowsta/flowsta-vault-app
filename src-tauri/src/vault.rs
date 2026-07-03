@@ -104,6 +104,20 @@ pub struct VaultConfig {
     /// device lands in the same per-user network with zero coordination.
     #[serde(default)]
     pub private_network_seed: Option<String>,
+
+    /// TOTP secret carried over from a migrated web account (base32 string,
+    /// plaintext here — the whole vault file is encrypted at rest). Root
+    /// secrets never go into gossiped records; they live vault-local only.
+    #[serde(default)]
+    pub totp_secret: Option<String>,
+
+    /// Remaining one-time backup codes from the migrated 2FA setup.
+    #[serde(default)]
+    pub totp_backup_codes: Option<Vec<String>>,
+
+    /// Whether 2FA was enabled on the web account at migration time.
+    #[serde(default)]
+    pub totp_enabled: Option<bool>,
 }
 
 /// Encrypted vault on disk (serialized as JSON).
@@ -333,6 +347,9 @@ mod tests {
             hosting_model: None,
             data_key: None,
             private_network_seed: None,
+            totp_secret: None,
+            totp_backup_codes: None,
+            totp_enabled: None,
         };
 
         let encrypted = encrypt_vault(&config, "test-password-123").unwrap();
@@ -376,6 +393,9 @@ mod tests {
             hosting_model: None,
             data_key: None,
             private_network_seed: None,
+            totp_secret: None,
+            totp_backup_codes: None,
+            totp_enabled: None,
         };
 
         let encrypted = encrypt_vault(&config, "correct-password").unwrap();

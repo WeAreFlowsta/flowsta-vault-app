@@ -38,6 +38,11 @@ argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.8"
 
+# Password-derived key for decrypting exported account fields during
+# account migration (matches api/src/services/encryption.js: scrypt
+# N=16384, r=8, p=1 → AES-256-GCM)
+scrypt = { version = "0.11", default-features = false }
+
 # Encoding
 hex = "0.4"
 base64 = "0.22"

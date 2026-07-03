@@ -224,21 +224,34 @@ pub async fn sealed_store(
     refs: Option<Vec<String>>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<String, String> {
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as u64;
+    sealed_store_inner(&state, entry_type, body, refs.unwrap_or_default(), created_at).await
+}
+
+/// Store with an explicit creation timestamp — account migration preserves
+/// the original record times inside the cipher rather than stamping "now".
+pub(crate) async fn sealed_store_inner(
+    state: &Arc<AppState>,
+    entry_type: String,
+    body: serde_json::Value,
+    refs: Vec<String>,
+    created_at: u64,
+) -> Result<String, String> {
     use holochain_client::ZomeCallTarget;
     use holochain_types::prelude::{ExternIO, Record};
 
-    let (admin_port, app_port) = conductor_ports(&state)?;
-    let data_key = vault_data_key(&state)?;
+    let (admin_port, app_port) = conductor_ports(state)?;
+    let data_key = vault_data_key(state)?;
 
     let payload = SealedPayload {
         v: SEALED_PAYLOAD_V1,
         entry_type,
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_millis() as u64,
+        created_at,
         body: rmp_serde::to_vec_named(&body).map_err(|e| e.to_string())?,
-        refs: refs.unwrap_or_default(),
+        refs,
     };
     let (cipher, nonce) = seal(&payload, &data_key).map_err(|e| e.to_string())?;
 
@@ -268,11 +281,17 @@ pub async fn sealed_store(
 /// decrypt (foreign/corrupt) are skipped with a warning, never fatal.
 #[tauri::command]
 pub async fn sealed_list(state: State<'_, Arc<AppState>>) -> Result<Vec<SealedListItem>, String> {
+    sealed_list_inner(&state).await
+}
+
+pub(crate) async fn sealed_list_inner(
+    state: &Arc<AppState>,
+) -> Result<Vec<SealedListItem>, String> {
     use holochain_client::ZomeCallTarget;
     use holochain_types::prelude::{Entry, ExternIO, Record};
 
-    let (admin_port, app_port) = conductor_ports(&state)?;
-    let data_key = vault_data_key(&state)?;
+    let (admin_port, app_port) = conductor_ports(state)?;
+    let data_key = vault_data_key(state)?;
 
     let (app_ws, role_name) = connect_sealed_app_ws(admin_port, app_port).await?;
     let result = app_ws

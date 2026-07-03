@@ -236,6 +236,17 @@ async fn vault_grant(
     })
 }
 
+/// Vault-grant with explicit key material — used by the account-migration
+/// flow (and its staging test) where the seed is derived from the phrase
+/// in hand rather than read from an unlocked vault.
+pub(crate) async fn vault_grant_with_seed(
+    api_url: &str,
+    device_seed: &[u8; 32],
+    agent_b64: &str,
+) -> Result<VaultGrantResult, String> {
+    vault_grant(api_url, device_seed, agent_b64).await
+}
+
 /// Authenticate the unlocked vault's device identity with the API.
 /// Usable any time post-unlock (e.g. to refresh a session for API calls).
 #[tauri::command]

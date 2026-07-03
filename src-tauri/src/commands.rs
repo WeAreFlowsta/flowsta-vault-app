@@ -335,6 +335,35 @@ pub fn setup_vault(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SetupResult, String> {
+    setup_vault_inner(
+        mnemonic,
+        password,
+        web_agent_pub_key,
+        web_email,
+        web_username,
+        display_name,
+        profile_picture,
+        hosting_model,
+        app_handle,
+        &state,
+    )
+}
+
+/// Vault creation shared by the wizard command and the account-migration
+/// flow (which creates the vault mid-migration, before importing data).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn setup_vault_inner(
+    mnemonic: String,
+    password: String,
+    web_agent_pub_key: Option<String>,
+    web_email: Option<String>,
+    web_username: Option<String>,
+    display_name: Option<String>,
+    profile_picture: Option<String>,
+    hosting_model: Option<String>,
+    app_handle: tauri::AppHandle,
+    state: &Arc<AppState>,
+) -> Result<SetupResult, String> {
     // Validate mnemonic
     if !validate_mnemonic(&mnemonic) {
         return Err("Invalid recovery phrase".into());
@@ -401,6 +430,9 @@ pub fn setup_vault(
         hosting_model,
         data_key: Some(data_key.to_vec()),
         private_network_seed: Some(private_network_seed),
+        totp_secret: None,
+        totp_backup_codes: None,
+        totp_enabled: None,
     };
 
     // Encrypt and save (with unencrypted display identifier for unlock screen)
@@ -429,7 +461,7 @@ pub fn setup_vault(
     log::info!("Vault created and unlocked. Agent: {}", &agent_pub_key);
 
     // Load MAU state (fresh store for new vault)
-    crate::mau::load_mau_state(&state);
+    crate::mau::load_mau_state(state);
 
     // Cache the lair passphrase in a memory-locked, zero-on-drop buffer so
     // the runtime watchdog can restart the conductor without re-prompting.
@@ -445,7 +477,7 @@ pub fn setup_vault(
         conductor_data_dir,
         conductor_passphrase,
         app_handle,
-        state.inner().clone(),
+        state.clone(),
     );
 
     Ok(SetupResult {
@@ -2615,7 +2647,7 @@ pub fn write_json_file(
 }
 
 /// Standard base64 decoding (with + / and padding).
-fn base64_standard_decode(input: &str) -> Result<Vec<u8>, ()> {
+pub(crate) fn base64_standard_decode(input: &str) -> Result<Vec<u8>, ()> {
     fn val(c: u8) -> Result<u32, ()> {
         match c {
             b'A'..=b'Z' => Ok((c - b'A') as u32),

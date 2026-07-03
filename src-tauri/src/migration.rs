@@ -1,0 +1,1218 @@
+//! Custodial-account migration ("Upgrade your account").
+//!
+//! Moves a flowsta.com web account into this device's Vault:
+//! the account's private-cell data is exported losslessly by the API
+//! (encrypted fields returned AS STORED), decrypted locally with the web
+//! password the user just signed in with, re-encrypted under the
+//! phrase-derived data key, and written into the encrypted private cell on
+//! this device. After a local encrypted backup exists, the device key
+//! signs the flip and the API makes it the account's auth authority
+//! (password login dies, Vault-grant lives, the original DID is preserved
+//! via the agent link graph).
+//!
+//! Order is load-bearing:
+//!   sign-in → phrase → export → verify → link device → create vault →
+//!   import → TOTP vault-local → backup → signed flip
+//! The device link MUST be committed while the custodial cell is alive
+//! (the identity zome verifies the pair signature through it), and the
+//! flip comes last so any earlier failure leaves the account fully
+//! custodial and the flow safely retryable.
+//!
+//! Record mapping into the encrypted private cell (v2 Sealed records):
+//! - UserProfile        → "user_profile" with the email DECRYPTED into the
+//!                        body (the sealed cipher is the encryption now —
+//!                        keeping the password-locked blob would break
+//!                        phrase-only recovery once the web password dies)
+//! - EmailPermission    → "email_permission" (as stored, plaintext fields)
+//! - LoginActivity      → "login_activity"
+//! - DashboardActivity  → "dashboard_activity"
+//! - OAuthActivity      → "oauth_activity"
+//! - PrivacySettings    → "privacy_settings"
+//! - AppAnalyticsId     → "app_analytics_id" (app_id now lives inside the
+//!                        cipher — the v1.11 link-tag leak is gone by
+//!                        construction)
+//! - ProfilePicture     → "profile_picture"
+//! - TotpConfig         → NOT sealed: decrypted and kept vault-local
+//!                        (root secrets are never gossiped)
+//! - RecoveryPhrase     → NOT imported (the phrase IS the seed now; used
+//!                        only to verify the entered phrase matches)
+//! - Session            → dropped by design
+
+use crate::backup;
+use crate::commands::{base64_standard_decode, AppState};
+use crate::key_derivation::{
+    base64_standard_encode, build_sorted_agent_pair_payload, construct_agent_pub_key_bytes,
+    construct_agent_pub_key_string, derive_device_keypair, derive_recovery_lookup_hash,
+    derive_seed, msgpack_encode_bytes, sign_with_device_seed, validate_mnemonic,
+    DEVICE_1_CONSTANT,
+};
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tauri::{Emitter, State};
+
+// ── Decryption of API-exported fields ───────────────────────────────────────
+//
+// Must byte-match api/src/services/encryption.js encryptWithPassword:
+// key = scrypt(password, salt, N=16384, r=8, p=1, len=32)
+// AES-256-GCM, 12-byte nonce; entry fields carry ciphertext (tag split
+// off), nonce, salt, tag — each standard base64.
+
+fn b64(field: &str, value: &str) -> Result<Vec<u8>, String> {
+    base64_standard_decode(value).map_err(|_| format!("Invalid base64 in exported {}", field))
+}
+
+/// Decrypt one exported AES-GCM field group with the web password.
+pub fn decrypt_api_field(
+    cipher_b64: &str,
+    nonce_b64: &str,
+    salt_b64: &str,
+    tag_b64: &str,
+    password: &str,
+) -> Result<String, String> {
+    let salt = b64("salt", salt_b64)?;
+    let nonce = b64("nonce", nonce_b64)?;
+    let mut cipher = b64("ciphertext", cipher_b64)?;
+    let tag = b64("tag", tag_b64)?;
+    if nonce.len() != 12 {
+        return Err(format!("Exported nonce is {} bytes, expected 12", nonce.len()));
+    }
+
+    let params = scrypt::Params::new(14, 8, 1, 32)
+        .map_err(|e| format!("scrypt params: {}", e))?;
+    let mut key = [0u8; 32];
+    scrypt::scrypt(password.as_bytes(), &salt, &params, &mut key)
+        .map_err(|e| format!("scrypt derivation failed: {}", e))?;
+
+    // The aes-gcm crate expects ciphertext||tag.
+    cipher.extend_from_slice(&tag);
+    let aead = Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
+    let plain = aead
+        .decrypt(Nonce::from_slice(&nonce), cipher.as_ref())
+        .map_err(|_| "decrypt_failed: wrong password or corrupted field".to_string())?;
+    String::from_utf8(plain).map_err(|_| "Decrypted field is not valid UTF-8".to_string())
+}
+
+// ── Export bundle (mirrors the private zome's ExportedData) ─────────────────
+
+#[derive(Deserialize)]
+struct WireEncrypted4 {
+    nonce: String,
+    salt: String,
+    tag: String,
+}
+
+#[derive(Deserialize)]
+struct WireProfile {
+    encrypted_email: String,
+    #[serde(flatten)]
+    enc: WireEncrypted4,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    created_at: i64,
+    #[serde(default)]
+    updated_at: i64,
+}
+
+#[derive(Deserialize)]
+struct WireRecovery {
+    encrypted_mnemonic: String,
+    #[serde(flatten)]
+    enc: WireEncrypted4,
+}
+
+#[derive(Deserialize)]
+struct WireTotp {
+    encrypted_secret: String,
+    nonce: String,
+    salt: String,
+    tag: String,
+    encrypted_backup_codes: String,
+    backup_nonce: String,
+    backup_salt: String,
+    backup_tag: String,
+    #[serde(default)]
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct WireBundle {
+    user_profile: Option<WireProfile>,
+    recovery_phrase: Option<WireRecovery>,
+    #[serde(default)]
+    sessions: Vec<serde_json::Value>,
+    #[serde(default)]
+    email_permissions: Vec<serde_json::Value>,
+    #[serde(default)]
+    login_activities: Vec<serde_json::Value>,
+    #[serde(default)]
+    dashboard_activities: Vec<serde_json::Value>,
+    #[serde(default)]
+    oauth_activities: Vec<serde_json::Value>,
+    privacy_settings: Option<serde_json::Value>,
+    #[serde(default)]
+    analytics_ids: Vec<serde_json::Value>,
+    totp_config: Option<WireTotp>,
+    profile_picture: Option<serde_json::Value>,
+}
+
+// ── Mapping output ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MappedRecord {
+    pub entry_type: String,
+    /// Original creation time normalized to milliseconds (goes inside the
+    /// sealed cipher; the DHT action timestamp will be "now" — that's the
+    /// only timing a peer can see).
+    pub created_at_ms: u64,
+    pub body: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MigratedTotp {
+    pub secret: String,
+    pub backup_codes: Vec<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug)]
+pub struct MappedBundle {
+    pub records: Vec<MappedRecord>,
+    pub email: String,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    pub totp: Option<MigratedTotp>,
+    pub sessions_skipped: usize,
+}
+
+/// Normalize a v1.11 timestamp to milliseconds. The API writes cell
+/// timestamps in microseconds (`Date.now() * 1000`), but a few older
+/// records carry plain milliseconds — disambiguate by magnitude.
+fn to_millis(ts: i64) -> u64 {
+    if ts <= 0 {
+        return 0;
+    }
+    if ts >= 100_000_000_000_000 {
+        (ts / 1000) as u64 // microseconds
+    } else {
+        ts as u64
+    }
+}
+
+fn record_created_ms(v: &serde_json::Value, fallback_ms: u64) -> u64 {
+    v.get("created_at")
+        .and_then(|x| x.as_i64())
+        .map(to_millis)
+        .filter(|&ms| ms > 0)
+        .unwrap_or(fallback_ms)
+}
+
+pub fn normalize_mnemonic(phrase: &str) -> String {
+    phrase
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Decrypt and map an exported bundle into sealed-record inputs.
+///
+/// Verifies the entered phrase against the account's stored (encrypted)
+/// recovery phrase — the strong ownership check: by export time every
+/// migrating account has a phrase blob, and it must decrypt to exactly the
+/// phrase in hand, whether it was the user's existing phrase or one the
+/// server just minted for the ceremony.
+pub fn map_bundle(
+    bundle: &serde_json::Value,
+    password: &str,
+    expected_mnemonic: &str,
+) -> Result<MappedBundle, String> {
+    let wire: WireBundle = serde_json::from_value(bundle.clone())
+        .map_err(|e| format!("Unexpected export bundle shape: {}", e))?;
+
+    let recovery = wire
+        .recovery_phrase
+        .as_ref()
+        .ok_or("export_missing_phrase: the account has no stored recovery phrase record")?;
+    let stored_phrase = decrypt_api_field(
+        &recovery.encrypted_mnemonic,
+        &recovery.enc.nonce,
+        &recovery.enc.salt,
+        &recovery.enc.tag,
+        password,
+    )
+    .map_err(|e| format!("Could not decrypt the account's recovery phrase record ({})", e))?;
+    if normalize_mnemonic(&stored_phrase) != normalize_mnemonic(expected_mnemonic) {
+        return Err(
+            "phrase_mismatch: this phrase is not the one on file for this account".to_string(),
+        );
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let mut records = Vec::new();
+    let mut email = String::new();
+    let mut username = None;
+    let mut display_name = None;
+
+    if let Some(profile) = &wire.user_profile {
+        email = decrypt_api_field(
+            &profile.encrypted_email,
+            &profile.enc.nonce,
+            &profile.enc.salt,
+            &profile.enc.tag,
+            password,
+        )
+        .map_err(|e| format!("Could not decrypt the account email ({})", e))?;
+        username = profile.username.clone();
+        display_name = if profile.display_name.is_empty() {
+            None
+        } else {
+            Some(profile.display_name.clone())
+        };
+        records.push(MappedRecord {
+            entry_type: "user_profile".into(),
+            created_at_ms: if profile.created_at > 0 {
+                to_millis(profile.created_at)
+            } else {
+                now_ms
+            },
+            body: serde_json::json!({
+                "email": email,
+                "username": profile.username,
+                "display_name": profile.display_name,
+                "created_at": profile.created_at,
+                "updated_at": profile.updated_at,
+            }),
+        });
+    }
+
+    let passthrough: [(&str, &Vec<serde_json::Value>); 5] = [
+        ("email_permission", &wire.email_permissions),
+        ("login_activity", &wire.login_activities),
+        ("dashboard_activity", &wire.dashboard_activities),
+        ("oauth_activity", &wire.oauth_activities),
+        ("app_analytics_id", &wire.analytics_ids),
+    ];
+    for (entry_type, items) in passthrough {
+        for item in items {
+            records.push(MappedRecord {
+                entry_type: entry_type.into(),
+                created_at_ms: record_created_ms(item, now_ms),
+                body: item.clone(),
+            });
+        }
+    }
+
+    if let Some(settings) = &wire.privacy_settings {
+        records.push(MappedRecord {
+            entry_type: "privacy_settings".into(),
+            created_at_ms: record_created_ms(settings, now_ms),
+            body: settings.clone(),
+        });
+    }
+    if let Some(picture) = &wire.profile_picture {
+        records.push(MappedRecord {
+            entry_type: "profile_picture".into(),
+            created_at_ms: picture
+                .get("updated_at")
+                .and_then(|x| x.as_i64())
+                .map(to_millis)
+                .filter(|&ms| ms > 0)
+                .unwrap_or(now_ms),
+            body: picture.clone(),
+        });
+    }
+
+    let totp = match &wire.totp_config {
+        Some(t) => {
+            let secret = decrypt_api_field(
+                &t.encrypted_secret,
+                &t.nonce,
+                &t.salt,
+                &t.tag,
+                password,
+            )
+            .map_err(|e| format!("Could not decrypt the 2FA secret ({})", e))?;
+            let codes = decrypt_api_field(
+                &t.encrypted_backup_codes,
+                &t.backup_nonce,
+                &t.backup_salt,
+                &t.backup_tag,
+                password,
+            )
+            .map_err(|e| format!("Could not decrypt the 2FA backup codes ({})", e))?;
+            Some(MigratedTotp {
+                secret,
+                backup_codes: codes
+                    .split(',')
+                    .map(|c| c.trim().to_string())
+                    .filter(|c| !c.is_empty())
+                    .collect(),
+                enabled: t.enabled,
+            })
+        }
+        None => None,
+    };
+
+    Ok(MappedBundle {
+        records,
+        email,
+        username,
+        display_name,
+        totp,
+        sessions_skipped: wire.sessions.len(),
+    })
+}
+
+// ── API calls ───────────────────────────────────────────────────────────────
+
+fn api_base(api_url: &str) -> String {
+    api_url.trim_end_matches('/').to_string()
+}
+
+async fn parse_json(resp: reqwest::Response) -> Result<(u16, serde_json::Value), String> {
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Invalid API response: {}", e))?;
+    Ok((status, body))
+}
+
+fn api_err(context: &str, status: u16, body: &serde_json::Value) -> String {
+    format!(
+        "{}: {} ({}) [{}]",
+        context,
+        body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown_error"),
+        body.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+        status
+    )
+}
+
+pub struct MeInfo {
+    pub user_id: String,
+    pub did: String,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    pub profile_picture: Option<String>,
+}
+
+pub(crate) async fn fetch_me(api_url: &str, jwt: &str) -> Result<MeInfo, String> {
+    let resp = reqwest::Client::new()
+        .get(format!("{}/auth/me", api_base(api_url)))
+        .bearer_auth(jwt)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach API: {}", e))?;
+    let (status, body) = parse_json(resp).await?;
+    if status >= 300 {
+        return Err(api_err("me_failed", status, &body));
+    }
+    let user = body.get("user").unwrap_or(&body);
+    let get = |k: &str| user.get(k).and_then(|v| v.as_str()).map(String::from);
+    Ok(MeInfo {
+        user_id: get("id").ok_or("Account lookup response missing user id")?,
+        did: get("did").unwrap_or_default(),
+        username: get("username"),
+        display_name: get("displayName").or_else(|| get("display_name")),
+        profile_picture: get("profilePicture").or_else(|| get("profile_picture")),
+    })
+}
+
+pub struct ExportResult {
+    pub web_agent_b64: String,
+    pub dna_version: String,
+    pub data: serde_json::Value,
+}
+
+pub(crate) async fn fetch_export(api_url: &str, jwt: &str) -> Result<ExportResult, String> {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/auth/migration/export", api_base(api_url)))
+        .bearer_auth(jwt)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach API: {}", e))?;
+    let (status, body) = parse_json(resp).await?;
+    if status >= 300 {
+        return Err(api_err("export_failed", status, &body));
+    }
+    Ok(ExportResult {
+        web_agent_b64: body
+            .get("agent_pub_key")
+            .and_then(|v| v.as_str())
+            .ok_or("Export response missing agent_pub_key")?
+            .to_string(),
+        dna_version: body
+            .get("dna_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        data: body.get("data").cloned().ok_or("Export response missing data")?,
+    })
+}
+
+/// Mint (or re-mint, for the lost-phrase escape hatch) the account's
+/// recovery phrase server-side and bind its lookup hash. The migrating
+/// user then completes the write-down ceremony with THIS phrase, and it
+/// becomes the seed of their device identity.
+#[tauri::command]
+pub async fn migration_new_phrase(
+    api_url: String,
+    jwt: String,
+    password: String,
+) -> Result<String, String> {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/auth/setup-recovery-phrase", api_base(&api_url)))
+        .bearer_auth(&jwt)
+        .json(&serde_json::json!({ "password": password }))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach API: {}", e))?;
+    let (status, body) = parse_json(resp).await?;
+    if status >= 300 {
+        return Err(api_err("setup_phrase_failed", status, &body));
+    }
+    body.get("recoveryPhrase")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or("Phrase setup response missing recoveryPhrase".to_string())
+}
+
+/// Confirm the phrase's lookup hash resolves to THIS account's web agent
+/// key before linking — refuses a phrase that belongs to a different
+/// account (the link endpoint identifies the target account by the hash).
+pub(crate) async fn verify_lookup_binding(
+    api_url: &str,
+    lookup_hash: &str,
+    web_39: &[u8; 39],
+) -> Result<(), String> {
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{}/auth/agent-key-by-lookup-hash?hash={}",
+            api_base(api_url),
+            lookup_hash
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach API: {}", e))?;
+    let (status, body) = parse_json(resp).await?;
+    if status >= 300 {
+        return Err(api_err("lookup_hash_not_found", status, &body));
+    }
+    let key_b64 = body
+        .get("agent_pub_key")
+        .and_then(|v| v.as_str())
+        .ok_or("Lookup response missing agent_pub_key")?;
+    // The API returns either the raw 32-byte key or the full 39-byte key.
+    let bytes = base64_standard_decode(key_b64).map_err(|_| "Bad key encoding in lookup")?;
+    let resolved_39 = match bytes.len() {
+        32 => {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&bytes);
+            construct_agent_pub_key_bytes(&k)
+        }
+        39 => {
+            let mut k = [0u8; 39];
+            k.copy_from_slice(&bytes);
+            k
+        }
+        n => return Err(format!("Lookup key is {} bytes, expected 32 or 39", n)),
+    };
+    if &resolved_39 != web_39 {
+        return Err(
+            "phrase_mismatch: this phrase resolves to a different account".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Commit the device↔web agent link through the identity zome (pair
+/// signature over MessagePack of the sorted 78-byte key pair). Must run
+/// while the custodial cell is still enabled.
+pub(crate) async fn link_device_key(
+    api_url: &str,
+    device_seed: &[u8; 32],
+    device_39: &[u8; 39],
+    web_39: &[u8; 39],
+    lookup_hash: &str,
+) -> Result<(), String> {
+    let pair = build_sorted_agent_pair_payload(device_39, web_39);
+    let signature = sign_with_device_seed(device_seed, &msgpack_encode_bytes(&pair));
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/auth/link-desktop-agent", api_base(api_url)))
+        .json(&serde_json::json!({
+            "desktop_agent_key": base64_standard_encode(device_39),
+            "recovery_lookup_hash": lookup_hash,
+            "signature": base64_standard_encode(&signature),
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach API: {}", e))?;
+    let (status, body) = parse_json(resp).await?;
+    if status >= 300 {
+        // A previous attempt may already have committed this link — that is
+        // success for our purposes (the flow is retryable).
+        let text = body.to_string().to_lowercase();
+        if text.contains("already linked") || text.contains("already_linked") {
+            return Ok(());
+        }
+        return Err(api_err("link_failed", status, &body));
+    }
+    Ok(())
+}
+
+pub(crate) async fn complete_flip(
+    api_url: &str,
+    jwt: &str,
+    user_id: &str,
+    device_seed: &[u8; 32],
+    device_b64: &str,
+) -> Result<Vec<String>, String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    let canonical = format!(
+        "flowsta-migration-complete:v1:{}:{}:{}",
+        user_id, device_b64, ts
+    );
+    let signature = hex::encode(sign_with_device_seed(device_seed, canonical.as_bytes()));
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/auth/migration/complete", api_base(api_url)))
+        .bearer_auth(jwt)
+        .json(&serde_json::json!({
+            "device_agent_pub_key": device_b64,
+            "timestamp": ts,
+            "signature": signature,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach API: {}", e))?;
+    let (status, body) = parse_json(resp).await?;
+    if status >= 300 {
+        return Err(api_err("flip_failed", status, &body));
+    }
+    Ok(body
+        .get("cells_disabled")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+// ── The orchestrator ────────────────────────────────────────────────────────
+
+#[derive(Serialize, Clone)]
+struct MigrationProgress {
+    stage: &'static str,
+    message: String,
+}
+
+fn emit_progress(app: &tauri::AppHandle, stage: &'static str, message: &str) {
+    let _ = app.emit(
+        "migration-progress",
+        MigrationProgress {
+            stage,
+            message: message.to_string(),
+        },
+    );
+}
+
+#[derive(Serialize)]
+pub struct MigrationSummary {
+    pub records_migrated: usize,
+    pub sessions_skipped: usize,
+    pub totp_moved: bool,
+    pub cells_disabled: Vec<String>,
+    pub backup_label: String,
+    pub email: String,
+    pub did: String,
+    pub agent_pub_key: String,
+}
+
+/// Run the full account upgrade. The wizard calls this after the user has
+/// signed in with the web password, holds the verified phrase, and has
+/// explicitly consented. Everything before the final flip call is
+/// non-destructive and retryable.
+#[tauri::command]
+pub async fn migrate_custodial_account(
+    api_url: String,
+    jwt: String,
+    password: String,
+    mnemonic: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<MigrationSummary, String> {
+    let state = state.inner().clone();
+    let mnemonic = normalize_mnemonic(&mnemonic);
+    if !validate_mnemonic(&mnemonic) {
+        return Err("Invalid recovery phrase".into());
+    }
+
+    // Device-side derivations (never leave this function).
+    let device_seed = derive_seed(&mnemonic, DEVICE_1_CONSTANT).map_err(|e| e.to_string())?;
+    let signing_key = derive_device_keypair(&mnemonic).map_err(|e| e.to_string())?;
+    let device_pub = signing_key.verifying_key().to_bytes();
+    let device_39 = construct_agent_pub_key_bytes(&device_pub);
+    let device_b64 = base64_standard_encode(&device_39);
+    let lookup_hash = derive_recovery_lookup_hash(&mnemonic)
+        .map_err(|e| e.to_string())?
+        .to_lowercase();
+
+    emit_progress(&app_handle, "account", "Checking your account…");
+    let me = fetch_me(&api_url, &jwt).await?;
+
+    emit_progress(&app_handle, "export", "Fetching your account data…");
+    let export = fetch_export(&api_url, &jwt).await?;
+    let web_bytes = base64_standard_decode(&export.web_agent_b64)
+        .map_err(|_| "Bad web agent key in export")?;
+    if web_bytes.len() != 39 {
+        return Err(format!(
+            "Web agent key is {} bytes, expected 39",
+            web_bytes.len()
+        ));
+    }
+    let mut web_39 = [0u8; 39];
+    web_39.copy_from_slice(&web_bytes);
+
+    emit_progress(&app_handle, "decrypt", "Decrypting your data on this device…");
+    let mapped = map_bundle(&export.data, &password, &mnemonic)?;
+
+    // The phrase must belong to THIS account before we link with it.
+    verify_lookup_binding(&api_url, &lookup_hash, &web_39).await?;
+
+    emit_progress(&app_handle, "link", "Linking this device to your identity…");
+    link_device_key(&api_url, &device_seed, &device_39, &web_39, &lookup_hash).await?;
+
+    // Create the vault (or resume into an existing one from a previous
+    // attempt — it must be unlocked and built from the SAME phrase).
+    let vault_is_set_up = {
+        let path = state.vault_path.lock().unwrap();
+        crate::vault::vault_exists(&path)
+    };
+    if vault_is_set_up {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config
+            .as_ref()
+            .ok_or("A vault already exists on this device — unlock it first, then retry the upgrade")?;
+        let expected = construct_agent_pub_key_string(&device_pub);
+        if cfg.agent_pub_key != expected {
+            return Err(
+                "A vault for a different identity already exists on this device".to_string(),
+            );
+        }
+        log::info!("[migration] resuming with the existing vault");
+    } else {
+        emit_progress(&app_handle, "vault", "Creating your vault…");
+        let web_agent_str = {
+            // Preserve the web identity in uhCAk form for the dashboard.
+            let mut key_32 = [0u8; 32];
+            key_32.copy_from_slice(&web_39[3..35]);
+            construct_agent_pub_key_string(&key_32)
+        };
+        crate::commands::setup_vault_inner(
+            mnemonic.clone(),
+            password.clone(),
+            Some(web_agent_str),
+            Some(mapped.email.clone()),
+            mapped.username.clone().or(me.username.clone()),
+            mapped.display_name.clone().or(me.display_name.clone()),
+            me.profile_picture.clone(),
+            Some("device-hosted".to_string()),
+            app_handle.clone(),
+            &state,
+        )?;
+    }
+
+    // Wait for the conductor + encrypted private cell. First boot on a
+    // fresh vault initializes lair and installs DNAs — allow minutes, and
+    // probe by actually listing (the conductor can report ready before the
+    // cell accepts calls).
+    emit_progress(
+        &app_handle,
+        "cell",
+        "Starting your private cell (first start can take a few minutes)…",
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let existing = loop {
+        match crate::sealed::sealed_list_inner(&state).await {
+            Ok(list) => break list,
+            Err(e) => {
+                if std::time::Instant::now() > deadline {
+                    return Err(format!(
+                        "Your private cell did not come up in time ({}). Your account is unchanged — retry the upgrade.",
+                        e
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
+    };
+
+    emit_progress(&app_handle, "import", "Moving your data into your vault…");
+    let already: std::collections::HashSet<(String, u64)> = existing
+        .iter()
+        .map(|r| (r.entry_type.clone(), r.created_at))
+        .collect();
+    let mut stored = 0usize;
+    for record in &mapped.records {
+        if already.contains(&(record.entry_type.clone(), record.created_at_ms)) {
+            continue; // resume: already imported by a previous attempt
+        }
+        crate::sealed::sealed_store_inner(
+            &state,
+            record.entry_type.clone(),
+            record.body.clone(),
+            Vec::new(),
+            record.created_at_ms,
+        )
+        .await
+        .map_err(|e| format!("Import failed on {}: {}", record.entry_type, e))?;
+        stored += 1;
+    }
+
+    // Verify every mapped record is now readable on-device before anything
+    // irreversible happens.
+    let on_device = crate::sealed::sealed_list_inner(&state).await?;
+    let have: std::collections::HashSet<(String, u64)> = on_device
+        .iter()
+        .map(|r| (r.entry_type.clone(), r.created_at))
+        .collect();
+    for record in &mapped.records {
+        if !have.contains(&(record.entry_type.clone(), record.created_at_ms)) {
+            return Err(format!(
+                "Verification failed: {} record not readable on-device — account left unchanged",
+                record.entry_type
+            ));
+        }
+    }
+    log::info!(
+        "[migration] {} records on-device ({} newly stored)",
+        mapped.records.len(),
+        stored
+    );
+
+    // 2FA material stays vault-local (never sealed, never gossiped).
+    if let Some(totp) = &mapped.totp {
+        let vault_path = state.vault_path.lock().unwrap().clone();
+        let mut config = state.vault_config.lock().unwrap();
+        if let Some(cfg) = config.as_mut() {
+            cfg.totp_secret = Some(totp.secret.clone());
+            cfg.totp_backup_codes = Some(totp.backup_codes.clone());
+            cfg.totp_enabled = Some(totp.enabled);
+            cfg.web_email = Some(mapped.email.clone());
+            let mut encrypted = crate::vault::encrypt_vault(cfg, &password)
+                .map_err(|e| format!("Vault save failed: {}", e))?;
+            encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
+            crate::vault::save_vault(&vault_path, &encrypted)
+                .map_err(|e| format!("Vault save failed: {}", e))?;
+        }
+    }
+
+    // Backup gate: a local encrypted export of everything that just moved
+    // must exist before the account flips.
+    emit_progress(&app_handle, "backup", "Writing your local encrypted backup…");
+    let backup_label = format!(
+        "account-migration-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    let backup_payload = serde_json::json!({
+        "version": 1,
+        "kind": "flowsta-account-migration",
+        "exported_at": backup::iso_now(),
+        "user_id": me.user_id,
+        "did": me.did,
+        "email": mapped.email,
+        "dna_version": export.dna_version,
+        "records": mapped.records,
+        "totp": mapped.totp,
+        "sessions_skipped": mapped.sessions_skipped,
+    });
+    backup::save_backup(
+        &state,
+        "flowsta",
+        "Flowsta Account",
+        Some(&backup_label),
+        &serde_json::to_vec(&backup_payload).map_err(|e| e.to_string())?,
+        Some("application/json"),
+    )?;
+
+    // The signed flip — after this, password login is dead and this device
+    // key is the account's auth authority. The original DID never changes.
+    emit_progress(&app_handle, "flip", "Switching your account to this device…");
+    let cells_disabled =
+        complete_flip(&api_url, &jwt, &me.user_id, &device_seed, &device_b64).await?;
+
+    emit_progress(&app_handle, "done", "Your account now lives on this device.");
+    log::info!(
+        "[migration] account {} flipped to device-hosted ({} cells disabled)",
+        me.user_id,
+        cells_disabled.len()
+    );
+
+    Ok(MigrationSummary {
+        records_migrated: mapped.records.len(),
+        sessions_skipped: mapped.sessions_skipped,
+        totp_moved: mapped.totp.is_some(),
+        cells_disabled,
+        backup_label,
+        email: mapped.email,
+        did: me.did,
+        agent_pub_key: construct_agent_pub_key_string(&device_pub),
+    })
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_PASSWORD: &str = "Migration-Test-Pass-1!";
+    const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+
+    // Golden fixtures produced by api/src/services/encryption.js
+    // encryptWithPassword on 2026-07-04 — the cross-language contract.
+    const EMAIL_FIXTURE: (&str, &str, &str, &str, &str) = (
+        "QJpjqn/5LtgBjCfuaE1iK1kbkQ==",
+        "XBkz84I+J8VgYpB8",
+        "dWVh3E9hvzgcvzNogzDJnmqrCljbf7GE5s/fKTVZTUI=",
+        "VDkZKXNox/6DRQ/LXHOfVg==",
+        "migtest@example.com",
+    );
+    const PHRASE_FIXTURE: (&str, &str, &str, &str) = (
+        "t5ObN8+82hmSFycKFVB49/fF7Mx0izSkvIloiyXup6/M/Q4gJ7xY1G8fMl6/HxVI2ooW6oLlIggUq571Of3sUm8IdIJJkogJTCKTdgam239ZZYBwhsxC3ZIisHNRzOge3UvuAVwM95VEJLdwKhqvAqXEAtnkjkTge9PJSF8bSJFg2D7c9USOoNa/FVBkutweRFYITK4fVIarS/LQr/4GptHBpLbJ1Tqdv2CcfwIGukA+ETDUB1kRRUvwvw==",
+        "+RSvTkgQ9z+Rl8E8",
+        "37iA+RlISmDLqvc2gvA/FuzDWNXYxj7WJB2+sO/RMkA=",
+        "1PoConrNDz5jE1OUNrgN0A==",
+    );
+    const TOTP_FIXTURE: (&str, &str, &str, &str, &str) = (
+        "ywYk/pkjFhp9K/Ksbjhwag==",
+        "qZPWT/2ZMjtvV4oI",
+        "RqpcK55JnBAXhaIV7LDfFb4T27t3PUQkPBAvFyLEEwo=",
+        "7EvTWnLg6VBjZ3/lS1OzEg==",
+        "JBSWY3DPEHPK3PXP",
+    );
+    const BACKUP_CODES_FIXTURE: (&str, &str, &str, &str) = (
+        "cptLhLFyIewH+dL23Qz548kNig5g+eVOG20UM+reREBm",
+        "P2nYOYNPlEE6VA3U",
+        "klQCd+pBNbKi/12/MypYvDL/mF7r7WKlA4+Z4d5bQrQ=",
+        "3Ey0TEQVsY+qOrthVRcuxw==",
+    );
+
+    #[test]
+    fn test_decrypt_api_field_golden() {
+        let (cipher, nonce, salt, tag, plain) = EMAIL_FIXTURE;
+        let out = decrypt_api_field(cipher, nonce, salt, tag, TEST_PASSWORD).unwrap();
+        assert_eq!(out, plain);
+    }
+
+    #[test]
+    fn test_decrypt_api_field_wrong_password() {
+        let (cipher, nonce, salt, tag, _) = EMAIL_FIXTURE;
+        let out = decrypt_api_field(cipher, nonce, salt, tag, "wrong-password");
+        assert!(out.unwrap_err().contains("decrypt_failed"));
+    }
+
+    fn fixture_bundle() -> serde_json::Value {
+        serde_json::json!({
+            "user_profile": {
+                "encrypted_email": EMAIL_FIXTURE.0,
+                "nonce": EMAIL_FIXTURE.1,
+                "salt": EMAIL_FIXTURE.2,
+                "tag": EMAIL_FIXTURE.3,
+                "username": "migtester",
+                "display_name": "Mig Tester",
+                "created_at": 1751500000000000_i64, // microseconds
+                "updated_at": 1751500000000000_i64,
+            },
+            "recovery_phrase": {
+                "encrypted_mnemonic": PHRASE_FIXTURE.0,
+                "nonce": PHRASE_FIXTURE.1,
+                "salt": PHRASE_FIXTURE.2,
+                "tag": PHRASE_FIXTURE.3,
+                "verified": true,
+                "created_at": 1751500000000000_i64,
+            },
+            "sessions": [{"user_agent": "x", "ip_address": "y"}],
+            "email_permissions": [
+                {"service_name": "billing", "purpose": "invoices", "granted": true,
+                 "created_at": 1751500000000000_i64, "updated_at": 1751500000000000_i64}
+            ],
+            "login_activities": [
+                {"timestamp": 1751500000000_i64, "login_method": "password",
+                 "session_id": "s1", "created_at": 1751500000000000_i64}
+            ],
+            "dashboard_activities": [],
+            "oauth_activities": [
+                {"timestamp": 1751500000000_i64, "app_id": "app-uuid-1",
+                 "app_name": "Website", "event_type": "login",
+                 "created_at": 1751500000000000_i64}
+            ],
+            "privacy_settings": {"track_ip_address": false, "track_user_agent": false,
+                "activity_log_retention_days": 90,
+                "created_at": 1751500000000000_i64, "updated_at": 1751500000000000_i64},
+            "analytics_ids": [
+                {"app_id": "app-uuid-1", "analytics_id": "anon-uuid",
+                 "created_at": 1751500000000000_i64}
+            ],
+            "totp_config": {
+                "encrypted_secret": TOTP_FIXTURE.0,
+                "nonce": TOTP_FIXTURE.1,
+                "salt": TOTP_FIXTURE.2,
+                "tag": TOTP_FIXTURE.3,
+                "encrypted_backup_codes": BACKUP_CODES_FIXTURE.0,
+                "backup_nonce": BACKUP_CODES_FIXTURE.1,
+                "backup_salt": BACKUP_CODES_FIXTURE.2,
+                "backup_tag": BACKUP_CODES_FIXTURE.3,
+                "enabled": true,
+                "created_at": 1751500000000000_i64,
+                "updated_at": 1751500000000000_i64,
+            },
+            "profile_picture": {"profile_picture": "data:image/png;base64,AAA",
+                "has_custom_picture": false, "updated_at": 1751500000000000_i64},
+            "export_timestamp": 1751600000000000_i64,
+            "dna_version": "1.11",
+        })
+    }
+
+    #[test]
+    fn test_map_bundle_full() {
+        let mapped = map_bundle(&fixture_bundle(), TEST_PASSWORD, TEST_MNEMONIC).unwrap();
+
+        assert_eq!(mapped.email, "migtest@example.com");
+        assert_eq!(mapped.username.as_deref(), Some("migtester"));
+        assert_eq!(mapped.display_name.as_deref(), Some("Mig Tester"));
+        assert_eq!(mapped.sessions_skipped, 1);
+
+        // profile + permission + login + oauth + privacy + analytics + picture
+        assert_eq!(mapped.records.len(), 7);
+        let types: Vec<&str> = mapped.records.iter().map(|r| r.entry_type.as_str()).collect();
+        assert!(types.contains(&"user_profile"));
+        assert!(types.contains(&"email_permission"));
+        assert!(types.contains(&"login_activity"));
+        assert!(types.contains(&"oauth_activity"));
+        assert!(types.contains(&"privacy_settings"));
+        assert!(types.contains(&"app_analytics_id"));
+        assert!(types.contains(&"profile_picture"));
+        // Never sealed: root secrets and dropped types.
+        assert!(!types.contains(&"recovery_phrase"));
+        assert!(!types.contains(&"totp_config"));
+        assert!(!types.contains(&"session"));
+
+        // The profile body carries the DECRYPTED email — the password-locked
+        // blob must not survive migration.
+        let profile = mapped.records.iter().find(|r| r.entry_type == "user_profile").unwrap();
+        assert_eq!(profile.body["email"], "migtest@example.com");
+        assert!(profile.body.get("encrypted_email").is_none());
+
+        // Microsecond cell timestamps normalize to milliseconds.
+        assert_eq!(profile.created_at_ms, 1751500000000);
+
+        // TOTP decrypts to vault-local material.
+        let totp = mapped.totp.unwrap();
+        assert_eq!(totp.secret, "JBSWY3DPEHPK3PXP");
+        assert_eq!(totp.backup_codes, vec!["a1b2c3d4e5f60718", "90aabbccddeeff00"]);
+        assert!(totp.enabled);
+    }
+
+    #[test]
+    fn test_map_bundle_rejects_wrong_phrase() {
+        // A valid BIP39 phrase that is NOT the one stored on the account.
+        let other = "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth title";
+        let err = map_bundle(&fixture_bundle(), TEST_PASSWORD, other).unwrap_err();
+        assert!(err.contains("phrase_mismatch"), "{}", err);
+    }
+
+    #[test]
+    fn test_map_bundle_requires_phrase_record() {
+        let mut bundle = fixture_bundle();
+        bundle["recovery_phrase"] = serde_json::Value::Null;
+        let err = map_bundle(&bundle, TEST_PASSWORD, TEST_MNEMONIC).unwrap_err();
+        assert!(err.contains("export_missing_phrase"), "{}", err);
+    }
+
+    #[test]
+    fn test_to_millis_units() {
+        assert_eq!(to_millis(1751500000000000), 1751500000000); // µs → ms
+        assert_eq!(to_millis(1751500000000), 1751500000000); // already ms
+        assert_eq!(to_millis(0), 0);
+        assert_eq!(to_millis(-5), 0);
+    }
+
+    #[test]
+    fn test_normalize_mnemonic() {
+        assert_eq!(
+            normalize_mnemonic("  Abandon   ABANDON\nart "),
+            "abandon abandon art"
+        );
+    }
+
+    // ── Staging integration: the full migration contract with real signing ──
+    //
+    // Mirrors the API-side migration e2e (register → server phrase → device
+    // key from THE SAME phrase → pair-sig link → lossless export → local
+    // decrypt → flip → password dies / vault-grant lives / DID preserved →
+    // revert) through THIS module's functions. The on-device conductor
+    // import is exercised in the GUI walkthrough instead.
+    //
+    // Run explicitly: cargo test --lib migration -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn migration_flow_against_staging() {
+        const STAGING: &str = "https://auth-api-staging.flowsta.com";
+        let client = reqwest::Client::new();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let email = format!("migvault-{}@example.com", suffix);
+        let password = format!("Migration-Vault-{}!x", suffix);
+
+        // 1. Register a synthetic custodial user (creates real API cells).
+        let resp = client
+            .post(format!("{}/auth/register", STAGING))
+            .json(&serde_json::json!({
+                "email": email,
+                "password": password,
+                "confirmPassword": password,
+                "displayName": format!("Mig Vault {}", suffix),
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 201, "register");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let jwt = body["token"].as_str().unwrap().to_string();
+
+        // 2. Server mints the phrase (the no-existing-phrase path — the same
+        //    endpoint the wizard's lost-phrase escape hatch uses).
+        let phrase = migration_new_phrase(STAGING.into(), jwt.clone(), password.clone())
+            .await
+            .expect("setup-recovery-phrase");
+        assert_eq!(phrase.split(' ').count(), 24, "24-word phrase");
+
+        // 3. Device derivations from THE SAME phrase.
+        let mnemonic = normalize_mnemonic(&phrase);
+        assert!(validate_mnemonic(&mnemonic), "server phrase is valid BIP39");
+        let device_seed = derive_seed(&mnemonic, DEVICE_1_CONSTANT).unwrap();
+        let device_pub = derive_device_keypair(&mnemonic)
+            .unwrap()
+            .verifying_key()
+            .to_bytes();
+        let device_39 = construct_agent_pub_key_bytes(&device_pub);
+        let device_b64 = base64_standard_encode(&device_39);
+        let lookup_hash = derive_recovery_lookup_hash(&mnemonic).unwrap().to_lowercase();
+
+        // 4. Account info + lossless export.
+        let me = fetch_me(STAGING, &jwt).await.expect("me");
+        assert!(!me.user_id.is_empty(), "user id");
+        let did_before = me.did.clone();
+        assert!(did_before.starts_with("did:flowsta:"), "did: {}", did_before);
+
+        let export = fetch_export(STAGING, &jwt).await.expect("export");
+        let web_bytes = base64_standard_decode(&export.web_agent_b64).unwrap();
+        assert_eq!(web_bytes.len(), 39, "web key 39 bytes");
+        let mut web_39 = [0u8; 39];
+        web_39.copy_from_slice(&web_bytes);
+
+        // 5. Local decrypt + mapping: the email round-trips through the
+        //    server-side scrypt/AES-GCM and our Rust port; the stored phrase
+        //    blob decrypts to exactly the phrase in hand.
+        let mapped = map_bundle(&export.data, &password, &mnemonic).expect("map_bundle");
+        assert_eq!(mapped.email, email, "decrypted email matches");
+        assert!(
+            mapped.records.iter().any(|r| r.entry_type == "user_profile"),
+            "profile mapped"
+        );
+        assert!(mapped.totp.is_none(), "no 2FA on this account");
+
+        // A wrong (valid) phrase must be rejected by the blob comparison.
+        let wrong = "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth title";
+        assert!(
+            map_bundle(&export.data, &password, wrong)
+                .unwrap_err()
+                .contains("phrase_mismatch"),
+            "wrong phrase rejected"
+        );
+
+        // 6. Lookup binding + zome-verified pair link.
+        verify_lookup_binding(STAGING, &lookup_hash, &web_39)
+            .await
+            .expect("lookup binding");
+        link_device_key(STAGING, &device_seed, &device_39, &web_39, &lookup_hash)
+            .await
+            .expect("link");
+
+        // 7. Pre-flip, vault-grant must refuse: the device key is only in
+        //    the link table, not yet the account's auth key.
+        let pre = crate::device_identity::vault_grant_with_seed(STAGING, &device_seed, &device_b64).await;
+        assert!(
+            pre.as_ref()
+                .err()
+                .map(|e| e.contains("unknown_agent_key") || e.contains("not_device_hosted"))
+                .unwrap_or(false),
+            "pre-flip vault-grant must be refused: {:?}",
+            pre.as_ref().err()
+        );
+
+        // 8. The signed flip.
+        let cells = complete_flip(STAGING, &jwt, &me.user_id, &device_seed, &device_b64)
+            .await
+            .expect("flip");
+        assert!(!cells.is_empty(), "cells disabled: {:?}", cells);
+
+        // 9. Password login dies; vault-grant lives; DID preserved.
+        let resp = client
+            .post(format!("{}/auth/login", STAGING))
+            .json(&serde_json::json!({ "emailOrUsername": email, "password": password }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 403, "password login 403 post-flip");
+
+        let grant = crate::device_identity::vault_grant_with_seed(STAGING, &device_seed, &device_b64)
+            .await
+            .expect("post-flip vault-grant");
+        assert_eq!(grant.did, did_before, "DID preserved");
+        assert!(!grant.token.is_empty(), "device session token");
+
+        // 10. Revert lever restores custodial password login.
+        let resp = client
+            .post(format!("{}/auth/migration/revert", STAGING))
+            .bearer_auth(&grant.token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "revert 200");
+
+        let resp = client
+            .post(format!("{}/auth/login", STAGING))
+            .json(&serde_json::json!({ "emailOrUsername": email, "password": password }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "password login restored after revert");
+    }
+}
