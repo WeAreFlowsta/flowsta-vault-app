@@ -12,6 +12,7 @@ mod mau;
 mod process_ext;
 mod quota_cache;
 mod relay_login;
+mod sealed;
 mod vault;
 
 use commands::AppState;
@@ -158,11 +159,23 @@ pub fn run() {
 
             // If we were launched from a file-explorer "Sign with Flowsta
             // Vault" action, the OS passed the file path(s) as positional
-            // CLI args. Queue them now so the frontend can pick them up
-            // after vault unlock via `take_pending_sign_paths`.
-            let startup_paths = commands::extract_sign_paths_from_args(
-                std::env::args().skip(1),
-            );
+            // CLI args. A flowsta:// deep link cold-launching a closed Vault
+            // ALSO arrives here — route those first (same rule as the
+            // single-instance callback; round-5 catch 7). The relay code is
+            // queued in AppState and drained by the frontend after mount.
+            let (startup_urls, startup_rest): (Vec<String>, Vec<String>) =
+                std::env::args().skip(1).partition(|a| relay_login::is_flowsta_url(a));
+            for u in &startup_urls {
+                match relay_login::parse_relay_code(u) {
+                    Some(code) => {
+                        log::info!("flowsta:// relay code received via launch args");
+                        let mut pending = app_state.pending_relay_code.lock().unwrap();
+                        *pending = Some(code);
+                    }
+                    None => log::warn!("Unrecognized flowsta:// URL in launch args"),
+                }
+            }
+            let startup_paths = commands::extract_sign_paths_from_args(startup_rest);
             if !startup_paths.is_empty() {
                 let count = startup_paths.len();
                 let mut queue = app_state.pending_sign_paths.lock().unwrap();

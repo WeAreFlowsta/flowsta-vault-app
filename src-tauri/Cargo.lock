@@ -1792,6 +1792,7 @@ dependencies = [
  "rmp-serde",
  "rusty-chromaprint",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sha2",
  "symphonia",
