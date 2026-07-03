@@ -91,6 +91,19 @@ pub struct VaultConfig {
     /// `None` = legacy restore-from-web vault (custodial web account).
     #[serde(default)]
     pub hosting_model: Option<String>,
+
+    /// 32-byte symmetric data-encryption key for private DNA v2 Sealed
+    /// records (encrypted at rest like device_seed). Derived from the
+    /// mnemonic (`flowsta-data-encryption-v1`) — identical on every one of
+    /// the user's devices, so gossiped records decrypt everywhere.
+    #[serde(default)]
+    pub data_key: Option<Vec<u8>>,
+
+    /// Per-user private-DHT network seed (hex) for DNA v2 installs.
+    /// Derived from the mnemonic (`flowsta-private-network-v2`) — every
+    /// device lands in the same per-user network with zero coordination.
+    #[serde(default)]
+    pub private_network_seed: Option<String>,
 }
 
 /// Encrypted vault on disk (serialized as JSON).
@@ -318,6 +331,8 @@ mod tests {
             identity_dna_version: Some("1.3".to_string()),
             conductor_version: Some("0.6.0".to_string()),
             hosting_model: None,
+            data_key: None,
+            private_network_seed: None,
         };
 
         let encrypted = encrypt_vault(&config, "test-password-123").unwrap();
@@ -359,6 +374,8 @@ mod tests {
             identity_dna_version: None,
             conductor_version: None,
             hosting_model: None,
+            data_key: None,
+            private_network_seed: None,
         };
 
         let encrypted = encrypt_vault(&config, "correct-password").unwrap();

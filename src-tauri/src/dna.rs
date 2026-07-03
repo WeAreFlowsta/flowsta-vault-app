@@ -21,8 +21,15 @@ pub const BUNDLED_PRIVATE_VERSION: &str = "1.11";
 pub const BUNDLED_IDENTITY_VERSION: &str = "1.4";
 pub const BUNDLED_SIGNING_VERSION: &str = "1.4";
 
+/// The encrypted private DNA (opaque Sealed records, per-user network).
+/// Device-hosted vaults only; installed with a per-user network seed
+/// derived from the recovery phrase — never with the manifest's
+/// placeholder seed.
+pub const BUNDLED_PRIVATE_V2_VERSION: &str = "2.0";
+
 /// hApp bundle filenames bundled with this app build (in src-tauri/resources/).
 const BUNDLED_PRIVATE_HAPP_FILE: &str = "flowsta_private_v1_11_happ.happ";
+const BUNDLED_PRIVATE_V2_HAPP_FILE: &str = "flowsta_private_v2_0_happ.happ";
 const BUNDLED_IDENTITY_HAPP_FILE: &str = "flowsta_identity_v1_4_happ.happ";
 const BUNDLED_SIGNING_HAPP_FILE: &str = "flowsta_signing_v1_4_happ.happ";
 
@@ -37,6 +44,10 @@ pub struct InstalledDnas {
     pub private_app_id: String,
     pub identity_app_id: String,
     pub signing_app_id: String,
+    /// The encrypted (v2, Sealed-record) private cell — device-hosted vaults
+    /// only, installed with the per-user network seed. None when the bundle
+    /// is absent or the vault is custodial-linked.
+    pub private_v2_app_id: Option<String>,
 }
 
 /// Construct a Holochain installed_app_id from DNA type and version.
@@ -302,11 +313,15 @@ pub async fn install_dnas(
     private_version: &str,
     identity_version: &str,
     signing_version: &str,
+    // Some(per-user seed) = also install the encrypted private DNA v2 with
+    // this network-seed override (device-hosted vaults). None = skip v2.
+    private_v2_seed: Option<&str>,
     conductor_child: &mut Child,
 ) -> Result<InstalledDnas, String> {
     let private_app_id = make_app_id("private", private_version);
     let identity_app_id = make_app_id("identity", identity_version);
     let signing_app_id = make_app_id("signing", signing_version);
+    let private_v2_app_id = make_app_id("private", BUNDLED_PRIVATE_V2_VERSION);
 
     // Determine .happ filenames — use bundled names if version matches bundled,
     // otherwise construct from version (downloaded by dna_updater).
@@ -356,6 +371,7 @@ pub async fn install_dnas(
     let mut private_installed = false;
     let mut identity_installed = false;
     let mut signing_installed = false;
+    let mut private_v2_installed = false;
 
     for app in &existing_apps {
         let key_matches = app.agent_pub_key == agent_key;
@@ -392,6 +408,17 @@ pub async fn install_dnas(
                     .map_err(|e| format!("Failed to uninstall signing app: {}", e))?;
             }
         }
+        if app.installed_app_id == private_v2_app_id {
+            if key_matches {
+                private_v2_installed = true;
+            } else {
+                log::warn!("Private v2 app installed with wrong agent key, reinstalling...");
+                admin_ws
+                    .uninstall_app(private_v2_app_id.clone(), false)
+                    .await
+                    .map_err(|e| format!("Failed to uninstall private v2 app: {}", e))?;
+            }
+        }
     }
 
     // 2.5. Normalize state: ensure every known-installed-and-keymatched app
@@ -408,7 +435,8 @@ pub async fn install_dnas(
     for app in &existing_apps {
         let is_target = app.installed_app_id == private_app_id
             || app.installed_app_id == identity_app_id
-            || app.installed_app_id == signing_app_id;
+            || app.installed_app_id == signing_app_id
+            || app.installed_app_id == private_v2_app_id;
         if !is_target {
             continue;
         }
@@ -427,12 +455,14 @@ pub async fn install_dnas(
             .map_err(|e| format!("Failed to enable existing {}: {}", app.installed_app_id, e))?;
     }
 
-    if private_installed && identity_installed && signing_installed {
+    let v2_satisfied = private_v2_seed.is_none() || private_v2_installed;
+    if private_installed && identity_installed && signing_installed && v2_satisfied {
         log::info!("All DNAs already installed with correct agent key, skipping");
         return Ok(InstalledDnas {
             private_app_id,
             identity_app_id,
             signing_app_id,
+            private_v2_app_id: if private_v2_installed { Some(private_v2_app_id) } else { None },
         });
     }
 
@@ -619,10 +649,61 @@ pub async fn install_dnas(
         signing_ok,
     );
 
+    // 6. Install the encrypted private DNA v2 (device-hosted vaults only) —
+    //    ALWAYS with the per-user network seed override; the manifest seed is
+    //    a placeholder. Non-fatal if the bundle is absent (older resource
+    //    sets): sealed-record features are unavailable until it ships.
+    let mut private_v2_ok = private_v2_installed;
+    if let Some(seed) = private_v2_seed {
+        if !private_v2_installed {
+            let happ_path = resource_dir.join(BUNDLED_PRIVATE_V2_HAPP_FILE);
+            if !happ_path.exists() {
+                log::warn!(
+                    "Private v2 hApp bundle not found at {:?} — encrypted private data unavailable",
+                    happ_path
+                );
+            } else {
+                let happ_size = std::fs::metadata(&happ_path).map(|m| m.len()).unwrap_or(0);
+                log::info!(
+                    "[dna:private-v2] installing v{} ({} bytes) with per-user network seed",
+                    BUNDLED_PRIVATE_V2_VERSION, happ_size,
+                );
+                let install_start = std::time::Instant::now();
+                let seed_owned = seed.to_string();
+                install_app_resilient(
+                    &mut admin_ws,
+                    admin_port,
+                    conductor_child,
+                    &private_v2_app_id,
+                    || InstallAppPayload {
+                        source: AppBundleSource::Path(happ_path.clone()),
+                        agent_key: Some(agent_key.clone()),
+                        installed_app_id: Some(private_v2_app_id.clone()),
+                        network_seed: Some(seed_owned.clone()),
+                        roles_settings: None,
+                        ignore_genesis_failure: false,
+                    },
+                )
+                .await
+                .map_err(|e| format!("Failed to install private v2 DNA: {}", e))?;
+
+                enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &private_v2_app_id)
+                    .await
+                    .map_err(|e| format!("Failed to enable private v2 DNA: {}", e))?;
+                log::info!(
+                    "[dna:private-v2] installed + enabled in {}ms",
+                    install_start.elapsed().as_millis()
+                );
+                private_v2_ok = true;
+            }
+        }
+    }
+
     Ok(InstalledDnas {
         private_app_id,
         identity_app_id,
         signing_app_id,
+        private_v2_app_id: if private_v2_ok { Some(private_v2_app_id) } else { None },
     })
 }
 

@@ -8,7 +8,9 @@ use lair_keystore_api::prelude::*;
 use std::path::{Path, PathBuf};
 use crate::process_ext::CommandExt;
 use std::process::{Child, Stdio};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+use crate::commands::AppState;
+use std::sync::Arc;
 
 /// Candidate admin WebSocket ports for the conductor.
 /// Tries each in order — allows staging and production vaults to coexist.
@@ -533,6 +535,20 @@ async fn start_holochain_attempt(
     }
     let install_start = std::time::Instant::now();
     log::info!("[conductor] starting DNA install sequence");
+    // Device-hosted vaults also get the encrypted private DNA v2, installed
+    // with the per-user network seed from the vault config (derived from the
+    // recovery phrase at setup). Custodial-linked vaults skip it.
+    let private_v2_seed: Option<String> = {
+        let state = app_handle.state::<Arc<AppState>>();
+        let cfg = state.vault_config.lock().unwrap();
+        cfg.as_ref().and_then(|c| {
+            if c.hosting_model.as_deref() == Some("device-hosted") {
+                c.private_network_seed.clone()
+            } else {
+                None
+            }
+        })
+    };
     let install_result = dna::install_dnas(
         admin_port,
         &resource_dir,
@@ -540,6 +556,7 @@ async fn start_holochain_attempt(
         dna::BUNDLED_PRIVATE_VERSION,
         dna::BUNDLED_IDENTITY_VERSION,
         dna::BUNDLED_SIGNING_VERSION,
+        private_v2_seed.as_deref(),
         &mut conductor_child,
     ).await;
     let install_elapsed = install_start.elapsed();
@@ -574,6 +591,9 @@ async fn start_holochain_attempt(
         installed_dnas.identity_app_id,
         installed_dnas.signing_app_id,
     );
+    if let Some(v2) = &installed_dnas.private_v2_app_id {
+        log::info!("Encrypted private DNA v2 active: {}", v2);
+    }
 
     // 9. Attach app interface for zome calls (e.g. pairing code generation).
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {

@@ -36,6 +36,7 @@
     ],
     "resources": [
       "resources/flowsta_private_v1_11_happ.happ",
+      "resources/flowsta_private_v2_0_happ.happ",
       "resources/flowsta_identity_v1_4_happ.happ",
       "resources/flowsta_signing_v1_4_happ.happ"
     ],

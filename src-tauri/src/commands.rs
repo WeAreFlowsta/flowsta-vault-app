@@ -21,7 +21,7 @@ use tauri::{Emitter, Manager, State};
 /// peer data. The Vault log "Websocket error: Timeout" is exactly this
 /// firing. 300 s covers realistic cold-start DHT warmup; the loading UX
 /// holds the user with a progress message while it runs.
-fn long_request_ws_config() -> Arc<holochain_client::WebsocketConfig> {
+pub(crate) fn long_request_ws_config() -> Arc<holochain_client::WebsocketConfig> {
     let mut cfg = holochain_client::WebsocketConfig::CLIENT_DEFAULT;
     cfg.default_request_timeout = std::time::Duration::from_secs(300);
     Arc::new(cfg)
@@ -350,6 +350,14 @@ pub fn setup_vault(
     let lookup_hash = derive_recovery_lookup_hash(&mnemonic)
         .map_err(|e| format!("Lookup hash derivation failed: {}", e))?;
 
+    // Derive the private DNA v2 material while the mnemonic is in hand
+    // (it is never stored): the symmetric Sealed-record key and the
+    // per-user network seed. Same values on every device from this phrase.
+    let data_key = crate::key_derivation::derive_data_encryption_key(&mnemonic)
+        .map_err(|e| format!("Data key derivation failed: {}", e))?;
+    let private_network_seed = crate::key_derivation::derive_private_network_seed(&mnemonic)
+        .map_err(|e| format!("Network seed derivation failed: {}", e))?;
+
     // Create vault config
     let config = VaultConfig {
         agent_pub_key: agent_pub_key.clone(),
@@ -372,6 +380,8 @@ pub fn setup_vault(
         identity_dna_version: Some(crate::dna::BUNDLED_IDENTITY_VERSION.to_string()),
         conductor_version: Some("0.6.0".to_string()),
         hosting_model,
+        data_key: Some(data_key.to_vec()),
+        private_network_seed: Some(private_network_seed),
     };
 
     // Encrypt and save (with unencrypted display identifier for unlock screen)

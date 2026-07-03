@@ -333,6 +333,8 @@ pub fn run() {
             relay_login::relay_approve,
             relay_login::relay_deny,
             relay_login::take_pending_relay_code,
+            sealed::sealed_store,
+            sealed::sealed_list,
             commands::unlock_vault,
             commands::lock_vault,
             commands::reset_vault,
