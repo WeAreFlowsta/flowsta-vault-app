@@ -1,12 +1,12 @@
-//! Device-hosted identity (R1 Track B): create a sovereign identity in Vault,
-//! register it with the Flowsta API (A3), and authenticate via Vault-grant
-//! challenge-response (A4). No web password, no API-hosted cells.
+//! Device-hosted identity: create a sovereign identity in Vault,
+//! register it with the Flowsta API, and authenticate via Vault-grant
+//! challenge-response. No web password, no API-hosted cells.
 //!
 //! Signature contracts (must match `api/src/routes/deviceIdentity.js`):
-//! - Registration (D1): raw Ed25519 over the canonical UTF-8 string
+//! - Registration: raw Ed25519 over the canonical UTF-8 string
 //!   `flowsta-register-identity:v1:{agentPubKeyB64}:{recoveryLookupHash}:{emailHashHex}:{unixSeconds}`
 //!   where emailHash = sha256(lowercase(trim(email))) hex.
-//! - Login (D4): raw Ed25519 over the server-issued challenge string
+//! - Login: raw Ed25519 over the server-issued challenge string
 //!   `flowsta-auth-challenge:v1:{nonce}:{client_id}` — signed exactly as
 //!   received; the server rejects unprefixed challenges.
 
@@ -23,7 +23,7 @@ use tauri::State;
 
 const VAULT_CLIENT_ID: &str = "flowsta-vault";
 
-/// Generate a fresh 24-word BIP39 mnemonic from OS entropy (B1).
+/// Generate a fresh 24-word BIP39 mnemonic from OS entropy.
 /// Vault was restore-only before this — creation is net-new.
 #[tauri::command]
 pub fn generate_new_mnemonic() -> Result<String, String> {
@@ -70,7 +70,7 @@ fn api_error(status: reqwest::StatusCode, body: &ApiEnvelope, context: &str) -> 
     format!("{}: {} ({}) [{}]", context, code, msg, status.as_u16())
 }
 
-/// Register a Vault-created identity as a new Flowsta account (B5 -> A3).
+/// Register a Vault-created identity as a new Flowsta account.
 /// Creates NO cells anywhere — the API stores only the pubkey + credential.
 #[tauri::command]
 pub async fn register_device_identity(
@@ -104,7 +104,7 @@ pub async fn register_device_identity(
         .map_err(|e| e.to_string())?
         .as_secs();
 
-    // D1 canonical registration message — signed raw (no MessagePack).
+    // Canonical registration message — signed raw (no MessagePack).
     let canonical = format!(
         "flowsta-register-identity:v1:{}:{}:{}:{}",
         agent_b64, lookup_hash, email_hash, ts
@@ -164,7 +164,7 @@ pub struct VaultGrantResult {
     pub profile_picture: Option<String>,
 }
 
-/// Shared A4 flow: fetch a challenge, sign it raw with the device seed,
+/// Shared vault-grant flow: fetch a challenge, sign it raw with the device seed,
 /// trade the signature for a JWT.
 async fn vault_grant(
     api_url: &str,
@@ -199,7 +199,7 @@ async fn vault_grant(
     }
     let challenge = ch.challenge.ok_or("Challenge response missing challenge")?;
 
-    // D4: the challenge string is signed exactly as received, raw bytes.
+    // Domain separation: the challenge string is signed exactly as received.
     let signature = base64_standard_encode(&sign_with_device_seed(
         device_seed,
         challenge.as_bytes(),
@@ -221,7 +221,7 @@ async fn vault_grant(
         .await
         .map_err(|e| format!("Token response parse failed: {}", e))?;
     if !status.is_success() {
-        // Preserve the machine-readable code — restore (B6) branches on it.
+        // Preserve the machine-readable code — the restore path branches on it.
         return Err(api_error(status, &body, "vault_grant_failed"));
     }
 
@@ -236,7 +236,7 @@ async fn vault_grant(
     })
 }
 
-/// Authenticate the unlocked vault's device identity with the API (A4).
+/// Authenticate the unlocked vault's device identity with the API.
 /// Usable any time post-unlock (e.g. to refresh a session for API calls).
 #[tauri::command]
 pub async fn vault_grant_login(
@@ -262,9 +262,9 @@ pub async fn vault_grant_login(
     vault_grant(&api_url, &seed, &agent_b64).await
 }
 
-/// B6 — restore a device-hosted identity from the recovery phrase alone.
-/// Derives the key, proves it to the API via A4, and returns the account's
-/// public profile so the wizard can rebuild local state. Never calls A3.
+/// Restore a device-hosted identity from the recovery phrase alone.
+/// Derives the key, proves it via challenge-response, and returns the account's
+/// public profile so the wizard can rebuild local state. Never re-registers.
 ///
 /// Error contract for the wizard:
 /// - contains `unknown_agent_key` -> no device-hosted account for this phrase
@@ -294,13 +294,13 @@ mod tests {
 
     const STAGING: &str = "https://auth-api-staging.flowsta.com";
 
-    /// Full B5 + B6 contract test against the live STAGING API using the real
+    /// Full register + restore contract test against the live STAGING API using the real
     /// derivation + signing code. Ignored by default — run explicitly:
     /// `cargo test --lib device_identity -- --ignored`
     #[tokio::test]
     #[ignore]
     async fn test_register_and_restore_against_staging() {
-        // B1: fresh phrase
+        // Fresh phrase
         let mnemonic = generate_new_mnemonic().unwrap();
         assert_eq!(mnemonic.split(' ').count(), 24);
 
@@ -312,19 +312,19 @@ mod tests {
                 .as_secs()
         );
 
-        // B5: register (A3)
+        // Register
         let reg = register_device_identity(
             STAGING.into(),
             mnemonic.clone(),
             email.clone(),
-            Some("B Track Test".into()),
+            Some("Device Test".into()),
         )
         .await
         .expect("registration should succeed");
         assert!(reg.did.starts_with("did:flowsta:uhCAk"), "did: {}", reg.did);
         assert!(!reg.user_id.is_empty());
 
-        // Duplicate registration must be rejected (409 — B6 is the re-entry path)
+        // Duplicate registration must be rejected (409 — restore is the re-entry path)
         let dup = register_device_identity(
             STAGING.into(),
             mnemonic.clone(),
@@ -338,12 +338,12 @@ mod tests {
             dup.as_ref().err()
         );
 
-        // B6: restore from phrase alone (A4 challenge-response)
+        // Restore from phrase alone (challenge-response)
         let restored = restore_device_identity(STAGING.into(), mnemonic.clone())
             .await
             .expect("restore should succeed");
         assert_eq!(restored.did, reg.did, "restore must recover the SAME identity");
-        assert_eq!(restored.display_name.as_deref(), Some("B Track Test"));
+        assert_eq!(restored.display_name.as_deref(), Some("Device Test"));
         assert!(!restored.token.is_empty(), "restore must yield a session token");
 
         // A wrong phrase must NOT find an account

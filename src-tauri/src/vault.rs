@@ -87,7 +87,7 @@ pub struct VaultConfig {
     pub conductor_version: Option<String>,
 
     /// Hosting model: `Some("device-hosted")` for identities created in Vault
-    /// (R1 Track B — no web password, no API cells; auth via Vault-grant).
+    /// (no web password, no API cells; auth via Vault-grant).
     /// `None` = legacy restore-from-web vault (custodial web account).
     #[serde(default)]
     pub hosting_model: Option<String>,

@@ -1,18 +1,18 @@
-//! Sealed-record crypto (R2 Track H3 core) — encrypt-before-gossip for the
+//! Sealed-record crypto — encrypt-before-gossip for the
 //! private DNA v2. Every gossiping record is an opaque `{cipher, nonce}`
 //! blob; entry type, timestamps, app ids, relationships all live INSIDE the
-//! ciphertext (design: build-docs/current/R2_ENCRYPTED_DNA_V2_DESIGN.md).
+//! ciphertext.
 //!
-//! Method (design §1 — AMENDS the earlier crypto_box-by-agent-key note,
-//! which breaks multi-device because per-device agent keys differ):
+//! Method (deliberately NOT crypto_box-by-agent-key — per-device agent
+//! keys differ, which would make records unreadable across devices):
 //! XSalsa20-Poly1305 secretbox with the per-user symmetric data key
 //!   data_key = HMAC-SHA256("flowsta-data-encryption-v1", bip39_seed)
-//! (key_derivation::derive_data_encryption_key, golden-vector-verified).
+//! (see key_derivation::derive_data_encryption_key, golden-vector-verified).
 //! Every device derives the same key from the phrase — multi-device gossip
 //! decrypts with zero key exchange, and recovery needs only the phrase.
 //!
 //! The zome never sees plaintext: seal before create_sealed, unseal after
-//! get_all_sealed. The zome-call half lands with the v2 DNA (H1).
+//! get_all_sealed.
 
 use lair_keystore_api::dependencies::sodoken;
 use serde::{Deserialize, Serialize};
@@ -41,8 +41,8 @@ pub enum SealedError {
 }
 
 /// The plaintext-before-encryption layout. `body` carries the original
-/// v1.11 entry struct unmodified (design §2 — makes migration a mechanical
-/// wrap), serialized as embedded MessagePack alongside the metadata that
+/// v1.11 entry struct unmodified (so migration is a mechanical wrap),
+/// serialized as embedded MessagePack alongside the metadata that
 /// v1.11 leaked in the clear.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SealedPayload {
@@ -50,7 +50,8 @@ pub struct SealedPayload {
     /// Which v1.11 entry type this wraps: "user_profile", "login_activity",
     /// "email_permission", "dashboard_activity", "oauth_activity",
     /// "privacy_settings", "app_analytics_id", "profile_picture".
-    /// (RecoveryPhrase + TotpConfig never become Sealed — design §3.)
+    /// (RecoveryPhrase + TotpConfig never become Sealed — root secrets are
+    /// never gossiped.)
     pub entry_type: String,
     /// Creation time in ms — inside the cipher; the DHT action timestamp is
     /// the only timing a peer sees.
@@ -128,7 +129,7 @@ mod tests {
     #[test]
     fn test_multi_device_same_phrase_decrypts() {
         // Device A and device B derive the key independently from the same
-        // phrase — B must decrypt what A sealed (the §1 amendment's point).
+        // phrase — B must decrypt what A sealed (the multi-device property).
         let key_a = derive_data_encryption_key(TEST_MNEMONIC).unwrap();
         let key_b = derive_data_encryption_key(TEST_MNEMONIC).unwrap();
         let (cipher, nonce) = seal(&test_payload(), &key_a).unwrap();

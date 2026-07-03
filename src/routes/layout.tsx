@@ -238,7 +238,7 @@ export default component$(() => {
     origin: string | null;
   } | null>(null);
 
-  // Relay login (R2 F2) — approve a sign-in happening on another device.
+  // Relay login — approve a sign-in happening on another device.
   // The approval screen is ALWAYS shown (no remember option): cross-device
   // approval is the phishing surface, the screen is the defense.
   const pendingRelayClaim = useSignal<{
@@ -309,7 +309,7 @@ export default component$(() => {
     await fetchProfile();
     screen.value = "dashboard";
     checkConnectivity();
-    // Process a relay sign-in code that arrived while locked (R2 F2).
+    // Process a relay sign-in code that arrived while locked.
     if (queuedRelayCode.value) {
       const code = queuedRelayCode.value;
       queuedRelayCode.value = null;
@@ -434,7 +434,7 @@ export default component$(() => {
     });
   });
 
-  // Relay login codes arriving via flowsta:// (R2 F3). Unlocked → claim and
+  // Relay login codes arriving via flowsta://. Unlocked → claim and
   // show the approval screen; locked → queue client-side and banner the
   // unlock screen. Registered on every screen (deep links arrive any time).
   // eslint-disable-next-line qwik/no-use-visible-task
@@ -1020,7 +1020,7 @@ export default component$(() => {
         </main>
       </div>
 
-      {/* Relay login: enter-code modal (R2 F2) */}
+      {/* Relay login: enter-code modal */}
       {relayCodeModal.value && !pendingRelayClaim.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
@@ -1075,7 +1075,7 @@ export default component$(() => {
         </div>
       )}
 
-      {/* Relay login: approval dialog (R2 F2). Deliberately NO remember
+      {/* Relay login: approval dialog. Deliberately NO remember
           option — every cross-device sign-in is reviewed. */}
       {pendingRelayClaim.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">

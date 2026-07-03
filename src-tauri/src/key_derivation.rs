@@ -9,8 +9,8 @@
 //! - `flowsta-sync-encryption` — cross-device sync encryption key (future)
 //! - `flowsta-sync-anchor` — DHT sync anchor lookup key (future)
 //! - `flowsta-recovery-lookup` — recovery phrase lookup hash (existing, used by API)
-//! - `flowsta-data-encryption-v1` — DNA v2 Sealed-record symmetric key (R2)
-//! - `flowsta-private-network-v2` — per-user private-DHT network seed (R2)
+//! - `flowsta-data-encryption-v1` — DNA v2 Sealed-record symmetric key
+//! - `flowsta-private-network-v2` — per-user private-DHT network seed
 
 use bip39::Mnemonic;
 use blake2::digest::{consts::U32, Digest};
@@ -33,7 +33,7 @@ pub const WEB_IDENTITY_CONSTANT: &str = "flowsta-holochain-identity";
 pub const RECOVERY_LOOKUP_CONSTANT: &str = "flowsta-recovery-lookup";
 
 /// Symmetric data-encryption key for the encrypted private DNA v2
-/// ("Sealed" records, R2 encrypt-before-gossip). Phrase-derived so every
+/// ("Sealed" records, encrypt-before-gossip). Phrase-derived so every
 /// device computes the same key — multi-device gossip decrypts without key
 /// exchange (per-device AGENT keys differ by design; this key does not).
 /// JS reference: `recoveryPhrase.js` deriveDataEncryptionKey.
@@ -463,7 +463,7 @@ mod tests {
         );
     }
 
-    /// Cross-language verification for the R2 (DNA v2) derivations.
+    /// Cross-language verification for the DNA v2 derivations.
     /// Hex values produced by `api/src/services/recoveryPhrase.js`
     /// deriveDataEncryptionKey / derivePrivateNetworkSeed on 2026-07-03.
     #[test]

@@ -1,4 +1,4 @@
-//! Relay login (R2 Track F2/F3) — approve a sign-in happening on another
+//! Relay login — approve a sign-in happening on another
 //! device (a phone, or a Firefox/Safari desktop that can't reach the
 //! loopback IPC). The browser and this Vault meet at the auth-api:
 //!
@@ -7,8 +7,7 @@
 //!                 arrives) -> claim -> approval screen -> sign -> approve
 //!   other device: poll returns the session.
 //!
-//! Design doc: build-docs/current/R2_RELAY_LOGIN_PROTOCOL.md
-//! Server side: api/src/routes/relay.js (R2 F1, staging-verified).
+//! Server side: the auth API's /auth/relay/* routes.
 //!
 //! Security invariants (do not relax):
 //! - The approval screen is ALWAYS shown — no remember/auto-approve for
@@ -105,8 +104,8 @@ pub async fn relay_approve_core(
     device_seed: &[u8; 32],
     agent_b64: &str,
 ) -> Result<(), String> {
-    // D4: sign the challenge string exactly as received, raw UTF-8 bytes
-    // (same contract as the A4 vault-grant in device_identity.rs).
+    // Domain separation: sign the challenge string exactly as received, raw
+    // UTF-8 bytes (same contract as the vault-grant in device_identity.rs).
     let signature = crate::key_derivation::base64_standard_encode(&sign_with_device_seed(
         device_seed,
         claim.challenge.as_bytes(),
@@ -331,7 +330,7 @@ mod tests {
             derive_seed, DEVICE_1_CONSTANT,
         };
 
-        // Fresh identity (register via A3 like the device_identity test).
+        // Fresh identity (register like the device_identity test).
         let mnemonic = device_identity::generate_new_mnemonic().expect("mnemonic");
         let email = format!(
             "relayvault-{}@example.com",
@@ -347,7 +346,7 @@ mod tests {
             Some("Relay Vault Test".into()),
         )
         .await
-        .expect("A3 register");
+        .expect("register");
 
         let signing_key = derive_device_keypair(&mnemonic).expect("keypair");
         let agent_b64 =

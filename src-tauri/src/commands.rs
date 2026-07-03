@@ -156,10 +156,10 @@ pub struct AppState {
     /// to handle them. Drained by `take_pending_sign_paths`.
     pub pending_sign_paths: Mutex<Vec<std::path::PathBuf>>,
     /// A relay-login code that arrived via flowsta:// while the vault was
-    /// locked or before the frontend mounted (R2 F3). Drained by
+    /// locked or before the frontend mounted — drained by
     /// `take_pending_relay_code`.
     pub pending_relay_code: Mutex<Option<String>>,
-    /// The claimed relay session between claim and approve/deny (R2 F2).
+    /// The claimed relay session between claim and approve/deny.
     /// Held Rust-side so approve signs the server-issued challenge, never a
     /// frontend-supplied one.
     pub pending_relay_claim: Mutex<Option<crate::relay_login::RelayClaim>>,
@@ -4133,7 +4133,7 @@ async fn commit_signature_to_dht(
 }
 
 // ============================================
-// Phase 8 — Sign quota cache (HMAC-signed local persistence)
+// Sign quota cache (HMAC-signed local persistence)
 // ============================================
 
 #[tauri::command]

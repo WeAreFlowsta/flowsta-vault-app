@@ -47,7 +47,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const result = useStore({ agentPubKey: "", did: "" });
   const showTechDetails = useSignal(false);
 
-  // Create-new-identity state (R1 Track B)
+  // Create-new-identity state (device-hosted identity)
   const createEmail = useSignal("");
   const createDisplayName = useSignal("");
   const createPassword = useSignal("");

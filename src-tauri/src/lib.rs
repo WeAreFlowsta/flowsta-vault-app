@@ -103,7 +103,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // Another instance tried to launch. flowsta:// URLs MUST be
             // routed before sign-file extraction — an auth deep link misread
-            // as a file path would silently do nothing (R2 round-5 catch 7).
+            // as a file path would silently do nothing.
             let (urls, rest): (Vec<&String>, Vec<&String>) = args
                 .iter()
                 .skip(1)
@@ -126,7 +126,7 @@ pub fn run() {
                 }
             }
         }))
-        // flowsta:// scheme (R1 E2) — registered AFTER single-instance so URL
+        // flowsta:// scheme — registered AFTER single-instance so URL
         // forwarding works. Lets a browser wake a closed-but-installed Vault
         // for "Sign in with your Vault"; the single-instance callback above
         // focuses the window on wake. macOS delivers via RunEvent::Opened.
@@ -161,7 +161,7 @@ pub fn run() {
             // Vault" action, the OS passed the file path(s) as positional
             // CLI args. A flowsta:// deep link cold-launching a closed Vault
             // ALSO arrives here — route those first (same rule as the
-            // single-instance callback; round-5 catch 7). The relay code is
+            // single-instance callback). The relay code is
             // queued in AppState and drained by the frontend after mount.
             let (startup_urls, startup_rest): (Vec<String>, Vec<String>) =
                 std::env::args().skip(1).partition(|a| relay_login::is_flowsta_url(a));
@@ -192,7 +192,7 @@ pub fn run() {
             // (connections piled in the accept queue; /status went dark).
             // A separate runtime means conductor churn can never block the
             // IPC accept loop. (Surfaced building Your Own AI's Vault
-            // sign-in — see build-docs current/VAULT_NEXT_RELEASE.md.)
+            // sign-in.)
             let ipc_state = app_state.clone();
             let app_handle = app.handle().clone();
             std::thread::Builder::new()
@@ -410,7 +410,7 @@ pub fn run() {
                 // handled in the setup hook + single-instance callback.
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 tauri::RunEvent::Opened { urls } => {
-                    // flowsta:// first (R2 F3) — see the single-instance
+                    // flowsta:// first — see the single-instance
                     // callback for why the order is load-bearing.
                     let (deep_links, rest): (Vec<String>, Vec<String>) = urls
                         .iter()

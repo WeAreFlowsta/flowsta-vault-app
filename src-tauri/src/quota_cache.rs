@@ -1,6 +1,6 @@
 //! Sign quota cache with HMAC-signed local persistence.
 //!
-//! Phase 8: Vault must enforce sign quotas locally for offline use. We can't
+//! Vault must enforce sign quotas locally for offline use. We can't
 //! trust localStorage (trivially editable), so we persist quota state in
 //! `data_dir/quota_cache.json` HMAC-signed with a device-local key.
 //!
