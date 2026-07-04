@@ -3922,7 +3922,7 @@ pub async fn set_thumbnail(
 
 /// Commit a SignatureRecord to the signing DNA via the local conductor.
 /// Returns the ActionHash as a base64-encoded string.
-async fn commit_signature_to_dht(
+pub(crate) async fn commit_signature_to_dht(
     admin_port: u16,
     app_port: u16,
     file_hash: &[u8],

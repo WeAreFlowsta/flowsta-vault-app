@@ -229,13 +229,15 @@ export default component$(() => {
     replacing_existing: boolean;
   } | null>(null);
 
-  // Document-sign approval dialog state (Sign It)
+  // Document-sign approval dialog state (Sign It). `commit` means the
+  // signature will be PUBLISHED to the Sign It network, not just returned.
   const pendingDocumentSign = useSignal<{
     id: string;
     app_name: string;
     file_hash: string;
     label: string | null;
     origin: string | null;
+    commit?: boolean;
   } | null>(null);
 
   // Generic /sign approval (linked apps signing outside the linking ceremony)
@@ -436,6 +438,7 @@ export default component$(() => {
       file_hash: string;
       label: string | null;
       origin: string | null;
+      commit: boolean;
     }>("document-sign-request", (event) => {
       pendingDocumentSign.value = event.payload;
     });
@@ -1490,7 +1493,9 @@ export default component$(() => {
             </div>
 
             <p class="mb-4 text-xs text-gray-400">
-              This app wants you to cryptographically sign a file. Your signature will be publicly verifiable on the DHT.
+              {pendingDocumentSign.value.commit
+                ? 'This will publish a signature from this device to the Sign It network — publicly verifiable, and it speaks as you.'
+                : 'This app wants you to cryptographically sign a file. Your signature will be publicly verifiable on the DHT.'}
             </p>
 
             <div class="flex gap-3">
@@ -1505,7 +1510,7 @@ export default component$(() => {
                 class="flex-1"
                 onClick$={() => handleDocumentSignResponse(true)}
               >
-                Sign
+                {pendingDocumentSign.value.commit ? 'Sign & publish' : 'Sign'}
               </GlassButton>
             </div>
           </div>

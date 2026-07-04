@@ -1710,6 +1710,29 @@ struct SignDocumentRequest {
     /// Developer client_id from dev.flowsta.com
     #[serde(default)]
     client_id: Option<String>,
+    /// Signer-declared note stored with a published signature (280 max)
+    #[serde(default)]
+    comment: Option<String>,
+    /// Publish the signature to the Sign It network from THIS device's
+    /// signing cell (web-delegated signing for upgraded accounts).
+    /// Restricted to Flowsta origins; the approval dialog says so.
+    #[serde(default)]
+    commit: bool,
+}
+
+/// Publishing to the user's own signing cell is a Flowsta-surface
+/// capability: only pages on flowsta.com (or its subdomains) may request
+/// it. Signature-only requests stay available to every app, dialog-gated.
+fn is_flowsta_origin(origin: Option<&str>) -> bool {
+    let Some(origin) = origin else { return false };
+    let Ok(url) = url::Url::parse(origin) else { return false };
+    if url.scheme() != "https" {
+        return false;
+    }
+    match url.host_str() {
+        Some(host) => host == "flowsta.com" || host.ends_with(".flowsta.com"),
+        None => false,
+    }
 }
 
 #[derive(Serialize)]
@@ -1719,8 +1742,8 @@ struct SignDocumentResponse {
     signature: String,
     agent_pub_key: String,
     signed_at: String,
-    /// Placeholder for DHT action hash — will be populated once
-    /// conductor zome call integration is added in task 1.4
+    /// Set when the signature was published to the Sign It network
+    /// (`commit: true`) — hex of the committed record's action hash.
     action_hash: Option<String>,
 }
 
@@ -1779,6 +1802,30 @@ async fn sign_document_handler(
         ));
     }
 
+    if req.commit && !is_flowsta_origin(origin.as_deref()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "tier_forbidden".into(),
+                description: Some(
+                    "Publishing a signature through Vault is available to Flowsta pages only."
+                        .into(),
+                ),
+            }),
+        ));
+    }
+    if let Some(ref comment) = req.comment {
+        if comment.len() > 280 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(IpcError {
+                    error: "invalid_comment".into(),
+                    description: Some("comment must be 280 characters or fewer".into()),
+                }),
+            ));
+        }
+    }
+
     // 3. Resolve app name for the approval dialog
     let app_name = req.app_name.clone().unwrap_or_else(|| {
         origin.clone().unwrap_or_else(|| "Unknown app".to_string())
@@ -1802,13 +1849,16 @@ async fn sign_document_handler(
         *pending_sign = Some(pending);
     }
 
-    // 6. Emit Tauri event to show approval dialog
+    // 6. Emit Tauri event to show approval dialog. `commit` tells the
+    // dialog this signature will be PUBLISHED to the Sign It network,
+    // not just returned to the calling app.
     let event_payload = serde_json::json!({
         "id": request_id,
         "app_name": app_name,
         "file_hash": req.file_hash,
         "label": req.label,
         "origin": origin,
+        "commit": req.commit,
     });
     raise_window(&state.app_handle);
     let _ = state.app_handle.emit("document-sign-request", event_payload);
@@ -1900,17 +1950,70 @@ async fn sign_document_handler(
         crate::mau::record_mau_event_if_needed(&state.app_state, client_id);
     }
 
-    // 10. Return signature
-    // NOTE: DHT commit (action_hash) is added in task 1.4 when conductor
-    // zome call integration is built. For now, we return the signature
-    // which the calling app can use.
+    // 10. Publish to the Sign It network when requested — same call the
+    // in-app signing flow uses, against this device's signing cell. A
+    // requested publish that cannot happen is an ERROR, not a silent
+    // signature-only response: the calling page treats the action hash as
+    // proof the signature exists on the network.
+    let action_hash = if req.commit {
+        let conductor_ports = {
+            let conductor = state.app_state.conductor_handle.lock().unwrap();
+            conductor.as_ref().map(|h| (h.admin_port, h.app_port))
+        };
+        let Some((admin_port, app_port)) = conductor_ports else {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(IpcError {
+                    error: "conductor_not_ready".into(),
+                    description: Some(
+                        "Your Vault is still starting up — try again in a moment.".into(),
+                    ),
+                }),
+            ));
+        };
+        let now_ms = (unix_now() as i64) * 1000;
+        match crate::commands::commit_signature_to_dht(
+            admin_port,
+            app_port,
+            &hash_bytes,
+            &signature_bytes,
+            now_ms,
+            req.intent.as_deref(),
+            req.ai_generation.as_deref(),
+            req.content_rights.as_ref(),
+            None,
+            None,
+            req.comment.as_deref(),
+            None,
+        )
+        .await
+        {
+            Ok(hash) => Some(hash),
+            Err(e) => {
+                log::error!("Web-delegated signature publish failed: {}", e);
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(IpcError {
+                        error: "commit_failed".into(),
+                        description: Some(
+                            "The signature was not published — nothing changed. Try again."
+                                .into(),
+                        ),
+                    }),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     let resp = SignDocumentResponse {
         success: true,
         file_hash: req.file_hash,
         signature: base64_standard_encode(&signature_bytes),
         agent_pub_key: vault_agent_pub_key,
         signed_at: now_iso,
-        action_hash: None,
+        action_hash,
     };
 
     Ok(axum::response::IntoResponse::into_response(Json(resp)))
@@ -2010,4 +2113,26 @@ pub async fn start_ipc_server(
     }
 
     Err("All IPC ports (27777-27779) are unavailable".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_flowsta_origin;
+
+    #[test]
+    fn test_flowsta_origin_gate() {
+        // Flowsta pages over https may request publishing
+        assert!(is_flowsta_origin(Some("https://flowsta.com")));
+        assert!(is_flowsta_origin(Some("https://www.flowsta.com")));
+        assert!(is_flowsta_origin(Some("https://ourtest.flowsta.com")));
+
+        // Everyone else is signature-only
+        assert!(!is_flowsta_origin(None));
+        assert!(!is_flowsta_origin(Some("https://example.com")));
+        assert!(!is_flowsta_origin(Some("https://evilflowsta.com")));
+        assert!(!is_flowsta_origin(Some("https://flowsta.com.evil.com")));
+        assert!(!is_flowsta_origin(Some("http://flowsta.com"))); // no plaintext
+        assert!(!is_flowsta_origin(Some("tauri://localhost")));
+        assert!(!is_flowsta_origin(Some("not a url")));
+    }
 }
