@@ -30,6 +30,8 @@ export default component$<Props>(({ target, onSaved$ }) => {
   const image = useSignal<string | null>(null);
   const canvas = useSignal<HTMLCanvasElement | null>(null);
   const saving = useSignal(false);
+  // Holds the in-flight publish so closing the modal doesn't cancel it.
+  const backgroundSave = useSignal<any>(null);
   const error = useSignal("");
 
   const reset = $(() => {
@@ -39,20 +41,19 @@ export default component$<Props>(({ target, onSaved$ }) => {
     error.value = "";
   });
 
-  const handlePick = $(() => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = "image/*";
-    input.onchange = () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        image.value = e.target?.result as string;
-      };
-      reader.readAsDataURL(file);
+  // A real <input type=file> behind a <label>: the picker opens natively on
+  // the first click. (A programmatic input.click() fires only after the
+  // lazy-loaded handler arrives — outside the click's user-gesture window —
+  // so the webview swallowed the first attempt.)
+  const handleFileChosen = $((_: Event, el: HTMLInputElement) => {
+    const file = el.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      image.value = e.target?.result as string;
     };
-    input.click();
+    reader.readAsDataURL(file);
+    el.value = "";
   });
 
   const handleSave = $(async () => {
@@ -70,14 +71,30 @@ export default component$<Props>(({ target, onSaved$ }) => {
         saving.value = false;
         return;
       }
-      await invoke("set_thumbnail", {
-        actionHashHex: target.value.action_hash,
+      const actionHash = target.value.action_hash;
+      // The save publishes to the signing network — on a fresh vault the
+      // network walk can take a minute or two. If the user closes the
+      // modal meanwhile, the publish keeps going and the list updates
+      // when it lands.
+      const pending = invoke("set_thumbnail", {
+        actionHashHex: actionHash,
         thumbnail,
-      });
-      await onSaved$(target.value.action_hash, thumbnail);
-      target.value = null;
-      image.value = null;
-      canvas.value = null;
+      }).then(
+        async () => {
+          await onSaved$(actionHash, thumbnail);
+          return null;
+        },
+        (e: any) => (typeof e === "string" ? e : e?.message) || "Failed to save thumbnail",
+      );
+      backgroundSave.value = pending as any;
+      const failure = await pending;
+      if (failure) {
+        error.value = failure;
+      } else if (target.value?.action_hash === actionHash) {
+        target.value = null;
+        image.value = null;
+        canvas.value = null;
+      }
     } catch (e: any) {
       console.error("Thumbnail save error:", e);
       error.value = (typeof e === "string" ? e : e.message) || "Failed to save thumbnail";
@@ -93,16 +110,22 @@ export default component$<Props>(({ target, onSaved$ }) => {
         <h3 class="mb-4 text-base font-semibold text-white">Edit Thumbnail</h3>
 
         {!image.value ? (
-          <div
+          <label
+            for="thumbnail-file-input"
             class="flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-600 p-10 transition-colors cursor-pointer hover:border-gray-500"
-            onClick$={handlePick}
           >
+            <input
+              id="thumbnail-file-input"
+              type="file"
+              accept="image/*"
+              class="hidden"
+              onChange$={handleFileChosen}
+            />
             <svg class="mb-3 h-10 w-10 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
               <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z" />
             </svg>
             <p class="text-sm text-gray-400">Click to choose a thumbnail image</p>
-            <p class="mt-1 text-xs text-gray-500">or drag and drop</p>
-          </div>
+          </label>
         ) : (
           <div>
             <ImageCropper
@@ -126,13 +149,23 @@ export default component$<Props>(({ target, onSaved$ }) => {
           </div>
         )}
 
+        {saving.value && (
+          <p class="mt-3 text-xs text-gray-400">
+            Publishing to your signing network — on a fresh Vault this can
+            take a minute or two. You can close this window; the thumbnail
+            appears when it lands.
+          </p>
+        )}
+
         <div class="mt-4 flex gap-3">
           <GlassButton
             variant="secondary"
             class="flex-1"
-            onClick$={reset}
+            onClick$={saving.value
+              ? $(() => { target.value = null; image.value = null; canvas.value = null; })
+              : reset}
           >
-            Cancel
+            {saving.value ? "Close — keep publishing" : "Cancel"}
           </GlassButton>
           {image.value && (
             <GlassButton
@@ -140,7 +173,7 @@ export default component$<Props>(({ target, onSaved$ }) => {
               disabled={saving.value || !canvas.value}
               onClick$={handleSave}
             >
-              {saving.value ? "Saving..." : "Save Thumbnail"}
+              {saving.value ? "Publishing…" : "Save Thumbnail"}
             </GlassButton>
           )}
         </div>
