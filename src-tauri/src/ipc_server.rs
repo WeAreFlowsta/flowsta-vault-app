@@ -97,6 +97,14 @@ use tower_http::cors::CorsLayer;
 pub struct IpcState {
     pub app_state: Arc<AppState>,
     pub app_handle: tauri::AppHandle,
+    pub op_jobs: OpJobs,
+}
+
+/// Report a job's stage (no-op for synchronous callers).
+fn set_job_stage(state: &Arc<IpcState>, job_id: &Option<String>, stage: &str) {
+    if let Some(id) = job_id {
+        state.op_jobs.set_stage(id, stage);
+    }
 }
 
 // ── Origin tracking helper ──────────────────────────────────────────
@@ -1724,6 +1732,10 @@ struct SignDocumentRequest {
     /// Hex action hash of an earlier signature this one amends/replaces.
     #[serde(default)]
     supersedes: Option<String>,
+    /// Run as an async job: respond immediately with a job_id and report
+    /// progress via /op-status. The page polls; nothing is held open.
+    #[serde(default)]
+    job: bool,
     /// Publish the signature to the Sign It network from THIS device's
     /// signing cell (web-delegated signing for upgraded accounts).
     /// Restricted to Flowsta origins; the approval dialog says so.
@@ -1803,11 +1815,51 @@ async fn sign_document_handler(
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "sign-document");
 
+    if req.job {
+        let job_id = state.op_jobs.create("sign");
+        let task_state = state.clone();
+        let task_origin = origin.clone();
+        let task_job = job_id.clone();
+        tokio::spawn(async move {
+            match sign_document_core(
+                task_state.clone(),
+                task_origin,
+                req,
+                Some(task_job.clone()),
+            )
+            .await
+            {
+                Ok(v) => task_state.op_jobs.finish(&task_job, v),
+                Err((_, Json(e))) => task_state.op_jobs.fail(
+                    &task_job,
+                    &e.error,
+                    e.description.as_deref().unwrap_or(""),
+                ),
+            }
+        });
+        return Ok(axum::response::IntoResponse::into_response(Json(
+            serde_json::json!({ "job_id": job_id }),
+        )));
+    }
+
+    sign_document_core(state, origin, req, None)
+        .await
+        .map(|v| axum::response::IntoResponse::into_response(Json(v)))
+}
+
+async fn sign_document_core(
+    state: Arc<IpcState>,
+    origin: Option<String>,
+    req: SignDocumentRequest,
+    job_id: Option<String>,
+) -> Result<serde_json::Value, (StatusCode, Json<IpcError>)> {
+
     // 1. Verify vault is unlocked. For Flowsta pages, surface the locked
     // vault and WAIT through the unlock — the approval dialog then appears
     // immediately and the page's original click completes on its own.
     let locked = state.app_state.vault_config.lock().unwrap().is_none();
     if locked {
+        set_job_stage(&state, &job_id, "waiting_unlock");
         let flowsta = is_flowsta_origin(origin.as_deref());
         if flowsta {
             raise_window(&state.app_handle);
@@ -1816,7 +1868,9 @@ async fn sign_document_handler(
                 serde_json::json!({ "reason": "sign", "origin": origin }),
             );
         }
-        if !flowsta || !wait_for_unlock(&state.app_state, 60).await {
+        // Jobs hold nothing open, so they can politely wait longer.
+        let unlock_budget = if job_id.is_some() { 180 } else { 60 };
+        if !flowsta || !wait_for_unlock(&state.app_state, unlock_budget).await {
             let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
             return Err((
                 StatusCode::FORBIDDEN,
@@ -1926,6 +1980,7 @@ async fn sign_document_handler(
     // unlock; right after a restart it can need a minute.) The UI shows a
     // visible "preparing" banner for the whole wait.
     if req.commit {
+        set_job_stage(&state, &job_id, "preparing");
         let _ = state.app_handle.emit(
             "op-pending",
             serde_json::json!({ "op": "sign", "origin": origin }),
@@ -1975,11 +2030,13 @@ async fn sign_document_handler(
         "commit": req.commit,
         "amends": supersedes_bytes.is_some(),
     });
+    set_job_stage(&state, &job_id, "awaiting_approval");
     raise_window(&state.app_handle);
     let _ = state.app_handle.emit("document-sign-request", event_payload);
 
-    // 7. Wait for user response with 60s timeout
-    let approved = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+    // 7. Wait for user response (jobs can wait longer — nothing is held open)
+    let approval_budget = if job_id.is_some() { 120 } else { 60 };
+    let approved = match tokio::time::timeout(std::time::Duration::from_secs(approval_budget), rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => {
             return Err((
@@ -2070,6 +2127,7 @@ async fn sign_document_handler(
     // requested publish that cannot happen is an ERROR, not a silent
     // signature-only response: the calling page treats the action hash as
     // proof the signature exists on the network.
+    set_job_stage(&state, &job_id, "publishing");
     let action_hash = if req.commit {
         let Some((admin_port, app_port)) = wait_for_conductor(&state.app_state, 30).await
         else {
@@ -2167,7 +2225,15 @@ async fn sign_document_handler(
         action_hash,
     };
 
-    Ok(axum::response::IntoResponse::into_response(Json(resp)))
+    serde_json::to_value(&resp).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError {
+                error: "internal_error".into(),
+                description: Some(format!("Response encoding failed: {}", e)),
+            }),
+        )
+    })
 }
 
 // ── POST /profile-update — web dashboard delegating a profile write ─────────
@@ -2186,6 +2252,8 @@ struct ProfileUpdateRequest {
     /// Data URI (or https URL) for the profile picture.
     #[serde(default)]
     profile_picture: Option<String>,
+    #[serde(default)]
+    job: bool,
 }
 
 async fn profile_update_handler(
@@ -2195,6 +2263,37 @@ async fn profile_update_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "profile-update");
+
+    if req.job {
+        let job_id = state.op_jobs.create("profile");
+        let task_state = state.clone();
+        let task_origin = origin.clone();
+        let task_job = job_id.clone();
+        tokio::spawn(async move {
+            match profile_update_core(task_state.clone(), task_origin, req, Some(task_job.clone())).await {
+                Ok(v) => task_state.op_jobs.finish(&task_job, v),
+                Err((_, Json(e))) => task_state.op_jobs.fail(
+                    &task_job,
+                    &e.error,
+                    e.description.as_deref().unwrap_or(""),
+                ),
+            }
+        });
+        return Ok(axum::response::IntoResponse::into_response(Json(
+            serde_json::json!({ "job_id": job_id }),
+        )));
+    }
+    profile_update_core(state, origin, req, None)
+        .await
+        .map(|v| axum::response::IntoResponse::into_response(Json(v)))
+}
+
+async fn profile_update_core(
+    state: Arc<IpcState>,
+    origin: Option<String>,
+    req: ProfileUpdateRequest,
+    job_id: Option<String>,
+) -> Result<serde_json::Value, (StatusCode, Json<IpcError>)> {
 
     if !is_flowsta_origin(origin.as_deref()) {
         return Err((
@@ -2208,12 +2307,14 @@ async fn profile_update_handler(
         ));
     }
     if state.app_state.vault_config.lock().unwrap().is_none() {
+        set_job_stage(&state, &job_id, "waiting_unlock");
         raise_window(&state.app_handle);
         let _ = state.app_handle.emit(
             "unlock-attention",
             serde_json::json!({ "reason": "profile", "origin": origin }),
         );
-        let unlocked = wait_for_unlock(&state.app_state, 60).await;
+        let unlock_budget = if job_id.is_some() { 180 } else { 60 };
+        let unlocked = wait_for_unlock(&state.app_state, unlock_budget).await;
         let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
         if !unlocked {
             return Err((
@@ -2271,6 +2372,7 @@ async fn profile_update_handler(
 
     // The write needs the conductor — make sure it's up BEFORE asking for
     // approval so an approval can always land.
+    set_job_stage(&state, &job_id, "preparing");
     if wait_for_conductor(&state.app_state, 90).await.is_none() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2296,6 +2398,7 @@ async fn profile_update_handler(
             responder: tx,
         });
     }
+    set_job_stage(&state, &job_id, "awaiting_approval");
     raise_window(&state.app_handle);
     let _ = state.app_handle.emit(
         "profile-update-request",
@@ -2340,6 +2443,7 @@ async fn profile_update_handler(
         ));
     }
 
+    set_job_stage(&state, &job_id, "publishing");
     // Write the sealed record(s): display name lives on "user_profile",
     // the picture on "profile_picture" (v1.11 shapes, sealed in v2).
     let now_us = (unix_now() as i64) * 1_000_000;
@@ -2486,9 +2590,7 @@ async fn profile_update_handler(
     let _ = state
         .app_handle
         .emit("profile-updated", serde_json::json!({}));
-    Ok(axum::response::IntoResponse::into_response(Json(
-        serde_json::json!({ "success": true }),
-    )))
+    Ok(serde_json::json!({ "success": true }))
 }
 
 // ── Web-delegated signature management: revoke + thumbnail ─────────────────
@@ -2629,6 +2731,8 @@ struct RevokeSignatureRequest {
     action_hash: String,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    job: bool,
 }
 
 async fn revoke_signature_handler(
@@ -2638,6 +2742,38 @@ async fn revoke_signature_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "revoke-signature");
+
+    if req.job {
+        let job_id = state.op_jobs.create("revoke");
+        let task_state = state.clone();
+        let task_origin = origin.clone();
+        let task_job = job_id.clone();
+        tokio::spawn(async move {
+            match revoke_signature_core(task_state.clone(), task_origin, req, Some(task_job.clone())).await {
+                Ok(v) => task_state.op_jobs.finish(&task_job, v),
+                Err((_, Json(e))) => task_state.op_jobs.fail(
+                    &task_job,
+                    &e.error,
+                    e.description.as_deref().unwrap_or(""),
+                ),
+            }
+        });
+        return Ok(axum::response::IntoResponse::into_response(Json(
+            serde_json::json!({ "job_id": job_id }),
+        )));
+    }
+    revoke_signature_core(state, origin, req, None)
+        .await
+        .map(|v| axum::response::IntoResponse::into_response(Json(v)))
+}
+
+async fn revoke_signature_core(
+    state: Arc<IpcState>,
+    origin: Option<String>,
+    req: RevokeSignatureRequest,
+    job_id: Option<String>,
+) -> Result<serde_json::Value, (StatusCode, Json<IpcError>)> {
+    set_job_stage(&state, &job_id, "preparing");
     cell_op_gate(&state, origin.as_deref(), &req.action_hash, "revoke").await?;
 
     if let Some(ref r) = req.reason {
@@ -2652,8 +2788,10 @@ async fn revoke_signature_handler(
         }
     }
 
+    set_job_stage(&state, &job_id, "awaiting_approval");
     cell_op_approval(&state, "revoke", origin.clone(), req.reason.clone()).await?;
 
+    set_job_stage(&state, &job_id, "publishing");
     let revocation = crate::commands::revoke_signature_inner(
         &state.app_state,
         req.action_hash.clone(),
@@ -2671,9 +2809,7 @@ async fn revoke_signature_handler(
     })?;
 
     let _ = state.app_handle.emit("signature-published", serde_json::json!({}));
-    Ok(axum::response::IntoResponse::into_response(Json(
-        serde_json::json!({ "success": true, "revocation_hash": revocation }),
-    )))
+    Ok(serde_json::json!({ "success": true, "revocation_hash": revocation }))
 }
 
 #[derive(Deserialize)]
@@ -2682,6 +2818,8 @@ struct SetThumbnailRequest {
     action_hash: String,
     /// data:image/... URI.
     thumbnail: String,
+    #[serde(default)]
+    job: bool,
 }
 
 async fn set_thumbnail_handler(
@@ -2691,6 +2829,38 @@ async fn set_thumbnail_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "set-thumbnail");
+
+    if req.job {
+        let job_id = state.op_jobs.create("thumbnail");
+        let task_state = state.clone();
+        let task_origin = origin.clone();
+        let task_job = job_id.clone();
+        tokio::spawn(async move {
+            match set_thumbnail_core(task_state.clone(), task_origin, req, Some(task_job.clone())).await {
+                Ok(v) => task_state.op_jobs.finish(&task_job, v),
+                Err((_, Json(e))) => task_state.op_jobs.fail(
+                    &task_job,
+                    &e.error,
+                    e.description.as_deref().unwrap_or(""),
+                ),
+            }
+        });
+        return Ok(axum::response::IntoResponse::into_response(Json(
+            serde_json::json!({ "job_id": job_id }),
+        )));
+    }
+    set_thumbnail_core(state, origin, req, None)
+        .await
+        .map(|v| axum::response::IntoResponse::into_response(Json(v)))
+}
+
+async fn set_thumbnail_core(
+    state: Arc<IpcState>,
+    origin: Option<String>,
+    req: SetThumbnailRequest,
+    job_id: Option<String>,
+) -> Result<serde_json::Value, (StatusCode, Json<IpcError>)> {
+    set_job_stage(&state, &job_id, "preparing");
     cell_op_gate(&state, origin.as_deref(), &req.action_hash, "thumbnail").await?;
 
     if !req.thumbnail.starts_with("data:image/") || req.thumbnail.len() > 300_000 {
@@ -2703,8 +2873,10 @@ async fn set_thumbnail_handler(
         ));
     }
 
+    set_job_stage(&state, &job_id, "awaiting_approval");
     cell_op_approval(&state, "thumbnail", origin.clone(), None).await?;
 
+    set_job_stage(&state, &job_id, "publishing");
     let thumb_hash = crate::commands::set_thumbnail_inner(
         &state.app_state,
         req.action_hash.clone(),
@@ -2722,9 +2894,120 @@ async fn set_thumbnail_handler(
     })?;
 
     let _ = state.app_handle.emit("signature-published", serde_json::json!({}));
-    Ok(axum::response::IntoResponse::into_response(Json(
-        serde_json::json!({ "success": true, "thumbnail_hash": thumb_hash }),
-    )))
+    Ok(serde_json::json!({ "success": true, "thumbnail_hash": thumb_hash }))
+}
+
+// ── Async operation jobs ────────────────────────────────────────────────────
+//
+// Committing operations from web pages run as JOBS: the POST validates and
+// returns a job id immediately; the page polls /op-status while the request
+// rides through unlock, conductor startup, the approval dialog, and the
+// commit. Nothing is held open, so there are no client timeout budgets, no
+// ghost failures (the client giving up changes nothing), and no duplicate
+// risk on retry — the page always learns the real outcome.
+
+use std::collections::HashMap;
+
+#[derive(Clone, Serialize)]
+pub struct OpJobSnapshot {
+    pub job_id: String,
+    /// waiting_unlock | preparing | awaiting_approval | publishing |
+    /// done | failed
+    pub stage: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+struct OpJob {
+    snapshot: OpJobSnapshot,
+    updated_at: i64,
+}
+
+#[derive(Default)]
+pub struct OpJobs {
+    jobs: std::sync::Mutex<HashMap<String, OpJob>>,
+}
+
+const JOB_TTL_SECS: i64 = 10 * 60;
+
+impl OpJobs {
+    fn prune(map: &mut HashMap<String, OpJob>) {
+        let now = unix_now();
+        map.retain(|_, j| now - j.updated_at < JOB_TTL_SECS);
+    }
+
+    pub fn create(&self, op: &str) -> String {
+        let job_id = format!("{}-{}-{:x}", op, unix_now(), rand::random::<u32>());
+        let mut map = self.jobs.lock().unwrap();
+        Self::prune(&mut map);
+        map.insert(
+            job_id.clone(),
+            OpJob {
+                snapshot: OpJobSnapshot {
+                    job_id: job_id.clone(),
+                    stage: "preparing".into(),
+                    result: None,
+                    error: None,
+                    description: None,
+                },
+                updated_at: unix_now(),
+            },
+        );
+        job_id
+    }
+
+    pub fn set_stage(&self, job_id: &str, stage: &str) {
+        let mut map = self.jobs.lock().unwrap();
+        if let Some(job) = map.get_mut(job_id) {
+            job.snapshot.stage = stage.into();
+            job.updated_at = unix_now();
+        }
+    }
+
+    pub fn finish(&self, job_id: &str, result: serde_json::Value) {
+        let mut map = self.jobs.lock().unwrap();
+        if let Some(job) = map.get_mut(job_id) {
+            job.snapshot.stage = "done".into();
+            job.snapshot.result = Some(result);
+            job.updated_at = unix_now();
+        }
+    }
+
+    pub fn fail(&self, job_id: &str, error: &str, description: &str) {
+        let mut map = self.jobs.lock().unwrap();
+        if let Some(job) = map.get_mut(job_id) {
+            job.snapshot.stage = "failed".into();
+            job.snapshot.error = Some(error.into());
+            job.snapshot.description = Some(description.into());
+            job.updated_at = unix_now();
+        }
+    }
+
+    pub fn snapshot(&self, job_id: &str) -> Option<OpJobSnapshot> {
+        let mut map = self.jobs.lock().unwrap();
+        Self::prune(&mut map);
+        map.get(job_id).map(|j| j.snapshot.clone())
+    }
+}
+
+async fn op_status_handler(
+    State(state): State<Arc<IpcState>>,
+    axum::extract::Path(job_id): axum::extract::Path<String>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    match state.op_jobs.snapshot(&job_id) {
+        Some(snap) => Ok(axum::response::IntoResponse::into_response(Json(snap))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError {
+                error: "unknown_job".into(),
+                description: Some("No such job (it may have expired).".into()),
+            }),
+        )),
+    }
 }
 
 /// Simple timestamp to ISO 8601 string (avoids adding chrono dependency).
@@ -2770,6 +3053,7 @@ pub async fn start_ipc_server(
     let ipc_state = Arc::new(IpcState {
         app_state,
         app_handle,
+        op_jobs: OpJobs::default(),
     });
 
     // CORS: deliberately permissive. Third-party desktop apps use varied
@@ -2795,6 +3079,7 @@ pub async fn start_ipc_server(
         .route("/profile-update", post(profile_update_handler))
         .route("/revoke-signature", post(revoke_signature_handler))
         .route("/set-thumbnail", post(set_thumbnail_handler))
+        .route("/op-status/:job_id", get(op_status_handler))
         .route("/revoke-identity", post(revoke_identity_handler))
         .route("/link-status", get(link_status_handler))
         .route("/backup", post(backup_handler))
