@@ -107,6 +107,16 @@ pub struct PendingProfileUpdateRequest {
     pub responder: tokio::sync::oneshot::Sender<bool>,
 }
 
+/// Pending approval for a web-delegated signature-management operation
+/// (revoke / thumbnail). `op` picks the dialog copy.
+pub struct PendingCellOpRequest {
+    pub id: String,
+    pub origin: Option<String>,
+    pub op: String,
+    pub detail: Option<String>,
+    pub responder: tokio::sync::oneshot::Sender<bool>,
+}
+
 /// A pending generic /sign request awaiting user approval (linked apps
 /// signing arbitrary payloads outside the post-link ceremony window).
 pub struct PendingRawSignRequest {
@@ -150,6 +160,7 @@ pub struct AppState {
     /// A pending /sign-document request waiting for user approval.
     pub pending_document_sign: Mutex<Option<PendingDocumentSignRequest>>,
     pub pending_profile_update: Mutex<Option<PendingProfileUpdateRequest>>,
+    pub pending_cell_op: Mutex<Option<PendingCellOpRequest>>,
     /// A pending generic /sign request waiting for user approval.
     pub pending_raw_sign: Mutex<Option<PendingRawSignRequest>>,
     /// Origins whose /link-identity approval is recent enough that the
@@ -221,6 +232,7 @@ impl AppState {
             pending_link_identity: Mutex::new(None),
             pending_document_sign: Mutex::new(None),
             pending_profile_update: Mutex::new(None),
+            pending_cell_op: Mutex::new(None),
             pending_raw_sign: Mutex::new(None),
             recent_link_approvals: Mutex::new(std::collections::HashMap::new()),
             approved_apps: Mutex::new(Vec::new()),
@@ -576,6 +588,9 @@ pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
         let _ = req.responder.send(false);
     }
     if let Some(req) = state.pending_profile_update.lock().unwrap().take() {
+        let _ = req.responder.send(false);
+    }
+    if let Some(req) = state.pending_cell_op.lock().unwrap().take() {
         let _ = req.responder.send(false);
     }
 
@@ -2386,6 +2401,19 @@ pub fn respond_profile_update_request(
     Ok(())
 }
 
+/// Respond to a pending signature-management approval dialog.
+#[tauri::command]
+pub fn respond_cell_op_request(
+    approved: bool,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let mut pending = state.pending_cell_op.lock().unwrap();
+    let req = pending.take().ok_or("No pending operation request")?;
+
+    let _ = req.responder.send(approved);
+    Ok(())
+}
+
 /// Respond to a pending generic /sign approval dialog.
 #[tauri::command]
 pub fn respond_raw_sign_request(
@@ -3784,6 +3812,16 @@ pub async fn revoke_signature(
     action_hash_hex: String,
     reason: Option<String>,
     state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    revoke_signature_inner(state.inner(), action_hash_hex, reason).await
+}
+
+/// Commit a revocation against one of this agent's signature records.
+/// Shared by the in-app flow and web-delegated management.
+pub(crate) async fn revoke_signature_inner(
+    state: &Arc<AppState>,
+    action_hash_hex: String,
+    reason: Option<String>,
 ) -> Result<String, String> {
     use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
         ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};

@@ -1721,6 +1721,9 @@ struct SignDocumentRequest {
     /// published signature, like the in-app signing flow does.
     #[serde(default)]
     thumbnail: Option<String>,
+    /// Hex action hash of an earlier signature this one amends/replaces.
+    #[serde(default)]
+    supersedes: Option<String>,
     /// Publish the signature to the Sign It network from THIS device's
     /// signing cell (web-delegated signing for upgraded accounts).
     /// Restricted to Flowsta origins; the approval dialog says so.
@@ -1862,6 +1865,23 @@ async fn sign_document_handler(
             ));
         }
     }
+    let supersedes_bytes = match req.supersedes.as_deref() {
+        Some(hex_str) => match hex::decode(hex_str) {
+            Ok(b) if b.len() == 39 => Some(b),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(IpcError {
+                        error: "invalid_supersedes".into(),
+                        description: Some(
+                            "supersedes must be the hex action hash of an earlier signature".into(),
+                        ),
+                    }),
+                ));
+            }
+        },
+        None => None,
+    };
     if let Some(ref t) = req.thumbnail {
         if !t.starts_with("data:image/") || t.len() > 300_000 {
             return Err((
@@ -1909,6 +1929,7 @@ async fn sign_document_handler(
         "label": req.label,
         "origin": origin,
         "commit": req.commit,
+        "amends": supersedes_bytes.is_some(),
     });
     raise_window(&state.app_handle);
     let _ = state.app_handle.emit("document-sign-request", event_payload);
@@ -2034,7 +2055,7 @@ async fn sign_document_handler(
             None,
             req.perceptual_hash.as_ref(),
             req.comment.as_deref(),
-            None,
+            supersedes_bytes.as_deref(),
         )
         .await
         {
@@ -2415,6 +2436,229 @@ async fn profile_update_handler(
     )))
 }
 
+// ── Web-delegated signature management: revoke + thumbnail ─────────────────
+//
+// Same capability rule as publishing: Flowsta pages only, per-action
+// approval in Vault, operations land on THIS device's signing cell.
+
+/// Run the shared approval dialog for a signature-management operation.
+/// Returns Ok(()) on approval; an error response otherwise.
+async fn cell_op_approval(
+    state: &Arc<IpcState>,
+    op: &str,
+    origin: Option<String>,
+    detail: Option<String>,
+) -> Result<(), (StatusCode, Json<IpcError>)> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    let request_id = format!("{}-{}", op, unix_now());
+    {
+        let mut pending = state.app_state.pending_cell_op.lock().unwrap();
+        *pending = Some(crate::commands::PendingCellOpRequest {
+            id: request_id.clone(),
+            origin: origin.clone(),
+            op: op.to_string(),
+            detail: detail.clone(),
+            responder: tx,
+        });
+    }
+    raise_window(&state.app_handle);
+    let _ = state.app_handle.emit(
+        "cell-op-request",
+        serde_json::json!({
+            "id": request_id,
+            "op": op,
+            "origin": origin,
+            "detail": detail,
+        }),
+    );
+
+    match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(false)) => Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "user_denied".into(),
+                description: Some("User rejected the request.".into()),
+            }),
+        )),
+        Ok(Err(_)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError {
+                error: "internal_error".into(),
+                description: Some("Approval channel closed unexpectedly.".into()),
+            }),
+        )),
+        Err(_) => {
+            let mut pending = state.app_state.pending_cell_op.lock().unwrap();
+            *pending = None;
+            Err((
+                StatusCode::REQUEST_TIMEOUT,
+                Json(IpcError {
+                    error: "timeout".into(),
+                    description: Some("User did not respond within 60 seconds.".into()),
+                }),
+            ))
+        }
+    }
+}
+
+/// Shared front door for the management endpoints: Flowsta origin,
+/// unlocked vault (riding through the unlock like signing does), and a
+/// valid 39-byte hex action hash.
+async fn cell_op_gate(
+    state: &Arc<IpcState>,
+    origin: Option<&str>,
+    action_hash_hex: &str,
+    reason: &str,
+) -> Result<(), (StatusCode, Json<IpcError>)> {
+    if !is_flowsta_origin(origin) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "tier_forbidden".into(),
+                description: Some(
+                    "Managing Vault-published signatures is available to Flowsta pages only."
+                        .into(),
+                ),
+            }),
+        ));
+    }
+    if hex::decode(action_hash_hex).map(|b| b.len() != 39).unwrap_or(true) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(IpcError {
+                error: "invalid_action_hash".into(),
+                description: Some("action_hash must be a hex 39-byte action hash".into()),
+            }),
+        ));
+    }
+    if state.app_state.vault_config.lock().unwrap().is_none() {
+        raise_window(&state.app_handle);
+        let _ = state.app_handle.emit(
+            "unlock-attention",
+            serde_json::json!({ "reason": reason, "origin": origin }),
+        );
+        let unlocked = wait_for_unlock(&state.app_state, 60).await;
+        let _ = state
+            .app_handle
+            .emit("unlock-attention-clear", serde_json::json!({}));
+        if !unlocked {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "vault_locked".into(),
+                    description: Some("Vault is locked. Unlock it first.".into()),
+                }),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RevokeSignatureRequest {
+    /// Hex 39-byte action hash of the signature to revoke.
+    action_hash: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn revoke_signature_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+    Json(req): Json<RevokeSignatureRequest>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    let origin = extract_origin(&headers);
+    track_request(&state.app_state, origin.as_deref(), "revoke-signature");
+    cell_op_gate(&state, origin.as_deref(), &req.action_hash, "revoke").await?;
+
+    if let Some(ref r) = req.reason {
+        if r.len() > 280 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(IpcError {
+                    error: "invalid_reason".into(),
+                    description: Some("reason must be 280 characters or fewer".into()),
+                }),
+            ));
+        }
+    }
+
+    cell_op_approval(&state, "revoke", origin.clone(), req.reason.clone()).await?;
+
+    let revocation = crate::commands::revoke_signature_inner(
+        &state.app_state,
+        req.action_hash.clone(),
+        req.reason.clone(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError {
+                error: "revoke_failed".into(),
+                description: Some(format!("Revocation failed: {}", e)),
+            }),
+        )
+    })?;
+
+    let _ = state.app_handle.emit("signature-published", serde_json::json!({}));
+    Ok(axum::response::IntoResponse::into_response(Json(
+        serde_json::json!({ "success": true, "revocation_hash": revocation }),
+    )))
+}
+
+#[derive(Deserialize)]
+struct SetThumbnailRequest {
+    /// Hex 39-byte action hash of the signature the preview belongs to.
+    action_hash: String,
+    /// data:image/... URI.
+    thumbnail: String,
+}
+
+async fn set_thumbnail_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+    Json(req): Json<SetThumbnailRequest>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    let origin = extract_origin(&headers);
+    track_request(&state.app_state, origin.as_deref(), "set-thumbnail");
+    cell_op_gate(&state, origin.as_deref(), &req.action_hash, "thumbnail").await?;
+
+    if !req.thumbnail.starts_with("data:image/") || req.thumbnail.len() > 300_000 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(IpcError {
+                error: "invalid_thumbnail".into(),
+                description: Some("thumbnail must be a data:image/... URI under 300 KB".into()),
+            }),
+        ));
+    }
+
+    cell_op_approval(&state, "thumbnail", origin.clone(), None).await?;
+
+    let thumb_hash = crate::commands::set_thumbnail_inner(
+        &state.app_state,
+        req.action_hash.clone(),
+        req.thumbnail.clone(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError {
+                error: "write_failed".into(),
+                description: Some(format!("Thumbnail publish failed: {}", e)),
+            }),
+        )
+    })?;
+
+    let _ = state.app_handle.emit("signature-published", serde_json::json!({}));
+    Ok(axum::response::IntoResponse::into_response(Json(
+        serde_json::json!({ "success": true, "thumbnail_hash": thumb_hash }),
+    )))
+}
+
 /// Simple timestamp to ISO 8601 string (avoids adding chrono dependency).
 fn chrono_lite(unix_secs: i64) -> String {
     let secs = unix_secs as u64;
@@ -2481,6 +2725,8 @@ pub async fn start_ipc_server(
         .route("/link-identity", post(link_identity_handler))
         .route("/sign-document", post(sign_document_handler))
         .route("/profile-update", post(profile_update_handler))
+        .route("/revoke-signature", post(revoke_signature_handler))
+        .route("/set-thumbnail", post(set_thumbnail_handler))
         .route("/revoke-identity", post(revoke_identity_handler))
         .route("/link-status", get(link_status_handler))
         .route("/backup", post(backup_handler))

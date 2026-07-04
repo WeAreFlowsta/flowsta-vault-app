@@ -238,6 +238,15 @@ export default component$(() => {
     label: string | null;
     origin: string | null;
     commit?: boolean;
+    amends?: boolean;
+  } | null>(null);
+
+  // Signature-management approval (dashboard delegating revoke/thumbnail)
+  const pendingCellOp = useSignal<{
+    id: string;
+    op: string;
+    origin: string | null;
+    detail: string | null;
   } | null>(null);
 
   // Profile-update approval (dashboard delegating a profile write here)
@@ -450,6 +459,7 @@ export default component$(() => {
       label: string | null;
       origin: string | null;
       commit: boolean;
+      amends: boolean;
     }>("document-sign-request", (event) => {
       pendingDocumentSign.value = event.payload;
     });
@@ -475,6 +485,14 @@ export default component$(() => {
     const unlistenAttentionClear = listen("unlock-attention-clear", () => {
       unlockAttention.value = null;
     });
+    const unlistenCellOp = listen<{
+      id: string;
+      op: string;
+      origin: string | null;
+      detail: string | null;
+    }>("cell-op-request", (event) => {
+      pendingCellOp.value = event.payload;
+    });
 
     cleanup(() => {
       unlistenPromise.then((unlisten) => unlisten());
@@ -482,6 +500,7 @@ export default component$(() => {
       unlistenPublished.then((unlisten) => unlisten());
       unlistenAttention.then((unlisten) => unlisten());
       unlistenAttentionClear.then((unlisten) => unlisten());
+      unlistenCellOp.then((unlisten) => unlisten());
     });
   });
 
@@ -758,6 +777,16 @@ export default component$(() => {
       console.error("Failed to respond to profile-update request:", e);
     } finally {
       pendingProfileUpdate.value = null;
+    }
+  });
+
+  const handleCellOpResponse = $(async (approved: boolean) => {
+    try {
+      await invoke("respond_cell_op_request", { approved });
+    } catch (e) {
+      console.error("Failed to respond to operation request:", e);
+    } finally {
+      pendingCellOp.value = null;
     }
   });
 
@@ -1508,6 +1537,42 @@ export default component$(() => {
       )}
 
       {/* Document sign approval dialog (Sign It) */}
+      {pendingCellOp.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
+            <h3 class="mb-1 text-base font-semibold text-white">
+              {pendingCellOp.value.op === "revoke" ? "Revoke Signature" : "Update Thumbnail"}
+            </h3>
+            <p class="mb-3 text-xs text-gray-400">
+              {pendingCellOp.value.origin || "A Flowsta page"}
+            </p>
+            <p class="mb-4 text-xs text-gray-400">
+              {pendingCellOp.value.op === "revoke"
+                ? "This publicly and permanently marks your signature as revoked on the Sign It network."
+                : "This attaches a new preview image to one of your published signatures."}
+            </p>
+            {pendingCellOp.value.op === "revoke" && pendingCellOp.value.detail && (
+              <div class="mb-4 rounded-lg border border-gray-700 bg-gray-900 p-3">
+                <span class="text-xs text-gray-500">Reason: </span>
+                <span class="text-xs text-white">{pendingCellOp.value.detail}</span>
+              </div>
+            )}
+            <div class="flex gap-3">
+              <GlassButton
+                variant="secondary"
+                class="flex-1"
+                onClick$={() => handleCellOpResponse(false)}
+              >
+                Deny
+              </GlassButton>
+              <GlassButton class="flex-1" onClick$={() => handleCellOpResponse(true)}>
+                {pendingCellOp.value.op === "revoke" ? "Revoke" : "Update"}
+              </GlassButton>
+            </div>
+          </div>
+        </div>
+      )}
+
       {pendingProfileUpdate.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
@@ -1592,7 +1657,9 @@ export default component$(() => {
 
             <p class="mb-4 text-xs text-gray-400">
               {pendingDocumentSign.value.commit
-                ? 'This will publish a signature from this device to the Sign It network — publicly verifiable, and it speaks as you.'
+                ? pendingDocumentSign.value.amends
+                  ? 'This publishes an updated signature that replaces an earlier one you made — the original stays visible in its history.'
+                  : 'This will publish a signature from this device to the Sign It network — publicly verifiable, and it speaks as you.'
                 : 'This app wants you to cryptographically sign a file. Your signature will be publicly verifiable on the DHT.'}
             </p>
 
