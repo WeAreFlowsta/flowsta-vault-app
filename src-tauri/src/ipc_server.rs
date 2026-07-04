@@ -100,6 +100,20 @@ pub struct IpcState {
     pub op_jobs: OpJobs,
 }
 
+/// Dev-only: auto-approve all bridge dialogs so the full operation matrix
+/// can run headlessly. Compile-gated OUT of release builds; additionally
+/// requires the env flag, so a dev build behaves normally by default.
+fn auto_approve_enabled() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var("FLOWSTA_VAULT_AUTO_APPROVE").as_deref() == Ok("1")
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
 /// Report a job's stage (no-op for synchronous callers).
 fn set_job_stage(state: &Arc<IpcState>, job_id: &Option<String>, stage: &str) {
     if let Some(id) = job_id {
@@ -2036,7 +2050,12 @@ async fn sign_document_core(
 
     // 7. Wait for user response (jobs can wait longer — nothing is held open)
     let approval_budget = if job_id.is_some() { 120 } else { 60 };
-    let approved = match tokio::time::timeout(std::time::Duration::from_secs(approval_budget), rx).await {
+    let approved = if auto_approve_enabled() {
+        let _ = state.app_state.pending_document_sign.lock().unwrap().take();
+        log::warn!("AUTO-APPROVE (dev): document-sign approved headlessly");
+        true
+    } else {
+        match tokio::time::timeout(std::time::Duration::from_secs(approval_budget), rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => {
             return Err((
@@ -2059,6 +2078,7 @@ async fn sign_document_core(
                 }),
             ));
         }
+    }
     };
 
     if !approved {
@@ -2410,27 +2430,33 @@ async fn profile_update_core(
         }),
     );
 
-    let approved = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(_)) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(IpcError {
-                    error: "internal_error".into(),
-                    description: Some("Approval channel closed unexpectedly.".into()),
-                }),
-            ));
-        }
-        Err(_) => {
-            let mut pending = state.app_state.pending_profile_update.lock().unwrap();
-            *pending = None;
-            return Err((
-                StatusCode::REQUEST_TIMEOUT,
-                Json(IpcError {
-                    error: "timeout".into(),
-                    description: Some("User did not respond within 60 seconds.".into()),
-                }),
-            ));
+    let approved = if auto_approve_enabled() {
+        let _ = state.app_state.pending_profile_update.lock().unwrap().take();
+        log::warn!("AUTO-APPROVE (dev): profile update approved headlessly");
+        true
+    } else {
+        match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(IpcError {
+                        error: "internal_error".into(),
+                        description: Some("Approval channel closed unexpectedly.".into()),
+                    }),
+                ));
+            }
+            Err(_) => {
+                let mut pending = state.app_state.pending_profile_update.lock().unwrap();
+                *pending = None;
+                return Err((
+                    StatusCode::REQUEST_TIMEOUT,
+                    Json(IpcError {
+                        error: "timeout".into(),
+                        description: Some("User did not respond within 60 seconds.".into()),
+                    }),
+                ));
+            }
         }
     };
     if !approved {
@@ -2629,6 +2655,11 @@ async fn cell_op_approval(
         }),
     );
 
+    if auto_approve_enabled() {
+        let _ = state.app_state.pending_cell_op.lock().unwrap().take();
+        log::warn!("AUTO-APPROVE (dev): {} approved headlessly", op);
+        return Ok(());
+    }
     match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
         Ok(Ok(true)) => Ok(()),
         Ok(Ok(false)) => Err((
