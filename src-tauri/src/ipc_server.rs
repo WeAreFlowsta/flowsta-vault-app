@@ -2011,6 +2011,12 @@ async fn sign_document_handler(
                         log::warn!("Quota sync after published sign failed (non-fatal): {}", e);
                     }
                 });
+                // Tell the Vault UI a signature just landed so the
+                // signatures view and quota meter refresh live.
+                let _ = state.app_handle.emit(
+                    "signature-published",
+                    serde_json::json!({ "action_hash": hash, "file_hash": req.file_hash }),
+                );
                 Some(hash)
             }
             Err(e) => {

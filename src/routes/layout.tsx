@@ -458,10 +458,16 @@ export default component$(() => {
     }>("profile-update-request", (event) => {
       pendingProfileUpdate.value = event.payload;
     });
+    // A signature published through the localhost bridge (web-delegated
+    // signing) — refresh the signatures view so it appears immediately.
+    const unlistenPublished = listen("signature-published", () => {
+      refreshSignatures();
+    });
 
     cleanup(() => {
       unlistenPromise.then((unlisten) => unlisten());
       unlistenProfile.then((unlisten) => unlisten());
+      unlistenPublished.then((unlisten) => unlisten());
     });
   });
 
