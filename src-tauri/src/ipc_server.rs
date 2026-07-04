@@ -3010,6 +3010,77 @@ async fn op_status_handler(
     }
 }
 
+// ── GET /signatures — the dashboard reads from the Vault, not the network ──
+//
+// The Vault is the source of truth for the user's own records: this serves
+// exactly what the Vault UI shows (own chain, instantly consistent, plus
+// linked-agent history as gossip warms). Flowsta pages only; read-only, so
+// no approval dialog. The page falls back to the server's shared-network
+// lookup only when the Vault isn't reachable.
+
+async fn signatures_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    let origin = extract_origin(&headers);
+    track_request(&state.app_state, origin.as_deref(), "signatures");
+
+    if !is_flowsta_origin(origin.as_deref()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "tier_forbidden".into(),
+                description: Some("Signature reads are available to Flowsta pages only.".into()),
+            }),
+        ));
+    }
+    if state.app_state.vault_config.lock().unwrap().is_none() {
+        // A background read must not pop the unlock screen — the page
+        // just falls back to the network lookup.
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "vault_locked".into(),
+                description: Some("Vault is locked.".into()),
+            }),
+        ));
+    }
+    if wait_for_conductor(&state.app_state, 5).await.is_none() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(IpcError {
+                error: "conductor_not_ready".into(),
+                description: Some("Vault is still starting up.".into()),
+            }),
+        ));
+    }
+
+    let own = crate::commands::get_my_own_signatures_inner(&state.app_state)
+        .await
+        .unwrap_or_default();
+    // Linked history is best-effort: DHT-bound, additive only.
+    let linked = crate::commands::get_my_linked_signatures_inner(&state.app_state)
+        .await
+        .map(|r| r.signatures)
+        .unwrap_or_default();
+
+    let own_hashes: std::collections::HashSet<String> = own
+        .iter()
+        .filter_map(|s| s.get("action_hash").and_then(|h| h.as_str()).map(String::from))
+        .collect();
+    let mut signatures = own;
+    signatures.extend(linked.into_iter().filter(|s| {
+        s.get("action_hash")
+            .and_then(|h| h.as_str())
+            .map(|h| !own_hashes.contains(h))
+            .unwrap_or(true)
+    }));
+
+    Ok(axum::response::IntoResponse::into_response(Json(
+        serde_json::json!({ "source": "vault", "signatures": signatures }),
+    )))
+}
+
 /// Simple timestamp to ISO 8601 string (avoids adding chrono dependency).
 fn chrono_lite(unix_secs: i64) -> String {
     let secs = unix_secs as u64;
@@ -3080,6 +3151,7 @@ pub async fn start_ipc_server(
         .route("/revoke-signature", post(revoke_signature_handler))
         .route("/set-thumbnail", post(set_thumbnail_handler))
         .route("/op-status/:job_id", get(op_status_handler))
+        .route("/signatures", get(signatures_handler))
         .route("/revoke-identity", post(revoke_identity_handler))
         .route("/link-status", get(link_status_handler))
         .route("/backup", post(backup_handler))

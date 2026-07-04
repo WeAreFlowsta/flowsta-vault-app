@@ -3595,7 +3595,7 @@ pub async fn get_my_own_signatures(
     }
 }
 
-async fn get_my_own_signatures_inner(
+pub(crate) async fn get_my_own_signatures_inner(
     state: &Arc<AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let (admin_ws, app_port, _apps, signing_apps) = open_signing_conductor(state).await?;
@@ -3661,7 +3661,7 @@ pub async fn get_my_linked_signatures(
     }
 }
 
-async fn get_my_linked_signatures_inner(
+pub(crate) async fn get_my_linked_signatures_inner(
     state: &Arc<AppState>,
 ) -> Result<LinkedSignaturesResult, String> {
     let (admin_ws, app_port, apps, signing_apps) = open_signing_conductor(state).await?;
