@@ -3879,6 +3879,16 @@ pub async fn set_thumbnail(
     thumbnail: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<String, String> {
+    set_thumbnail_inner(state.inner(), action_hash_hex, thumbnail).await
+}
+
+/// Commit a thumbnail against a signature record on the device signing
+/// cell. Shared by the in-app flow and web-delegated publishing.
+pub(crate) async fn set_thumbnail_inner(
+    state: &Arc<AppState>,
+    action_hash_hex: String,
+    thumbnail: String,
+) -> Result<String, String> {
     use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
         ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
     use holochain_types::prelude::ExternIO;

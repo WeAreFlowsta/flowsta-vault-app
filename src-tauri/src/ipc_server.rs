@@ -1713,6 +1713,14 @@ struct SignDocumentRequest {
     /// Signer-declared note stored with a published signature (280 max)
     #[serde(default)]
     comment: Option<String>,
+    /// Perceptual hash (image/audio/video fingerprint) stored with a
+    /// published signature — enables fuzzy matching on the verify page.
+    #[serde(default)]
+    perceptual_hash: Option<serde_json::Value>,
+    /// Small preview image (data:image/... URI) committed alongside a
+    /// published signature, like the in-app signing flow does.
+    #[serde(default)]
+    thumbnail: Option<String>,
     /// Publish the signature to the Sign It network from THIS device's
     /// signing cell (web-delegated signing for upgraded accounts).
     /// Restricted to Flowsta origins; the approval dialog says so.
@@ -1850,6 +1858,19 @@ async fn sign_document_handler(
                 Json(IpcError {
                     error: "invalid_comment".into(),
                     description: Some("comment must be 280 characters or fewer".into()),
+                }),
+            ));
+        }
+    }
+    if let Some(ref t) = req.thumbnail {
+        if !t.starts_with("data:image/") || t.len() > 300_000 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(IpcError {
+                    error: "invalid_thumbnail".into(),
+                    description: Some(
+                        "thumbnail must be a data:image/... URI under 300 KB".into(),
+                    ),
                 }),
             ));
         }
@@ -2011,7 +2032,7 @@ async fn sign_document_handler(
             req.ai_generation.as_deref(),
             req.content_rights.as_ref(),
             None,
-            None,
+            req.perceptual_hash.as_ref(),
             req.comment.as_deref(),
             None,
         )
@@ -2035,6 +2056,20 @@ async fn sign_document_handler(
                         log::warn!("Quota sync after published sign failed (non-fatal): {}", e);
                     }
                 });
+                // Thumbnail rides on the same source chain — commit it
+                // sequentially after the signature (best-effort; the
+                // signature stands without it).
+                if let Some(ref thumb) = req.thumbnail {
+                    if let Err(e) = crate::commands::set_thumbnail_inner(
+                        &state.app_state,
+                        hash.clone(),
+                        thumb.clone(),
+                    )
+                    .await
+                    {
+                        log::warn!("Thumbnail commit after publish failed (non-fatal): {}", e);
+                    }
+                }
                 // Tell the Vault UI a signature just landed so the
                 // signatures view and quota meter refresh live.
                 let _ = state.app_handle.emit(
