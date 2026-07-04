@@ -212,6 +212,11 @@ pub struct AppState {
     /// both spawn a fresh conductor — the first one wins, the others
     /// observe the recovered state.
     pub conductor_restart_lock: tokio::sync::Mutex<()>,
+    /// Dev-only (headless test harness): passphrase stashed by the bridge's
+    /// /dev/lock so /dev/unlock can re-unlock without a secret ever leaving
+    /// the process. Only written while the auto-approve harness flag is
+    /// active; the endpoints that touch it 404 in release builds.
+    pub dev_relock_passphrase: Mutex<Option<lair_keystore_api::dependencies::sodoken::LockedArray>>,
 }
 
 impl AppState {
@@ -249,6 +254,7 @@ impl AppState {
             pending_relay_claim: Mutex::new(None),
             unlock_passphrase: Mutex::new(None),
             conductor_restart_lock: tokio::sync::Mutex::new(()),
+            dev_relock_passphrase: Mutex::new(None),
         }
     }
 
@@ -518,6 +524,14 @@ pub fn unlock_vault(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SetupResult, String> {
+    unlock_vault_inner(password, app_handle, state.inner())
+}
+
+pub(crate) fn unlock_vault_inner(
+    password: String,
+    app_handle: tauri::AppHandle,
+    state: &Arc<AppState>,
+) -> Result<SetupResult, String> {
     let vault_path = state.vault_path.lock().unwrap();
 
     if !vault_exists(&vault_path) {
@@ -570,7 +584,7 @@ pub fn unlock_vault(
     );
 
     // Spawn conductor startup in background (if device seed is available)
-    spawn_conductor_startup(device_seed, data_dir, passphrase, app_handle, state.inner().clone());
+    spawn_conductor_startup(device_seed, data_dir, passphrase, app_handle, state.clone());
 
     Ok(result)
 }
@@ -578,6 +592,10 @@ pub fn unlock_vault(
 /// Lock the vault (clear in-memory config and stop conductor).
 #[tauri::command]
 pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    lock_vault_inner(state.inner())
+}
+
+pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     // Cancel any open approval dialog: deny the waiting IPC request so it
     // returns immediately instead of hanging (and can never be approved
     // against a now-locked vault). The calling app sees a clean denial.
@@ -4419,6 +4437,88 @@ pub(crate) async fn sync_quota_to_server_inner(
 
     log::info!("[quota-sync] success: synced {} signatures", count);
     Ok(true)
+}
+
+/// Best-known sign-quota state for gating a publish: refresh from the API
+/// (writing through to the HMAC-signed cache, exactly like the in-app
+/// meter), falling back to the local cache when offline. `None` means no
+/// quota state is knowable — the caller should allow the sign, since the
+/// server still meters via quota sync.
+pub(crate) async fn current_sign_quota(
+    state: &Arc<AppState>,
+    api_url: &str,
+) -> Option<crate::quota_cache::QuotaCache> {
+    // Prefer the linked web account's key (the one a subscription is
+    // attached to) over the local device key — same rule as the in-app UI.
+    let agent_key = {
+        let config = state.vault_config.lock().unwrap();
+        config.as_ref().and_then(|c| {
+            c.web_agent_pub_key
+                .clone()
+                .or_else(|| Some(c.agent_pub_key.clone()))
+        })
+    };
+
+    if let Some(key) = agent_key {
+        let url = format!(
+            "{}/api/v1/sign-it/quota/by-agent?agent_pub_key={}",
+            api_url,
+            urlencoding_encode(&key)
+        );
+        let fresh = async {
+            let resp = reqwest::Client::new()
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+                .ok()?;
+            if !resp.status().is_success() {
+                return None;
+            }
+            resp.json::<serde_json::Value>().await.ok()
+        }
+        .await;
+
+        if let Some(v) = fresh {
+            let cache = crate::quota_cache::QuotaCache {
+                tier: v
+                    .get("tier")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("free")
+                    .to_string(),
+                used: v.get("used").and_then(|u| u.as_u64()).unwrap_or(0) as u32,
+                limit: v.get("limit").and_then(|l| l.as_u64()).unwrap_or(0) as u32,
+                period_end: v
+                    .get("resets_at")
+                    .and_then(|r| r.as_str())
+                    .map(String::from),
+                last_synced_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                write_counter: 0,
+            };
+            match crate::quota_cache::write(&state.data_dir, cache) {
+                Ok(written) => return Some(written),
+                Err(e) => log::warn!("Quota cache write failed (non-fatal): {}", e),
+            }
+        }
+    }
+
+    // Offline / lookup failed: trust the HMAC-signed local cache.
+    crate::quota_cache::read(&state.data_dir).ok().flatten()
+}
+
+/// Minimal percent-encoding for a URL query value (avoids a new dep).
+fn urlencoding_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{:02X}", b),
+        })
+        .collect()
 }
 
 #[tauri::command]

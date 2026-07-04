@@ -98,6 +98,10 @@ pub struct IpcState {
     pub app_state: Arc<AppState>,
     pub app_handle: tauri::AppHandle,
     pub op_jobs: OpJobs,
+    /// Committing operations write to the device's source chains — run them
+    /// one at a time. Two concurrent publishes (double-click race, two tabs)
+    /// would otherwise fight over the chain head and one would fail.
+    pub commit_serial: tokio::sync::Mutex<()>,
 }
 
 /// Dev-only: auto-approve all bridge dialogs so the full operation matrix
@@ -112,6 +116,18 @@ fn auto_approve_enabled() -> bool {
     {
         false
     }
+}
+
+/// Dev-only companion to auto-approve: a request carrying
+/// `x-flowsta-test-deny: 1` is auto-DENIED instead of approved, so the
+/// harness can exercise the user_denied paths. Inert unless the
+/// auto-approve flag is active (and therefore inert in release builds).
+fn test_deny_requested(headers: &HeaderMap) -> bool {
+    auto_approve_enabled()
+        && headers
+            .get("x-flowsta-test-deny")
+            .and_then(|v| v.to_str().ok())
+            == Some("1")
 }
 
 /// Report a job's stage (no-op for synchronous callers).
@@ -1828,9 +1844,23 @@ async fn sign_document_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "sign-document");
+    let test_deny = test_deny_requested(&headers);
 
     if req.job {
-        let job_id = state.op_jobs.create("sign");
+        // Identical request already in flight (double-submit / double-click)
+        // → join its job instead of publishing twice.
+        let fingerprint = format!(
+            "sign|{}|{}|{}",
+            req.file_hash,
+            req.commit,
+            req.supersedes.as_deref().unwrap_or("")
+        );
+        let (job_id, joined) = state.op_jobs.create_or_join("sign", &fingerprint);
+        if joined {
+            return Ok(axum::response::IntoResponse::into_response(Json(
+                serde_json::json!({ "job_id": job_id }),
+            )));
+        }
         let task_state = state.clone();
         let task_origin = origin.clone();
         let task_job = job_id.clone();
@@ -1840,6 +1870,7 @@ async fn sign_document_handler(
                 task_origin,
                 req,
                 Some(task_job.clone()),
+                test_deny,
             )
             .await
             {
@@ -1856,7 +1887,7 @@ async fn sign_document_handler(
         )));
     }
 
-    sign_document_core(state, origin, req, None)
+    sign_document_core(state, origin, req, None, test_deny)
         .await
         .map(|v| axum::response::IntoResponse::into_response(Json(v)))
 }
@@ -1866,6 +1897,7 @@ async fn sign_document_core(
     origin: Option<String>,
     req: SignDocumentRequest,
     job_id: Option<String>,
+    test_deny: bool,
 ) -> Result<serde_json::Value, (StatusCode, Json<IpcError>)> {
 
     // 1. Verify vault is unlocked. For Flowsta pages, surface the locked
@@ -1989,17 +2021,43 @@ async fn sign_document_core(
         origin.clone().unwrap_or_else(|| "Unknown app".to_string())
     });
 
-    // When publishing, make sure the conductor is up BEFORE asking for
-    // approval — an approval must always be able to commit. (It spawns on
-    // unlock; right after a restart it can need a minute.) The UI shows a
-    // visible "preparing" banner for the whole wait.
+    // When publishing, make sure the sign is within quota and the conductor
+    // is up BEFORE asking for approval — an approval must always be able to
+    // commit. (The conductor spawns on unlock; right after a restart it can
+    // need a minute.) The UI shows a visible "preparing" banner for the wait.
     if req.commit {
         set_job_stage(&state, &job_id, "preparing");
+
+        // Quota gate — same rule as the in-app sign flow: refresh from the
+        // server (fall back to the signed local cache offline) and refuse
+        // when the period's signatures are used up. An amend counts like
+        // any other published signature.
+        let api_url = option_env!("FLOWSTA_API_URL").unwrap_or("https://auth-api.flowsta.com");
+        if let Some(q) = crate::commands::current_sign_quota(&state.app_state, api_url).await {
+            if q.limit >= 1 && q.used >= q.limit {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(IpcError {
+                        error: "quota_exceeded".into(),
+                        description: Some(format!(
+                            "You've used all {} signature{} for this period ({} plan). Upgrade at flowsta.com/dashboard/premium to keep signing.",
+                            q.limit,
+                            if q.limit == 1 { "" } else { "s" },
+                            q.tier
+                        )),
+                    }),
+                ));
+            }
+        }
         let _ = state.app_handle.emit(
             "op-pending",
             serde_json::json!({ "op": "sign", "origin": origin }),
         );
-        let ready = wait_for_conductor(&state.app_state, 90).await.is_some();
+        // Jobs can outwait a full cold start; sync callers stay snappy.
+        let conductor_budget = if job_id.is_some() { 300 } else { 90 };
+        let ready = wait_for_conductor(&state.app_state, conductor_budget)
+            .await
+            .is_some();
         let _ = state.app_handle.emit("op-pending-clear", serde_json::json!({}));
         if !ready {
             return Err((
@@ -2052,8 +2110,11 @@ async fn sign_document_core(
     let approval_budget = if job_id.is_some() { 120 } else { 60 };
     let approved = if auto_approve_enabled() {
         let _ = state.app_state.pending_document_sign.lock().unwrap().take();
-        log::warn!("AUTO-APPROVE (dev): document-sign approved headlessly");
-        true
+        log::warn!(
+            "AUTO-{} (dev): document-sign resolved headlessly",
+            if test_deny { "DENY" } else { "APPROVE" }
+        );
+        !test_deny
     } else {
         match tokio::time::timeout(std::time::Duration::from_secs(approval_budget), rx).await {
         Ok(Ok(result)) => result,
@@ -2148,6 +2209,11 @@ async fn sign_document_core(
     // signature-only response: the calling page treats the action hash as
     // proof the signature exists on the network.
     set_job_stage(&state, &job_id, "publishing");
+    let _commit_guard = if req.commit {
+        Some(state.commit_serial.lock().await)
+    } else {
+        None
+    };
     let action_hash = if req.commit {
         let Some((admin_port, app_port)) = wait_for_conductor(&state.app_state, 30).await
         else {
@@ -2283,14 +2349,25 @@ async fn profile_update_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "profile-update");
+    let test_deny = test_deny_requested(&headers);
 
     if req.job {
-        let job_id = state.op_jobs.create("profile");
+        let fingerprint = format!(
+            "profile|{}|{}",
+            req.display_name.as_deref().unwrap_or(""),
+            req.profile_picture.as_deref().map(str::len).unwrap_or(0)
+        );
+        let (job_id, joined) = state.op_jobs.create_or_join("profile", &fingerprint);
+        if joined {
+            return Ok(axum::response::IntoResponse::into_response(Json(
+                serde_json::json!({ "job_id": job_id }),
+            )));
+        }
         let task_state = state.clone();
         let task_origin = origin.clone();
         let task_job = job_id.clone();
         tokio::spawn(async move {
-            match profile_update_core(task_state.clone(), task_origin, req, Some(task_job.clone())).await {
+            match profile_update_core(task_state.clone(), task_origin, req, Some(task_job.clone()), test_deny).await {
                 Ok(v) => task_state.op_jobs.finish(&task_job, v),
                 Err((_, Json(e))) => task_state.op_jobs.fail(
                     &task_job,
@@ -2303,7 +2380,7 @@ async fn profile_update_handler(
             serde_json::json!({ "job_id": job_id }),
         )));
     }
-    profile_update_core(state, origin, req, None)
+    profile_update_core(state, origin, req, None, test_deny)
         .await
         .map(|v| axum::response::IntoResponse::into_response(Json(v)))
 }
@@ -2313,6 +2390,7 @@ async fn profile_update_core(
     origin: Option<String>,
     req: ProfileUpdateRequest,
     job_id: Option<String>,
+    test_deny: bool,
 ) -> Result<serde_json::Value, (StatusCode, Json<IpcError>)> {
 
     if !is_flowsta_origin(origin.as_deref()) {
@@ -2393,7 +2471,11 @@ async fn profile_update_core(
     // The write needs the conductor — make sure it's up BEFORE asking for
     // approval so an approval can always land.
     set_job_stage(&state, &job_id, "preparing");
-    if wait_for_conductor(&state.app_state, 90).await.is_none() {
+    let conductor_budget = if job_id.is_some() { 300 } else { 90 };
+    if wait_for_conductor(&state.app_state, conductor_budget)
+        .await
+        .is_none()
+    {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(IpcError {
@@ -2432,8 +2514,11 @@ async fn profile_update_core(
 
     let approved = if auto_approve_enabled() {
         let _ = state.app_state.pending_profile_update.lock().unwrap().take();
-        log::warn!("AUTO-APPROVE (dev): profile update approved headlessly");
-        true
+        log::warn!(
+            "AUTO-{} (dev): profile update resolved headlessly",
+            if test_deny { "DENY" } else { "APPROVE" }
+        );
+        !test_deny
     } else {
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
             Ok(Ok(result)) => result,
@@ -2470,6 +2555,7 @@ async fn profile_update_core(
     }
 
     set_job_stage(&state, &job_id, "publishing");
+    let _commit_guard = state.commit_serial.lock().await;
     // Write the sealed record(s): display name lives on "user_profile",
     // the picture on "profile_picture" (v1.11 shapes, sealed in v2).
     let now_us = (unix_now() as i64) * 1_000_000;
@@ -2631,6 +2717,7 @@ async fn cell_op_approval(
     op: &str,
     origin: Option<String>,
     detail: Option<String>,
+    test_deny: bool,
 ) -> Result<(), (StatusCode, Json<IpcError>)> {
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
     let request_id = format!("{}-{}", op, unix_now());
@@ -2657,7 +2744,20 @@ async fn cell_op_approval(
 
     if auto_approve_enabled() {
         let _ = state.app_state.pending_cell_op.lock().unwrap().take();
-        log::warn!("AUTO-APPROVE (dev): {} approved headlessly", op);
+        log::warn!(
+            "AUTO-{} (dev): {} resolved headlessly",
+            if test_deny { "DENY" } else { "APPROVE" },
+            op
+        );
+        if test_deny {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "user_denied".into(),
+                    description: Some("User rejected the request.".into()),
+                }),
+            ));
+        }
         return Ok(());
     }
     match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
@@ -2698,6 +2798,7 @@ async fn cell_op_gate(
     origin: Option<&str>,
     action_hash_hex: &str,
     reason: &str,
+    job_id: &Option<String>,
 ) -> Result<(), (StatusCode, Json<IpcError>)> {
     if !is_flowsta_origin(origin) {
         return Err((
@@ -2721,12 +2822,15 @@ async fn cell_op_gate(
         ));
     }
     if state.app_state.vault_config.lock().unwrap().is_none() {
+        set_job_stage(state, job_id, "waiting_unlock");
         raise_window(&state.app_handle);
         let _ = state.app_handle.emit(
             "unlock-attention",
             serde_json::json!({ "reason": reason, "origin": origin }),
         );
-        let unlocked = wait_for_unlock(&state.app_state, 60).await;
+        // Jobs hold nothing open, so they can politely wait longer.
+        let unlock_budget = if job_id.is_some() { 180 } else { 60 };
+        let unlocked = wait_for_unlock(&state.app_state, unlock_budget).await;
         let _ = state
             .app_handle
             .emit("unlock-attention-clear", serde_json::json!({}));
@@ -2739,10 +2843,15 @@ async fn cell_op_gate(
                 }),
             ));
         }
+        set_job_stage(state, job_id, "preparing");
     }
     // The operation commits to the signing cell — wait for the conductor
     // before the approval dialog so an approval can always land.
-    if wait_for_conductor(&state.app_state, 90).await.is_none() {
+    let conductor_budget = if job_id.is_some() { 300 } else { 90 };
+    if wait_for_conductor(&state.app_state, conductor_budget)
+        .await
+        .is_none()
+    {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(IpcError {
@@ -2773,14 +2882,21 @@ async fn revoke_signature_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "revoke-signature");
+    let test_deny = test_deny_requested(&headers);
 
     if req.job {
-        let job_id = state.op_jobs.create("revoke");
+        let fingerprint = format!("revoke|{}", req.action_hash);
+        let (job_id, joined) = state.op_jobs.create_or_join("revoke", &fingerprint);
+        if joined {
+            return Ok(axum::response::IntoResponse::into_response(Json(
+                serde_json::json!({ "job_id": job_id }),
+            )));
+        }
         let task_state = state.clone();
         let task_origin = origin.clone();
         let task_job = job_id.clone();
         tokio::spawn(async move {
-            match revoke_signature_core(task_state.clone(), task_origin, req, Some(task_job.clone())).await {
+            match revoke_signature_core(task_state.clone(), task_origin, req, Some(task_job.clone()), test_deny).await {
                 Ok(v) => task_state.op_jobs.finish(&task_job, v),
                 Err((_, Json(e))) => task_state.op_jobs.fail(
                     &task_job,
@@ -2793,7 +2909,7 @@ async fn revoke_signature_handler(
             serde_json::json!({ "job_id": job_id }),
         )));
     }
-    revoke_signature_core(state, origin, req, None)
+    revoke_signature_core(state, origin, req, None, test_deny)
         .await
         .map(|v| axum::response::IntoResponse::into_response(Json(v)))
 }
@@ -2803,9 +2919,10 @@ async fn revoke_signature_core(
     origin: Option<String>,
     req: RevokeSignatureRequest,
     job_id: Option<String>,
+    test_deny: bool,
 ) -> Result<serde_json::Value, (StatusCode, Json<IpcError>)> {
     set_job_stage(&state, &job_id, "preparing");
-    cell_op_gate(&state, origin.as_deref(), &req.action_hash, "revoke").await?;
+    cell_op_gate(&state, origin.as_deref(), &req.action_hash, "revoke", &job_id).await?;
 
     if let Some(ref r) = req.reason {
         if r.len() > 280 {
@@ -2820,9 +2937,10 @@ async fn revoke_signature_core(
     }
 
     set_job_stage(&state, &job_id, "awaiting_approval");
-    cell_op_approval(&state, "revoke", origin.clone(), req.reason.clone()).await?;
+    cell_op_approval(&state, "revoke", origin.clone(), req.reason.clone(), test_deny).await?;
 
     set_job_stage(&state, &job_id, "publishing");
+    let _commit_guard = state.commit_serial.lock().await;
     let revocation = crate::commands::revoke_signature_inner(
         &state.app_state,
         req.action_hash.clone(),
@@ -2860,14 +2978,21 @@ async fn set_thumbnail_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "set-thumbnail");
+    let test_deny = test_deny_requested(&headers);
 
     if req.job {
-        let job_id = state.op_jobs.create("thumbnail");
+        let fingerprint = format!("thumbnail|{}", req.action_hash);
+        let (job_id, joined) = state.op_jobs.create_or_join("thumbnail", &fingerprint);
+        if joined {
+            return Ok(axum::response::IntoResponse::into_response(Json(
+                serde_json::json!({ "job_id": job_id }),
+            )));
+        }
         let task_state = state.clone();
         let task_origin = origin.clone();
         let task_job = job_id.clone();
         tokio::spawn(async move {
-            match set_thumbnail_core(task_state.clone(), task_origin, req, Some(task_job.clone())).await {
+            match set_thumbnail_core(task_state.clone(), task_origin, req, Some(task_job.clone()), test_deny).await {
                 Ok(v) => task_state.op_jobs.finish(&task_job, v),
                 Err((_, Json(e))) => task_state.op_jobs.fail(
                     &task_job,
@@ -2880,7 +3005,7 @@ async fn set_thumbnail_handler(
             serde_json::json!({ "job_id": job_id }),
         )));
     }
-    set_thumbnail_core(state, origin, req, None)
+    set_thumbnail_core(state, origin, req, None, test_deny)
         .await
         .map(|v| axum::response::IntoResponse::into_response(Json(v)))
 }
@@ -2890,9 +3015,10 @@ async fn set_thumbnail_core(
     origin: Option<String>,
     req: SetThumbnailRequest,
     job_id: Option<String>,
+    test_deny: bool,
 ) -> Result<serde_json::Value, (StatusCode, Json<IpcError>)> {
     set_job_stage(&state, &job_id, "preparing");
-    cell_op_gate(&state, origin.as_deref(), &req.action_hash, "thumbnail").await?;
+    cell_op_gate(&state, origin.as_deref(), &req.action_hash, "thumbnail", &job_id).await?;
 
     if !req.thumbnail.starts_with("data:image/") || req.thumbnail.len() > 300_000 {
         return Err((
@@ -2905,9 +3031,10 @@ async fn set_thumbnail_core(
     }
 
     set_job_stage(&state, &job_id, "awaiting_approval");
-    cell_op_approval(&state, "thumbnail", origin.clone(), None).await?;
+    cell_op_approval(&state, "thumbnail", origin.clone(), None, test_deny).await?;
 
     set_job_stage(&state, &job_id, "publishing");
+    let _commit_guard = state.commit_serial.lock().await;
     let thumb_hash = crate::commands::set_thumbnail_inner(
         &state.app_state,
         req.action_hash.clone(),
@@ -2959,23 +3086,44 @@ struct OpJob {
 }
 
 #[derive(Default)]
+struct OpJobsInner {
+    jobs: HashMap<String, OpJob>,
+    /// Fingerprint of each still-running job → its job_id. A resubmit of an
+    /// identical request (double-click, page retry) joins the in-flight job
+    /// instead of running the operation twice.
+    active: HashMap<String, String>,
+}
+
+#[derive(Default)]
 pub struct OpJobs {
-    jobs: std::sync::Mutex<HashMap<String, OpJob>>,
+    inner: std::sync::Mutex<OpJobsInner>,
 }
 
 const JOB_TTL_SECS: i64 = 10 * 60;
 
 impl OpJobs {
-    fn prune(map: &mut HashMap<String, OpJob>) {
+    fn prune(inner: &mut OpJobsInner) {
         let now = unix_now();
-        map.retain(|_, j| now - j.updated_at < JOB_TTL_SECS);
+        let jobs = &mut inner.jobs;
+        jobs.retain(|_, j| now - j.updated_at < JOB_TTL_SECS);
+        inner.active.retain(|_, id| jobs.contains_key(id));
     }
 
-    pub fn create(&self, op: &str) -> String {
+    /// Create a job — or, when an identical request is already in flight,
+    /// join it. Returns (job_id, joined).
+    pub fn create_or_join(&self, op: &str, fingerprint: &str) -> (String, bool) {
+        let mut inner = self.inner.lock().unwrap();
+        Self::prune(&mut inner);
+        if let Some(existing) = inner.active.get(fingerprint) {
+            if let Some(job) = inner.jobs.get(existing) {
+                let stage = job.snapshot.stage.as_str();
+                if stage != "done" && stage != "failed" {
+                    return (existing.clone(), true);
+                }
+            }
+        }
         let job_id = format!("{}-{}-{:x}", op, unix_now(), rand::random::<u32>());
-        let mut map = self.jobs.lock().unwrap();
-        Self::prune(&mut map);
-        map.insert(
+        inner.jobs.insert(
             job_id.clone(),
             OpJob {
                 snapshot: OpJobSnapshot {
@@ -2988,40 +3136,47 @@ impl OpJobs {
                 updated_at: unix_now(),
             },
         );
-        job_id
+        inner.active.insert(fingerprint.to_string(), job_id.clone());
+        (job_id, false)
+    }
+
+    fn release_fingerprint(inner: &mut OpJobsInner, job_id: &str) {
+        inner.active.retain(|_, id| id != job_id);
     }
 
     pub fn set_stage(&self, job_id: &str, stage: &str) {
-        let mut map = self.jobs.lock().unwrap();
-        if let Some(job) = map.get_mut(job_id) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(job) = inner.jobs.get_mut(job_id) {
             job.snapshot.stage = stage.into();
             job.updated_at = unix_now();
         }
     }
 
     pub fn finish(&self, job_id: &str, result: serde_json::Value) {
-        let mut map = self.jobs.lock().unwrap();
-        if let Some(job) = map.get_mut(job_id) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(job) = inner.jobs.get_mut(job_id) {
             job.snapshot.stage = "done".into();
             job.snapshot.result = Some(result);
             job.updated_at = unix_now();
         }
+        Self::release_fingerprint(&mut inner, job_id);
     }
 
     pub fn fail(&self, job_id: &str, error: &str, description: &str) {
-        let mut map = self.jobs.lock().unwrap();
-        if let Some(job) = map.get_mut(job_id) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(job) = inner.jobs.get_mut(job_id) {
             job.snapshot.stage = "failed".into();
             job.snapshot.error = Some(error.into());
             job.snapshot.description = Some(description.into());
             job.updated_at = unix_now();
         }
+        Self::release_fingerprint(&mut inner, job_id);
     }
 
     pub fn snapshot(&self, job_id: &str) -> Option<OpJobSnapshot> {
-        let mut map = self.jobs.lock().unwrap();
-        Self::prune(&mut map);
-        map.get(job_id).map(|j| j.snapshot.clone())
+        let mut inner = self.inner.lock().unwrap();
+        Self::prune(&mut inner);
+        inner.jobs.get(job_id).map(|j| j.snapshot.clone())
     }
 }
 
@@ -3112,6 +3267,118 @@ async fn signatures_handler(
     )))
 }
 
+// ── Dev-only lock/unlock — headless test harness support ───────────────────
+//
+// The operation matrix needs to drive the locked and cold-start legs
+// without a human at the keyboard. Both endpoints are inert unless the
+// dev auto-approve flag is active (and compile-gated out of release via
+// auto_approve_enabled always returning false there). /dev/lock stashes
+// the in-memory passphrase so /dev/unlock can re-unlock — no secret is
+// ever transmitted or logged.
+
+async fn dev_lock_handler(
+    State(state): State<Arc<IpcState>>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError {
+                error: "not_found".into(),
+                description: None,
+            }),
+        ));
+    }
+    // Stash the unlock passphrase before lock_vault_inner zeroes it.
+    let pass = {
+        let mut guard = state.app_state.unlock_passphrase.lock().unwrap();
+        guard.as_mut().map(|locked| locked.lock().to_vec())
+    };
+    if let Some(p) = pass {
+        *state.app_state.dev_relock_passphrase.lock().unwrap() =
+            Some(lair_keystore_api::dependencies::sodoken::LockedArray::from(p));
+    }
+    crate::commands::lock_vault_inner(&state.app_state).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError {
+                error: "lock_failed".into(),
+                description: Some(e),
+            }),
+        )
+    })?;
+    log::warn!("DEV: vault locked via /dev/lock");
+    let _ = state.app_handle.emit("dev-vault-locked", serde_json::json!({}));
+    Ok(axum::response::IntoResponse::into_response(Json(
+        serde_json::json!({ "success": true }),
+    )))
+}
+
+async fn dev_unlock_handler(
+    State(state): State<Arc<IpcState>>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError {
+                error: "not_found".into(),
+                description: None,
+            }),
+        ));
+    }
+    let pass = {
+        let mut guard = state.app_state.dev_relock_passphrase.lock().unwrap();
+        guard.as_mut().map(|locked| locked.lock().to_vec())
+    };
+    let Some(pass_bytes) = pass else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(IpcError {
+                error: "no_stashed_passphrase".into(),
+                description: Some("Lock via /dev/lock first (in this session).".into()),
+            }),
+        ));
+    };
+    let password = String::from_utf8(pass_bytes).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError {
+                error: "internal_error".into(),
+                description: Some("Stashed passphrase is not valid UTF-8.".into()),
+            }),
+        )
+    })?;
+    let app_handle = state.app_handle.clone();
+    let app_state = state.app_state.clone();
+    // The vault KDF is deliberately slow — keep it off the async runtime.
+    let result = tokio::task::spawn_blocking(move || {
+        crate::commands::unlock_vault_inner(password, app_handle, &app_state)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError {
+                error: "internal_error".into(),
+                description: Some(format!("Unlock task failed: {}", e)),
+            }),
+        )
+    })?
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError {
+                error: "unlock_failed".into(),
+                description: Some(e),
+            }),
+        )
+    })?;
+    log::warn!("DEV: vault unlocked via /dev/unlock");
+    let _ = state.app_handle.emit("dev-vault-unlocked", serde_json::json!({}));
+    Ok(axum::response::IntoResponse::into_response(Json(
+        serde_json::json!({ "success": true, "agent_pub_key": result.agent_pub_key }),
+    )))
+}
+
 /// Simple timestamp to ISO 8601 string (avoids adding chrono dependency).
 fn chrono_lite(unix_secs: i64) -> String {
     let secs = unix_secs as u64;
@@ -3156,6 +3423,7 @@ pub async fn start_ipc_server(
         app_state,
         app_handle,
         op_jobs: OpJobs::default(),
+        commit_serial: tokio::sync::Mutex::new(()),
     });
 
     // CORS: deliberately permissive. Third-party desktop apps use varied
@@ -3189,6 +3457,10 @@ pub async fn start_ipc_server(
         .route("/backup/list", get(backup_list_handler))
         .route("/backup/retrieve", post(backup_retrieve_handler))
         .route("/backup/delete", post(backup_delete_handler))
+        // Dev-only harness endpoints: 404 unless the auto-approve flag is
+        // active in a debug build (never active in release).
+        .route("/dev/lock", post(dev_lock_handler))
+        .route("/dev/unlock", post(dev_unlock_handler))
         .layer(cors)
         .with_state(ipc_state);
 
@@ -3216,7 +3488,38 @@ pub async fn start_ipc_server(
 
 #[cfg(test)]
 mod tests {
-    use super::is_flowsta_origin;
+    use super::{is_flowsta_origin, OpJobs};
+
+    #[test]
+    fn test_job_coalescing() {
+        let jobs = OpJobs::default();
+
+        // Identical in-flight request joins the same job.
+        let (a, joined_a) = jobs.create_or_join("sign", "sign|abc|true|");
+        let (b, joined_b) = jobs.create_or_join("sign", "sign|abc|true|");
+        assert!(!joined_a);
+        assert!(joined_b);
+        assert_eq!(a, b);
+
+        // A different request gets its own job.
+        let (c, joined_c) = jobs.create_or_join("sign", "sign|def|true|");
+        assert!(!joined_c);
+        assert_ne!(a, c);
+
+        // Once finished, the same fingerprint starts a NEW job (the old
+        // result stays pollable by its id).
+        jobs.finish(&a, serde_json::json!({ "success": true }));
+        let (d, joined_d) = jobs.create_or_join("sign", "sign|abc|true|");
+        assert!(!joined_d);
+        assert_ne!(a, d);
+        assert_eq!(jobs.snapshot(&a).unwrap().stage, "done");
+
+        // Failure also releases the fingerprint.
+        jobs.fail(&c, "user_denied", "");
+        let (e, joined_e) = jobs.create_or_join("sign", "sign|def|true|");
+        assert!(!joined_e);
+        assert_ne!(c, e);
+    }
 
     #[test]
     fn test_flowsta_origin_gate() {
