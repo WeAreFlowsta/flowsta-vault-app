@@ -1720,6 +1720,23 @@ struct SignDocumentRequest {
     commit: bool,
 }
 
+/// Wait for the vault to be unlocked, up to `secs`. Used by Flowsta-page
+/// requests that arrive while locked: instead of failing immediately, the
+/// request rides through the unlock and its approval dialog appears the
+/// moment the user is in — no second attempt needed from the web page.
+async fn wait_for_unlock(state: &Arc<AppState>, secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if state.vault_config.lock().unwrap().is_some() {
+            return true;
+        }
+        if std::time::Instant::now() > deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
 /// Publishing to the user's own signing cell is a Flowsta-surface
 /// capability: only pages on flowsta.com (or its subdomains) may request
 /// it. Signature-only requests stay available to every app, dialog-gated.
@@ -1756,14 +1773,20 @@ async fn sign_document_handler(
     track_request(&state.app_state, origin.as_deref(), "sign-document");
 
     // 1. Verify vault is unlocked. For Flowsta pages, surface the locked
-    // vault instead of failing quietly — the user is mid-action on the
-    // dashboard and needs to see the unlock screen.
-    {
-        let config = state.app_state.vault_config.lock().unwrap();
-        if config.is_none() {
-            if is_flowsta_origin(origin.as_deref()) {
-                raise_window(&state.app_handle);
-            }
+    // vault and WAIT through the unlock — the approval dialog then appears
+    // immediately and the page's original click completes on its own.
+    let locked = state.app_state.vault_config.lock().unwrap().is_none();
+    if locked {
+        let flowsta = is_flowsta_origin(origin.as_deref());
+        if flowsta {
+            raise_window(&state.app_handle);
+            let _ = state.app_handle.emit(
+                "unlock-attention",
+                serde_json::json!({ "reason": "sign", "origin": origin }),
+            );
+        }
+        if !flowsta || !wait_for_unlock(&state.app_state, 60).await {
+            let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(IpcError {
@@ -1772,6 +1795,7 @@ async fn sign_document_handler(
                 }),
             ));
         }
+        let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
     }
 
     // 2. Validate file_hash is valid hex and 32 bytes
@@ -2086,10 +2110,15 @@ async fn profile_update_handler(
             }),
         ));
     }
-    {
-        let config = state.app_state.vault_config.lock().unwrap();
-        if config.is_none() {
-            raise_window(&state.app_handle);
+    if state.app_state.vault_config.lock().unwrap().is_none() {
+        raise_window(&state.app_handle);
+        let _ = state.app_handle.emit(
+            "unlock-attention",
+            serde_json::json!({ "reason": "profile", "origin": origin }),
+        );
+        let unlocked = wait_for_unlock(&state.app_state, 60).await;
+        let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
+        if !unlocked {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(IpcError {

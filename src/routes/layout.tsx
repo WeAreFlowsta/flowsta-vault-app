@@ -268,6 +268,9 @@ export default component$(() => {
     ip_prefix: string | null;
     expires_in: number;
   } | null>(null);
+  // Set while a Flowsta page's request (sign / profile) is waiting behind
+  // the lock screen — its approval dialog appears the moment we unlock.
+  const unlockAttention = useSignal<{ reason: string; origin: string | null } | null>(null);
   const relayCodeModal = useSignal(false);
   const relayCodeInput = useSignal("");
   const relayBusy = useSignal(false);
@@ -463,11 +466,22 @@ export default component$(() => {
     const unlistenPublished = listen("signature-published", () => {
       refreshSignatures();
     });
+    const unlistenAttention = listen<{ reason: string; origin: string | null }>(
+      "unlock-attention",
+      (event) => {
+        unlockAttention.value = event.payload;
+      },
+    );
+    const unlistenAttentionClear = listen("unlock-attention-clear", () => {
+      unlockAttention.value = null;
+    });
 
     cleanup(() => {
       unlistenPromise.then((unlisten) => unlisten());
       unlistenProfile.then((unlisten) => unlisten());
       unlistenPublished.then((unlisten) => unlisten());
+      unlistenAttention.then((unlisten) => unlisten());
+      unlistenAttentionClear.then((unlisten) => unlisten());
     });
   });
 
@@ -884,6 +898,17 @@ export default component$(() => {
   if (screen.value === "unlock") {
     return (
       <>
+        {unlockAttention.value && (
+          <div class="fixed top-0 inset-x-0 z-50 bg-amber-500/15 border-b border-amber-500/40 px-4 py-3 text-center">
+            <p class="text-sm text-amber-200">
+              {unlockAttention.value.origin || "A Flowsta page"} is waiting to
+              {unlockAttention.value.reason === "profile"
+                ? " update your profile"
+                : " sign a file"}{" "}
+              — unlock your Vault to review and approve it.
+            </p>
+          </div>
+        )}
         {queuedRelayCode.value && (
           <div class="fixed top-0 inset-x-0 z-50 bg-amber-500/15 border-b border-amber-500/40 px-4 py-3 text-center">
             <p class="text-sm text-amber-200">
