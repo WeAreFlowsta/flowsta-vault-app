@@ -1923,17 +1923,26 @@ async fn sign_document_handler(
 
     // When publishing, make sure the conductor is up BEFORE asking for
     // approval — an approval must always be able to commit. (It spawns on
-    // unlock; right after a restart it can need a minute.)
-    if req.commit && wait_for_conductor(&state.app_state, 90).await.is_none() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(IpcError {
-                error: "conductor_not_ready".into(),
-                description: Some(
-                    "Your Vault is still starting up — try again in a moment.".into(),
-                ),
-            }),
-        ));
+    // unlock; right after a restart it can need a minute.) The UI shows a
+    // visible "preparing" banner for the whole wait.
+    if req.commit {
+        let _ = state.app_handle.emit(
+            "op-pending",
+            serde_json::json!({ "op": "sign", "origin": origin }),
+        );
+        let ready = wait_for_conductor(&state.app_state, 90).await.is_some();
+        let _ = state.app_handle.emit("op-pending-clear", serde_json::json!({}));
+        if !ready {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(IpcError {
+                    error: "conductor_not_ready".into(),
+                    description: Some(
+                        "Your Vault is still starting up — try again in a moment.".into(),
+                    ),
+                }),
+            ));
+        }
     }
 
     // 4. Create oneshot channel for user approval

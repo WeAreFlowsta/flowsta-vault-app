@@ -241,6 +241,10 @@ export default component$(() => {
     amends?: boolean;
   } | null>(null);
 
+  // A Flowsta page's committing request is waiting for the conductor —
+  // show a visible preparing state instead of dead air before the dialog.
+  const opPending = useSignal<{ op: string; origin: string | null } | null>(null);
+
   // Signature-management approval (dashboard delegating revoke/thumbnail)
   const pendingCellOp = useSignal<{
     id: string;
@@ -485,6 +489,15 @@ export default component$(() => {
     const unlistenAttentionClear = listen("unlock-attention-clear", () => {
       unlockAttention.value = null;
     });
+    const unlistenOpPending = listen<{ op: string; origin: string | null }>(
+      "op-pending",
+      (event) => {
+        opPending.value = event.payload;
+      },
+    );
+    const unlistenOpPendingClear = listen("op-pending-clear", () => {
+      opPending.value = null;
+    });
     const unlistenCellOp = listen<{
       id: string;
       op: string;
@@ -501,6 +514,8 @@ export default component$(() => {
       unlistenAttention.then((unlisten) => unlisten());
       unlistenAttentionClear.then((unlisten) => unlisten());
       unlistenCellOp.then((unlisten) => unlisten());
+      unlistenOpPending.then((unlisten) => unlisten());
+      unlistenOpPendingClear.then((unlisten) => unlisten());
     });
   });
 
@@ -1537,6 +1552,16 @@ export default component$(() => {
       )}
 
       {/* Document sign approval dialog (Sign It) */}
+      {opPending.value && (
+        <div class="fixed top-0 inset-x-0 z-40 bg-sky-500/15 border-b border-sky-500/40 px-4 py-2.5 text-center">
+          <p class="text-sm text-sky-200">
+            <span class="mr-2 inline-block h-3 w-3 animate-spin rounded-full border-2 border-sky-300 border-t-transparent align-middle"></span>
+            {opPending.value.origin || "A Flowsta page"} is waiting to sign —
+            preparing your Vault…
+          </p>
+        </div>
+      )}
+
       {pendingCellOp.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
