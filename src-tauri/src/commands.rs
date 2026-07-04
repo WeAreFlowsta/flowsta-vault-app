@@ -3958,17 +3958,53 @@ pub(crate) async fn set_thumbnail_inner(
     let payload_mp = rmp_serde::to_vec_named(&payload)
         .map_err(|e| format!("MessagePack: {}", e))?;
 
-    let result = app_ws.call_zome(
-        ZomeCallTarget::RoleName(role_name.into()),
-        "signing".into(),
-        "set_thumbnail".into(),
-        ExternIO::from(payload_mp),
-    ).await.map_err(|e| format!("set_thumbnail zome call: {}", e))?;
-
-    let thumb_hash = hex::encode(result.as_bytes());
-    log::info!("Thumbnail set on DHT, hash: {}", thumb_hash);
-
-    Ok(thumb_hash)
+    // The zome opens with a NETWORK link lookup on the signature's DHT
+    // neighborhood; on a cold vault that query can time out ("response
+    // channel dropped"). The first attempt warms the path, so retry the
+    // transient network timeouts a couple of times before giving up.
+    // (Durable fix is zome-side: that lookup only ever finds self-authored
+    // links and should read locally — rides the next signing-DNA rev.)
+    let mut last_err = String::new();
+    for attempt in 1..=3u32 {
+        let started = std::time::Instant::now();
+        match app_ws
+            .call_zome(
+                ZomeCallTarget::RoleName(role_name.clone().into()),
+                "signing".into(),
+                "set_thumbnail".into(),
+                ExternIO::from(payload_mp.clone()),
+            )
+            .await
+        {
+            Ok(result) => {
+                let thumb_hash = hex::encode(result.as_bytes());
+                log::info!(
+                    "Thumbnail set on DHT in {:?} (attempt {}), hash: {}",
+                    started.elapsed(),
+                    attempt,
+                    thumb_hash
+                );
+                return Ok(thumb_hash);
+            }
+            Err(e) => {
+                last_err = format!("{}", e);
+                let transient = last_err.contains("response timeout")
+                    || last_err.contains("channel dropped")
+                    || last_err.contains("chain head has moved");
+                log::warn!(
+                    "set_thumbnail attempt {}/3 failed after {:?}: {}",
+                    attempt,
+                    started.elapsed(),
+                    last_err
+                );
+                if !transient || attempt == 3 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
+    }
+    Err(format!("set_thumbnail zome call: {}", last_err))
 }
 
 /// Commit a SignatureRecord to the signing DNA via the local conductor.
