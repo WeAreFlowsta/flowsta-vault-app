@@ -1748,6 +1748,26 @@ async fn wait_for_unlock(state: &Arc<AppState>, secs: u64) -> bool {
     }
 }
 
+/// Wait for the conductor to come up, up to `secs`. The conductor spawns
+/// on unlock and takes a while on a fresh start — a request that rode
+/// through the unlock would otherwise approve and then fail to commit.
+async fn wait_for_conductor(state: &Arc<AppState>, secs: u64) -> Option<(u16, u16)> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let ports = {
+            let handle = state.conductor_handle.lock().unwrap();
+            handle.as_ref().map(|h| (h.admin_port, h.app_port))
+        };
+        if ports.is_some() {
+            return ports;
+        }
+        if std::time::Instant::now() > deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 /// Publishing to the user's own signing cell is a Flowsta-surface
 /// capability: only pages on flowsta.com (or its subdomains) may request
 /// it. Signature-only requests stay available to every app, dialog-gated.
@@ -1901,6 +1921,21 @@ async fn sign_document_handler(
         origin.clone().unwrap_or_else(|| "Unknown app".to_string())
     });
 
+    // When publishing, make sure the conductor is up BEFORE asking for
+    // approval — an approval must always be able to commit. (It spawns on
+    // unlock; right after a restart it can need a minute.)
+    if req.commit && wait_for_conductor(&state.app_state, 90).await.is_none() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(IpcError {
+                error: "conductor_not_ready".into(),
+                description: Some(
+                    "Your Vault is still starting up — try again in a moment.".into(),
+                ),
+            }),
+        ));
+    }
+
     // 4. Create oneshot channel for user approval
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
     let request_id = format!("sign-{}", unix_now());
@@ -2027,11 +2062,8 @@ async fn sign_document_handler(
     // signature-only response: the calling page treats the action hash as
     // proof the signature exists on the network.
     let action_hash = if req.commit {
-        let conductor_ports = {
-            let conductor = state.app_state.conductor_handle.lock().unwrap();
-            conductor.as_ref().map(|h| (h.admin_port, h.app_port))
-        };
-        let Some((admin_port, app_port)) = conductor_ports else {
+        let Some((admin_port, app_port)) = wait_for_conductor(&state.app_state, 30).await
+        else {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(IpcError {
@@ -2224,6 +2256,20 @@ async fn profile_update_handler(
             Json(IpcError {
                 error: "nothing_to_update".into(),
                 description: Some("Provide display_name and/or profile_picture.".into()),
+            }),
+        ));
+    }
+
+    // The write needs the conductor — make sure it's up BEFORE asking for
+    // approval so an approval can always land.
+    if wait_for_conductor(&state.app_state, 90).await.is_none() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(IpcError {
+                error: "conductor_not_ready".into(),
+                description: Some(
+                    "Your Vault is still starting up — try again in a moment.".into(),
+                ),
             }),
         ));
     }
@@ -2551,6 +2597,19 @@ async fn cell_op_gate(
                 }),
             ));
         }
+    }
+    // The operation commits to the signing cell — wait for the conductor
+    // before the approval dialog so an approval can always land.
+    if wait_for_conductor(&state.app_state, 90).await.is_none() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(IpcError {
+                error: "conductor_not_ready".into(),
+                description: Some(
+                    "Your Vault is still starting up — try again in a moment.".into(),
+                ),
+            }),
+        ));
     }
     Ok(())
 }
