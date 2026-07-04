@@ -3653,7 +3653,20 @@ async fn get_my_linked_signatures_inner(
     // partial display. Return Err so the frontend retries; the
     // `profile-synced` event fires the next refresh once auto-link
     // is done.
-    if cached_web_key.is_none() {
+    //
+    // Device-hosted vaults never auto-link (there is no web account to
+    // link against), so the race doesn't exist for them — waiting here
+    // would keep the signatures view on "loading" forever. They resolve
+    // linked agents purely through the identity DNA's link graph (which
+    // is how a migrated account still sees its pre-upgrade signatures).
+    let device_hosted = {
+        let config = state.vault_config.lock().unwrap();
+        config
+            .as_ref()
+            .map(|c| c.hosting_model.as_deref() == Some("device-hosted"))
+            .unwrap_or(false)
+    };
+    if cached_web_key.is_none() && !device_hosted {
         return Err("auto-link not yet complete (cached web agent key unset)".to_string());
     }
     let linked_keys = fetch_linked_agent_keys(&admin_ws, app_port, &apps, cached_web_key).await;
@@ -4253,6 +4266,14 @@ pub fn read_quota_cache(state: State<'_, Arc<AppState>>) -> Result<Option<crate:
 #[tauri::command]
 pub async fn sync_quota_to_server(
     state: State<'_, Arc<AppState>>,
+    api_url: String,
+    count: u32,
+) -> Result<bool, String> {
+    sync_quota_to_server_inner(state.inner(), api_url, count).await
+}
+
+pub(crate) async fn sync_quota_to_server_inner(
+    state: &Arc<AppState>,
     api_url: String,
     count: u32,
 ) -> Result<bool, String> {

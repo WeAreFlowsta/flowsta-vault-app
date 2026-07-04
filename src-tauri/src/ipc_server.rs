@@ -1755,10 +1755,15 @@ async fn sign_document_handler(
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "sign-document");
 
-    // 1. Verify vault is unlocked
+    // 1. Verify vault is unlocked. For Flowsta pages, surface the locked
+    // vault instead of failing quietly — the user is mid-action on the
+    // dashboard and needs to see the unlock screen.
     {
         let config = state.app_state.vault_config.lock().unwrap();
         if config.is_none() {
+            if is_flowsta_origin(origin.as_deref()) {
+                raise_window(&state.app_handle);
+            }
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(IpcError {
@@ -1988,7 +1993,26 @@ async fn sign_document_handler(
         )
         .await
         {
-            Ok(hash) => Some(hash),
+            Ok(hash) => {
+                // A published signature counts against the sign quota just
+                // like an in-app sign: bump the local cache and push the
+                // count to the server so web quota meters update.
+                if let Err(e) = crate::quota_cache::increment_used(&state.app_state.data_dir) {
+                    log::warn!("Quota cache increment failed (non-fatal): {}", e);
+                }
+                let sync_state = state.app_state.clone();
+                let api_url = option_env!("FLOWSTA_API_URL")
+                    .unwrap_or("https://auth-api.flowsta.com")
+                    .to_string();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        crate::commands::sync_quota_to_server_inner(&sync_state, api_url, 1).await
+                    {
+                        log::warn!("Quota sync after published sign failed (non-fatal): {}", e);
+                    }
+                });
+                Some(hash)
+            }
             Err(e) => {
                 log::error!("Web-delegated signature publish failed: {}", e);
                 return Err((
@@ -2059,6 +2083,7 @@ async fn profile_update_handler(
     {
         let config = state.app_state.vault_config.lock().unwrap();
         if config.is_none() {
+            raise_window(&state.app_handle);
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(IpcError {
