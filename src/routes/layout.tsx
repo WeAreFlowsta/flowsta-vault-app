@@ -240,6 +240,14 @@ export default component$(() => {
     commit?: boolean;
   } | null>(null);
 
+  // Profile-update approval (dashboard delegating a profile write here)
+  const pendingProfileUpdate = useSignal<{
+    id: string;
+    origin: string | null;
+    display_name: string | null;
+    picture_changed: boolean;
+  } | null>(null);
+
   // Generic /sign approval (linked apps signing outside the linking ceremony)
   const pendingRawSign = useSignal<{
     id: string;
@@ -442,9 +450,18 @@ export default component$(() => {
     }>("document-sign-request", (event) => {
       pendingDocumentSign.value = event.payload;
     });
+    const unlistenProfile = listen<{
+      id: string;
+      origin: string | null;
+      display_name: string | null;
+      picture_changed: boolean;
+    }>("profile-update-request", (event) => {
+      pendingProfileUpdate.value = event.payload;
+    });
 
     cleanup(() => {
       unlistenPromise.then((unlisten) => unlisten());
+      unlistenProfile.then((unlisten) => unlisten());
     });
   });
 
@@ -711,6 +728,16 @@ export default component$(() => {
       console.error("Failed to respond to document-sign request:", e);
     } finally {
       pendingDocumentSign.value = null;
+    }
+  });
+
+  const handleProfileUpdateResponse = $(async (approved: boolean) => {
+    try {
+      await invoke("respond_profile_update_request", { approved });
+    } catch (e) {
+      console.error("Failed to respond to profile-update request:", e);
+    } finally {
+      pendingProfileUpdate.value = null;
     }
   });
 
@@ -1450,6 +1477,46 @@ export default component$(() => {
       )}
 
       {/* Document sign approval dialog (Sign It) */}
+      {pendingProfileUpdate.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
+            <h3 class="mb-1 text-base font-semibold text-white">Update Your Profile</h3>
+            <p class="mb-4 text-xs text-gray-400">
+              {pendingProfileUpdate.value.origin || "A Flowsta page"} wants to update
+              the profile stored in your Vault.
+            </p>
+            <div class="mb-4 space-y-2 rounded-lg border border-gray-700 bg-gray-900 p-3">
+              {pendingProfileUpdate.value.display_name && (
+                <div class="flex justify-between">
+                  <span class="text-xs text-gray-500">New display name</span>
+                  <span class="text-xs text-white truncate max-w-[200px]">
+                    {pendingProfileUpdate.value.display_name}
+                  </span>
+                </div>
+              )}
+              {pendingProfileUpdate.value.picture_changed && (
+                <div class="flex justify-between">
+                  <span class="text-xs text-gray-500">Profile picture</span>
+                  <span class="text-xs text-white">will be replaced</span>
+                </div>
+              )}
+            </div>
+            <div class="flex gap-3">
+              <GlassButton
+                variant="secondary"
+                class="flex-1"
+                onClick$={() => handleProfileUpdateResponse(false)}
+              >
+                Deny
+              </GlassButton>
+              <GlassButton class="flex-1" onClick$={() => handleProfileUpdateResponse(true)}>
+                Update
+              </GlassButton>
+            </div>
+          </div>
+        </div>
+      )}
+
       {pendingDocumentSign.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">

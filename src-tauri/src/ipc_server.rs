@@ -2019,6 +2019,307 @@ async fn sign_document_handler(
     Ok(axum::response::IntoResponse::into_response(Json(resp)))
 }
 
+// ── POST /profile-update — web dashboard delegating a profile write ─────────
+//
+// Device-hosted accounts keep their canonical profile in the encrypted
+// private cell on THIS device; the dashboard can't write it server-side.
+// Flowsta pages only (same capability rule as publishing a signature),
+// and every update passes a per-action approval dialog. The dashboard
+// separately refreshes the server's public-profile cache so
+// flowsta.com/<username> keeps working.
+
+#[derive(Deserialize)]
+struct ProfileUpdateRequest {
+    #[serde(default)]
+    display_name: Option<String>,
+    /// Data URI (or https URL) for the profile picture.
+    #[serde(default)]
+    profile_picture: Option<String>,
+}
+
+async fn profile_update_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+    Json(req): Json<ProfileUpdateRequest>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    let origin = extract_origin(&headers);
+    track_request(&state.app_state, origin.as_deref(), "profile-update");
+
+    if !is_flowsta_origin(origin.as_deref()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "tier_forbidden".into(),
+                description: Some(
+                    "Updating the Vault-stored profile is available to Flowsta pages only.".into(),
+                ),
+            }),
+        ));
+    }
+    {
+        let config = state.app_state.vault_config.lock().unwrap();
+        if config.is_none() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "vault_locked".into(),
+                    description: Some("Vault is locked. Unlock it first.".into()),
+                }),
+            ));
+        }
+    }
+
+    let display_name = req
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if let Some(ref name) = display_name {
+        if name.len() > 80 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(IpcError {
+                    error: "invalid_display_name".into(),
+                    description: Some("Display name must be 80 characters or fewer.".into()),
+                }),
+            ));
+        }
+    }
+    let picture = req.profile_picture.filter(|p| !p.is_empty());
+    if let Some(ref p) = picture {
+        let ok_scheme = p.starts_with("data:image/") || p.starts_with("https://");
+        if !ok_scheme || p.len() > 800_000 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(IpcError {
+                    error: "invalid_profile_picture".into(),
+                    description: Some(
+                        "Profile picture must be a data:image/... URI or https URL under 800 KB."
+                            .into(),
+                    ),
+                }),
+            ));
+        }
+    }
+    if display_name.is_none() && picture.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(IpcError {
+                error: "nothing_to_update".into(),
+                description: Some("Provide display_name and/or profile_picture.".into()),
+            }),
+        ));
+    }
+
+    // Per-action approval — no silent writes into the user's cell.
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    let request_id = format!("profile-{}", unix_now());
+    {
+        let mut pending = state.app_state.pending_profile_update.lock().unwrap();
+        *pending = Some(crate::commands::PendingProfileUpdateRequest {
+            id: request_id.clone(),
+            origin: origin.clone(),
+            display_name: display_name.clone(),
+            picture_changed: picture.is_some(),
+            responder: tx,
+        });
+    }
+    raise_window(&state.app_handle);
+    let _ = state.app_handle.emit(
+        "profile-update-request",
+        serde_json::json!({
+            "id": request_id,
+            "origin": origin,
+            "display_name": display_name,
+            "picture_changed": picture.is_some(),
+        }),
+    );
+
+    let approved = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(IpcError {
+                    error: "internal_error".into(),
+                    description: Some("Approval channel closed unexpectedly.".into()),
+                }),
+            ));
+        }
+        Err(_) => {
+            let mut pending = state.app_state.pending_profile_update.lock().unwrap();
+            *pending = None;
+            return Err((
+                StatusCode::REQUEST_TIMEOUT,
+                Json(IpcError {
+                    error: "timeout".into(),
+                    description: Some("User did not respond within 60 seconds.".into()),
+                }),
+            ));
+        }
+    };
+    if !approved {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "user_denied".into(),
+                description: Some("User rejected the profile update.".into()),
+            }),
+        ));
+    }
+
+    // Write the sealed record(s): display name lives on "user_profile",
+    // the picture on "profile_picture" (v1.11 shapes, sealed in v2).
+    let now_us = (unix_now() as i64) * 1_000_000;
+    let now_ms = (unix_now() as u64) * 1000;
+    let existing = crate::sealed::sealed_list_inner(&state.app_state)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(IpcError {
+                    error: "conductor_not_ready".into(),
+                    description: Some(format!(
+                        "Your Vault is still starting up ({}) — try again in a moment.",
+                        e
+                    )),
+                }),
+            )
+        })?;
+
+    let store_err = |e: String| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError {
+                error: "write_failed".into(),
+                description: Some(format!("Profile write failed: {}", e)),
+            }),
+        )
+    };
+
+    if let Some(ref name) = display_name {
+        // Newest-first ordering from sealed_list — the first match is live.
+        let current = existing.iter().find(|r| r.entry_type == "user_profile");
+        match current {
+            Some(record) => {
+                let mut body = record.body.clone();
+                body["display_name"] = serde_json::json!(name);
+                body["updated_at"] = serde_json::json!(now_us);
+                crate::sealed::sealed_replace_inner(
+                    &state.app_state,
+                    &record.action_hash,
+                    "user_profile".into(),
+                    body,
+                    record.refs.clone(),
+                    record.created_at,
+                )
+                .await
+                .map_err(store_err)?;
+            }
+            None => {
+                let email = {
+                    let config = state.app_state.vault_config.lock().unwrap();
+                    config
+                        .as_ref()
+                        .and_then(|c| c.web_email.clone())
+                        .unwrap_or_default()
+                };
+                crate::sealed::sealed_store_inner(
+                    &state.app_state,
+                    "user_profile".into(),
+                    serde_json::json!({
+                        "email": email,
+                        "username": null,
+                        "display_name": name,
+                        "created_at": now_us,
+                        "updated_at": now_us,
+                    }),
+                    Vec::new(),
+                    now_ms,
+                )
+                .await
+                .map_err(store_err)?;
+            }
+        }
+    }
+
+    if let Some(ref pic) = picture {
+        let body = serde_json::json!({
+            "profile_picture": pic,
+            "has_custom_picture": true,
+            "updated_at": now_us,
+        });
+        let current = existing.iter().find(|r| r.entry_type == "profile_picture");
+        match current {
+            Some(record) => {
+                crate::sealed::sealed_replace_inner(
+                    &state.app_state,
+                    &record.action_hash,
+                    "profile_picture".into(),
+                    body,
+                    record.refs.clone(),
+                    record.created_at,
+                )
+                .await
+                .map_err(store_err)?;
+            }
+            None => {
+                crate::sealed::sealed_store_inner(
+                    &state.app_state,
+                    "profile_picture".into(),
+                    body,
+                    Vec::new(),
+                    now_ms,
+                )
+                .await
+                .map_err(store_err)?;
+            }
+        }
+    }
+
+    // Mirror into the vault config so the app's own UI shows the change
+    // immediately; persist with the cached unlock passphrase (best-effort —
+    // the sealed records above are the canonical store).
+    {
+        let passphrase = {
+            let mut guard = state.app_state.unlock_passphrase.lock().unwrap();
+            guard
+                .as_mut()
+                .and_then(|locked| String::from_utf8(locked.lock().to_vec()).ok())
+        };
+        let mut config = state.app_state.vault_config.lock().unwrap();
+        if let Some(cfg) = config.as_mut() {
+            if let Some(ref name) = display_name {
+                cfg.display_name = Some(name.clone());
+            }
+            if let Some(ref pic) = picture {
+                cfg.profile_picture = Some(pic.clone());
+            }
+            if let Some(pw) = passphrase {
+                let vault_path = state.app_state.vault_path.lock().unwrap().clone();
+                match crate::vault::encrypt_vault(cfg, &pw) {
+                    Ok(mut encrypted) => {
+                        encrypted.display_email =
+                            cfg.web_email.clone().or(cfg.web_username.clone());
+                        if let Err(e) = crate::vault::save_vault(&vault_path, &encrypted) {
+                            log::warn!("Profile config persist failed (non-fatal): {}", e);
+                        }
+                    }
+                    Err(e) => log::warn!("Profile config encrypt failed (non-fatal): {}", e),
+                }
+            }
+        }
+    }
+
+    let _ = state
+        .app_handle
+        .emit("profile-updated", serde_json::json!({}));
+    Ok(axum::response::IntoResponse::into_response(Json(
+        serde_json::json!({ "success": true }),
+    )))
+}
+
 /// Simple timestamp to ISO 8601 string (avoids adding chrono dependency).
 fn chrono_lite(unix_secs: i64) -> String {
     let secs = unix_secs as u64;
@@ -2084,6 +2385,7 @@ pub async fn start_ipc_server(
         .route("/authenticate", post(authenticate_handler))
         .route("/link-identity", post(link_identity_handler))
         .route("/sign-document", post(sign_document_handler))
+        .route("/profile-update", post(profile_update_handler))
         .route("/revoke-identity", post(revoke_identity_handler))
         .route("/link-status", get(link_status_handler))
         .route("/backup", post(backup_handler))

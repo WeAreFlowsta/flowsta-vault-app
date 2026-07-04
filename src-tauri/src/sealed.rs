@@ -284,6 +284,72 @@ pub async fn sealed_list(state: State<'_, Arc<AppState>>) -> Result<Vec<SealedLi
     sealed_list_inner(&state).await
 }
 
+/// Supersede an existing sealed record with new content (seal → replace →
+/// tombstone the original, atomically zome-side). `original_hash_hex` is
+/// the hex 39-byte action hash from sealed_list.
+pub(crate) async fn sealed_replace_inner(
+    state: &Arc<AppState>,
+    original_hash_hex: &str,
+    entry_type: String,
+    body: serde_json::Value,
+    refs: Vec<String>,
+    created_at: u64,
+) -> Result<String, String> {
+    use holochain_client::ZomeCallTarget;
+    use holochain_types::prelude::{ActionHash, ExternIO, Record};
+
+    let original_bytes =
+        hex::decode(original_hash_hex).map_err(|_| "Bad action hash encoding".to_string())?;
+    if original_bytes.len() != 39 {
+        return Err(format!(
+            "Action hash is {} bytes, expected 39",
+            original_bytes.len()
+        ));
+    }
+    let original_hash = ActionHash::from_raw_39(original_bytes);
+
+    let (admin_port, app_port) = conductor_ports(state)?;
+    let data_key = vault_data_key(state)?;
+
+    let payload = SealedPayload {
+        v: SEALED_PAYLOAD_V1,
+        entry_type,
+        created_at,
+        body: rmp_serde::to_vec_named(&body).map_err(|e| e.to_string())?,
+        refs,
+    };
+    let (cipher, nonce) = seal(&payload, &data_key).map_err(|e| e.to_string())?;
+
+    #[derive(Serialize)]
+    struct ReplaceSealedWire {
+        original_hash: ActionHash,
+        replacement: SealedInputWire,
+    }
+    let input = rmp_serde::to_vec_named(&ReplaceSealedWire {
+        original_hash,
+        replacement: SealedInputWire {
+            cipher,
+            nonce: nonce.to_vec(),
+        },
+    })
+    .map_err(|e| e.to_string())?;
+
+    let (app_ws, role_name) = connect_sealed_app_ws(admin_port, app_port).await?;
+    let result = app_ws
+        .call_zome(
+            ZomeCallTarget::RoleName(role_name),
+            "private_data".into(),
+            "replace_sealed".into(),
+            ExternIO::from(input),
+        )
+        .await
+        .map_err(|e| format!("replace_sealed failed: {:?}", e))?;
+
+    let record: Record = rmp_serde::from_slice(result.as_bytes())
+        .map_err(|e| format!("Record decode failed: {}", e))?;
+    Ok(hex::encode(record.action_address().get_raw_39()))
+}
+
 pub(crate) async fn sealed_list_inner(
     state: &Arc<AppState>,
 ) -> Result<Vec<SealedListItem>, String> {

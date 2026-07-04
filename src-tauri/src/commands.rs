@@ -97,6 +97,16 @@ pub struct PendingDocumentSignRequest {
     pub responder: tokio::sync::oneshot::Sender<bool>,
 }
 
+/// Pending profile-update approval — the web dashboard delegating a
+/// profile write into this Vault (device-hosted accounts).
+pub struct PendingProfileUpdateRequest {
+    pub id: String,
+    pub origin: Option<String>,
+    pub display_name: Option<String>,
+    pub picture_changed: bool,
+    pub responder: tokio::sync::oneshot::Sender<bool>,
+}
+
 /// A pending generic /sign request awaiting user approval (linked apps
 /// signing arbitrary payloads outside the post-link ceremony window).
 pub struct PendingRawSignRequest {
@@ -139,6 +149,7 @@ pub struct AppState {
     pub pending_link_identity: Mutex<Option<PendingLinkIdentityRequest>>,
     /// A pending /sign-document request waiting for user approval.
     pub pending_document_sign: Mutex<Option<PendingDocumentSignRequest>>,
+    pub pending_profile_update: Mutex<Option<PendingProfileUpdateRequest>>,
     /// A pending generic /sign request waiting for user approval.
     pub pending_raw_sign: Mutex<Option<PendingRawSignRequest>>,
     /// Origins whose /link-identity approval is recent enough that the
@@ -209,6 +220,7 @@ impl AppState {
             pending_auth: Mutex::new(None),
             pending_link_identity: Mutex::new(None),
             pending_document_sign: Mutex::new(None),
+            pending_profile_update: Mutex::new(None),
             pending_raw_sign: Mutex::new(None),
             recent_link_approvals: Mutex::new(std::collections::HashMap::new()),
             approved_apps: Mutex::new(Vec::new()),
@@ -561,6 +573,9 @@ pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
         let _ = req.responder.send(false);
     }
     if let Some(req) = state.pending_document_sign.lock().unwrap().take() {
+        let _ = req.responder.send(false);
+    }
+    if let Some(req) = state.pending_profile_update.lock().unwrap().take() {
         let _ = req.responder.send(false);
     }
 
@@ -2353,6 +2368,19 @@ pub fn respond_document_sign_request(
 ) -> Result<(), String> {
     let mut pending = state.pending_document_sign.lock().unwrap();
     let req = pending.take().ok_or("No pending document-sign request")?;
+
+    let _ = req.responder.send(approved);
+    Ok(())
+}
+
+/// Respond to a pending profile-update approval dialog.
+#[tauri::command]
+pub fn respond_profile_update_request(
+    approved: bool,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let mut pending = state.pending_profile_update.lock().unwrap();
+    let req = pending.take().ok_or("No pending profile-update request")?;
 
     let _ = req.responder.send(approved);
     Ok(())

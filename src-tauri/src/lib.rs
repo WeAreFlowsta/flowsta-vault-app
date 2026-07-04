@@ -338,6 +338,7 @@ pub fn run() {
             sealed::sealed_list,
             migration::migration_new_phrase,
             migration::migrate_custodial_account,
+            commands::respond_profile_update_request,
             commands::unlock_vault,
             commands::lock_vault,
             commands::reset_vault,
