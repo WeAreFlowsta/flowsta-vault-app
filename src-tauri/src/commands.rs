@@ -4493,7 +4493,10 @@ pub(crate) async fn commit_signature_to_dht(
                 if !retriable || attempt == 3 {
                     return Err(last_err);
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Cell re-enable (conductor restarted underneath us) takes
+                // seconds; a lost head race resolves immediately.
+                let gap = if last_err.contains("CellDisabled") { 5 } else { 2 };
+                tokio::time::sleep(std::time::Duration::from_secs(gap)).await;
             }
         }
     }

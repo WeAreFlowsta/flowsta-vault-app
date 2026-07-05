@@ -3411,6 +3411,18 @@ async fn signatures_handler(
 // the in-memory passphrase so /dev/unlock can re-unlock — no secret is
 // ever transmitted or logged.
 
+async fn dev_status_handler() -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError { error: "not_found".into(), description: None }),
+        ));
+    }
+    Ok(axum::response::IntoResponse::into_response(Json(
+        serde_json::json!({ "harness": true }),
+    )))
+}
+
 async fn dev_lock_handler(
     State(state): State<Arc<IpcState>>,
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
@@ -3459,6 +3471,13 @@ async fn dev_unlock_handler(
                 description: None,
             }),
         ));
+    }
+    // Already unlocked → no-op. Re-running unlock on a live vault would
+    // respawn the conductor stack under everything mid-flight.
+    if state.app_state.vault_config.lock().unwrap().is_some() {
+        return Ok(axum::response::IntoResponse::into_response(Json(
+            serde_json::json!({ "success": true, "already_unlocked": true }),
+        )));
     }
     let pass = {
         let mut guard = state.app_state.dev_relock_passphrase.lock().unwrap();
@@ -3594,6 +3613,7 @@ pub async fn start_ipc_server(
         .route("/backup/delete", post(backup_delete_handler))
         // Dev-only harness endpoints: 404 unless the auto-approve flag is
         // active in a debug build (never active in release).
+        .route("/dev/status", get(dev_status_handler))
         .route("/dev/lock", post(dev_lock_handler))
         .route("/dev/unlock", post(dev_unlock_handler))
         .layer(cors)

@@ -162,15 +162,13 @@ async function preflight() {
   if (!status.unlocked) throw new Error('Unlock the vault first, then re-run.');
 
   // Dev endpoints active = the auto-approve flag is actually on.
-  const devProbe = await api('/dev/unlock', { method: 'POST', body: {} });
-  const devActive = devProbe.status === 400 || devProbe.status === 200;
+  // GET /dev/status is nondestructive (a POST probe once re-unlocked a live
+  // vault and respawned the conductor mid-run).
+  const devProbe = await api('/dev/status');
+  const devActive = devProbe.status === 200 && devProbe.data?.harness === true;
   record('dev harness endpoints active (auto-approve flag on)', devActive,
     devActive ? '' : `got ${devProbe.status} — start the vault with FLOWSTA_VAULT_AUTO_APPROVE=1`);
   if (!devActive) throw new Error('auto-approve flag missing');
-  if (devProbe.status === 200) {
-    // Shouldn't happen (nothing stashed yet) but leave the vault unlocked.
-    console.log('  (note: /dev/unlock returned 200 on probe)');
-  }
 
   const sigs = await getSignatures();
   record('GET /signatures (flowsta origin)', Array.isArray(sigs), `${sigs.length} records`);
@@ -226,9 +224,13 @@ async function happyRow(profileName) {
 
   const sign = await runJob('/sign-document', signBody(hashA));
   record('sign publishes', sign.final.stage === 'done' && !!sign.final.result?.action_hash, JSON.stringify(sign.final).slice(0, 200));
-  // Note: awaiting_approval is usually too brief to observe under
-  // auto-approve — publishing is the stage that proves the pipeline ran.
-  record('sign stages truthful', sign.stages.includes('publishing') && sign.stages[sign.stages.length - 1] === 'done', `stages: ${sign.stages}`);
+  // Stages may be too brief to OBSERVE (fast pipeline vs 750ms polls) —
+  // truthfulness means every stage we did see is a known stage in pipeline
+  // order, ending at done.
+  const PIPELINE = ['waiting_unlock', 'preparing', 'awaiting_approval', 'publishing', 'done'];
+  const idxs = sign.stages.map((st) => PIPELINE.indexOf(st));
+  const ordered = idxs.every((v, i) => v >= 0 && (i === 0 || v >= idxs[i - 1]));
+  record('sign stages truthful', ordered && sign.stages[sign.stages.length - 1] === 'done', `stages: ${sign.stages}`);
   const recA = await findRecord(hashA);
   record('signature visible in Vault-first read within seconds', recA.hits.length === 1);
   // The thumbnail rides BEHIND the publish (background task) — poll for it.
