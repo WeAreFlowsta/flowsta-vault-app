@@ -194,7 +194,6 @@ export default component$(() => {
   if (loading.value) {
     return (
       <div>
-        <div class="mb-6 h-8 w-32 animate-pulse rounded bg-gray-700" />
         <div class="mb-6 animate-pulse rounded-lg border border-gray-700 bg-[#15203a] p-6">
           <div class="mb-3 h-4 w-24 rounded bg-gray-700" />
           <div class="mb-2 h-4 w-full rounded bg-gray-700" />
@@ -274,7 +273,87 @@ export default component$(() => {
 
   return (
     <div>
-      <h1 class="mb-6 text-2xl font-bold text-white">Overview</h1>
+      {/* Stats Grid */}
+      <div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+        {/* Signatures */}
+        <Link
+          href="/sign-it/"
+          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
+        >
+          <div class="mb-3 flex items-center gap-2 text-gray-400">
+            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+            </svg>
+            <span class="text-sm font-medium">Signatures</span>
+          </div>
+          <p class="text-3xl font-bold text-white">
+            {sigsLoaded ? (
+              sigCount
+            ) : (
+              <span class="inline-block h-7 w-10 animate-pulse rounded bg-gray-700 align-middle" />
+            )}
+          </p>
+          <p class="mt-1 text-xs text-gray-500">
+            {!sigsLoaded
+              ? "Syncing — first load takes a few minutes"
+              : sigCount === 0
+                ? "Sign your first file"
+                : [
+                    `${activeSigs} active`,
+                    revokedSigs > 0 ? `${revokedSigs} revoked` : null,
+                    amendedSigs > 0 ? `${amendedSigs} amendment${amendedSigs === 1 ? "" : "s"}` : null,
+                  ].filter(Boolean).join(", ")}
+          </p>
+        </Link>
+
+        {/* Connected Apps */}
+        <Link
+          href="/identities/"
+          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
+        >
+          <div class="mb-3 flex items-center gap-2 text-gray-400">
+            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+            </svg>
+            <span class="text-sm font-medium">Connected Apps</span>
+          </div>
+          <p class="text-3xl font-bold text-white">
+            {connectedApps.value.length}
+          </p>
+          <p class="mt-1 text-xs text-gray-500">
+            {connectedApps.value.length === 0
+              ? "No apps linked yet"
+              : connectedApps.value.map((a) => a.app_name).join(", ")}
+          </p>
+        </Link>
+
+        {/* Backups */}
+        <Link
+          href="/your-data/"
+          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
+        >
+          <div class="mb-3 flex items-center gap-2 text-gray-400">
+            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+            </svg>
+            <span class="text-sm font-medium">Backups</span>
+          </div>
+          <p class="text-3xl font-bold text-white">
+            {stats?.total_backups ?? 0}
+          </p>
+          <p class="mt-1 text-xs text-gray-500">
+            {stats && stats.total_backups > 0
+              ? `${formatBytes(stats.total_size)} across ${stats.app_count} app${stats.app_count !== 1 ? "s" : ""}`
+              : "No backups yet"}
+          </p>
+          {stats && stats.apps.length > 0 && (
+            <p class="mt-0.5 text-xs italic text-gray-600">
+              Last backup {timeAgo(Math.max(...stats.apps.map((a) => a.last_backup_at)))}
+            </p>
+          )}
+        </Link>
+      </div>
+
 
       {/* Identity Card */}
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
@@ -459,87 +538,6 @@ export default component$(() => {
             )}
           </div>
         )}
-      </div>
-
-      {/* Stats Grid */}
-      <div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
-        {/* Signatures */}
-        <Link
-          href="/sign-it/"
-          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
-        >
-          <div class="mb-3 flex items-center gap-2 text-gray-400">
-            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-              <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
-            </svg>
-            <span class="text-sm font-medium">Signatures</span>
-          </div>
-          <p class="text-3xl font-bold text-white">
-            {sigsLoaded ? (
-              sigCount
-            ) : (
-              <span class="inline-block h-7 w-10 animate-pulse rounded bg-gray-700 align-middle" />
-            )}
-          </p>
-          <p class="mt-1 text-xs text-gray-500">
-            {!sigsLoaded
-              ? "Syncing — first load takes a few minutes"
-              : sigCount === 0
-                ? "Sign your first file"
-                : [
-                    `${activeSigs} active`,
-                    revokedSigs > 0 ? `${revokedSigs} revoked` : null,
-                    amendedSigs > 0 ? `${amendedSigs} amendment${amendedSigs === 1 ? "" : "s"}` : null,
-                  ].filter(Boolean).join(", ")}
-          </p>
-        </Link>
-
-        {/* Connected Apps */}
-        <Link
-          href="/identities/"
-          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
-        >
-          <div class="mb-3 flex items-center gap-2 text-gray-400">
-            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-              <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-            </svg>
-            <span class="text-sm font-medium">Connected Apps</span>
-          </div>
-          <p class="text-3xl font-bold text-white">
-            {connectedApps.value.length}
-          </p>
-          <p class="mt-1 text-xs text-gray-500">
-            {connectedApps.value.length === 0
-              ? "No apps linked yet"
-              : connectedApps.value.map((a) => a.app_name).join(", ")}
-          </p>
-        </Link>
-
-        {/* Backups */}
-        <Link
-          href="/your-data/"
-          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
-        >
-          <div class="mb-3 flex items-center gap-2 text-gray-400">
-            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-              <path stroke-linecap="round" stroke-linejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-            </svg>
-            <span class="text-sm font-medium">Backups</span>
-          </div>
-          <p class="text-3xl font-bold text-white">
-            {stats?.total_backups ?? 0}
-          </p>
-          <p class="mt-1 text-xs text-gray-500">
-            {stats && stats.total_backups > 0
-              ? `${formatBytes(stats.total_size)} across ${stats.app_count} app${stats.app_count !== 1 ? "s" : ""}`
-              : "No backups yet"}
-          </p>
-          {stats && stats.apps.length > 0 && (
-            <p class="mt-0.5 text-xs italic text-gray-600">
-              Last backup {timeAgo(Math.max(...stats.apps.map((a) => a.last_backup_at)))}
-            </p>
-          )}
-        </Link>
       </div>
 
       {/* Recent Activity — unified feed: signatures, backups, linked apps. */}
