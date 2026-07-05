@@ -3241,9 +3241,20 @@ async fn signatures_handler(
         ));
     }
 
+    // Own signatures are the Vault's ground truth — a failed read (cells
+    // still enabling right after unlock) must be an ERROR the page can
+    // fall back from, never a false-authoritative empty list.
     let own = crate::commands::get_my_own_signatures_inner(&state.app_state)
         .await
-        .unwrap_or_default();
+        .map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(IpcError {
+                    error: "conductor_not_ready".into(),
+                    description: Some(format!("Vault is still starting up ({}).", e)),
+                }),
+            )
+        })?;
     // Linked history is best-effort: DHT-bound, additive only.
     let linked = crate::commands::get_my_linked_signatures_inner(&state.app_state)
         .await

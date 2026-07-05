@@ -124,7 +124,7 @@ async fn connect_sealed_app_ws(
         ClientAgentSigner, IssueAppAuthenticationTokenPayload,
     };
 
-    let app_id = crate::dna::make_app_id("private", crate::dna::BUNDLED_PRIVATE_V2_VERSION);
+    let app_id = crate::dna::private_v2_app_id();
 
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
@@ -184,6 +184,56 @@ async fn connect_sealed_app_ws(
     .map_err(|e| format!("App WS connect failed: {}", e))?;
 
     Ok((app_ws, role_name))
+}
+
+/// Connect and call a `private_data` zome function, retrying transient
+/// failures: right after an unlock the enable/readiness race can fail the
+/// credential authorize, and the FIRST call to a freshly-installed cell
+/// compiles the WASM module, which can outrun a response timeout. A
+/// ModuleBuild failure (bad wasm) is permanent — no retry.
+async fn sealed_zome_call(
+    admin_port: u16,
+    app_port: u16,
+    zome_fn: &str,
+    input: Vec<u8>,
+) -> Result<holochain_types::prelude::ExternIO, String> {
+    use holochain_client::ZomeCallTarget;
+    use holochain_types::prelude::ExternIO;
+
+    let mut last_err = String::new();
+    for attempt in 1..=3u32 {
+        let result = async {
+            let (app_ws, role_name) = connect_sealed_app_ws(admin_port, app_port).await?;
+            app_ws
+                .call_zome(
+                    ZomeCallTarget::RoleName(role_name),
+                    "private_data".into(),
+                    zome_fn.into(),
+                    ExternIO::from(input.clone()),
+                )
+                .await
+                .map_err(|e| format!("{} failed: {:?}", zome_fn, e))
+        }
+        .await;
+        match result {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                last_err = e;
+                let permanent = last_err.contains("ModuleBuild");
+                let transient = !permanent
+                    && ["authorize_signing_credentials", "CellDisabled", "response timeout",
+                        "channel dropped", "chain head has moved", "InternalError"]
+                        .iter()
+                        .any(|m| last_err.contains(m));
+                log::warn!("{} attempt {}/3 failed: {}", zome_fn, attempt, last_err);
+                if !transient || attempt == 3 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
+    }
+    Err(last_err)
 }
 
 fn conductor_ports(state: &AppState) -> Result<(u16, u16), String> {
@@ -261,16 +311,7 @@ pub(crate) async fn sealed_store_inner(
     })
     .map_err(|e| e.to_string())?;
 
-    let (app_ws, role_name) = connect_sealed_app_ws(admin_port, app_port).await?;
-    let result = app_ws
-        .call_zome(
-            ZomeCallTarget::RoleName(role_name),
-            "private_data".into(),
-            "create_sealed".into(),
-            ExternIO::from(input),
-        )
-        .await
-        .map_err(|e| format!("create_sealed failed: {:?}", e))?;
+    let result = sealed_zome_call(admin_port, app_port, "create_sealed", input).await?;
 
     let record: Record = rmp_serde::from_slice(result.as_bytes())
         .map_err(|e| format!("Record decode failed: {}", e))?;
@@ -334,16 +375,7 @@ pub(crate) async fn sealed_replace_inner(
     })
     .map_err(|e| e.to_string())?;
 
-    let (app_ws, role_name) = connect_sealed_app_ws(admin_port, app_port).await?;
-    let result = app_ws
-        .call_zome(
-            ZomeCallTarget::RoleName(role_name),
-            "private_data".into(),
-            "replace_sealed".into(),
-            ExternIO::from(input),
-        )
-        .await
-        .map_err(|e| format!("replace_sealed failed: {:?}", e))?;
+    let result = sealed_zome_call(admin_port, app_port, "replace_sealed", input).await?;
 
     let record: Record = rmp_serde::from_slice(result.as_bytes())
         .map_err(|e| format!("Record decode failed: {}", e))?;
@@ -359,16 +391,13 @@ pub(crate) async fn sealed_list_inner(
     let (admin_port, app_port) = conductor_ports(state)?;
     let data_key = vault_data_key(state)?;
 
-    let (app_ws, role_name) = connect_sealed_app_ws(admin_port, app_port).await?;
-    let result = app_ws
-        .call_zome(
-            ZomeCallTarget::RoleName(role_name),
-            "private_data".into(),
-            "get_all_sealed".into(),
-            ExternIO::from(rmp_serde::to_vec_named(&()).map_err(|e| e.to_string())?),
-        )
-        .await
-        .map_err(|e| format!("get_all_sealed failed: {:?}", e))?;
+    let result = sealed_zome_call(
+        admin_port,
+        app_port,
+        "get_all_sealed",
+        rmp_serde::to_vec_named(&()).map_err(|e| e.to_string())?,
+    )
+    .await?;
 
     let records: Vec<Record> = rmp_serde::from_slice(result.as_bytes())
         .map_err(|e| format!("Records decode failed: {}", e))?;

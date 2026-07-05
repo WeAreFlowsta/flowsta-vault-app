@@ -27,6 +27,26 @@ pub const BUNDLED_SIGNING_VERSION: &str = "1.4";
 /// placeholder seed.
 pub const BUNDLED_PRIVATE_V2_VERSION: &str = "2.0";
 
+/// Bundle revision of the v2 happ. A rebuilt bundle changes the DNA hash,
+/// but the installed app id wouldn't change — the vault would keep serving
+/// the stale (possibly broken) cell forever. Bump this whenever the bundled
+/// v2 happ file changes; installs of older revisions are replaced on the
+/// next unlock. Safe while the cell is single-user-network and re-derivable
+/// (its content re-imports from the phrase-derived key or migration).
+pub const BUNDLED_PRIVATE_V2_REVISION: u32 = 2;
+
+/// Installed app id for the bundled v2 private cell, including the bundle
+/// revision (e.g. "flowsta_private_v2_0_r2"). Revision 1 was the unsuffixed
+/// "flowsta_private_v2_0" (hdk 0.6.2 build whose module cannot load on the
+/// bundled 0.6.1 conductor).
+pub fn private_v2_app_id() -> String {
+    format!(
+        "{}_r{}",
+        make_app_id("private", BUNDLED_PRIVATE_V2_VERSION),
+        BUNDLED_PRIVATE_V2_REVISION
+    )
+}
+
 /// hApp bundle filenames bundled with this app build (in src-tauri/resources/).
 const BUNDLED_PRIVATE_HAPP_FILE: &str = "flowsta_private_v1_11_happ.happ";
 const BUNDLED_PRIVATE_V2_HAPP_FILE: &str = "flowsta_private_v2_0_happ.happ";
@@ -321,7 +341,8 @@ pub async fn install_dnas(
     let private_app_id = make_app_id("private", private_version);
     let identity_app_id = make_app_id("identity", identity_version);
     let signing_app_id = make_app_id("signing", signing_version);
-    let private_v2_app_id = make_app_id("private", BUNDLED_PRIVATE_V2_VERSION);
+    let private_v2_app_id = private_v2_app_id();
+    let private_v2_stale_prefix = make_app_id("private", BUNDLED_PRIVATE_V2_VERSION);
 
     // Determine .happ filenames — use bundled names if version matches bundled,
     // otherwise construct from version (downloaded by dna_updater).
@@ -418,6 +439,18 @@ pub async fn install_dnas(
                     .await
                     .map_err(|e| format!("Failed to uninstall private v2 app: {}", e))?;
             }
+        } else if app.installed_app_id.starts_with(&private_v2_stale_prefix) {
+            // A v2 cell from an older bundle revision (different DNA hash
+            // under the same version) — replace it with the current bundle.
+            log::warn!(
+                "Stale private v2 bundle revision installed ({}), replacing with {}",
+                app.installed_app_id,
+                private_v2_app_id,
+            );
+            admin_ws
+                .uninstall_app(app.installed_app_id.clone(), false)
+                .await
+                .map_err(|e| format!("Failed to uninstall stale private v2 app: {}", e))?;
         }
     }
 

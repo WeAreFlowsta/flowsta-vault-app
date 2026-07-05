@@ -226,7 +226,9 @@ async function happyRow(profileName) {
 
   const sign = await runJob('/sign-document', signBody(hashA));
   record('sign publishes', sign.final.stage === 'done' && !!sign.final.result?.action_hash, JSON.stringify(sign.final).slice(0, 200));
-  record('sign stages truthful', sign.stages.includes('awaiting_approval') && sign.stages.includes('publishing'), `stages: ${sign.stages}`);
+  // Note: awaiting_approval is usually too brief to observe under
+  // auto-approve — publishing is the stage that proves the pipeline ran.
+  record('sign stages truthful', sign.stages.includes('publishing') && sign.stages[sign.stages.length - 1] === 'done', `stages: ${sign.stages}`);
   const recA = await findRecord(hashA);
   record('signature visible in Vault-first read within seconds', recA.hits.length === 1);
   record('…with its thumbnail', !!recA.hits[0]?.thumbnail);

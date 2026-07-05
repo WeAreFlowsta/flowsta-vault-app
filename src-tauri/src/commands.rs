@@ -3836,7 +3836,38 @@ pub async fn revoke_signature(
 
 /// Commit a revocation against one of this agent's signature records.
 /// Shared by the in-app flow and web-delegated management.
+///
+/// Right after an unlock the conductor advertises readiness before the
+/// cells truly are — the first admin round-trip (authorize credentials)
+/// or zome call can fail with a transient internal error. Retry those,
+/// like set_thumbnail does.
 pub(crate) async fn revoke_signature_inner(
+    state: &Arc<AppState>,
+    action_hash_hex: String,
+    reason: Option<String>,
+) -> Result<String, String> {
+    let mut last_err = String::new();
+    for attempt in 1..=3u32 {
+        match revoke_signature_attempt(state, action_hash_hex.clone(), reason.clone()).await {
+            Ok(h) => return Ok(h),
+            Err(e) => {
+                last_err = e;
+                let transient = ["auth creds", "CellDisabled", "response timeout",
+                    "channel dropped", "chain head has moved", "InternalError"]
+                    .iter()
+                    .any(|m| last_err.contains(m));
+                log::warn!("revoke_signature attempt {}/3 failed: {}", attempt, last_err);
+                if !transient || attempt == 3 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
+    }
+    Err(last_err)
+}
+
+async fn revoke_signature_attempt(
     state: &Arc<AppState>,
     action_hash_hex: String,
     reason: Option<String>,
