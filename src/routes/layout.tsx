@@ -1169,7 +1169,7 @@ export default component$(() => {
           internally instead of expanding the row past the viewport. */}
       <div class="flex flex-1 min-h-0">
         {/* Sidebar */}
-        <aside class="flex w-64 flex-col border-r border-gray-700 bg-gray-900">
+        <aside class="flex w-64 flex-col bg-gray-900">
           {/* Navigation */}
           <nav class="flex-1 px-4 pt-5">
             {navItems.map((item) => {
@@ -1200,7 +1200,7 @@ export default component$(() => {
           </nav>
 
           {/* Status + Lock */}
-          <div class="border-t border-gray-700 px-4 py-4">
+          <div class="px-4 py-4">
             <div class="mb-2 flex items-center justify-between">
               <StatusIndicator status={connectionStatus.value} />
               <span class="text-xs text-gray-500">v{__APP_VERSION__}</span>
