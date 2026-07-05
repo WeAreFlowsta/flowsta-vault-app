@@ -225,6 +225,27 @@ export default component$(() => {
     displayName: "",
     profilePicture: "",
     email: "",
+    username: "",
+    did: "",
+    agentKey: "",
+  });
+  // Header identity dropdown + plan status (tier from the public quota
+  // endpoint; upgrading is a web/Stripe flow, the Vault hands off).
+  const profileMenuOpen = useSignal(false);
+  const planInfo = useSignal<{ tier: string; used: number; limit: number } | null>(null);
+  const refreshPlan = $(async () => {
+    try {
+      const key = userProfile.agentKey;
+      if (!key) return;
+      const resp = await fetch(
+        `${__API_URL__}/api/v1/sign-it/quota/by-agent?agent_pub_key=${encodeURIComponent(key)}`,
+        { cache: "no-store" },
+      );
+      if (resp.ok) {
+        const q = await resp.json();
+        planInfo.value = { tier: q.tier || "free", used: q.used ?? 0, limit: q.limit ?? 0 };
+      }
+    } catch { /* offline — plan hidden */ }
   });
 
   // Auth approval dialog state
@@ -326,14 +347,22 @@ export default component$(() => {
     try {
       const identity = await invoke<{
         agent_pub_key: string;
+        did: string;
         display_name: string | null;
         profile_picture: string | null;
         web_email: string | null;
+        web_username: string | null;
+        web_agent_pub_key: string | null;
       }>("get_identity");
 
       userProfile.displayName = identity.display_name ?? "";
       userProfile.profilePicture = identity.profile_picture ?? "";
       userProfile.email = identity.web_email ?? "";
+      userProfile.username = identity.web_username ?? "";
+      userProfile.did = identity.did ?? "";
+      // Subscriptions attach to the linked web account when there is one.
+      userProfile.agentKey = identity.web_agent_pub_key || identity.agent_pub_key;
+      refreshPlan();
 
       // Scope the signatures cache to this agent_pub_key. If a previous
       // identity sat in localStorage (Reset Vault → new identity, restore
@@ -1109,22 +1138,97 @@ export default component$(() => {
             </div>
           </div>
 
-          {/* Right: Profile — only shown if display name is set */}
+          {/* Right: identity chip → dropdown (identity lives HERE, not
+              duplicated on Overview) */}
           {displayName && (
-            <div class="flex items-center gap-2">
-              <span class="text-sm text-gray-300">{displayName}</span>
-              {userProfile.profilePicture ? (
-                <img
-                  src={userProfile.profilePicture}
-                  alt="Profile"
-                  class="h-8 w-8 rounded-full object-cover border border-gray-600"
-                  width={32}
-                  height={32}
-                />
-              ) : (
-                <div class="flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-sm font-medium text-white">
-                  {displayName.charAt(0).toUpperCase()}
-                </div>
+            <div class="relative">
+              <button
+                type="button"
+                class="flex items-center gap-2 rounded-full py-1 pl-3 pr-1.5 transition-colors hover:bg-gray-800"
+                onClick$={() => (profileMenuOpen.value = !profileMenuOpen.value)}
+              >
+                <span class="text-sm text-gray-300">{displayName}</span>
+                {userProfile.profilePicture ? (
+                  <img
+                    src={userProfile.profilePicture}
+                    alt="Profile"
+                    class="h-8 w-8 rounded-full object-cover border border-gray-600"
+                    width={32}
+                    height={32}
+                  />
+                ) : (
+                  <div class="flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-sm font-medium text-white">
+                    {displayName.charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <svg
+                  class={[
+                    "h-3.5 w-3.5 text-gray-500 transition-transform",
+                    profileMenuOpen.value ? "rotate-180" : "",
+                  ].join(" ")}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}
+                >
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                </svg>
+              </button>
+
+              {profileMenuOpen.value && (
+                <>
+                  {/* click-away backdrop */}
+                  <div
+                    class="fixed inset-0 z-40"
+                    onClick$={() => (profileMenuOpen.value = false)}
+                  />
+                  <div class="absolute right-0 top-12 z-50 w-72 rounded-xl border border-white/10 bg-gray-900 p-4 shadow-2xl">
+                    <p class="text-sm font-semibold text-white">{displayName}</p>
+                    {userProfile.email && (
+                      <p class="mt-0.5 truncate text-xs text-gray-400">{userProfile.email}</p>
+                    )}
+                    <p class="mt-0.5 text-xs text-gray-500">
+                      {userProfile.username ? `@${userProfile.username}` : "No username yet — claim one on Overview"}
+                    </p>
+
+                    <div class="mt-3 flex items-center justify-between rounded-lg bg-white/[0.06] px-3 py-2">
+                      <span class="text-xs text-gray-300">
+                        {planInfo.value
+                          ? `${planInfo.value.tier === "free" ? "Free" : planInfo.value.tier.charAt(0).toUpperCase() + planInfo.value.tier.slice(1).replace("_", " ")} plan · ${planInfo.value.used}/${planInfo.value.limit} signs`
+                          : "Plan: —"}
+                      </span>
+                      <button
+                        type="button"
+                        class="rounded-md border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-300 transition-colors hover:bg-sky-500/20"
+                        onClick$={() => {
+                          profileMenuOpen.value = false;
+                          open(`${__WEB_URL__}/dashboard/premium/`);
+                        }}
+                      >
+                        {planInfo.value && planInfo.value.tier !== "free" ? "Manage" : "Upgrade"}
+                      </button>
+                    </div>
+
+                    {userProfile.did && (
+                      <button
+                        type="button"
+                        class="mt-2 w-full rounded-lg px-3 py-2 text-left text-xs text-gray-400 transition-colors hover:bg-gray-800 hover:text-gray-200"
+                        onClick$={async () => {
+                          try {
+                            await navigator.clipboard.writeText(userProfile.did);
+                          } catch { /* clipboard unavailable */ }
+                          profileMenuOpen.value = false;
+                        }}
+                      >
+                        Copy DID
+                      </button>
+                    )}
+                    <Link
+                      href="/settings/"
+                      class="block w-full rounded-lg px-3 py-2 text-left text-xs text-gray-400 transition-colors hover:bg-gray-800 hover:text-gray-200"
+                      onClick$={() => (profileMenuOpen.value = false)}
+                    >
+                      Settings
+                    </Link>
+                  </div>
+                </>
               )}
             </div>
           )}

@@ -2,6 +2,7 @@ import { $, component$, useComputed$, useContext, useSignal, useVisibleTask$ } f
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-shell";
 import { listen } from "@tauri-apps/api/event";
 import { CopyButton } from "~/components/ui/CopyButton";
 import { signaturesContext } from "~/lib/context";
@@ -86,6 +87,9 @@ export default component$(() => {
   const connectedApps = useComputed$(() => dedupeLinkedApps(linkedApps.value));
   const loading = useSignal(true);
   const showFullDid = useSignal(false);
+  // Plan/quota status — public endpoint, keyed to the account the
+  // subscription is attached to. Upgrading is a web (Stripe) flow.
+  const planInfo = useSignal<{ tier: string; used: number; limit: number } | null>(null);
 
   // Username claim/change — the registrar lives server-side (uniqueness,
   // login lookup, the public URL, billing tiers); the command authenticates
@@ -164,6 +168,17 @@ export default component$(() => {
       identity.value = id;
       backupStats.value = stats;
       linkedApps.value = apps;
+      try {
+        const key = id.web_agent_pub_key || id.agent_pub_key;
+        const resp = await fetch(
+          `${__API_URL__}/api/v1/sign-it/quota/by-agent?agent_pub_key=${encodeURIComponent(key)}`,
+          { cache: "no-store" },
+        );
+        if (resp.ok) {
+          const q = await resp.json();
+          planInfo.value = { tier: q.tier || "free", used: q.used ?? 0, limit: q.limit ?? 0 };
+        }
+      } catch { /* offline — plan card shows a dash */ }
     } catch {
       // Vault might be locked
     } finally {
@@ -199,8 +214,8 @@ export default component$(() => {
           <div class="mb-2 h-4 w-full rounded bg-gray-700" />
           <div class="h-4 w-3/4 rounded bg-gray-700" />
         </div>
-        <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          {[1, 2, 3].map((i) => (
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {[1, 2, 3, 4].map((i) => (
             <div key={i} class="animate-pulse rounded-lg border border-gray-700 bg-[#15203a] p-4">
               <div class="mb-2 h-3 w-20 rounded bg-gray-700" />
               <div class="h-6 w-12 rounded bg-gray-700" />
@@ -215,7 +230,6 @@ export default component$(() => {
   if (!id) return null;
 
   const stats = backupStats.value;
-  const hasDisplayName = !!id.display_name;
   const sigsLoaded = sigStore.loaded.value;
   const currentSigs = sigStore.signatures.value.filter((s: any) => !(s as any).superseded_by);
   const sigCount = currentSigs.length;
@@ -274,7 +288,7 @@ export default component$(() => {
   return (
     <div>
       {/* Stats Grid */}
-      <div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {/* Signatures */}
         <Link
           href="/sign-it/"
@@ -352,81 +366,38 @@ export default component$(() => {
             </p>
           )}
         </Link>
-      </div>
 
-
-      {/* Identity Card */}
-      <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
-        <div class="flex items-start justify-between">
-          <div class="flex items-center gap-4">
-            {/* Avatar */}
-            {id.profile_picture ? (
-              <img
-                src={id.profile_picture}
-                alt="Profile"
-                class="h-14 w-14 rounded-full object-cover border border-gray-600"
-                width={56}
-                height={56}
-              />
-            ) : (
-              <div class="flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-blue-600 to-blue-800 text-xl font-bold text-white">
-                {hasDisplayName
-                  ? id.display_name!.charAt(0).toUpperCase()
-                  : "V"}
-              </div>
-            )}
-
-            <div>
-              {hasDisplayName && (
-                <h2 class="text-lg font-semibold text-white">
-                  {id.display_name}
-                </h2>
-              )}
-              {id.web_email && (
-                <p class="text-sm text-gray-400">{id.web_email}</p>
-              )}
-              {id.web_username && (
-                <p class="text-sm text-gray-600">@{id.web_username}</p>
-              )}
-              {!hasDisplayName && !id.web_email && (
-                <h2 class="text-lg font-semibold text-white">Your Vault</h2>
-              )}
-              <p class="mt-0.5 text-xs text-gray-500">
-                Created{" "}
-                {new Date(id.created_at * 1000).toLocaleDateString(undefined, {
-                  year: "numeric",
-                  month: "short",
-                  day: "numeric",
-                })}
-              </p>
-            </div>
+        {/* Plan */}
+        <button
+          type="button"
+          class="rounded-xl border border-white/10 bg-white/[0.06] p-5 text-left transition-colors hover:border-white/20 hover:bg-white/[0.1]"
+          onClick$={() => open(`${__WEB_URL__}/dashboard/premium/`)}
+        >
+          <div class="mb-3 flex items-center gap-2 text-gray-400">
+            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z" />
+            </svg>
+            <span class="text-sm font-medium">Plan</span>
           </div>
-
-        </div>
-
-        {/* DID */}
-        <div class="mt-4 rounded-lg bg-black/30 px-4 py-3">
-          <div class="flex items-center justify-between mb-1">
-            <span class="text-xs font-medium text-gray-500">DID</span>
-            <button
-              type="button"
-              class="text-[10px] text-gray-500 hover:text-gray-400 transition-colors"
-              onClick$={() => { showFullDid.value = !showFullDid.value; }}
-            >
-              {showFullDid.value ? "Collapse" : "Expand"}
-            </button>
-          </div>
-          <div class="flex items-center gap-2">
-            <code class="flex-1 font-mono text-sm text-sky-400 break-all">
-              {showFullDid.value
-                ? id.did
-                : id.did.length > 50
-                  ? id.did.slice(0, 24) + "..." + id.did.slice(-20)
-                  : id.did}
-            </code>
-            <CopyButton text={id.did} label="Copy DID" />
-          </div>
-        </div>
+          <p class="text-3xl font-bold text-white">
+            {planInfo.value
+              ? planInfo.value.tier === "free"
+                ? "Free"
+                : planInfo.value.tier.charAt(0).toUpperCase() +
+                  planInfo.value.tier.slice(1).replace("_", " ")
+              : "—"}
+          </p>
+          <p class="mt-1 text-sm text-gray-400">
+            {planInfo.value
+              ? `${planInfo.value.used} of ${planInfo.value.limit} signs used this month`
+              : "Plan status unavailable offline"}
+          </p>
+          <p class="mt-0.5 text-xs text-sky-400">
+            {planInfo.value && planInfo.value.tier !== "free"
+              ? "Manage plan →"
+              : "Upgrade →"}
+          </p>
+        </button>
       </div>
 
       {/* Public profile / username */}
@@ -458,6 +429,30 @@ export default component$(() => {
             text={`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`}
             label="Copy link"
           />
+        </div>
+
+        {/* DID */}
+        <div class="mt-4 rounded-lg bg-black/30 px-4 py-3">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs font-medium text-gray-500">DID</span>
+            <button
+              type="button"
+              class="text-[10px] text-gray-500 hover:text-gray-400 transition-colors"
+              onClick$={() => { showFullDid.value = !showFullDid.value; }}
+            >
+              {showFullDid.value ? "Collapse" : "Expand"}
+            </button>
+          </div>
+          <div class="flex items-center gap-2">
+            <code class="flex-1 font-mono text-sm text-sky-400 break-all">
+              {showFullDid.value
+                ? id.did
+                : id.did.length > 50
+                  ? id.did.slice(0, 24) + "..." + id.did.slice(-20)
+                  : id.did}
+            </code>
+            <CopyButton text={id.did} label="Copy DID" />
+          </div>
         </div>
 
         {!id.web_username && !usernameEditing.value && (
