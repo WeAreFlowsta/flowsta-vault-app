@@ -177,6 +177,49 @@ pub async fn update_signing_coordinators_if_needed(
     Ok(())
 }
 
+#[cfg(test)]
+mod coordinator_bundle_tests {
+    use super::*;
+
+    /// Emit the bundled signing coordinator as a `.coordinators` file for
+    /// UpdateCoordinators rollouts on server conductors (same bundle the
+    /// vault hot-swap builds in memory). Run explicitly:
+    /// `cargo test --lib write_signing_coordinator_bundle -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn write_signing_coordinator_bundle() {
+        use holochain_types::prelude::{CoordinatorManifest, ZomeDependency, ZomeManifest};
+
+        let wasm = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("resources")
+                .join(SIGNING_COORDINATOR_WASM),
+        )
+        .expect("read coordinator wasm from resources/");
+
+        let zome = ZomeManifest {
+            name: "signing".into(),
+            hash: None,
+            path: "signing_coordinator.wasm".into(),
+            dependencies: Some(vec![ZomeDependency {
+                name: "signing_integrity".into(),
+            }]),
+        };
+        let resource_id = zome.resource_id();
+        let manifest = CoordinatorManifest { zomes: vec![zome] };
+        let bundle = mr_bundle::Bundle::new(manifest, [(resource_id, wasm.into())])
+            .expect("bundle");
+        let bytes = bundle.pack().expect("pack");
+
+        let out = std::env::temp_dir().join(format!(
+            "signing_coordinator_v1_4_rev{}.coordinators",
+            SIGNING_COORDINATOR_REV
+        ));
+        std::fs::write(&out, &bytes).expect("write bundle file");
+        println!("wrote {} ({} bytes)", out.display(), bytes.len());
+    }
+}
+
 /// Reconnect to the admin WebSocket. Used during recovery from a WS reset.
 async fn reconnect_admin(admin_port: u16) -> Result<AdminWebsocket, String> {
     AdminWebsocket::connect(
