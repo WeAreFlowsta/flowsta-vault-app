@@ -261,7 +261,6 @@ export default component$(() => {
 
   // A Flowsta page's committing request is waiting for the conductor —
   // show a visible preparing state instead of dead air before the dialog.
-  const opPending = useSignal<{ op: string; origin: string | null } | null>(null);
   // Bridge-operation activity: after an approval the Vault narrates what it
   // is doing on the user's behalf — the requesting app may tell its own
   // story, or none at all (third-party callers). Card = current/latest op;
@@ -517,11 +516,24 @@ export default component$(() => {
     const unlistenOpPending = listen<{ op: string; origin: string | null }>(
       "op-pending",
       (event) => {
-        opPending.value = event.payload;
+        // Pre-approval conductor wait — the first chapter of the same
+        // bottom-right story the rest of the operation tells (this was a
+        // separate top-of-page banner).
+        opActivity.value = {
+          op: event.payload.op,
+          origin: event.payload.origin,
+          label: null,
+          stage: "working",
+          title: "Getting your Vault ready…",
+          preparing: true,
+          at: Date.now(),
+        };
       },
     );
     const unlistenOpPendingClear = listen("op-pending-clear", () => {
-      opPending.value = null;
+      // Cleared when the wait ends: the approval dialog (then op-progress)
+      // takes over on success; a failure arrives as its own op-outcome.
+      if (opActivity.value?.preparing) opActivity.value = null;
     });
     const unlistenCellOp = listen<{
       id: string;
@@ -1734,17 +1746,6 @@ export default component$(() => {
               </GlassButton>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* Document sign approval dialog (Sign It) */}
-      {opPending.value && (
-        <div class="fixed top-0 inset-x-0 z-40 bg-sky-500/15 border-b border-sky-500/40 px-4 py-2.5 text-center">
-          <p class="text-sm text-sky-200">
-            <span class="mr-2 inline-block h-3 w-3 animate-spin rounded-full border-2 border-sky-300 border-t-transparent align-middle"></span>
-            {opPending.value.origin || "A Flowsta page"} is waiting to sign —
-            preparing your Vault…
-          </p>
         </div>
       )}
 
