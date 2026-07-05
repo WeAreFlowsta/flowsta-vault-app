@@ -154,120 +154,25 @@ export default component$(() => {
             <h3 class="mb-2 text-lg font-semibold text-white">
               Change Password
             </h3>
+            {/* Deliberately disabled: a password change re-encrypts the
+                vault file but cannot yet rotate the local keystore
+                passphrase, which would leave the network layer unable to
+                start on the next launch. Re-enable together with keystore
+                rotation. */}
             <p class="mb-4 text-sm text-gray-400">
-              Changes your Flowsta account password and re-encrypts the local
-              vault. Requires an internet connection.
+              Your unlock password was set when this vault was created.
+              Password changes are coming in a vault update — they need the
+              local keystore to be re-encrypted in the same step, and doing
+              it halfway would break your Vault's network connection.
             </p>
-
-            {!isOnline && (
-              <div class="mb-4">
-                <Callout intent="warning">
-                  <p>You must be online to change your password.</p>
-                </Callout>
-              </div>
-            )}
-
-            <form
-              preventdefault:submit
-              onSubmit$={handleChangePassword}
-              class="max-w-sm space-y-3"
-            >
-              {needsEmail.value && (
-                <div>
-                  <p class="mb-2 text-xs text-yellow-400">
-                    Your vault needs a one-time update. Enter your Flowsta email
-                    or username to continue.
-                  </p>
-                  <input
-                    type="text"
-                    placeholder="Email or username"
-                    value={emailOverride.value}
-                    disabled={changing.value}
-                    onInput$={(e) => {
-                      emailOverride.value = (
-                        e.target as HTMLInputElement
-                      ).value;
-                      changeError.value = "";
-                    }}
-                    class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:opacity-50"
-                  />
-                </div>
-              )}
-              <input
-                type="password"
-                placeholder="Current password"
-                value={currentPassword.value}
-                disabled={!isOnline || changing.value}
-                onInput$={(e) => {
-                  currentPassword.value = (e.target as HTMLInputElement).value;
-                  changeError.value = "";
-                  changeSuccess.value = "";
-                }}
-                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:opacity-50"
-              />
-              <input
-                type="password"
-                placeholder="New password"
-                value={newPassword.value}
-                disabled={!isOnline || changing.value}
-                onInput$={(e) => {
-                  newPassword.value = (e.target as HTMLInputElement).value;
-                  changeError.value = "";
-                  changeSuccess.value = "";
-                }}
-                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:opacity-50"
-              />
-              <input
-                type="password"
-                placeholder="Confirm new password"
-                value={confirmPassword.value}
-                disabled={!isOnline || changing.value}
-                onInput$={(e) => {
-                  confirmPassword.value = (e.target as HTMLInputElement).value;
-                  changeError.value = "";
-                  changeSuccess.value = "";
-                }}
-                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 disabled:opacity-50"
-              />
-
-              {/* Validation hints — only show once user starts typing new password */}
-              {newPassword.value.length > 0 && (
-                <div class="space-y-1 text-xs">
-                  {PASSWORD_RULES.map((rule) => (
-                    <div
-                      key={rule.label}
-                      class={
-                        rule.test(newPassword.value)
-                          ? "text-green-400"
-                          : "text-gray-500"
-                      }
-                    >
-                      {rule.test(newPassword.value) ? "\u2713" : "\u2022"}{" "}
-                      {rule.label}
-                    </div>
-                  ))}
-                  {!notSameAsOld && currentPassword.value.length > 0 && (
-                    <div class="text-red-400">
-                      New password must differ from current
-                    </div>
-                  )}
-                  {confirmPassword.value.length > 0 && !passwordsMatch && (
-                    <div class="text-red-400">Passwords don't match</div>
-                  )}
-                </div>
-              )}
-
-              {changeError.value && (
-                <p class="text-sm text-red-400">{changeError.value}</p>
-              )}
-              {changeSuccess.value && (
-                <p class="text-sm text-green-400">{changeSuccess.value}</p>
-              )}
-
-              <GlassButton type="submit" disabled={!canSubmit}>
-                {changing.value ? "Changing..." : "Change Password"}
-              </GlassButton>
-            </form>
+            <Callout intent="info">
+              <p>
+                Need a different password now? Back up your recovery phrase,
+                then use Reset Vault below and restore from the phrase —
+                you'll choose a new password during restore. Your identity,
+                signatures, and data are preserved.
+              </p>
+            </Callout>
           </div>
 
           {/* Auto-lock */}
