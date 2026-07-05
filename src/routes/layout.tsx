@@ -18,12 +18,13 @@ declare const __API_URL__: string;
 declare const __APP_VERSION__: string;
 declare const __WEB_URL__: string;
 
+// Same icon set + pill styling as the Website dashboard nav.
 const navItems = [
-  { label: "Overview", href: "/", icon: "home" },
-  { label: "Sign It", href: "/sign-it/", icon: "pencil" },
-  { label: "Connected Apps", href: "/identities/", icon: "link" },
-  { label: "Your Data", href: "/your-data/", icon: "database" },
-  { label: "Settings", href: "/settings/", icon: "cog" },
+  { label: "Overview", href: "/", icon: "🏠" },
+  { label: "Sign It", href: "/sign-it/", icon: "✍️" },
+  { label: "Connected Apps", href: "/identities/", icon: "🌐" },
+  { label: "Your Data", href: "/your-data/", icon: "🔐" },
+  { label: "Settings", href: "/settings/", icon: "⚙️" },
 ];
 
 export default component$(() => {
@@ -1096,7 +1097,7 @@ export default component$(() => {
   return (
     <div class="flex h-screen flex-col bg-gray-900">
       {/* Full-width header */}
-      <header class="sticky top-0 z-40 w-full border-b border-gray-700 bg-gray-900">
+      <header class="sticky top-0 z-40 w-full bg-gray-900">
         <div class="flex items-center justify-between py-3 px-6">
           {/* Left: Logo + VAULT badge */}
           <div class="flex items-center">
@@ -1182,7 +1183,7 @@ export default component$(() => {
                   key={item.href}
                   href={item.href}
                   class={[
-                    "mb-2 flex items-center gap-3 rounded-full px-4 py-3 text-sm font-medium transition-colors relative",
+                    "mb-2 flex items-center rounded-full px-4 py-3 text-sm font-medium transition-colors relative",
                     isActive
                       ? "text-white"
                       : "text-gray-300 hover:bg-gray-800 hover:text-white",
@@ -1191,7 +1192,7 @@ export default component$(() => {
                   {isActive && (
                     <span class="absolute left-2 h-1.5 w-1.5 rounded-full bg-current" />
                   )}
-                  <NavIcon name={item.icon} />
+                  <span class="mr-3 text-xl">{item.icon}</span>
                   {item.label}
                 </Link>
               );
@@ -1897,29 +1898,3 @@ export default component$(() => {
   );
 });
 
-// Simple nav icon component
-const NavIcon = component$<{ name: string }>(({ name }) => {
-  const iconPaths: Record<string, string> = {
-    home: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6",
-    link: "M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1",
-    database: "M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4",
-    pencil: "M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10",
-    cog: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z",
-  };
-
-  return (
-    <svg
-      class="h-5 w-5"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      stroke-width={1.5}
-    >
-      <path
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        d={iconPaths[name] ?? ""}
-      />
-    </svg>
-  );
-});
