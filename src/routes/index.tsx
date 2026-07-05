@@ -421,18 +421,24 @@ export default component$(() => {
           )}
         </div>
 
-        <div class="flex items-center gap-2">
-          <code class="flex-1 truncate font-mono text-sm text-sky-400">
-            {`${__WEB_URL__.replace(/^https?:\/\//, "")}/${id.web_username || id.agent_pub_key}`}
-          </code>
-          <CopyButton
-            text={`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`}
-            label="Copy link"
-          />
+        {/* Profile link — same inset-row treatment as the DID below */}
+        <div class="mt-2 rounded-lg bg-black/30 px-4 py-3">
+          <div class="mb-1 flex items-center justify-between">
+            <span class="text-xs font-medium text-gray-500">Profile link</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <code class="flex-1 truncate font-mono text-sm text-sky-400">
+              {`${__WEB_URL__.replace(/^https?:\/\//, "")}/${id.web_username || id.agent_pub_key}`}
+            </code>
+            <CopyButton
+              text={`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`}
+              label="Copy link"
+            />
+          </div>
         </div>
 
         {/* DID */}
-        <div class="mt-4 rounded-lg bg-black/30 px-4 py-3">
+        <div class="mt-3 rounded-lg bg-black/30 px-4 py-3">
           <div class="flex items-center justify-between mb-1">
             <span class="text-xs font-medium text-gray-500">DID</span>
             <button
