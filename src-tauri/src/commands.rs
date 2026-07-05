@@ -27,6 +27,16 @@ pub(crate) fn long_request_ws_config() -> Arc<holochain_client::WebsocketConfig>
     Arc::new(cfg)
 }
 
+/// Short-fuse config for calls wrapped in a retry loop. set_thumbnail's
+/// zome fn opens with a network get_links that can hang for minutes on a
+/// cold conductor — better to fail an attempt fast and retry than to hold
+/// the caller for the full 5-minute default.
+pub(crate) fn retryable_request_ws_config() -> Arc<holochain_client::WebsocketConfig> {
+    let mut cfg = holochain_client::WebsocketConfig::CLIENT_DEFAULT;
+    cfg.default_request_timeout = std::time::Duration::from_secs(45);
+    Arc::new(cfg)
+}
+
 // ── Connected Sites tracking ────────────────────────────────────────
 
 /// A site (browser origin) that has made requests to the IPC server.
@@ -4022,7 +4032,7 @@ pub(crate) async fn set_thumbnail_inner(
     signer.add_credentials(cell_id, credentials);
     let app_ws = AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
-        long_request_ws_config(),
+        retryable_request_ws_config(),
         issued.token, signer.into(),
         Some("flowsta-vault-thumb".into()),
     ).await.map_err(|e| format!("App WS: {}", e))?;

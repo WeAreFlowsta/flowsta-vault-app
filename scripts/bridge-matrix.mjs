@@ -231,7 +231,14 @@ async function happyRow(profileName) {
   record('sign stages truthful', sign.stages.includes('publishing') && sign.stages[sign.stages.length - 1] === 'done', `stages: ${sign.stages}`);
   const recA = await findRecord(hashA);
   record('signature visible in Vault-first read within seconds', recA.hits.length === 1);
-  record('…with its thumbnail', !!recA.hits[0]?.thumbnail);
+  // The thumbnail rides BEHIND the publish (background task) — poll for it.
+  let thumbSeen = false;
+  for (let i = 0; i < 30 && !thumbSeen; i++) {
+    const check = await findRecord(hashA, { attempts: 1 });
+    thumbSeen = !!check.hits[0]?.thumbnail;
+    if (!thumbSeen) await new Promise((r) => setTimeout(r, 3000));
+  }
+  record('…thumbnail lands shortly after (background ride)', thumbSeen);
   const aHash = sign.final.result?.action_hash;
 
   const amend = await runJob('/sign-document', signBody(hashA, { supersedes: aHash, thumbnail: TINY_PNG_2, comment: 'amended by matrix' }));

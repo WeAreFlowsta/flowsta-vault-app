@@ -2262,26 +2262,47 @@ async fn sign_document_core(
                         log::warn!("Quota sync after published sign failed (non-fatal): {}", e);
                     }
                 });
-                // Thumbnail rides on the same source chain — commit it
-                // sequentially after the signature (best-effort; the
-                // signature stands without it).
-                if let Some(ref thumb) = req.thumbnail {
-                    if let Err(e) = crate::commands::set_thumbnail_inner(
-                        &state.app_state,
-                        hash.clone(),
-                        thumb.clone(),
-                    )
-                    .await
-                    {
-                        log::warn!("Thumbnail commit after publish failed (non-fatal): {}", e);
-                    }
-                }
-                // Tell the Vault UI a signature just landed so the
-                // signatures view and quota meter refresh live.
+                // The record exists NOW — tell the Vault UI immediately so
+                // the signatures view and quota meter refresh live.
                 let _ = state.app_handle.emit(
                     "signature-published",
                     serde_json::json!({ "action_hash": hash, "file_hash": req.file_hash }),
                 );
+                // The thumbnail rides BEHIND the publish, in the background:
+                // its zome fn opens with a network get_links that can hang
+                // for minutes on a cold conductor, and neither the job nor
+                // the commit lock may wait on that. Best-effort — the
+                // signature stands without its preview, and the UI refreshes
+                // again when (if) it lands.
+                if let Some(thumb) = req.thumbnail.clone() {
+                    let bg = state.clone();
+                    let bg_hash = hash.clone();
+                    let bg_file = req.file_hash.clone();
+                    tokio::spawn(async move {
+                        let _guard = bg.commit_serial.lock().await;
+                        match crate::commands::set_thumbnail_inner(
+                            &bg.app_state,
+                            bg_hash.clone(),
+                            thumb,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                let _ = bg.app_handle.emit(
+                                    "signature-published",
+                                    serde_json::json!({
+                                        "action_hash": bg_hash,
+                                        "file_hash": bg_file,
+                                    }),
+                                );
+                            }
+                            Err(e) => log::warn!(
+                                "Thumbnail commit after publish failed (non-fatal, record stands without preview): {}",
+                                e
+                            ),
+                        }
+                    });
+                }
                 Some(hash)
             }
             Err(e) => {
