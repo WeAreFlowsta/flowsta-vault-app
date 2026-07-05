@@ -601,6 +601,15 @@ async fn start_holochain_attempt(
         log::info!("Encrypted private DNA v2 active: {}", v2);
     }
 
+    // Coordinator-only fixes don't change the DNA hash, so an existing
+    // signing cell keeps running the old zome code until hot-swapped.
+    // Non-fatal: retried on the next start.
+    if let Err(e) =
+        dna::update_signing_coordinators_if_needed(admin_port, &resource_dir, &data_dir).await
+    {
+        log::warn!("Signing coordinator hot-swap failed (non-fatal): {}", e);
+    }
+
     // 9. Attach app interface for zome calls (e.g. pairing code generation).
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
         message: "Setting up app interface...".into(),

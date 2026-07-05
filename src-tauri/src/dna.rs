@@ -82,6 +82,99 @@ fn make_happ_filename(dna_type: &str, version: &str) -> String {
     format!("flowsta_{}_v{}_happ.happ", dna_type, version.replace('.', "_"))
 }
 
+/// Bundled signing-DNA coordinator revision. Coordinator-only changes keep
+/// the DNA hash, so an EXISTING cell never picks them up from the happ
+/// bundle — it must be hot-swapped via UpdateCoordinators. Bump this
+/// together with any coordinator rebuild copied into resources/.
+/// Rev 2: self-authored lookups (my signatures, thumbnails) read LOCAL
+/// instead of hanging on cold-network get_links.
+pub const SIGNING_COORDINATOR_REV: u32 = 2;
+const SIGNING_COORDINATOR_WASM: &str = "signing_coordinator_v1_4.wasm";
+
+/// Hot-swap the signing cell's coordinator zome to the bundled revision.
+/// Idempotent via a marker file; failures are non-fatal (retried on the
+/// next conductor start). Fresh installs already carry the new coordinator
+/// inside the happ, so the swap is a no-op for them beyond marker setting.
+pub async fn update_signing_coordinators_if_needed(
+    admin_port: u16,
+    resource_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> Result<(), String> {
+    use holochain_types::prelude::{
+        CoordinatorBundle, CoordinatorManifest, CoordinatorSource, UpdateCoordinatorsPayload,
+        ZomeDependency, ZomeManifest,
+    };
+
+    let marker = data_dir.join("signing-coordinator-rev");
+    let applied: u32 = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(1);
+    if applied >= SIGNING_COORDINATOR_REV {
+        return Ok(());
+    }
+
+    let wasm = std::fs::read(resource_dir.join(SIGNING_COORDINATOR_WASM))
+        .map_err(|e| format!("read {}: {}", SIGNING_COORDINATOR_WASM, e))?;
+
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", admin_port),
+        Some("flowsta-vault-coord-update".to_string()),
+    )
+    .await
+    .map_err(|e| format!("Admin WS: {}", e))?;
+
+    let apps = admin_ws
+        .list_apps(None)
+        .await
+        .map_err(|e| format!("list_apps: {}", e))?;
+    let signing_app_id = make_app_id("signing", BUNDLED_SIGNING_VERSION);
+    let Some(app) = apps.iter().find(|a| a.installed_app_id == signing_app_id) else {
+        // No signing cell yet (nothing to swap) — leave the marker unset so
+        // a later install+start pass gets the check again.
+        return Ok(());
+    };
+    let cell_id = app
+        .cell_info
+        .values()
+        .flat_map(|cells| cells.iter())
+        .find_map(|c| match c {
+            holochain_client::CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        })
+        .ok_or("No provisioned signing cell")?;
+
+    let zome = ZomeManifest {
+        name: "signing".into(),
+        hash: None,
+        path: "signing_coordinator.wasm".into(),
+        dependencies: Some(vec![ZomeDependency {
+            name: "signing_integrity".into(),
+        }]),
+    };
+    let resource_id = zome.resource_id();
+    let manifest = CoordinatorManifest { zomes: vec![zome] };
+    let bundle = mr_bundle::Bundle::new(manifest, [(resource_id, wasm.into())])
+        .map_err(|e| format!("coordinator bundle: {}", e))?;
+
+    admin_ws
+        .update_coordinators(UpdateCoordinatorsPayload {
+            cell_id,
+            source: CoordinatorSource::Bundle(Box::new(CoordinatorBundle::from(bundle))),
+        })
+        .await
+        .map_err(|e| format!("update_coordinators: {}", e))?;
+
+    std::fs::write(&marker, SIGNING_COORDINATOR_REV.to_string())
+        .map_err(|e| format!("write marker: {}", e))?;
+    log::info!(
+        "Signing coordinator hot-swapped to rev {} on {}",
+        SIGNING_COORDINATOR_REV,
+        signing_app_id,
+    );
+    Ok(())
+}
+
 /// Reconnect to the admin WebSocket. Used during recovery from a WS reset.
 async fn reconnect_admin(admin_port: u16) -> Result<AdminWebsocket, String> {
     AdminWebsocket::connect(

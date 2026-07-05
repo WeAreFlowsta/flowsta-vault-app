@@ -1786,6 +1786,7 @@ dependencies = [
  "lair_keystore_api",
  "libc",
  "log",
+ "mr_bundle",
  "percent-encoding",
  "rand 0.8.5",
  "reqwest 0.12.28",

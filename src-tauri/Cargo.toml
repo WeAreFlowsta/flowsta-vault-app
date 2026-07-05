@@ -73,6 +73,9 @@ lair_keystore_api = "=0.6.3"
 # Conductor 0.6.1 → Rust client 0.8.1 (released 2026-05-12 for Holochain 0.6.1).
 holochain_client = { version = "=0.8.1", default-features = false }
 holochain_types = "=0.6.1"
+# Building CoordinatorBundle for UpdateCoordinators hot-swaps (same version
+# holochain_types 0.6.1 uses).
+mr_bundle = "=0.6.1"
 
 # Save dialog
 tauri-plugin-dialog = "2"
