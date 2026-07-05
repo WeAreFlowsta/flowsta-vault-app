@@ -278,7 +278,7 @@ export default component$(() => {
         {/* Signatures */}
         <Link
           href="/sign-it/"
-          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
+          class="rounded-xl border border-white/10 bg-white/[0.06] p-5 transition-colors hover:border-white/20 hover:bg-white/[0.1]"
         >
           <div class="mb-3 flex items-center gap-2 text-gray-400">
             <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
@@ -309,7 +309,7 @@ export default component$(() => {
         {/* Connected Apps */}
         <Link
           href="/identities/"
-          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
+          class="rounded-xl border border-white/10 bg-white/[0.06] p-5 transition-colors hover:border-white/20 hover:bg-white/[0.1]"
         >
           <div class="mb-3 flex items-center gap-2 text-gray-400">
             <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
@@ -330,7 +330,7 @@ export default component$(() => {
         {/* Backups */}
         <Link
           href="/your-data/"
-          class="rounded-lg border border-gray-700 bg-[#15203a] p-5 transition-colors hover:border-gray-600 hover:bg-black/30"
+          class="rounded-xl border border-white/10 bg-white/[0.06] p-5 transition-colors hover:border-white/20 hover:bg-white/[0.1]"
         >
           <div class="mb-3 flex items-center gap-2 text-gray-400">
             <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
