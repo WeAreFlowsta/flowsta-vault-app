@@ -53,6 +53,10 @@ export default component$(() => {
   // auto-link caches the linked agent key mid-fetch, so the next round will
   // pick up linked-agent sigs that the current call missed).
   const pendingRefresh = useSignal(false);
+  // A confident "no linked agents" answer holds for the whole app session —
+  // re-checking pays a fixed ~10s DHT timeout on EVERY refresh for
+  // vault-native accounts that will never have linked history.
+  const linkedConfirmedNone = useSignal(false);
   const refreshSignatures = $(async () => {
     if (signaturesRefreshing.value) {
       pendingRefresh.value = true;
@@ -62,10 +66,10 @@ export default component$(() => {
     try {
       // Own + linked are dispatched as two independent Tauri commands so
       // the cold-DHT linked path can't block the fast local own query.
-      // The displayed count is NOT updated until linked is *confident*
-      // — showing 4 when the truth is 6 (linked still warming) reads
-      // as a buggy regression to the user. A background interval (set
-      // up below) keeps re-firing this until linked succeeds.
+      // Own results paint IMMEDIATELY (additive merge — nothing is ever
+      // evicted, so a not-yet-settled linked leg can't be misread as
+      // records disappearing); the "loaded" badge still waits for linked
+      // confidence, and a background interval re-fires until it arrives.
 
       // Own: local source-chain query, retry on Err. Returns null when all
       // attempts failed — own truth UNKNOWN (cells can take ~20s+ to enable
@@ -94,6 +98,7 @@ export default component$(() => {
       // or unreachable), so the empty result could be a cold-DHT false
       // negative — keep retrying via the background interval.
       const fetchLinked = async (): Promise<{ sigs: any[]; confident: boolean }> => {
+        if (linkedConfirmedNone.value) return { sigs: [], confident: true };
         let lastRes: { signatures: any[]; has_linked_agents: boolean } | null = null;
         let allAttemptsOk = true;
         for (let i = 0; i < 3; i++) {
@@ -102,85 +107,91 @@ export default component$(() => {
               "get_my_linked_signatures",
             );
             lastRes = r;
-            if (!r.has_linked_agents) return { sigs: [], confident: true };
+            if (!r.has_linked_agents) {
+              linkedConfirmedNone.value = true;
+              return { sigs: [], confident: true };
+            }
             if (r.signatures.length > 0) return { sigs: r.signatures, confident: true };
           } catch {
             allAttemptsOk = false;
           }
           if (i < 2) await new Promise((r) => setTimeout(r, 5_000));
         }
-        if (lastRes && !lastRes.has_linked_agents) return { sigs: [], confident: true };
+        if (lastRes && !lastRes.has_linked_agents) {
+          linkedConfirmedNone.value = true;
+          return { sigs: [], confident: true };
+        }
         if (allAttemptsOk) return { sigs: [], confident: true };
         return { sigs: lastRes?.signatures ?? [], confident: false };
+      };
+
+      // Merge a round of results into the displayed list — ADDITIVE only.
+      // By action_hash: the new round wins for present hashes, anything
+      // missing from this round is preserved from the existing signal so a
+      // partial round can't clobber cached data.
+      //
+      // Field-level merge for sigs in both new + cache: prefer the new
+      // round's data overall, but preserve cached `thumbnail` and
+      // `revoked*` when the new round returned null (Rust's per-sig
+      // enrichment has a 15 s budget; on cold DHT it can return null even
+      // when gossip has the data — without this, thumbnails flicker).
+      // `revoked` is one-way (revocations never retract) so cached `true`
+      // always wins.
+      const mergeRound = (round: any[]) => {
+        if (round.length === 0) return;
+        const cachedByHash = new Map<string, any>(
+          signaturesSig.value
+            .filter((s: any) => s.action_hash)
+            .map((s: any) => [s.action_hash as string, s]),
+        );
+        const enriched = round.map((newSig: any) => {
+          const old = cachedByHash.get(newSig.action_hash);
+          if (!old) return newSig;
+          return {
+            ...newSig,
+            thumbnail: newSig.thumbnail ?? old.thumbnail,
+            revoked: old.revoked || newSig.revoked,
+            revoked_at: newSig.revoked_at ?? old.revoked_at,
+            revocation_reason: newSig.revocation_reason ?? old.revocation_reason,
+          };
+        });
+        const newHashes = new Set(
+          enriched.map((s: any) => s.action_hash).filter(Boolean) as string[],
+        );
+        const merged = [
+          ...enriched,
+          ...signaturesSig.value.filter(
+            (s: any) => s.action_hash && !newHashes.has(s.action_hash),
+          ),
+        ];
+        signaturesSig.value = merged;
+        persistSignaturesCache(merged);
       };
 
       do {
         pendingRefresh.value = false;
 
-        const [ownRes, linkedRes] = await Promise.all([fetchOwn(), fetchLinked()]);
+        // Own is local truth — paint it the MOMENT it arrives. The linked
+        // leg is DHT-bound (can sit on a 10s timeout); it merges in
+        // additively when it settles. This is the product rule: anything
+        // the Vault knows shows instantly, the network only ever adds.
+        const linkedPromise = fetchLinked();
+        const ownRes = await fetchOwn();
         const ownOk = ownRes !== null;
-        const own = ownRes ?? [];
+        if (ownRes && ownRes.length > 0) {
+          mergeRound(ownRes);
+        }
 
-        // Own wins over linked on hash collision (own has accurate
-        // revocation; linked-agent builds always set revoked: false).
+        const linkedRes = await linkedPromise;
         const ownHashes = new Set(
-          own.map((s) => s.action_hash).filter(Boolean) as string[],
+          (ownRes ?? []).map((s) => s.action_hash).filter(Boolean) as string[],
         );
-        const combined = [
-          ...own,
-          ...linkedRes.sigs.filter(
+        mergeRound(
+          linkedRes.sigs.filter(
             (s) => s.action_hash && !ownHashes.has(s.action_hash),
           ),
-        ];
-
-        if (combined.length > 0) {
-          // Merge by action_hash — new round wins for present hashes,
-          // any missing-from-this-round sigs are preserved from the
-          // existing signal so a not-confident linked round can't
-          // clobber cached linked data from a prior session.
-          //
-          // Field-level merge for sigs in both new + cache: prefer the
-          // new round's data overall, but preserve cached `thumbnail`
-          // and `revoked*` when the new round returned null. Those
-          // fields go through Rust's per-sig enrichment which has a
-          // 15 s `tokio::time::timeout` cap (commands.rs) — on cold
-          // DHT the per-thumb / per-revocation fetch can blow past
-          // that budget and return null even when gossip has the data.
-          // Without this, thumbnails flicker between filled and empty
-          // as focus-driven refreshes race the enrichment budget.
-          // `revoked` is one-way in Holochain (revocation entries
-          // never get retracted) so cache's `true` always wins.
-          const cachedByHash = new Map<string, any>(
-            signaturesSig.value
-              .filter((s: any) => s.action_hash)
-              .map((s: any) => [s.action_hash as string, s]),
-          );
-          const enriched = combined.map((newSig: any) => {
-            const old = cachedByHash.get(newSig.action_hash);
-            if (!old) return newSig;
-            return {
-              ...newSig,
-              thumbnail: newSig.thumbnail ?? old.thumbnail,
-              revoked: old.revoked || newSig.revoked,
-              revoked_at: newSig.revoked_at ?? old.revoked_at,
-              revocation_reason: newSig.revocation_reason ?? old.revocation_reason,
-            };
-          });
-          const newHashes = new Set(
-            enriched.map((s: any) => s.action_hash).filter(Boolean) as string[],
-          );
-          const merged = [
-            ...enriched,
-            ...signaturesSig.value.filter(
-              (s: any) => s.action_hash && !newHashes.has(s.action_hash),
-            ),
-          ];
-          signaturesSig.value = merged;
-          persistSignaturesCache(merged);
-        }
-        // combined.length === 0: both queries came back empty after
-        // their own retries. Don't overwrite the cache — keep whatever
-        // we had.
+        );
+        // Empty rounds never overwrite the cache — keep whatever we had.
 
         // Promote to "loaded" only when linked is confident AND the own
         // read actually succeeded. A failed own read (cells still

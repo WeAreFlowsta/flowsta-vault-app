@@ -88,7 +88,9 @@ fn make_happ_filename(dna_type: &str, version: &str) -> String {
 /// together with any coordinator rebuild copied into resources/.
 /// Rev 2: self-authored lookups (my signatures, thumbnails) read LOCAL
 /// instead of hanging on cold-network get_links.
-pub const SIGNING_COORDINATOR_REV: u32 = 2;
+/// Rev 3: adds get_own_revocations_for_signature (LOCAL) — own-view
+/// enrichment stops paying a network round-trip per record.
+pub const SIGNING_COORDINATOR_REV: u32 = 3;
 const SIGNING_COORDINATOR_WASM: &str = "signing_coordinator_v1_4.wasm";
 
 /// Hot-swap the signing cell's coordinator zome to the bundled revision.

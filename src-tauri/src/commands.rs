@@ -3158,7 +3158,7 @@ async fn fetch_revocation_for_action(
     let call = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.into()),
         "signing".into(),
-        "get_revocations_for_signature".into(),
+        "get_own_revocations_for_signature".into(),
         ExternIO::from(payload),
     );
     let result = match tokio::time::timeout(std::time::Duration::from_secs(15), call).await {
