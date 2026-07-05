@@ -67,8 +67,12 @@ export default component$(() => {
       // as a buggy regression to the user. A background interval (set
       // up below) keeps re-firing this until linked succeeds.
 
-      // Own: local source-chain query, retry on Err.
-      const fetchOwn = async (): Promise<any[]> => {
+      // Own: local source-chain query, retry on Err. Returns null when all
+      // attempts failed — own truth UNKNOWN (cells can take ~20s+ to enable
+      // after unlock, longer than this retry span). null must never be
+      // treated as "zero new records": the caller keeps the cache AND keeps
+      // the background retry alive until a real read succeeds.
+      const fetchOwn = async (): Promise<any[] | null> => {
         for (let i = 0; i < 3; i++) {
           try {
             const r = await invoke<any[]>("get_my_own_signatures");
@@ -77,7 +81,7 @@ export default component$(() => {
             if (i < 2) await new Promise((r) => setTimeout(r, 2_000));
           }
         }
-        return [];
+        return null;
       };
 
       // Linked: DHT-bound, can take minutes on cold start. Up to 3 attempts
@@ -113,7 +117,9 @@ export default component$(() => {
       do {
         pendingRefresh.value = false;
 
-        const [own, linkedRes] = await Promise.all([fetchOwn(), fetchLinked()]);
+        const [ownRes, linkedRes] = await Promise.all([fetchOwn(), fetchLinked()]);
+        const ownOk = ownRes !== null;
+        const own = ownRes ?? [];
 
         // Own wins over linked on hash collision (own has accurate
         // revocation; linked-agent builds always set revoked: false).
@@ -176,11 +182,12 @@ export default component$(() => {
         // their own retries. Don't overwrite the cache — keep whatever
         // we had.
 
-        // Promote to "loaded" only when linked is confident. If linked
-        // isn't confident, stay in "Syncing — first load takes a few
-        // minutes" — the background retry interval will fire this
-        // again until it is.
-        if (linkedRes.confident) {
+        // Promote to "loaded" only when linked is confident AND the own
+        // read actually succeeded. A failed own read (cells still
+        // enabling after unlock) must keep the background retry alive —
+        // otherwise the view freezes on the stale cache with the user's
+        // newest records missing.
+        if (linkedRes.confident && ownOk) {
           signaturesLoaded.value = true;
         }
       } while (pendingRefresh.value);
