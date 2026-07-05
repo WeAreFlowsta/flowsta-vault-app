@@ -906,6 +906,10 @@ pub async fn ensure_apps_enabled(
             });
 
         if let Some(cell_id) = cell_id {
+            // Single-flight with every other credential fill: concurrent
+            // startup probes must not each commit a grant (that races real
+            // writes with "chain head has moved").
+            let _fill = state.credentials_fill_lock.lock().await;
             // Cache hit = cells were verified ready earlier this conductor
             // session — skip the probe (and its chain write) entirely.
             if state.cell_credentials.lock().unwrap().contains_key(&cell_id) {

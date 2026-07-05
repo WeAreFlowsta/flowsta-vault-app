@@ -234,6 +234,10 @@ pub struct AppState {
     /// head has moved"). Cleared on lock and on conductor start; filled
     /// once per cell and reused everywhere.
     pub cell_credentials: Mutex<HashMap<holochain_types::prelude::CellId, CachedCellCredentials>>,
+    /// Single-flights credential fills: N concurrent cache misses must not
+    /// each commit a cap grant (three startup probes racing = three chain
+    /// writes = "chain head has moved" under a user's first sign).
+    pub credentials_fill_lock: tokio::sync::Mutex<()>,
 }
 
 /// Owned copy of a cell's signing credentials (holochain_client's
@@ -269,6 +273,15 @@ pub(crate) async fn cell_credentials_cached(
     admin_ws: &holochain_client::AdminWebsocket,
     cell_id: &holochain_types::prelude::CellId,
 ) -> Result<holochain_client::SigningCredentials, String> {
+    {
+        let cache = state.cell_credentials.lock().unwrap();
+        if let Some(c) = cache.get(cell_id) {
+            return Ok(c.to_signing());
+        }
+    }
+    // Single-flight the fill: whoever wins the lock authorizes once; the
+    // others find the cache populated on the re-check.
+    let _fill = state.credentials_fill_lock.lock().await;
     {
         let cache = state.cell_credentials.lock().unwrap();
         if let Some(c) = cache.get(cell_id) {
@@ -334,6 +347,7 @@ impl AppState {
             conductor_restart_lock: tokio::sync::Mutex::new(()),
             dev_relock_passphrase: Mutex::new(None),
             cell_credentials: Mutex::new(HashMap::new()),
+            credentials_fill_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -4450,15 +4464,40 @@ pub(crate) async fn commit_signature_to_dht(
     let payload_mp = rmp_serde::to_vec_named(&payload)
         .map_err(|e| format!("MessagePack serialization failed: {}", e))?;
 
-    let result = app_ws
-        .call_zome(
-            ZomeCallTarget::RoleName(role_name.into()),
-            "signing".into(),
-            "create_signature".into(),
-            ExternIO::from(payload_mp),
-        )
-        .await
-        .map_err(|e| format!("Zome call create_signature failed: {}", e))?;
+    // Retry ONLY the definitively-not-committed failures: a "chain head
+    // has moved" bundle was rejected outright (a concurrent write won the
+    // head — rebuild on the new head and try again), and CellDisabled never
+    // executed. Timeouts are deliberately NOT retried here — an ambiguous
+    // commit retried blindly could publish the signature twice.
+    let mut result = None;
+    let mut last_err = String::new();
+    for attempt in 1..=3u32 {
+        match app_ws
+            .call_zome(
+                ZomeCallTarget::RoleName(role_name.clone().into()),
+                "signing".into(),
+                "create_signature".into(),
+                ExternIO::from(payload_mp.clone()),
+            )
+            .await
+        {
+            Ok(r) => {
+                result = Some(r);
+                break;
+            }
+            Err(e) => {
+                last_err = format!("Zome call create_signature failed: {}", e);
+                let retriable = last_err.contains("chain head has moved")
+                    || last_err.contains("CellDisabled");
+                log::warn!("create_signature attempt {}/3 failed: {}", attempt, last_err);
+                if !retriable || attempt == 3 {
+                    return Err(last_err);
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+    let result = result.ok_or(last_err)?;
 
     // Result is MessagePack-encoded ActionHash — deserialize to get raw 39 bytes
     let action_hash: holochain_types::prelude::ActionHash =
