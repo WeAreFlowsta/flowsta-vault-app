@@ -437,30 +437,6 @@ export default component$(() => {
           </div>
         </div>
 
-        {/* DID */}
-        <div class="mt-3 rounded-lg bg-black/30 px-4 py-3">
-          <div class="flex items-center justify-between mb-1">
-            <span class="text-xs font-medium text-gray-500">DID</span>
-            <button
-              type="button"
-              class="text-[10px] text-gray-500 hover:text-gray-400 transition-colors"
-              onClick$={() => { showFullDid.value = !showFullDid.value; }}
-            >
-              {showFullDid.value ? "Collapse" : "Expand"}
-            </button>
-          </div>
-          <div class="flex items-center gap-2">
-            <code class="flex-1 font-mono text-sm text-sky-400 break-all">
-              {showFullDid.value
-                ? id.did
-                : id.did.length > 50
-                  ? id.did.slice(0, 24) + "..." + id.did.slice(-20)
-                  : id.did}
-            </code>
-            <CopyButton text={id.did} label="Copy DID" />
-          </div>
-        </div>
-
         {!id.web_username && !usernameEditing.value && (
           <div class="mt-3">
             <p class="text-xs text-gray-400">
@@ -539,6 +515,31 @@ export default component$(() => {
             )}
           </div>
         )}
+
+        {/* DID */}
+        <div class="mt-3 rounded-lg bg-black/30 px-4 py-3">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs font-medium text-gray-500">DID</span>
+            <button
+              type="button"
+              class="text-[10px] text-gray-500 hover:text-gray-400 transition-colors"
+              onClick$={() => { showFullDid.value = !showFullDid.value; }}
+            >
+              {showFullDid.value ? "Collapse" : "Expand"}
+            </button>
+          </div>
+          <div class="flex items-center gap-2">
+            <code class="flex-1 font-mono text-sm text-sky-400 break-all">
+              {showFullDid.value
+                ? id.did
+                : id.did.length > 50
+                  ? id.did.slice(0, 24) + "..." + id.did.slice(-20)
+                  : id.did}
+            </code>
+            <CopyButton text={id.did} label="Copy DID" />
+          </div>
+        </div>
+
       </div>
 
       {/* Recent Activity — unified feed: signatures, backups, linked apps. */}
