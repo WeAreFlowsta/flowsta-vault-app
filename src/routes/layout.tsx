@@ -262,6 +262,13 @@ export default component$(() => {
   // A Flowsta page's committing request is waiting for the conductor —
   // show a visible preparing state instead of dead air before the dialog.
   const opPending = useSignal<{ op: string; origin: string | null } | null>(null);
+  // Bridge-operation activity: after an approval the Vault narrates what it
+  // is doing on the user's behalf — the requesting app may tell its own
+  // story, or none at all (third-party callers). Card = current/latest op;
+  // list = recent history for "wait, what did I just approve?".
+  const opActivity = useSignal<any | null>(null);
+  const opRecent = useSignal<any[]>([]);
+  const opRecentOpen = useSignal(false);
 
   // Signature-management approval (dashboard delegating revoke/thumbnail)
   const pendingCellOp = useSignal<{
@@ -525,6 +532,74 @@ export default component$(() => {
       pendingCellOp.value = event.payload;
     });
 
+    // Bridge-op narration: progress fires the moment an approval resolves,
+    // outcome closes the story (success / failure / user's own denial).
+    const OP_DOING: Record<string, string> = {
+      sign: "Signing…",
+      amend: "Publishing the amended signature…",
+      revoke: "Publishing the revocation…",
+      thumbnail: "Publishing the preview…",
+      profile: "Updating your profile…",
+    };
+    const OP_DONE: Record<string, string> = {
+      sign: "Signed",
+      amend: "Amended signature published",
+      revoke: "Revocation published",
+      thumbnail: "Preview updated",
+      profile: "Profile updated",
+    };
+    // Pre-dialog refusals (validation, wrong origin) never showed the user
+    // anything — log them to the list but don't pop a card out of nowhere.
+    const QUIET_ERRORS = [
+      "tier_forbidden", "invalid_file_hash", "invalid_supersedes",
+      "invalid_thumbnail", "invalid_comment", "invalid_action_hash",
+      "invalid_reason", "reserved_prefix", "nothing_to_update",
+      "vault_locked", "invalid_display_name", "invalid_profile_picture",
+    ];
+    const unlistenOpProgress = listen<any>("op-progress", (event) => {
+      const p = event.payload;
+      const title =
+        p.op === "sign" && p.publish
+          ? "Signing & publishing…"
+          : OP_DOING[p.op] || "Working…";
+      opActivity.value = {
+        op: p.op, publish: p.publish, origin: p.origin, label: p.label,
+        stage: "working", title, at: Date.now(),
+      };
+    });
+    const unlistenOpOutcome = listen<any>("op-outcome", (event) => {
+      const p = event.payload;
+      const denied = p.error === "user_denied";
+      const wasPublish = opActivity.value?.op === p.op ? opActivity.value?.publish : undefined;
+      const title = p.ok
+        ? p.op === "sign" && wasPublish
+          ? "Signed & published"
+          : p.op === "sign" && wasPublish === false
+            ? "Signed — returned to the app"
+            : OP_DONE[p.op] || "Done"
+        : denied
+          ? "You declined — nothing was changed"
+          : "Nothing was changed";
+      const entry = {
+        op: p.op, origin: p.origin, label: p.label,
+        stage: p.ok ? "ok" : denied ? "denied" : "failed",
+        title, description: p.ok ? null : p.description, at: Date.now(),
+      };
+      opRecent.value = [entry, ...opRecent.value].slice(0, 6);
+      const quiet = !p.ok && !denied && QUIET_ERRORS.includes(p.error);
+      if (!quiet || opActivity.value) {
+        opActivity.value = entry;
+        // Success/denied auto-dismiss; failures stay until dismissed or the
+        // next operation replaces them.
+        if (entry.stage !== "failed") {
+          const at = entry.at;
+          setTimeout(() => {
+            if (opActivity.value?.at === at) opActivity.value = null;
+          }, 6500);
+        }
+      }
+    });
+
     cleanup(() => {
       unlistenPromise.then((unlisten) => unlisten());
       unlistenProfile.then((unlisten) => unlisten());
@@ -534,6 +609,8 @@ export default component$(() => {
       unlistenCellOp.then((unlisten) => unlisten());
       unlistenOpPending.then((unlisten) => unlisten());
       unlistenOpPendingClear.then((unlisten) => unlisten());
+      unlistenOpProgress.then((unlisten) => unlisten());
+      unlistenOpOutcome.then((unlisten) => unlisten());
     });
   });
 
@@ -1376,6 +1453,97 @@ export default component$(() => {
           <p class="text-sm text-green-200">
             Approved — your other device is now signed in.
           </p>
+        </div>
+      )}
+
+      {/* Bridge-operation activity: what the Vault is doing / just did */}
+      {opActivity.value && (
+        <div
+          class={`fixed bottom-6 right-6 z-40 w-80 rounded-lg border px-4 py-3 shadow-xl ${
+            opActivity.value.stage === "ok"
+              ? "border-green-500/40 bg-green-500/15"
+              : opActivity.value.stage === "failed"
+                ? "border-red-500/40 bg-red-500/15"
+                : opActivity.value.stage === "denied"
+                  ? "border-gray-500/40 bg-gray-800/90"
+                  : "border-sky-500/40 bg-sky-500/15"
+          }`}
+        >
+          <div class="flex items-start gap-2.5">
+            {opActivity.value.stage === "working" ? (
+              <div class="mt-0.5 h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
+            ) : opActivity.value.stage === "ok" ? (
+              <svg class="mt-0.5 h-4 w-4 shrink-0 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+              </svg>
+            ) : (
+              <svg
+                class={`mt-0.5 h-4 w-4 shrink-0 ${opActivity.value.stage === "failed" ? "text-red-400" : "text-gray-400"}`}
+                fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}
+              >
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            )}
+            <div class="min-w-0 flex-1">
+              <p
+                class={`text-sm ${
+                  opActivity.value.stage === "ok"
+                    ? "text-green-200"
+                    : opActivity.value.stage === "failed"
+                      ? "text-red-200"
+                      : opActivity.value.stage === "denied"
+                        ? "text-gray-300"
+                        : "text-sky-200"
+                }`}
+              >
+                {opActivity.value.title}
+              </p>
+              <p class="mt-0.5 truncate text-xs text-gray-400">
+                {opActivity.value.label ? `${opActivity.value.label} · ` : ""}
+                requested by {(opActivity.value.origin || "an app").replace(/^https?:\/\//, "")}
+              </p>
+              {opActivity.value.stage === "failed" && opActivity.value.description && (
+                <p class="mt-1 text-xs text-red-200/80">{opActivity.value.description}</p>
+              )}
+              {opRecent.value.length > 1 && (
+                <button
+                  class="mt-1.5 text-xs text-gray-400 underline-offset-2 hover:underline"
+                  onClick$={() => (opRecentOpen.value = !opRecentOpen.value)}
+                >
+                  {opRecentOpen.value ? "Hide recent activity" : `Recent activity (${opRecent.value.length})`}
+                </button>
+              )}
+              {opRecentOpen.value && (
+                <ul class="mt-1.5 space-y-1 border-t border-white/10 pt-1.5">
+                  {opRecent.value.map((r: any, i: number) => (
+                    <li key={i} class="truncate text-xs text-gray-400">
+                      <span
+                        class={
+                          r.stage === "ok"
+                            ? "text-green-400"
+                            : r.stage === "failed"
+                              ? "text-red-400"
+                              : "text-gray-500"
+                        }
+                      >
+                        {r.stage === "ok" ? "✓" : r.stage === "failed" ? "✕" : "—"}
+                      </span>{" "}
+                      {r.title}
+                      {r.label ? ` · ${r.label}` : ""} ·{" "}
+                      {(r.origin || "app").replace(/^https?:\/\//, "")}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <button
+              class="shrink-0 text-gray-400 hover:text-white"
+              aria-label="Dismiss"
+              onClick$={() => (opActivity.value = null)}
+            >
+              ×
+            </button>
+          </div>
         </div>
       )}
 

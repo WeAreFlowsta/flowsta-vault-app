@@ -130,6 +130,32 @@ fn test_deny_requested(headers: &HeaderMap) -> bool {
             == Some("1")
 }
 
+/// Tell the Vault UI how a bridge operation ended, so the window the user
+/// just approved in never goes silent. `op-progress` fires the moment an
+/// approval resolves; this event closes the story (success, failure, or
+/// the user's own denial). The UI shows a card + keeps a recent list.
+fn emit_op_outcome(
+    state: &Arc<IpcState>,
+    op: &str,
+    origin: &Option<String>,
+    label: Option<&str>,
+    ok: bool,
+    error: Option<&str>,
+    description: Option<&str>,
+) {
+    let _ = state.app_handle.emit(
+        "op-outcome",
+        serde_json::json!({
+            "op": op,
+            "origin": origin,
+            "label": label,
+            "ok": ok,
+            "error": error,
+            "description": description,
+        }),
+    );
+}
+
 /// Report a job's stage (no-op for synchronous callers).
 fn set_job_stage(state: &Arc<IpcState>, job_id: &Option<String>, stage: &str) {
     if let Some(id) = job_id {
@@ -1864,6 +1890,9 @@ async fn sign_document_handler(
         let task_state = state.clone();
         let task_origin = origin.clone();
         let task_job = job_id.clone();
+        let op_name = if req.supersedes.is_some() { "amend" } else { "sign" };
+        let op_label = req.label.clone();
+        let op_origin = origin.clone();
         tokio::spawn(async move {
             match sign_document_core(
                 task_state.clone(),
@@ -1874,12 +1903,18 @@ async fn sign_document_handler(
             )
             .await
             {
-                Ok(v) => task_state.op_jobs.finish(&task_job, v),
-                Err((_, Json(e))) => task_state.op_jobs.fail(
-                    &task_job,
-                    &e.error,
-                    e.description.as_deref().unwrap_or(""),
-                ),
+                Ok(v) => {
+                    task_state.op_jobs.finish(&task_job, v);
+                    emit_op_outcome(&task_state, op_name, &op_origin, op_label.as_deref(), true, None, None);
+                }
+                Err((_, Json(e))) => {
+                    task_state.op_jobs.fail(
+                        &task_job,
+                        &e.error,
+                        e.description.as_deref().unwrap_or(""),
+                    );
+                    emit_op_outcome(&task_state, op_name, &op_origin, op_label.as_deref(), false, Some(&e.error), e.description.as_deref());
+                }
             }
         });
         return Ok(axum::response::IntoResponse::into_response(Json(
@@ -1887,9 +1922,15 @@ async fn sign_document_handler(
         )));
     }
 
-    sign_document_core(state, origin, req, None, test_deny)
-        .await
-        .map(|v| axum::response::IntoResponse::into_response(Json(v)))
+    let op_name = if req.supersedes.is_some() { "amend" } else { "sign" };
+    let op_label = req.label.clone();
+    let op_origin = origin.clone();
+    let result = sign_document_core(state.clone(), origin, req, None, test_deny).await;
+    match &result {
+        Ok(_) => emit_op_outcome(&state, op_name, &op_origin, op_label.as_deref(), true, None, None),
+        Err((_, Json(e))) => emit_op_outcome(&state, op_name, &op_origin, op_label.as_deref(), false, Some(&e.error), e.description.as_deref()),
+    }
+    result.map(|v| axum::response::IntoResponse::into_response(Json(v)))
 }
 
 async fn sign_document_core(
@@ -2152,6 +2193,18 @@ async fn sign_document_core(
         ));
     }
 
+    // The approval just resolved — from here the Vault works on the user's
+    // behalf, and its own UI narrates that (the requesting app may not).
+    let _ = state.app_handle.emit(
+        "op-progress",
+        serde_json::json!({
+            "op": if req.supersedes.is_some() { "amend" } else { "sign" },
+            "origin": origin,
+            "label": req.label,
+            "publish": req.commit,
+        }),
+    );
+
     // 8. Sign the file hash with the device Ed25519 key
     let (signature_bytes, vault_agent_pub_key) = {
         let config = state.app_state.vault_config.lock().unwrap();
@@ -2388,23 +2441,36 @@ async fn profile_update_handler(
         let task_state = state.clone();
         let task_origin = origin.clone();
         let task_job = job_id.clone();
+        let op_label = req.display_name.clone();
+        let op_origin = origin.clone();
         tokio::spawn(async move {
             match profile_update_core(task_state.clone(), task_origin, req, Some(task_job.clone()), test_deny).await {
-                Ok(v) => task_state.op_jobs.finish(&task_job, v),
-                Err((_, Json(e))) => task_state.op_jobs.fail(
-                    &task_job,
-                    &e.error,
-                    e.description.as_deref().unwrap_or(""),
-                ),
+                Ok(v) => {
+                    task_state.op_jobs.finish(&task_job, v);
+                    emit_op_outcome(&task_state, "profile", &op_origin, op_label.as_deref(), true, None, None);
+                }
+                Err((_, Json(e))) => {
+                    task_state.op_jobs.fail(
+                        &task_job,
+                        &e.error,
+                        e.description.as_deref().unwrap_or(""),
+                    );
+                    emit_op_outcome(&task_state, "profile", &op_origin, op_label.as_deref(), false, Some(&e.error), e.description.as_deref());
+                }
             }
         });
         return Ok(axum::response::IntoResponse::into_response(Json(
             serde_json::json!({ "job_id": job_id }),
         )));
     }
-    profile_update_core(state, origin, req, None, test_deny)
-        .await
-        .map(|v| axum::response::IntoResponse::into_response(Json(v)))
+    let op_label = req.display_name.clone();
+    let op_origin = origin.clone();
+    let result = profile_update_core(state.clone(), origin, req, None, test_deny).await;
+    match &result {
+        Ok(_) => emit_op_outcome(&state, "profile", &op_origin, op_label.as_deref(), true, None, None),
+        Err((_, Json(e))) => emit_op_outcome(&state, "profile", &op_origin, op_label.as_deref(), false, Some(&e.error), e.description.as_deref()),
+    }
+    result.map(|v| axum::response::IntoResponse::into_response(Json(v)))
 }
 
 async fn profile_update_core(
@@ -2575,6 +2641,10 @@ async fn profile_update_core(
             }),
         ));
     }
+    let _ = state.app_handle.emit(
+        "op-progress",
+        serde_json::json!({ "op": "profile", "origin": origin, "label": display_name }),
+    );
 
     set_job_stage(&state, &job_id, "publishing");
     let _commit_guard = state.commit_serial.lock().await;
@@ -2780,10 +2850,20 @@ async fn cell_op_approval(
                 }),
             ));
         }
+        let _ = state.app_handle.emit(
+            "op-progress",
+            serde_json::json!({ "op": op, "origin": origin, "label": detail }),
+        );
         return Ok(());
     }
     match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(true)) => {
+            let _ = state.app_handle.emit(
+                "op-progress",
+                serde_json::json!({ "op": op, "origin": origin, "label": detail }),
+            );
+            Ok(())
+        }
         Ok(Ok(false)) => Err((
             StatusCode::FORBIDDEN,
             Json(IpcError {
@@ -2917,23 +2997,34 @@ async fn revoke_signature_handler(
         let task_state = state.clone();
         let task_origin = origin.clone();
         let task_job = job_id.clone();
+        let op_origin = origin.clone();
         tokio::spawn(async move {
             match revoke_signature_core(task_state.clone(), task_origin, req, Some(task_job.clone()), test_deny).await {
-                Ok(v) => task_state.op_jobs.finish(&task_job, v),
-                Err((_, Json(e))) => task_state.op_jobs.fail(
-                    &task_job,
-                    &e.error,
-                    e.description.as_deref().unwrap_or(""),
-                ),
+                Ok(v) => {
+                    task_state.op_jobs.finish(&task_job, v);
+                    emit_op_outcome(&task_state, "revoke", &op_origin, None, true, None, None);
+                }
+                Err((_, Json(e))) => {
+                    task_state.op_jobs.fail(
+                        &task_job,
+                        &e.error,
+                        e.description.as_deref().unwrap_or(""),
+                    );
+                    emit_op_outcome(&task_state, "revoke", &op_origin, None, false, Some(&e.error), e.description.as_deref());
+                }
             }
         });
         return Ok(axum::response::IntoResponse::into_response(Json(
             serde_json::json!({ "job_id": job_id }),
         )));
     }
-    revoke_signature_core(state, origin, req, None, test_deny)
-        .await
-        .map(|v| axum::response::IntoResponse::into_response(Json(v)))
+    let op_origin = origin.clone();
+    let result = revoke_signature_core(state.clone(), origin, req, None, test_deny).await;
+    match &result {
+        Ok(_) => emit_op_outcome(&state, "revoke", &op_origin, None, true, None, None),
+        Err((_, Json(e))) => emit_op_outcome(&state, "revoke", &op_origin, None, false, Some(&e.error), e.description.as_deref()),
+    }
+    result.map(|v| axum::response::IntoResponse::into_response(Json(v)))
 }
 
 async fn revoke_signature_core(
@@ -3013,23 +3104,34 @@ async fn set_thumbnail_handler(
         let task_state = state.clone();
         let task_origin = origin.clone();
         let task_job = job_id.clone();
+        let op_origin = origin.clone();
         tokio::spawn(async move {
             match set_thumbnail_core(task_state.clone(), task_origin, req, Some(task_job.clone()), test_deny).await {
-                Ok(v) => task_state.op_jobs.finish(&task_job, v),
-                Err((_, Json(e))) => task_state.op_jobs.fail(
-                    &task_job,
-                    &e.error,
-                    e.description.as_deref().unwrap_or(""),
-                ),
+                Ok(v) => {
+                    task_state.op_jobs.finish(&task_job, v);
+                    emit_op_outcome(&task_state, "thumbnail", &op_origin, None, true, None, None);
+                }
+                Err((_, Json(e))) => {
+                    task_state.op_jobs.fail(
+                        &task_job,
+                        &e.error,
+                        e.description.as_deref().unwrap_or(""),
+                    );
+                    emit_op_outcome(&task_state, "thumbnail", &op_origin, None, false, Some(&e.error), e.description.as_deref());
+                }
             }
         });
         return Ok(axum::response::IntoResponse::into_response(Json(
             serde_json::json!({ "job_id": job_id }),
         )));
     }
-    set_thumbnail_core(state, origin, req, None, test_deny)
-        .await
-        .map(|v| axum::response::IntoResponse::into_response(Json(v)))
+    let op_origin = origin.clone();
+    let result = set_thumbnail_core(state.clone(), origin, req, None, test_deny).await;
+    match &result {
+        Ok(_) => emit_op_outcome(&state, "thumbnail", &op_origin, None, true, None, None),
+        Err((_, Json(e))) => emit_op_outcome(&state, "thumbnail", &op_origin, None, false, Some(&e.error), e.description.as_deref()),
+    }
+    result.map(|v| axum::response::IntoResponse::into_response(Json(v)))
 }
 
 async fn set_thumbnail_core(
