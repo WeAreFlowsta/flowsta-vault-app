@@ -94,6 +94,37 @@ export default component$(() => {
   const usernameInput = useSignal("");
   const usernameBusy = useSignal(false);
   const usernameError = useSignal("");
+  // Set when a claim is refused for an unverified email — offers resend.
+  const usernameNeedsVerify = useSignal(false);
+  const resendBusy = useSignal(false);
+  const resendNote = useSignal("");
+
+  const resendVerification = $(async () => {
+    if (resendBusy.value) return;
+    resendBusy.value = true;
+    resendNote.value = "";
+    try {
+      const grant = await invoke<{ token: string }>("vault_grant_login", {
+        apiUrl: __API_URL__,
+      });
+      const resp = await fetch(`${__API_URL__}/auth/resend-verification`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${grant.token}`,
+        },
+        body: JSON.stringify({ email: identity.value?.web_email ?? "" }),
+      });
+      const data = await resp.json().catch(() => null);
+      resendNote.value = resp.ok
+        ? `Verification email sent to ${identity.value?.web_email} — click the link, then claim your username.`
+        : data?.error || "Could not send the verification email. Try again in a few minutes.";
+    } catch (e) {
+      resendNote.value = `${e}`;
+    } finally {
+      resendBusy.value = false;
+    }
+  });
 
   const claimUsername = $(async () => {
     const u = usernameInput.value.trim().toLowerCase();
@@ -112,6 +143,7 @@ export default component$(() => {
       usernameInput.value = "";
     } catch (e) {
       usernameError.value = `${e}`;
+      usernameNeedsVerify.value = `${e}`.toLowerCase().includes("verify your email");
     } finally {
       usernameBusy.value = false;
     }
@@ -409,6 +441,21 @@ export default component$(() => {
             </div>
             {usernameError.value && (
               <p class="mt-2 text-xs text-red-400">{usernameError.value}</p>
+            )}
+            {usernameNeedsVerify.value && (
+              <div class="mt-2">
+                <button
+                  type="button"
+                  class="rounded-lg border border-gray-600 px-3 py-1.5 text-xs text-gray-300 transition-colors hover:text-white disabled:opacity-50"
+                  disabled={resendBusy.value}
+                  onClick$={resendVerification}
+                >
+                  {resendBusy.value ? "Sending…" : "Resend verification email"}
+                </button>
+                {resendNote.value && (
+                  <p class="mt-1.5 text-xs text-gray-400">{resendNote.value}</p>
+                )}
+              </div>
             )}
           </div>
         )}
