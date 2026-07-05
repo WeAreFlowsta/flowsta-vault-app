@@ -4513,6 +4513,156 @@ pub(crate) async fn commit_signature_to_dht(
 // Sign quota cache (HMAC-signed local persistence)
 // ============================================
 
+/// Claim or change the account's username. The username registrar is
+/// Tier-3 territory — uniqueness, login lookup (hash), the public
+/// flowsta.com/<u> URL and billing tiers all live server-side — so this
+/// authenticates with a vault-grant and calls the same endpoint the web
+/// dashboard uses. On success the plaintext is mirrored on-device:
+/// VaultConfig (instant UI) and the sealed user_profile record (the
+/// device-sovereign copy, same field migration preserves).
+#[tauri::command]
+pub async fn claim_web_username(
+    api_url: String,
+    username: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    let (seed_vec, agent_b64) = {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config.as_ref().ok_or("Vault is locked")?;
+        (
+            cfg.device_seed.clone().ok_or("No device seed in vault")?,
+            cfg.agent_pub_key_raw_b64
+                .clone()
+                .ok_or("No raw agent key in vault")?,
+        )
+    };
+    if seed_vec.len() != 32 {
+        return Err("Invalid device seed length".into());
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&seed_vec);
+
+    let grant = crate::device_identity::vault_grant_with_seed(&api_url, &seed, &agent_b64)
+        .await
+        .map_err(|e| format!("Sign-in for the username service failed: {}", e))?;
+
+    let resp = reqwest::Client::new()
+        .put(format!("{}/auth/username", api_url))
+        .bearer_auth(&grant.token)
+        .json(&serde_json::json!({ "username": username }))
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach the API: {}", e))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        // Surface the server's human-readable refusal (taken / reserved /
+        // needs a plan for short names) verbatim.
+        let msg = body
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("Username update failed")
+            .to_string();
+        return Err(msg);
+    }
+
+    // Mirror on-device: config (instant UI) + persisted vault file.
+    {
+        let passphrase = {
+            let mut guard = state.unlock_passphrase.lock().unwrap();
+            guard
+                .as_mut()
+                .and_then(|locked| String::from_utf8(locked.lock().to_vec()).ok())
+        };
+        let mut config = state.vault_config.lock().unwrap();
+        if let Some(cfg) = config.as_mut() {
+            cfg.web_username = Some(username.clone());
+            if let Some(pw) = passphrase {
+                let vault_path = state.vault_path.lock().unwrap().clone();
+                match crate::vault::encrypt_vault(cfg, &pw) {
+                    Ok(mut encrypted) => {
+                        encrypted.display_email =
+                            cfg.web_email.clone().or(cfg.web_username.clone());
+                        if let Err(e) = crate::vault::save_vault(&vault_path, &encrypted) {
+                            log::warn!("Username config persist failed (non-fatal): {}", e);
+                        }
+                    }
+                    Err(e) => log::warn!("Username config encrypt failed (non-fatal): {}", e),
+                }
+            }
+        }
+    }
+
+    // Sealed user_profile mirror — best-effort; the server registrar and
+    // the config copy above are what the UIs read.
+    let sealed_state = state.inner().clone();
+    let sealed_username = username.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mirror_username_into_sealed_profile(&sealed_state, &sealed_username).await
+        {
+            log::warn!("Sealed username mirror failed (non-fatal): {}", e);
+        }
+    });
+
+    Ok(username)
+}
+
+/// Write the username into the sealed user_profile record (replace-or-create),
+/// so the on-device identity stays complete without the server.
+async fn mirror_username_into_sealed_profile(
+    state: &Arc<AppState>,
+    username: &str,
+) -> Result<(), String> {
+    let existing = crate::sealed::sealed_list_inner(state).await?;
+    let now_us = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)) as i64;
+    match existing.iter().find(|r| r.entry_type == "user_profile") {
+        Some(record) => {
+            let mut body = record.body.clone();
+            body["username"] = serde_json::json!(username);
+            body["updated_at"] = serde_json::json!(now_us);
+            crate::sealed::sealed_replace_inner(
+                state,
+                &record.action_hash,
+                "user_profile".into(),
+                body,
+                record.refs.clone(),
+                record.created_at,
+            )
+            .await?;
+        }
+        None => {
+            let email = {
+                let config = state.vault_config.lock().unwrap();
+                config
+                    .as_ref()
+                    .and_then(|c| c.web_email.clone())
+                    .unwrap_or_default()
+            };
+            let now_ms = (now_us / 1000) as u64;
+            crate::sealed::sealed_store_inner(
+                state,
+                "user_profile".into(),
+                serde_json::json!({
+                    "email": email,
+                    "username": username,
+                    "display_name": null,
+                    "created_at": now_us,
+                    "updated_at": now_us,
+                }),
+                Vec::new(),
+                now_ms,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn read_quota_cache(state: State<'_, Arc<AppState>>) -> Result<Option<crate::quota_cache::QuotaCache>, String> {
     crate::quota_cache::read(&state.data_dir)

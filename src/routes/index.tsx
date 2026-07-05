@@ -1,4 +1,4 @@
-import { component$, useComputed$, useContext, useSignal, useVisibleTask$ } from "@builder.io/qwik";
+import { $, component$, useComputed$, useContext, useSignal, useVisibleTask$ } from "@builder.io/qwik";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
@@ -6,6 +6,9 @@ import { listen } from "@tauri-apps/api/event";
 import { CopyButton } from "~/components/ui/CopyButton";
 import { signaturesContext } from "~/lib/context";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
+
+declare const __API_URL__: string;
+declare const __WEB_URL__: string;
 
 interface VaultIdentity {
   agent_pub_key: string;
@@ -83,6 +86,36 @@ export default component$(() => {
   const connectedApps = useComputed$(() => dedupeLinkedApps(linkedApps.value));
   const loading = useSignal(true);
   const showFullDid = useSignal(false);
+
+  // Username claim/change — the registrar lives server-side (uniqueness,
+  // login lookup, the public URL, billing tiers); the command authenticates
+  // with a vault-grant and mirrors the result on-device.
+  const usernameEditing = useSignal(false);
+  const usernameInput = useSignal("");
+  const usernameBusy = useSignal(false);
+  const usernameError = useSignal("");
+
+  const claimUsername = $(async () => {
+    const u = usernameInput.value.trim().toLowerCase();
+    if (!u || usernameBusy.value) return;
+    usernameBusy.value = true;
+    usernameError.value = "";
+    try {
+      const confirmed = await invoke<string>("claim_web_username", {
+        apiUrl: __API_URL__,
+        username: u,
+      });
+      if (identity.value) {
+        identity.value = { ...identity.value, web_username: confirmed };
+      }
+      usernameEditing.value = false;
+      usernameInput.value = "";
+    } catch (e) {
+      usernameError.value = `${e}`;
+    } finally {
+      usernameBusy.value = false;
+    }
+  });
 
   // Shared signatures store from layout — count + last-known list are
   // already populated from cache by the time the user reaches Overview.
@@ -283,6 +316,102 @@ export default component$(() => {
             <CopyButton text={id.did} label="Copy DID" />
           </div>
         </div>
+      </div>
+
+      {/* Public profile / username */}
+      <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-5">
+        <div class="mb-1 flex items-center justify-between">
+          <h3 class="text-sm font-semibold uppercase tracking-wider text-gray-500">
+            Public Profile
+          </h3>
+          {id.web_username && !usernameEditing.value && (
+            <button
+              type="button"
+              class="text-xs text-gray-500 transition-colors hover:text-gray-400"
+              onClick$={() => {
+                usernameInput.value = id.web_username || "";
+                usernameError.value = "";
+                usernameEditing.value = true;
+              }}
+            >
+              Change
+            </button>
+          )}
+        </div>
+
+        <div class="flex items-center gap-2">
+          <code class="flex-1 truncate font-mono text-sm text-sky-400">
+            {`${__WEB_URL__.replace(/^https?:\/\//, "")}/${id.web_username || id.agent_pub_key}`}
+          </code>
+          <CopyButton
+            text={`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`}
+            label="Copy link"
+          />
+        </div>
+
+        {!id.web_username && !usernameEditing.value && (
+          <div class="mt-3">
+            <p class="text-xs text-gray-400">
+              Claim a username for a short, memorable profile —{" "}
+              {`${__WEB_URL__.replace(/^https?:\/\//, "")}/yourname`} — and one
+              identity people recognize across Flowsta and every app that uses
+              it. You can change it anytime.
+            </p>
+            <button
+              type="button"
+              class="mt-2 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-300 transition-colors hover:bg-sky-500/20"
+              onClick$={() => {
+                usernameInput.value = "";
+                usernameError.value = "";
+                usernameEditing.value = true;
+              }}
+            >
+              Claim a username
+            </button>
+          </div>
+        )}
+
+        {usernameEditing.value && (
+          <div class="mt-3">
+            <div class="flex items-center gap-2">
+              <input
+                type="text"
+                value={usernameInput.value}
+                placeholder="yourname (8+ characters on the free plan)"
+                maxLength={30}
+                class="flex-1 rounded-lg border border-gray-600 bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-sky-500 focus:outline-none"
+                onInput$={(_, el) => {
+                  usernameInput.value = el.value;
+                }}
+                onKeyDown$={(e) => {
+                  if ((e as KeyboardEvent).key === "Enter") claimUsername();
+                }}
+              />
+              <button
+                type="button"
+                class="rounded-lg border border-gray-600 px-3 py-2 text-xs text-gray-400 transition-colors hover:text-white"
+                disabled={usernameBusy.value}
+                onClick$={() => {
+                  usernameEditing.value = false;
+                  usernameError.value = "";
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                class="rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-xs font-medium text-sky-300 transition-colors hover:bg-sky-500/20 disabled:opacity-50"
+                disabled={usernameBusy.value || usernameInput.value.trim().length === 0}
+                onClick$={claimUsername}
+              >
+                {usernameBusy.value ? "Saving…" : "Save"}
+              </button>
+            </div>
+            {usernameError.value && (
+              <p class="mt-2 text-xs text-red-400">{usernameError.value}</p>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Stats Grid */}
