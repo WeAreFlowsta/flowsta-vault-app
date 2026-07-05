@@ -690,8 +690,15 @@ export default component$(() => {
       }
 
       signResults.value = results;
+      // Optimistic prepend into the app-wide store — ADD, never truncate.
+      // This signal is shared by every view (the old slice-to-10 here was
+      // silently shrinking the whole list until the next refresh).
       const successful = results.filter(r => r.success);
-      recentSignatures.value = [...successful, ...recentSignatures.value.slice(0, Math.max(0, 10 - successful.length))];
+      const newHashes = new Set(successful.map((r: any) => r.action_hash).filter(Boolean));
+      recentSignatures.value = [
+        ...successful,
+        ...recentSignatures.value.filter((s: any) => !newHashes.has(s.action_hash)),
+      ];
       persistSignaturesCache(recentSignatures.value);
       step.value = "done";
     } else if (fileHash.value) {
@@ -721,7 +728,13 @@ export default component$(() => {
           console.warn("quota sync failed:", err);
         });
         const enrichedResult = { ...result, fileName: fileName.value, thumbnail: thumbnailData.value };
-        recentSignatures.value = [enrichedResult, ...recentSignatures.value.slice(0, 9)];
+        // ADD to the shared store, never truncate it (views slice for display).
+        recentSignatures.value = [
+          enrichedResult,
+          ...recentSignatures.value.filter(
+            (s: any) => s.action_hash !== (enrichedResult as any).action_hash,
+          ),
+        ];
         persistSignaturesCache(recentSignatures.value);
 
         // Store thumbnail on DHT (non-blocking, best-effort)
