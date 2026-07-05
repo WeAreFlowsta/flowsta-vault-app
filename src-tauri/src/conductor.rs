@@ -368,6 +368,12 @@ pub async fn start_holochain(
     passphrase: String,
     device_seed: [u8; 32],
 ) -> Result<ConductorHandle, String> {
+    // A fresh conductor session gets fresh cap grants — drop any cached
+    // credentials so the readiness probe re-verifies (and re-fills) them.
+    {
+        let state = app_handle.state::<Arc<AppState>>();
+        state.cell_credentials.lock().unwrap().clear();
+    }
     match start_holochain_attempt(
         app_handle.clone(),
         data_dir.clone(),

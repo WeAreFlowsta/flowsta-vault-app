@@ -2229,6 +2229,7 @@ async fn sign_document_core(
         };
         let now_ms = (unix_now() as i64) * 1000;
         match crate::commands::commit_signature_to_dht(
+            &state.app_state,
             admin_port,
             app_port,
             &hash_bytes,

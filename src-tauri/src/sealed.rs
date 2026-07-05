@@ -116,12 +116,13 @@ pub struct SealedListItem {
 }
 
 async fn connect_sealed_app_ws(
+    state: &Arc<AppState>,
     admin_port: u16,
     app_port: u16,
 ) -> Result<(holochain_client::AppWebsocket, String), String> {
     use holochain_client::{
-        AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload, CellInfo,
-        ClientAgentSigner, IssueAppAuthenticationTokenPayload,
+        AdminWebsocket, AppWebsocket, CellInfo, ClientAgentSigner,
+        IssueAppAuthenticationTokenPayload,
     };
 
     let app_id = crate::dna::private_v2_app_id();
@@ -156,13 +157,8 @@ async fn connect_sealed_app_ws(
         })
         .ok_or("No provisioned sealed cell")?;
 
-    let credentials = admin_ws
-        .authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-            cell_id: cell_id.clone(),
-            functions: None,
-        })
-        .await
-        .map_err(|e| format!("authorize_signing_credentials failed: {}", e))?;
+    let credentials =
+        crate::commands::cell_credentials_cached(state, &admin_ws, &cell_id).await?;
 
     let issued = admin_ws
         .issue_app_auth_token(IssueAppAuthenticationTokenPayload::for_installed_app_id(
@@ -192,6 +188,7 @@ async fn connect_sealed_app_ws(
 /// compiles the WASM module, which can outrun a response timeout. A
 /// ModuleBuild failure (bad wasm) is permanent — no retry.
 async fn sealed_zome_call(
+    state: &Arc<AppState>,
     admin_port: u16,
     app_port: u16,
     zome_fn: &str,
@@ -203,7 +200,7 @@ async fn sealed_zome_call(
     let mut last_err = String::new();
     for attempt in 1..=3u32 {
         let result = async {
-            let (app_ws, role_name) = connect_sealed_app_ws(admin_port, app_port).await?;
+            let (app_ws, role_name) = connect_sealed_app_ws(state, admin_port, app_port).await?;
             app_ws
                 .call_zome(
                     ZomeCallTarget::RoleName(role_name),
@@ -219,10 +216,16 @@ async fn sealed_zome_call(
             Ok(r) => return Ok(r),
             Err(e) => {
                 last_err = e;
+                // Cached credentials can go stale if the chain was reset —
+                // drop them so the retry re-authorizes.
+                if last_err.contains("nauthorized") {
+                    crate::commands::invalidate_cell_credentials(state);
+                }
                 let permanent = last_err.contains("ModuleBuild");
                 let transient = !permanent
-                    && ["authorize_signing_credentials", "CellDisabled", "response timeout",
-                        "channel dropped", "chain head has moved", "InternalError"]
+                    && ["auth creds", "CellDisabled", "response timeout",
+                        "channel dropped", "chain head has moved", "InternalError",
+                        "nauthorized"]
                         .iter()
                         .any(|m| last_err.contains(m));
                 log::warn!("{} attempt {}/3 failed: {}", zome_fn, attempt, last_err);
@@ -311,7 +314,7 @@ pub(crate) async fn sealed_store_inner(
     })
     .map_err(|e| e.to_string())?;
 
-    let result = sealed_zome_call(admin_port, app_port, "create_sealed", input).await?;
+    let result = sealed_zome_call(state, admin_port, app_port, "create_sealed", input).await?;
 
     let record: Record = rmp_serde::from_slice(result.as_bytes())
         .map_err(|e| format!("Record decode failed: {}", e))?;
@@ -375,7 +378,7 @@ pub(crate) async fn sealed_replace_inner(
     })
     .map_err(|e| e.to_string())?;
 
-    let result = sealed_zome_call(admin_port, app_port, "replace_sealed", input).await?;
+    let result = sealed_zome_call(state, admin_port, app_port, "replace_sealed", input).await?;
 
     let record: Record = rmp_serde::from_slice(result.as_bytes())
         .map_err(|e| format!("Record decode failed: {}", e))?;
@@ -392,6 +395,7 @@ pub(crate) async fn sealed_list_inner(
     let data_key = vault_data_key(state)?;
 
     let result = sealed_zome_call(
+        state,
         admin_port,
         app_port,
         "get_all_sealed",

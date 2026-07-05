@@ -227,6 +227,74 @@ pub struct AppState {
     /// the process. Only written while the auto-approve harness flag is
     /// active; the endpoints that touch it 404 in release builds.
     pub dev_relock_passphrase: Mutex<Option<lair_keystore_api::dependencies::sodoken::LockedArray>>,
+    /// Cap-grant signing credentials cached per cell for the conductor
+    /// session. Every `authorize_signing_credentials` COMMITS a grant to
+    /// that cell's source chain — per-call authorization was bloating
+    /// chains (seq 500+ in a day) and colliding with real writes ("chain
+    /// head has moved"). Cleared on lock and on conductor start; filled
+    /// once per cell and reused everywhere.
+    pub cell_credentials: Mutex<HashMap<holochain_types::prelude::CellId, CachedCellCredentials>>,
+}
+
+/// Owned copy of a cell's signing credentials (holochain_client's
+/// `SigningCredentials` doesn't derive Clone).
+pub struct CachedCellCredentials {
+    pub signing_agent_key: holochain_types::prelude::AgentPubKey,
+    pub keypair: ed25519_dalek::SigningKey,
+    pub cap_secret: holochain_types::prelude::CapSecret,
+}
+
+impl CachedCellCredentials {
+    pub(crate) fn to_signing(&self) -> holochain_client::SigningCredentials {
+        holochain_client::SigningCredentials {
+            signing_agent_key: self.signing_agent_key.clone(),
+            keypair: self.keypair.clone(),
+            cap_secret: self.cap_secret,
+        }
+    }
+    pub(crate) fn from_signing(c: &holochain_client::SigningCredentials) -> Self {
+        Self {
+            signing_agent_key: c.signing_agent_key.clone(),
+            keypair: c.keypair.clone(),
+            cap_secret: c.cap_secret,
+        }
+    }
+}
+
+/// Authorize-once-per-session: return cached credentials for the cell, or
+/// authorize (ONE chain write) and cache them. All zome-call setup paths
+/// go through here.
+pub(crate) async fn cell_credentials_cached(
+    state: &Arc<AppState>,
+    admin_ws: &holochain_client::AdminWebsocket,
+    cell_id: &holochain_types::prelude::CellId,
+) -> Result<holochain_client::SigningCredentials, String> {
+    {
+        let cache = state.cell_credentials.lock().unwrap();
+        if let Some(c) = cache.get(cell_id) {
+            return Ok(c.to_signing());
+        }
+    }
+    let creds = admin_ws
+        .authorize_signing_credentials(holochain_client::AuthorizeSigningCredentialsPayload {
+            cell_id: cell_id.clone(),
+            functions: None,
+        })
+        .await
+        .map_err(|e| format!("auth creds: {}", e))?;
+    state
+        .cell_credentials
+        .lock()
+        .unwrap()
+        .insert(cell_id.clone(), CachedCellCredentials::from_signing(&creds));
+    Ok(creds)
+}
+
+/// Drop all cached cell credentials — call when a zome call fails
+/// "unauthorized" (e.g. the chain was reset underneath a cached grant) so
+/// the next attempt re-authorizes.
+pub(crate) fn invalidate_cell_credentials(state: &Arc<AppState>) {
+    state.cell_credentials.lock().unwrap().clear();
 }
 
 impl AppState {
@@ -265,6 +333,7 @@ impl AppState {
             unlock_passphrase: Mutex::new(None),
             conductor_restart_lock: tokio::sync::Mutex::new(()),
             dev_relock_passphrase: Mutex::new(None),
+            cell_credentials: Mutex::new(HashMap::new()),
         }
     }
 
@@ -624,6 +693,10 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
 
     // Session approvals don't outlive an unlock session.
     state.approved_apps.lock().unwrap().clear();
+
+    // Cached cap-grant credentials don't either (a reset/re-create after
+    // this lock would otherwise reuse grants from a dead chain).
+    state.cell_credentials.lock().unwrap().clear();
 
     // Clear MAU state before clearing vault config (needs device_seed)
     crate::mau::clear_mau_state(&state);
@@ -2981,6 +3054,7 @@ pub async fn sign_file(
 
     let action_hash = if let Some((admin_port, app_port)) = conductor_ports {
         match commit_signature_to_dht(
+            state.inner(),
             admin_port,
             app_port,
             &hash_bytes,
@@ -3147,13 +3221,14 @@ async fn fetch_thumbnail_for_action(
 /// Returns `(app_ws, role_name)` on success, or None (with a logged warning)
 /// if any step fails — caller should skip this version.
 async fn connect_signing_app_ws(
+    state: &Arc<AppState>,
     admin_ws: &holochain_client::AdminWebsocket,
     app_port: u16,
     signing_app: &holochain_client::AppInfo,
     ws_origin: &str,
 ) -> Option<(holochain_client::AppWebsocket, String)> {
-    use holochain_client::{AppWebsocket, AuthorizeSigningCredentialsPayload,
-        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload};
+    use holochain_client::{AppWebsocket, ClientAgentSigner, CellInfo,
+        IssueAppAuthenticationTokenPayload};
 
     let role_name = signing_app.cell_info.keys()
         .find(|k| k.starts_with("flowsta_signing"))?
@@ -3163,9 +3238,7 @@ async fn connect_signing_app_ws(
             CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
             _ => None,
         })?;
-    let creds = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-        cell_id: cell_id.clone(), functions: None,
-    }).await {
+    let creds = match cell_credentials_cached(state, admin_ws, &cell_id).await {
         Ok(c) => c,
         Err(e) => {
             log::warn!("auth creds for {}: {}", signing_app.installed_app_id, e);
@@ -3288,6 +3361,7 @@ async fn build_linked_signature_json(
 /// "no sigs" from "couldn't reach the cell" — that distinction matters
 /// for the frontend's "don't show a partial count" rule.
 async fn query_own_sigs_for_version(
+    state: &Arc<AppState>,
     admin_ws: &holochain_client::AdminWebsocket,
     app_port: u16,
     signing_app: &holochain_client::AppInfo,
@@ -3296,7 +3370,7 @@ async fn query_own_sigs_for_version(
     use holochain_types::prelude::{Entry, ExternIO, Record};
 
     let (app_ws, role_name) = connect_signing_app_ws(
-        admin_ws, app_port, signing_app, "flowsta-vault-read",
+        state, admin_ws, app_port, signing_app, "flowsta-vault-read",
     ).await.ok_or_else(|| format!("connect_signing_app_ws failed for {}",
         signing_app.installed_app_id))?;
 
@@ -3337,6 +3411,7 @@ async fn query_own_sigs_for_version(
 /// Tries the identity DNA's `get_linked_agents` first, falls back to the
 /// cached web agent key set during auto-link on unlock.
 async fn fetch_linked_agent_keys(
+    state: &Arc<AppState>,
     admin_ws: &holochain_client::AdminWebsocket,
     app_port: u16,
     apps: &[holochain_client::AppInfo],
@@ -3374,9 +3449,7 @@ async fn fetch_linked_agent_keys(
 
     let my_agent_key = identity_cell_id.agent_pubkey().clone();
 
-    let creds = match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-        cell_id: identity_cell_id.clone(), functions: None,
-    }).await {
+    let creds = match cell_credentials_cached(state, admin_ws, &identity_cell_id).await {
         Ok(c) => c,
         Err(e) => { log::warn!("identity auth creds: {}", e); return Vec::new(); }
     };
@@ -3465,6 +3538,7 @@ async fn fetch_linked_agent_keys(
 /// cold-DHT `get_signatures_for_agent` timed out, the call returned []
 /// and the frontend treated it as authoritative.
 async fn query_linked_sigs_for_version(
+    state: &Arc<AppState>,
     admin_ws: &holochain_client::AdminWebsocket,
     app_port: u16,
     signing_app: &holochain_client::AppInfo,
@@ -3474,7 +3548,7 @@ async fn query_linked_sigs_for_version(
     use holochain_types::prelude::{Entry, ExternIO, Record};
 
     let (app_ws, role_name) = connect_signing_app_ws(
-        admin_ws, app_port, signing_app, "flowsta-vault-linked-sign",
+        state, admin_ws, app_port, signing_app, "flowsta-vault-linked-sign",
     ).await.ok_or_else(|| format!("connect_signing_app_ws failed for {}",
         signing_app.installed_app_id))?;
 
@@ -3552,7 +3626,7 @@ async fn open_signing_conductor(
         Some("flowsta-vault-read".to_string()),
     ).await.map_err(|e| format!("Admin WS: {}", e))?;
 
-    crate::dna::ensure_apps_enabled(&admin_ws).await;
+    crate::dna::ensure_apps_enabled(&admin_ws, state).await;
 
     let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
     let signing_apps: Vec<_> = apps.iter()
@@ -3631,7 +3705,7 @@ pub(crate) async fn get_my_own_signatures_inner(
 
     let results = futures::future::join_all(
         signing_apps.iter()
-            .map(|app| query_own_sigs_for_version(&admin_ws, app_port, app)),
+            .map(|app| query_own_sigs_for_version(state, &admin_ws, app_port, app)),
     ).await;
     // Any single-version failure surfaces as Err so the frontend retries.
     let mut signatures: Vec<serde_json::Value> = Vec::new();
@@ -3725,7 +3799,7 @@ pub(crate) async fn get_my_linked_signatures_inner(
     if cached_web_key.is_none() && !device_hosted {
         return Err("auto-link not yet complete (cached web agent key unset)".to_string());
     }
-    let linked_keys = fetch_linked_agent_keys(&admin_ws, app_port, &apps, cached_web_key).await;
+    let linked_keys = fetch_linked_agent_keys(state, &admin_ws, app_port, &apps, cached_web_key).await;
     if linked_keys.is_empty() {
         log::info!("[get_my_linked_signatures] no linked agents — authoritative empty");
         return Ok(LinkedSignaturesResult {
@@ -3737,7 +3811,7 @@ pub(crate) async fn get_my_linked_signatures_inner(
 
     let results = futures::future::join_all(
         signing_apps.iter()
-            .map(|app| query_linked_sigs_for_version(&admin_ws, app_port, app, &linked_keys)),
+            .map(|app| query_linked_sigs_for_version(state, &admin_ws, app_port, app, &linked_keys)),
     ).await;
     let mut signatures: Vec<serde_json::Value> = Vec::new();
     for r in results {
@@ -3789,9 +3863,9 @@ async fn get_my_signatures_inner(
     let cached_web_key = state.linked_web_agent_key.lock().unwrap().clone();
     let own_future = futures::future::join_all(
         signing_apps.iter()
-            .map(|app| query_own_sigs_for_version(&admin_ws, app_port, app)),
+            .map(|app| query_own_sigs_for_version(state, &admin_ws, app_port, app)),
     );
-    let keys_future = fetch_linked_agent_keys(&admin_ws, app_port, &apps, cached_web_key);
+    let keys_future = fetch_linked_agent_keys(state, &admin_ws, app_port, &apps, cached_web_key);
     let (own_results, linked_keys) = tokio::join!(own_future, keys_future);
 
     // Best-effort: this combined call is for `export_all_data` where a
@@ -3809,7 +3883,7 @@ async fn get_my_signatures_inner(
         log::info!("Found {} linked agent(s), querying their signatures", linked_keys.len());
         let linked_results = futures::future::join_all(
             signing_apps.iter()
-                .map(|app| query_linked_sigs_for_version(&admin_ws, app_port, app, &linked_keys)),
+                .map(|app| query_linked_sigs_for_version(state, &admin_ws, app_port, app, &linked_keys)),
         ).await;
         let linked_sigs: Vec<serde_json::Value> = linked_results.into_iter()
             .filter_map(|r| r.ok())
@@ -3862,8 +3936,14 @@ pub(crate) async fn revoke_signature_inner(
             Ok(h) => return Ok(h),
             Err(e) => {
                 last_err = e;
+                // Stale cached grant (chain reset) → drop the cache so the
+                // retry re-authorizes fresh credentials.
+                if last_err.contains("nauthorized") {
+                    invalidate_cell_credentials(state);
+                }
                 let transient = ["auth creds", "CellDisabled", "response timeout",
-                    "channel dropped", "chain head has moved", "InternalError"]
+                    "channel dropped", "chain head has moved", "InternalError",
+                    "nauthorized"]
                     .iter()
                     .any(|m| last_err.contains(m));
                 log::warn!("revoke_signature attempt {}/3 failed: {}", attempt, last_err);
@@ -3899,7 +3979,7 @@ async fn revoke_signature_attempt(
         Some("flowsta-vault-revoke".to_string()),
     ).await.map_err(|e| format!("Admin WS: {}", e))?;
 
-    crate::dna::ensure_apps_enabled(&admin_ws).await;
+    crate::dna::ensure_apps_enabled(&admin_ws, state).await;
 
     let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
     let signing_app = apps.iter().find(|a| a.installed_app_id == signing_app_id)
@@ -3916,9 +3996,7 @@ async fn revoke_signature_attempt(
         })
         .ok_or("No provisioned signing cell")?;
 
-    let credentials = admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-        cell_id: cell_id.clone(), functions: None,
-    }).await.map_err(|e| format!("auth creds: {}", e))?;
+    let credentials = cell_credentials_cached(state, &admin_ws, &cell_id).await?;
 
     let issued = admin_ws.issue_app_auth_token(
         IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app_id),
@@ -4003,7 +4081,7 @@ pub(crate) async fn set_thumbnail_inner(
         Some("flowsta-vault-thumb".to_string()),
     ).await.map_err(|e| format!("Admin WS: {}", e))?;
 
-    crate::dna::ensure_apps_enabled(&admin_ws).await;
+    crate::dna::ensure_apps_enabled(&admin_ws, state).await;
 
     let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
     let signing_app = apps.iter().find(|a| a.installed_app_id == signing_app_id)
@@ -4020,9 +4098,7 @@ pub(crate) async fn set_thumbnail_inner(
         })
         .ok_or("No provisioned signing cell")?;
 
-    let credentials = admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-        cell_id: cell_id.clone(), functions: None,
-    }).await.map_err(|e| format!("auth creds: {}", e))?;
+    let credentials = cell_credentials_cached(state, &admin_ws, &cell_id).await?;
 
     let issued = admin_ws.issue_app_auth_token(
         IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app_id),
@@ -4085,6 +4161,11 @@ pub(crate) async fn set_thumbnail_inner(
             }
             Err(e) => {
                 last_err = format!("{}", e);
+                if last_err.contains("nauthorized") {
+                    // Stale cached grant — invalidate so the NEXT call (this
+                    // connection's signer is already built) re-authorizes.
+                    invalidate_cell_credentials(state);
+                }
                 let transient = last_err.contains("response timeout")
                     || last_err.contains("channel dropped")
                     || last_err.contains("chain head has moved");
@@ -4107,6 +4188,7 @@ pub(crate) async fn set_thumbnail_inner(
 /// Commit a SignatureRecord to the signing DNA via the local conductor.
 /// Returns the ActionHash as a base64-encoded string.
 pub(crate) async fn commit_signature_to_dht(
+    state: &Arc<AppState>,
     admin_port: u16,
     app_port: u16,
     file_hash: &[u8],
@@ -4138,7 +4220,7 @@ pub(crate) async fn commit_signature_to_dht(
     .map_err(|e| format!("Admin WS connect failed: {}", e))?;
 
     // Ensure all apps are enabled — conductor may disable cells on restart
-    crate::dna::ensure_apps_enabled(&admin_ws).await;
+    crate::dna::ensure_apps_enabled(&admin_ws, state).await;
 
     // Find the signing app and its provisioned cell
     let apps = admin_ws
@@ -4167,14 +4249,8 @@ pub(crate) async fn commit_signature_to_dht(
         })
         .ok_or("No provisioned signing cell")?;
 
-    // Authorize signing credentials for this cell
-    let credentials = admin_ws
-        .authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-            cell_id: cell_id.clone(),
-            functions: None,
-        })
-        .await
-        .map_err(|e| format!("authorize_signing_credentials failed: {}", e))?;
+    // Session-cached cap-grant credentials for this cell
+    let credentials = cell_credentials_cached(state, &admin_ws, &cell_id).await?;
 
     // Issue auth token
     let issued = admin_ws

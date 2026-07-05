@@ -766,7 +766,17 @@ pub async fn setup_app_interface(admin_port: u16) -> Result<u16, String> {
 /// Holochain conductor can disable cells on restart. This function
 /// enables all apps and should be called before making zome calls
 /// if there's any chance cells are disabled.
-pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
+///
+/// The readiness probe authorizes signing credentials (the only reliable
+/// "cells truly ready" signal — the conductor lies about Enabled status),
+/// which COMMITS a cap grant. To keep that to one grant per conductor
+/// session the probe result is stored in the credentials cache and the
+/// whole probe is skipped while the cache holds an entry for the probe
+/// cell.
+pub async fn ensure_apps_enabled(
+    admin_ws: &AdminWebsocket,
+    state: &std::sync::Arc<crate::commands::AppState>,
+) {
     use holochain_client::{AuthorizeSigningCredentialsPayload, CellInfo};
 
     let apps = match admin_ws.list_apps(None).await {
@@ -801,6 +811,11 @@ pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
             });
 
         if let Some(cell_id) = cell_id {
+            // Cache hit = cells were verified ready earlier this conductor
+            // session — skip the probe (and its chain write) entirely.
+            if state.cell_credentials.lock().unwrap().contains_key(&cell_id) {
+                return;
+            }
             // Try to authorize credentials — this will fail with CellDisabled
             // if cells aren't ready. Each retry sleeps 3 s; 15 attempts gives
             // the conductor up to ~45 s, headroom for the Windows unlock path
@@ -815,7 +830,13 @@ pub async fn ensure_apps_enabled(admin_ws: &AdminWebsocket) {
                     cell_id: cell_id.clone(),
                     functions: None,
                 }).await {
-                    Ok(_) => {
+                    Ok(creds) => {
+                        // The probe's grant becomes THE session grant for
+                        // this cell — store it so no caller re-authorizes.
+                        state.cell_credentials.lock().unwrap().insert(
+                            cell_id.clone(),
+                            crate::commands::CachedCellCredentials::from_signing(&creds),
+                        );
                         if attempt > 1 {
                             log::info!("ensure_apps_enabled: cells ready after {}s wait", (attempt - 1) * 3);
                         } else {
