@@ -22,7 +22,7 @@ declare const __WEB_URL__: string;
 const navItems = [
   { label: "Overview", href: "/", icon: "🏠" },
   { label: "Sign It", href: "/sign-it/", icon: "✍️" },
-  { label: "Connected Apps", href: "/identities/", icon: "🌐" },
+  { label: "Connections", href: "/identities/", icon: "🌐" },
   { label: "Your Data", href: "/your-data/", icon: "🔐" },
   { label: "Settings", href: "/settings/", icon: "⚙️" },
 ];

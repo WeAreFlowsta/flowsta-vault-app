@@ -57,6 +57,53 @@ export default component$(() => {
   // Connected sites (IPC origins)
   const connectedSites = useSignal<ConnectedSite[]>([]);
 
+  // Web sign-ins (OAuth grants) — server-authoritative, fetched with a
+  // vault-grant session so this page shows the COMPLETE picture. The web
+  // dashboard keeps a thin editor for these rows; app connections live
+  // only here.
+  const webSites = useSignal<any[]>([]);
+  const webSitesState = useSignal<"loading" | "ok" | "unavailable">("loading");
+  const webToken = useSignal<string | null>(null);
+  const revokingWebId = useSignal("");
+
+  const loadWebSites = $(async () => {
+    try {
+      const grant = await invoke<{ token: string }>("vault_grant_login", {
+        apiUrl: __API_URL__,
+      });
+      webToken.value = grant.token;
+      const resp = await fetch(`${__API_URL__}/auth/sites`, {
+        headers: { authorization: `Bearer ${grant.token}` },
+      });
+      if (!resp.ok) throw new Error(`${resp.status}`);
+      const data = await resp.json();
+      webSites.value = data.sites || [];
+      webSitesState.value = "ok";
+    } catch {
+      // Offline, or a custodial-linked vault (no vault-grant) — the web
+      // dashboard remains the place to manage these.
+      webSitesState.value = "unavailable";
+    }
+  });
+
+  const disconnectWebSite = $(async (siteId: string, appName: string) => {
+    if (!webToken.value || revokingWebId.value) return;
+    if (!confirm(`Disconnect from "${appName}"? This signs you out of it and revokes its access token.`)) return;
+    revokingWebId.value = siteId;
+    try {
+      const resp = await fetch(`${__API_URL__}/auth/sites/${siteId}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${webToken.value}` },
+      });
+      if (!resp.ok) throw new Error(`${resp.status}`);
+      webSites.value = webSites.value.filter((x) => x.id !== siteId);
+    } catch (e) {
+      console.error("Failed to disconnect web site:", e);
+    } finally {
+      revokingWebId.value = "";
+    }
+  });
+
   const loading = useSignal(true);
 
   // Load all data on mount
@@ -86,6 +133,7 @@ export default component$(() => {
       linkedApps.value = apps;
       appScopes.value = scopes;
       connectedSites.value = sites.filter((s) => !isInternalOrigin(s.origin));
+      loadWebSites();
     } catch {
       // Vault might be locked
     } finally {
@@ -217,7 +265,7 @@ export default component$(() => {
 
   return (
     <div>
-      <h1 class="mb-6 text-2xl font-bold text-white">Connected Apps</h1>
+      <h1 class="mb-6 text-2xl font-bold text-white">Connections</h1>
 
       {/* Flowsta Web Account */}
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
@@ -284,11 +332,11 @@ export default component$(() => {
         <div class="mb-4 flex items-center justify-between">
           <h3 class="text-lg font-semibold text-white">Apps & Sites</h3>
           <span class="text-xs text-gray-500">
-            {dedupedApps.value.length + connectedSites.value.length} connected
+            {dedupedApps.value.length + connectedSites.value.length + webSites.value.length} connected
           </span>
         </div>
 
-        {linkedApps.value.length === 0 && connectedSites.value.length === 0 ? (
+        {linkedApps.value.length === 0 && connectedSites.value.length === 0 && webSites.value.length === 0 ? (
           <div class="rounded-lg border border-dashed border-gray-600 bg-black/30 p-8 text-center">
             <svg class="mx-auto mb-3 h-8 w-8 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
               <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
@@ -318,17 +366,17 @@ export default component$(() => {
               return (
                 <div
                   key={`app-${app.client_id ?? app.app_name}`}
-                  class="rounded-lg border border-blue-800/50 bg-blue-900/10 px-4 py-3"
+                  class="rounded-lg border border-violet-800/50 bg-violet-900/10 px-4 py-3"
                 >
                   <div class="flex items-center justify-between gap-3">
                     <div class="min-w-0 flex-1">
                       <div class="flex items-center gap-2">
-                        <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-blue-900/50 text-xs text-sky-400">
+                        <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-violet-900/50 text-xs text-violet-400">
                           {app.app_name.charAt(0).toUpperCase()}
                         </div>
                         <span class="text-sm font-medium text-white">{app.app_name}</span>
-                        <span class="rounded-full bg-blue-900/30 px-2 py-0.5 text-[10px] font-medium text-sky-400">
-                          Identity linked
+                        <span class="rounded-full border border-violet-800 bg-violet-900/20 px-2 py-0.5 text-[10px] font-medium text-violet-400">
+                          App
                         </span>
                       </div>
                       <div class="mt-1 flex items-center gap-3 text-xs text-gray-500">
@@ -434,7 +482,55 @@ export default component$(() => {
                 </div>
               </div>
             ))}
+
+            {/* Web sign-ins (OAuth grants) — server-authoritative */}
+            {webSites.value.map((site: any) => (
+              <div
+                key={`web-${site.id}`}
+                class="flex items-center justify-between rounded-lg border border-blue-800/50 bg-blue-900/10 px-4 py-3"
+              >
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    {site.logo_url ? (
+                      <img src={site.logo_url} alt="" width={24} height={24} class="h-6 w-6 shrink-0 rounded" />
+                    ) : (
+                      <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-blue-900/50 text-xs text-blue-400">
+                        {(site.name || "?").charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                    <span class="truncate text-sm font-medium text-white">{site.name}</span>
+                    <span class="rounded-full border border-blue-800 bg-blue-900/20 px-2 py-0.5 text-[10px] font-medium text-blue-400">
+                      Web
+                    </span>
+                  </div>
+                  <div class="mt-1 flex items-center gap-3 text-xs text-gray-500">
+                    {site.first_connected_at && (
+                      <span>
+                        Connected {new Date(site.first_connected_at).toLocaleDateString()}
+                      </span>
+                    )}
+                    {site.scope && (
+                      <span class="truncate">Access: {String(site.scope).split(" ").join(", ")}</span>
+                    )}
+                  </div>
+                </div>
+                <GlassButton
+                  variant="danger"
+                  disabled={revokingWebId.value === site.id}
+                  onClick$={() => disconnectWebSite(site.id, site.name)}
+                >
+                  {revokingWebId.value === site.id ? "…" : "Disconnect"}
+                </GlassButton>
+              </div>
+            ))}
           </div>
+        )}
+
+        {webSitesState.value === "unavailable" && (
+          <p class="mt-3 text-xs text-gray-500">
+            Web sign-ins couldn't be loaded right now — manage them anytime at
+            flowsta.com under Connected Sites.
+          </p>
         )}
       </div>
 
@@ -445,10 +541,12 @@ export default component$(() => {
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
           </svg>
           <div>
-            <h4 class="text-sm font-medium text-gray-300">Web Connected Sites</h4>
+            <h4 class="text-sm font-medium text-gray-300">One place for everything connected</h4>
             <p class="mt-1 text-xs text-gray-500">
-              Websites that use Flowsta Auth for login are managed separately through
-              your web dashboard at flowsta.com under Connected Sites.
+              <span class="text-violet-400">App</span> rows are locally linked
+              apps managed only here. <span class="text-blue-400">Web</span>{" "}
+              rows are sites you signed into with Flowsta — also viewable on
+              your flowsta.com dashboard.
             </p>
           </div>
         </div>
@@ -458,5 +556,5 @@ export default component$(() => {
 });
 
 export const head: DocumentHead = {
-  title: "Connected Apps - Flowsta Vault",
+  title: "Connections - Flowsta Vault",
 };
