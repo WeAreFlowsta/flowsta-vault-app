@@ -57,8 +57,13 @@ export default component$(() => {
   // Granted scopes per app, keyed by client_id
   const appScopes = useSignal<Record<string, string[]>>({});
 
-  // Connected sites (IPC origins)
+  // Connected sites (IPC origins). A row here is TRAFFIC, not consent —
+  // only origins the user granted auto-approve to (trusted) appear in the
+  // grants list; the rest live in the collapsed Bridge Activity log.
   const connectedSites = useSignal<ConnectedSite[]>([]);
+  const trustedSites = useComputed$(() => connectedSites.value.filter((s) => s.trusted));
+  const activitySites = useComputed$(() => connectedSites.value.filter((s) => !s.trusted));
+  const activityOpen = useSignal(false);
 
   // Web sign-ins (OAuth grants) — server-authoritative, fetched with a
   // vault-grant session so this page shows the COMPLETE picture. The web
@@ -359,11 +364,11 @@ export default component$(() => {
         <div class="mb-4 flex items-center justify-between">
           <h3 class="text-lg font-semibold text-white">Apps & Sites</h3>
           <span class="text-xs text-gray-500">
-            {dedupedApps.value.length + connectedSites.value.length + webSites.value.length} connected
+            {dedupedApps.value.length + trustedSites.value.length + webSites.value.length} connected
           </span>
         </div>
 
-        {linkedApps.value.length === 0 && connectedSites.value.length === 0 && webSites.value.length === 0 ? (
+        {linkedApps.value.length === 0 && trustedSites.value.length === 0 && webSites.value.length === 0 ? (
           <div class="rounded-lg border border-dashed border-gray-600 bg-black/30 p-8 text-center">
             <svg class="mx-auto mb-3 h-8 w-8 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
               <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
@@ -439,6 +444,45 @@ export default component$(() => {
                 </div>
               );
             })}
+
+            {/* Auto-approve grants: origins the user explicitly trusted to
+                sign in without a dialog. This IS a grant — it lives with
+                the other grants. Plain traffic is in Bridge Activity below. */}
+            {trustedSites.value.map((site) => (
+              <div
+                key={`trusted-${site.origin}`}
+                class="flex items-center justify-between rounded-lg border border-green-800/50 bg-green-900/10 px-4 py-3"
+              >
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <div class="flex h-6 w-6 items-center justify-center rounded bg-green-900/50 text-xs text-green-400">
+                      {(() => {
+                        try {
+                          return new URL(site.origin).hostname.charAt(0).toUpperCase();
+                        } catch {
+                          return "?";
+                        }
+                      })()}
+                    </div>
+                    <span class="truncate text-sm font-medium text-white">
+                      {site.origin.replace(/^https?:\/\//, "")}
+                    </span>
+                    <span class="rounded-full border border-green-800 bg-green-900/20 px-2 py-0.5 text-[10px] font-medium text-green-400">
+                      Trusted
+                    </span>
+                  </div>
+                  <div class="mt-1 text-xs text-gray-500">
+                    Signs you in without asking · since {new Date(site.first_seen * 1000).toLocaleDateString()}
+                  </div>
+                </div>
+                <GlassButton
+                  variant="danger"
+                  onClick$={() => handleToggleTrust(site.origin, false)}
+                >
+                  Revoke
+                </GlassButton>
+              </div>
+            ))}
 
             {/* Connected sites */}
             {connectedSites.value.map((site) => (
@@ -564,6 +608,71 @@ export default component$(() => {
           </p>
         )}
       </div>
+
+      {/* Bridge activity — traffic log, NOT grants. Origins that called
+          this device's bridge without holding any standing permission. */}
+      {activitySites.value.length > 0 && (
+        <div class="mt-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
+          <button
+            type="button"
+            class="flex w-full items-center justify-between"
+            onClick$={() => (activityOpen.value = !activityOpen.value)}
+          >
+            <div class="text-left">
+              <h3 class="text-sm font-semibold text-white">Bridge activity</h3>
+              <p class="mt-0.5 text-xs text-gray-500">
+                {activitySites.value.length} site{activitySites.value.length !== 1 ? "s" : ""} contacted this Vault without holding any permission
+              </p>
+            </div>
+            <svg
+              class={["h-4 w-4 text-gray-500 transition-transform", activityOpen.value ? "rotate-180" : ""].join(" ")}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}
+            >
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+            </svg>
+          </button>
+
+          {activityOpen.value && (
+            <div class="mt-4 space-y-2">
+              {activitySites.value.map((site) => (
+                <div
+                  key={`activity-${site.origin}`}
+                  class="flex items-center justify-between rounded-lg border border-gray-700 bg-black/30 px-4 py-2.5"
+                >
+                  <div class="min-w-0 flex-1">
+                    <span class="truncate text-sm text-gray-300">{site.origin}</span>
+                    <div class="mt-0.5 flex items-center gap-3 text-xs text-gray-500">
+                      <span>{site.request_count} request{site.request_count !== 1 ? "s" : ""}</span>
+                      <span>Last: {timeAgo(site.last_request)}</span>
+                      <span class="rounded bg-gray-700 px-1.5 py-0.5 text-[10px] text-gray-400">{site.last_action}</span>
+                    </div>
+                  </div>
+                  <div class="ml-4 flex items-center gap-2">
+                    {site.has_authenticated && (
+                      <button
+                        type="button"
+                        title="Trust this site to sign you in without asking"
+                        class="rounded-lg border border-gray-600 px-2.5 py-1 text-xs text-gray-400 transition-colors hover:text-green-400 hover:border-green-800"
+                        onClick$={() => handleToggleTrust(site.origin, true)}
+                      >
+                        Trust
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      title="Clear from this log"
+                      class="rounded-lg px-2 py-1 text-xs text-gray-500 transition-colors hover:text-red-400"
+                      onClick$={() => handleRevokeSite(site.origin)}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Web connected sites info */}
       <div class="mt-6 rounded-lg border border-gray-700 bg-black/30 p-4">

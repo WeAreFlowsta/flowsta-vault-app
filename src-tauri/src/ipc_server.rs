@@ -3533,6 +3533,81 @@ async fn dev_unlock_handler(
     )))
 }
 
+// ── GET /connections — the registry, read-only, for Flowsta pages ─────────
+//
+// The Vault is the consent authority; the web dashboard is a WINDOW onto
+// it (authority follows custody, visibility follows the user). Serves the
+// identity-linked apps (with scopes) and trusted origins. Flowsta pages
+// only; a locked vault refuses without popping the unlock screen.
+
+async fn connections_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    let origin = extract_origin(&headers);
+    track_request(&state.app_state, origin.as_deref(), "connections");
+
+    if !is_flowsta_origin(origin.as_deref()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "tier_forbidden".into(),
+                description: Some("Connection reads are available to Flowsta pages only.".into()),
+            }),
+        ));
+    }
+    if state.app_state.vault_config.lock().unwrap().is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "vault_locked".into(),
+                description: Some("Vault is locked.".into()),
+            }),
+        ));
+    }
+
+    let apps: Vec<serde_json::Value> = {
+        let linked = state.app_state.linked_third_party_apps.lock().unwrap();
+        let scopes = state.app_state.linked_app_scopes.lock().unwrap();
+        linked
+            .iter()
+            .map(|a| {
+                let app_scopes = a
+                    .client_id
+                    .as_ref()
+                    .and_then(|cid| scopes.get(cid).cloned())
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "app_name": a.app_name,
+                    "app_agent_pub_key": a.app_agent_pub_key,
+                    "linked_at": a.linked_at,
+                    "client_id": a.client_id,
+                    "scopes": app_scopes,
+                })
+            })
+            .collect()
+    };
+    // `trusted` on the raw map is a display field computed at query time —
+    // the live source of truth is the approved_apps list.
+    let trusted_origins: Vec<serde_json::Value> = {
+        let approved = state.app_state.approved_apps.lock().unwrap();
+        let sites = state.app_state.connected_sites.lock().unwrap();
+        approved
+            .iter()
+            .map(|origin| {
+                serde_json::json!({
+                    "origin": origin,
+                    "first_seen": sites.get(origin).map(|s| s.first_seen),
+                })
+            })
+            .collect()
+    };
+
+    Ok(axum::response::IntoResponse::into_response(Json(
+        serde_json::json!({ "apps": apps, "trusted_origins": trusted_origins }),
+    )))
+}
+
 /// Simple timestamp to ISO 8601 string (avoids adding chrono dependency).
 fn chrono_lite(unix_secs: i64) -> String {
     let secs = unix_secs as u64;
@@ -3605,6 +3680,7 @@ pub async fn start_ipc_server(
         .route("/set-thumbnail", post(set_thumbnail_handler))
         .route("/op-status/:job_id", get(op_status_handler))
         .route("/signatures", get(signatures_handler))
+        .route("/connections", get(connections_handler))
         .route("/revoke-identity", post(revoke_identity_handler))
         .route("/link-status", get(link_status_handler))
         .route("/backup", post(backup_handler))
