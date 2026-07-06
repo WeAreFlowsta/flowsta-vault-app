@@ -24,6 +24,7 @@ interface VaultIdentity {
   web_email: string | null;
   web_username: string | null;
   web_agent_pub_key: string | null;
+  hosting_model: string | null;
 }
 
 interface BackupRecordSummary {
@@ -247,7 +248,13 @@ export default component$(() => {
       backupStats.value = stats;
       linkedApps.value = apps;
       try {
-        const key = id.web_agent_pub_key || id.agent_pub_key;
+        // Quota/plan is keyed to the account's CURRENT agent key. For a
+        // device-hosted account that's the vault's own key (after a
+        // migration the old web key stays only for signature attribution);
+        // for a custodial-linked vault it's the web account's key.
+        const key = id.hosting_model === "device-hosted"
+          ? id.agent_pub_key
+          : (id.web_agent_pub_key || id.agent_pub_key);
         const resp = await fetch(
           `${__API_URL__}/api/v1/sign-it/quota/by-agent?agent_pub_key=${encodeURIComponent(key)}`,
           { cache: "no-store" },

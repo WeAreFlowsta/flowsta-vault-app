@@ -189,11 +189,15 @@ export default component$(() => {
 
   const refreshQuota = $(async () => {
     // Try online first via the public quota-by-agent endpoint.
-    // Prefer web_agent_pub_key (the linked Flowsta account) over the local
-    // Vault agent — that's the one the user's subscription is attached to.
+    // Quota is keyed to the account's CURRENT agent key: the vault's own
+    // key for device-hosted accounts (post-migration the old web key stays
+    // only for signature attribution), the web account's key for
+    // custodial-linked vaults.
     try {
-      const id = await invoke<{ agent_pub_key: string; web_agent_pub_key: string | null }>("get_identity");
-      const agentKey = id?.web_agent_pub_key || id?.agent_pub_key;
+      const id = await invoke<{ agent_pub_key: string; web_agent_pub_key: string | null; hosting_model: string | null }>("get_identity");
+      const agentKey = id?.hosting_model === "device-hosted"
+        ? id?.agent_pub_key
+        : (id?.web_agent_pub_key || id?.agent_pub_key);
       if (agentKey) {
         const apiUrl = __API_URL__;
         const resp = await fetch(
