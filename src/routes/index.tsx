@@ -263,13 +263,17 @@ export default component$(() => {
       loading.value = false;
     }
 
-    // Refresh identity when profile is synced from web account
-    const unlisten = await listen("profile-synced", async () => {
+    // Refresh identity when the profile changes — synced from the web
+    // account, edited in-app, or written via an approved bridge request.
+    const refreshIdentity = async () => {
       try {
         identity.value = await invoke<VaultIdentity>("get_identity");
       } catch { /* ignore */ }
-    });
+    };
+    const unlisten = await listen("profile-synced", refreshIdentity);
+    const unlistenEdit = await listen("profile-updated", refreshIdentity);
     cleanup(() => unlisten());
+    cleanup(() => unlistenEdit());
 
     // Keep the connected-apps list live: the IPC server emits these when an app
     // links or is revoked, so refetch instead of waiting for a manual reload.
