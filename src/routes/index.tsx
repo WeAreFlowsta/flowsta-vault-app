@@ -400,74 +400,99 @@ export default component$(() => {
         </button>
       </div>
 
-      {/* Public profile / username */}
-      <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-5">
-        <div class="mb-1 flex items-center justify-between">
+      {/* Public profile — the identity hero: your link front and center,
+          actions where the thing they act on lives, DID as the quieter
+          technical row with copy / document / expand. */}
+      <div class="mb-6 rounded-xl border border-white/10 bg-white/[0.06] p-5">
+        <div class="mb-3 flex items-center justify-between">
           <h3 class="text-sm font-semibold uppercase tracking-wider text-gray-500">
             Public Profile
           </h3>
-          {id.web_username && !usernameEditing.value && (
-            <button
-              type="button"
-              class="text-xs text-gray-500 transition-colors hover:text-gray-400"
-              onClick$={() => {
-                usernameInput.value = id.web_username || "";
-                usernameError.value = "";
-                usernameEditing.value = true;
-              }}
-            >
-              Change
-            </button>
-          )}
+          <button
+            type="button"
+            class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-gray-400 transition-colors hover:text-white"
+            onClick$={() => open(`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`)}
+          >
+            <span class="relative flex h-1.5 w-1.5">
+              <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-60" />
+              <span class="relative inline-flex h-1.5 w-1.5 rounded-full bg-green-400" />
+            </span>
+            View live page
+            <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+            </svg>
+          </button>
         </div>
 
-        {/* Profile link — same inset-row treatment as the DID below */}
-        <div class="mt-2 rounded-lg bg-black/30 px-4 py-3">
-          <div class="mb-1 flex items-center justify-between">
-            <span class="text-xs font-medium text-gray-500">Profile link</span>
+        {/* Hero: the profile link */}
+        {!usernameEditing.value ? (
+          <div class="rounded-lg border border-white/10 bg-gradient-to-r from-sky-500/10 via-transparent to-violet-500/10 px-4 py-3.5">
+            <div class="flex items-center justify-between gap-3">
+              <div class="min-w-0 flex-1 truncate font-mono text-base">
+                <span class="text-gray-500">{__WEB_URL__.replace(/^https?:\/\//, "")}/</span>
+                {id.web_username ? (
+                  <span class="font-semibold text-white">{id.web_username}</span>
+                ) : (
+                  <span class="text-sm text-gray-400">{id.agent_pub_key}</span>
+                )}
+              </div>
+              <div class="flex shrink-0 items-center gap-1.5">
+                <CopyButton
+                  text={`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`}
+                  label="Copy link"
+                />
+                {id.web_username ? (
+                  <button
+                    type="button"
+                    class="flex items-center gap-1 rounded-md border border-gray-600/60 px-2 py-1 text-xs text-gray-400 transition-colors hover:border-gray-500 hover:text-white"
+                    onClick$={() => {
+                      usernameInput.value = id.web_username || "";
+                      usernameError.value = "";
+                      usernameEditing.value = true;
+                    }}
+                  >
+                    <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z" />
+                    </svg>
+                    Change
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    class="rounded-md border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-300 transition-colors hover:bg-sky-500/20"
+                    onClick$={() => {
+                      usernameInput.value = "";
+                      usernameError.value = "";
+                      usernameEditing.value = true;
+                    }}
+                  >
+                    Claim a username
+                  </button>
+                )}
+              </div>
+            </div>
+            {!id.web_username && (
+              <p class="mt-2 text-xs text-gray-400">
+                A username gives you a short, memorable link —{" "}
+                {`${__WEB_URL__.replace(/^https?:\/\//, "")}/yourname`} — and one
+                identity people recognize everywhere. Change it anytime.
+              </p>
+            )}
           </div>
-          <div class="flex items-center gap-2">
-            <code class="flex-1 truncate font-mono text-sm text-sky-400">
-              {`${__WEB_URL__.replace(/^https?:\/\//, "")}/${id.web_username || id.agent_pub_key}`}
-            </code>
-            <CopyButton
-              text={`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`}
-              label="Copy link"
-            />
-          </div>
-        </div>
-
-        {!id.web_username && !usernameEditing.value && (
-          <div class="mt-3">
-            <p class="text-xs text-gray-400">
-              Claim a username for a short, memorable profile —{" "}
-              {`${__WEB_URL__.replace(/^https?:\/\//, "")}/yourname`} — and one
-              identity people recognize across Flowsta and every app that uses
-              it. You can change it anytime.
-            </p>
-            <button
-              type="button"
-              class="mt-2 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-300 transition-colors hover:bg-sky-500/20"
-              onClick$={() => {
-                usernameInput.value = "";
-                usernameError.value = "";
-                usernameEditing.value = true;
-              }}
-            >
-              Claim a username
-            </button>
-          </div>
-        )}
-
-        {usernameEditing.value && (
-          <div class="mt-3">
+        ) : (
+          <div class="rounded-lg border border-sky-500/30 bg-gradient-to-r from-sky-500/10 via-transparent to-violet-500/10 px-4 py-3.5">
             <div class="flex items-center gap-2">
+              <span class="hidden shrink-0 font-mono text-sm text-gray-500 sm:inline">
+                {__WEB_URL__.replace(/^https?:\/\//, "")}/
+              </span>
               <input
                 type="text"
                 value={usernameInput.value}
                 placeholder="yourname (8+ characters on the free plan)"
                 maxLength={30}
-                class="flex-1 rounded-lg border border-gray-600 bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-sky-500 focus:outline-none"
+                // eslint-disable-next-line qwik/no-autofocus
+                autoFocus
+                class="min-w-0 flex-1 rounded-lg border border-gray-600 bg-black/30 px-3 py-2 font-mono text-sm text-white placeholder-gray-600 focus:border-sky-500 focus:outline-none"
                 onInput$={(_, el) => {
                   usernameInput.value = el.value;
                 }}
@@ -516,27 +541,36 @@ export default component$(() => {
           </div>
         )}
 
-        {/* DID */}
-        <div class="mt-3 rounded-lg bg-black/30 px-4 py-3">
-          <div class="flex items-center justify-between mb-1">
-            <span class="text-xs font-medium text-gray-500">DID</span>
+        {/* DID — the permanent identifier under the friendly link */}
+        <div class="mt-3 flex items-center gap-2 px-1">
+          <span class="shrink-0 text-xs font-medium text-gray-500">DID</span>
+          <code class="min-w-0 flex-1 truncate font-mono text-xs text-gray-400">
+            {showFullDid.value
+              ? id.did
+              : id.did.length > 50
+                ? id.did.slice(0, 24) + "…" + id.did.slice(-16)
+                : id.did}
+          </code>
+          <div class="flex shrink-0 items-center gap-1.5">
+            <CopyButton text={id.did} label="Copy DID" />
             <button
               type="button"
-              class="text-[10px] text-gray-500 hover:text-gray-400 transition-colors"
+              title="Open the machine-readable DID document"
+              class="flex items-center gap-1 rounded-md border border-gray-600/60 px-2 py-1 text-xs text-gray-400 transition-colors hover:border-gray-500 hover:text-white"
+              onClick$={() => open(`${__API_URL__}/did/${id.agent_pub_key}`)}
+            >
+              <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
+              </svg>
+              Document
+            </button>
+            <button
+              type="button"
+              class="rounded-md px-1.5 py-1 text-xs text-gray-500 transition-colors hover:text-white"
               onClick$={() => { showFullDid.value = !showFullDid.value; }}
             >
               {showFullDid.value ? "Collapse" : "Expand"}
             </button>
-          </div>
-          <div class="flex items-center gap-2">
-            <code class="flex-1 font-mono text-sm text-sky-400 break-all">
-              {showFullDid.value
-                ? id.did
-                : id.did.length > 50
-                  ? id.did.slice(0, 24) + "..." + id.did.slice(-20)
-                  : id.did}
-            </code>
-            <CopyButton text={id.did} label="Copy DID" />
           </div>
         </div>
 
