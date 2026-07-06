@@ -406,9 +406,7 @@ export default component$(() => {
           technical line (copy / document). */}
       <div class="mb-6 rounded-xl border border-white/10 bg-white/[0.06] p-5">
         <div class="mb-3 flex items-center justify-between">
-          <h3 class="text-sm font-semibold uppercase tracking-wider text-gray-500">
-            Public Profile
-          </h3>
+          <h3 class="text-lg font-semibold text-white">Public Profile</h3>
           <PillButton onClick$={() => open(`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`)}>
             <span class="relative flex h-1.5 w-1.5">
               <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-60" />
@@ -548,7 +546,7 @@ export default component$(() => {
 
       {/* Recent Activity — unified feed: signatures, backups, linked apps. */}
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
-        <h3 class="mb-4 text-sm font-semibold uppercase tracking-wider text-gray-500">
+        <h3 class="mb-4 text-lg font-semibold text-white">
           Recent Activity
         </h3>
 
