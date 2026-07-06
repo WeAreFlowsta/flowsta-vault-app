@@ -30,6 +30,11 @@ pub struct DnaVersionInfo {
     pub coordinator_only: bool,
     pub min_vault_version: String,
     pub min_conductor_version: String,
+    /// SHA-256 (hex) of the .happ file the server serves. When present the
+    /// download is verified before install — a drifted or corrupted bundle
+    /// fails loudly here instead of silently forking the DHT space.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -298,6 +303,7 @@ async fn download_happ_bundle(
     recovery_lookup_hash: &str,
     dna_type: &str,
     version: &str,
+    expected_sha256: Option<&str>,
     dest_path: &Path,
 ) -> Result<(), String> {
     let url = format!(
@@ -337,6 +343,23 @@ async fn download_happ_bundle(
 
     if bytes.is_empty() {
         return Err("Downloaded empty bundle".to_string());
+    }
+
+    // Verify against the manifest checksum before anything touches disk.
+    if let Some(expected) = expected_sha256 {
+        let actual = sha256_hex(&bytes);
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "Checksum mismatch for {} v{}: manifest {} vs downloaded {} — refusing to install",
+                dna_type, version, expected, actual
+            ));
+        }
+        log::info!("{} DNA v{} checksum verified ({})", dna_type, version, actual);
+    } else {
+        log::warn!(
+            "{} DNA v{}: no sha256 in manifest — installing unverified bundle",
+            dna_type, version
+        );
     }
 
     // Write to a temp file first, then rename (atomic on same filesystem)
@@ -387,7 +410,15 @@ async fn update_single_dna(
 
     // 1. Download the new .happ bundle to the app data directory.
     let bundle_path = download_dir.join(&new_info.filename);
-    download_happ_bundle(api_url, recovery_lookup_hash, dna_type, new_version, &bundle_path).await?;
+    download_happ_bundle(
+        api_url,
+        recovery_lookup_hash,
+        dna_type,
+        new_version,
+        new_info.sha256.as_deref(),
+        &bundle_path,
+    )
+    .await?;
 
     // 2. Connect to admin WebSocket.
     let admin_ws = AdminWebsocket::connect(
@@ -554,5 +585,26 @@ mod tests {
         assert!(!version_less_than("1.10", "1.9"));
         assert!(version_less_than("0.1.0", "1.0.0"));
         assert!(!version_less_than("2.0.0", "1.9.9"));
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    hex::encode(h.finalize())
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::sha256_hex;
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        // sha256("abc")
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }
