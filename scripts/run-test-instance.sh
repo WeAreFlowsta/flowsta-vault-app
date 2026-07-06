@@ -7,10 +7,9 @@
 # scans 27777-27779 — a dev vault typically holds 27777, so the first
 # test instance lands on 27778).
 #
-# Build first (embeds the staging frontend):
-#   VITE_API_URL=https://auth-api-staging.flowsta.com \
-#   VITE_WEB_URL=https://ourtest.flowsta.com \
-#   npx tauri build --debug --no-bundle
+# Build first with scripts/build-test-binary.sh — network params are
+# COMPILE-time; a build without the FLOWSTA_* env silently bakes the
+# prod bootstrap with no auth material (zero peers, no errors).
 #
 # Usage: scripts/run-test-instance.sh <suffix>   # e.g. i1-a, i1-b
 set -euo pipefail
