@@ -947,6 +947,22 @@ fn spawn_conductor_startup(
                             &passphrase_for_sync,
                         ).await;
 
+                        // Migrated (device-hosted) vaults skip auto-link but
+                        // carry the original web agent key from the migration —
+                        // seed the cache so signature reads include pre-upgrade
+                        // signatures immediately.
+                        {
+                            let config = state.vault_config.lock().unwrap();
+                            if let Some(cfg) = config.as_ref() {
+                                if cfg.hosting_model.as_deref() == Some("device-hosted") {
+                                    if let Some(ref wk) = cfg.web_agent_pub_key {
+                                        *state.linked_web_agent_key.lock().unwrap() = Some(wk.clone());
+                                        log::info!("Seeded web agent key from migrated-account config");
+                                    }
+                                }
+                            }
+                        }
+
                         // Auto-link with web account if not yet linked on DHT.
                         // Always attempt after identity DNA update (attestation is on old network).
                         let should_link = {

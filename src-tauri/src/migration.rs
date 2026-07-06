@@ -870,6 +870,29 @@ pub async fn migrate_custodial_account(
         cells_disabled.len()
     );
 
+    // Remember the account's original web agent key. Signature reads use it
+    // to show pre-upgrade signatures immediately — the identity-DNA link
+    // graph also carries this, but a fresh cell's network walk can exceed
+    // the read budget for a long time after setup. Same role the auto-link
+    // cache plays for custodial-linked vaults.
+    {
+        let vault_path = state.vault_path.lock().unwrap().clone();
+        let mut config = state.vault_config.lock().unwrap();
+        if let Some(cfg) = config.as_mut() {
+            cfg.web_agent_pub_key = Some(export.web_agent_b64.clone());
+            match crate::vault::encrypt_vault(cfg, &password) {
+                Ok(mut encrypted) => {
+                    encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
+                    if let Err(e) = crate::vault::save_vault(&vault_path, &encrypted) {
+                        log::warn!("[migration] web agent key persist failed (non-fatal): {}", e);
+                    }
+                }
+                Err(e) => log::warn!("[migration] config encrypt failed (non-fatal): {}", e),
+            }
+        }
+    }
+    *state.linked_web_agent_key.lock().unwrap() = Some(export.web_agent_b64.clone());
+
     Ok(MigrationSummary {
         records_migrated: mapped.records.len(),
         sessions_skipped: mapped.sessions_skipped,
