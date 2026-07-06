@@ -1185,6 +1185,11 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               identity. It stays on this device and is verified against your
               account before anything changes.
             </p>
+            <p class="mb-4 text-xs text-gray-500">
+              Started an upgrade before that didn't finish? The phrase it
+              showed you is the one on file — if you didn't save it, use
+              "I lost my recovery phrase" below to get a new one.
+            </p>
 
             <textarea
               class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-none"
