@@ -28,6 +28,23 @@ function isInternalOrigin(origin: string): boolean {
   }
 }
 
+// Granted powers in the user's language, not scope strings.
+const POWER_LABELS: Record<string, string> = {
+  display_name: "your name",
+  username: "your username",
+  email: "your email address",
+  profile_picture: "your profile picture",
+  did: "your DID",
+  public_key: "your public key",
+  holochain: "Holochain access",
+};
+function humanPowers(perms: unknown): string {
+  const list = (Array.isArray(perms) ? perms : [])
+    .filter((x: string) => x !== "openid")
+    .map((x: string) => POWER_LABELS[x] || x);
+  return list.length > 0 ? list.join(", ") : "your identity";
+}
+
 function timeAgo(unixSecs: number): string {
   const now = Math.floor(Date.now() / 1000);
   const diff = now - unixSecs;
@@ -567,11 +584,7 @@ export default component$(() => {
                         Connected {new Date(site.firstConnectedAt).toLocaleDateString()}
                       </span>
                     )}
-                    {Array.isArray(site.permissions) && site.permissions.length > 0 && (
-                      <span class="truncate">
-                        Access: {site.permissions.filter((x: string) => x !== "openid").join(", ")}
-                      </span>
-                    )}
+                    <span class="truncate">Can see: {humanPowers(site.permissions)}</span>
                   </div>
                 </div>
                 <GlassButton
