@@ -405,6 +405,49 @@ async function signatureOnlyLeg(baselineCount) {
   record('…and published nothing', !sigs.some((s) => s.file_hash === h));
 }
 
+
+// ── Profile sync leg: a bridge write must land in the vault's own state
+// (the config mirror the app UI and header chip read), and at rest the
+// server's public-profile cache must agree with the vault. The bridge
+// itself never pushes the cache — the web dashboard and the in-app editor
+// do — so the cache comparison happens only after the baseline restore.
+// Picture writes are NOT exercised here: /dev/identity exposes only the
+// picture length, so a test could not restore a real avatar it clobbered.
+async function profileSyncLeg() {
+  console.log('\n── Profile sync leg');
+  const before = await api('/dev/identity');
+  record('identity read-back available', before.status === 200 && !!before.data, JSON.stringify(before.data)?.slice(0, 140));
+  if (before.status !== 200) return;
+  const original = before.data.display_name;
+  const originalPicLen = before.data.profile_picture_len;
+
+  const testName = `Matrix Sync ${Date.now() % 100000}`;
+  const set = await runJob('/profile-update', { display_name: testName });
+  record('sync: bridge write lands', set.final.stage === 'done');
+  let ident = await api('/dev/identity');
+  record('sync: vault state reflects the write immediately (no reload)',
+    ident.data?.display_name === testName, `vault now "${ident.data?.display_name}"`);
+
+  const restore = await runJob('/profile-update', { display_name: original });
+  record('sync: baseline name restored', restore.final.stage === 'done');
+  ident = await api('/dev/identity');
+  record('sync: vault back to baseline', ident.data?.display_name === original);
+
+  const uname = ident.data?.web_username;
+  if (!uname) {
+    record('server cache cross-check skipped (no username set)', true);
+    return;
+  }
+  const resp = await fetch(`${API}/api/v1/profiles/by-username/${encodeURIComponent(uname)}`);
+  const prof = (await resp.json().catch(() => null))?.profile;
+  record('server profile cache agrees with vault at rest',
+    resp.ok && prof?.display_name === original,
+    `cache "${prof?.display_name}" vs vault "${original}"`);
+  record('server cache has an avatar when the vault does',
+    resp.ok && (originalPicLen > 0 ? !!prof?.profile_picture : true),
+    `vault pic len ${originalPicLen}, cache pic ${prof?.profile_picture ? 'present' : 'absent'}`);
+}
+
 // ───────────────────────── main ─────────────────────────
 
 (async () => {
@@ -427,6 +470,7 @@ async function signatureOnlyLeg(baselineCount) {
     await lockedRow({ ...ctx, ...dbl }, profileName);
     await coldStartRow({ ...ctx, ...dbl }, profileName);
     await signatureOnlyLeg(baseline.length);
+    await profileSyncLeg();
 
     // Quota accounting: 5 publishes (happy sign+amend, double sign, locked
     // sign, cold sign). Server sync is async — give it a moment.

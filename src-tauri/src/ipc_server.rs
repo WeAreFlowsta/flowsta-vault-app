@@ -3297,6 +3297,35 @@ async fn dev_status_handler() -> Result<axum::response::Response, (StatusCode, J
     )))
 }
 
+/// Dev-only read-back for the headless matrix: what identity does the
+/// vault currently hold? Lets sync tests assert that a bridge or in-app
+/// profile write actually landed (config mirror), not just that the job
+/// reported success. Returns the picture length only — tests must not
+/// overwrite a real picture they cannot restore.
+async fn dev_identity_handler(
+    State(state): State<Arc<IpcState>>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError { error: "not_found".into(), description: None }),
+        ));
+    }
+    let config = state.app_state.vault_config.lock().unwrap();
+    let Some(cfg) = config.as_ref() else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError { error: "vault_locked".into(), description: None }),
+        ));
+    };
+    Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({
+        "display_name": cfg.display_name,
+        "web_username": cfg.web_username,
+        "web_email": cfg.web_email,
+        "profile_picture_len": cfg.profile_picture.as_ref().map(|p| p.len()).unwrap_or(0),
+    }))))
+}
+
 async fn dev_lock_handler(
     State(state): State<Arc<IpcState>>,
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
@@ -3563,6 +3592,7 @@ pub async fn start_ipc_server(
         // Dev-only harness endpoints: 404 unless the auto-approve flag is
         // active in a debug build (never active in release).
         .route("/dev/status", get(dev_status_handler))
+        .route("/dev/identity", get(dev_identity_handler))
         .route("/dev/lock", post(dev_lock_handler))
         .route("/dev/unlock", post(dev_unlock_handler))
         .layer(cors)
