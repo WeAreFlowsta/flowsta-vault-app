@@ -126,10 +126,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   });
 
   // Legacy path: keep the web account custodial and just link this device.
-  const proceedToLinkOnly = $(() => {
-    error.value = "";
-    step.value = hasWebPhrase.value ? "phrase" : "no-phrase";
-  });
+  // True while the account upgrade runs — the shared progress card shows
+  // the interruption-safety note only then.
+  const migrating = useSignal(false);
 
   // Cohort-2 / lost-phrase: the server mints (or re-mints) the account's
   // phrase and binds its lookup hash; the user then does the write-down
@@ -185,6 +184,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const handleRunMigration = $(async () => {
     error.value = "";
     loading.value = true;
+    migrating.value = true;
     step.value = "progress";
     progressMessage.value = "Starting your account upgrade…";
 
@@ -1157,14 +1157,21 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               >
                 {loading.value ? "Preparing..." : "Upgrade to this device"}
               </GlassButton>
-              <GlassButton variant="secondary" onClick$={proceedToLinkOnly}>
-                Not now — just connect this device
-              </GlassButton>
+              <button
+                type="button"
+                class="text-xs text-gray-500 transition-colors hover:text-gray-300"
+                onClick$={() => {
+                  error.value = "";
+                  step.value = "signin";
+                }}
+              >
+                Back to sign-in
+              </button>
             </div>
 
             <p class="mt-6 text-xs text-gray-500">
-              Upgrading takes a few minutes. You can keep using your account
-              as usual afterward — only the way you sign in changes.
+              Upgrading takes a few minutes. Everything about your account
+              works the same afterward — only the way you sign in changes.
             </p>
           </div>
         )}
@@ -1314,22 +1321,27 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">Ready to Upgrade</h2>
             <p class="mb-4 text-sm text-gray-400">
-              Here's what happens next — nothing changes until every step has
-              succeeded:
+              Four steps, in order. Your account doesn't change until the
+              last one succeeds:
             </p>
             <ol class="mb-4 list-decimal space-y-1 pl-5 text-xs text-gray-400">
-              <li>Your account data is downloaded and decrypted on this device only.</li>
-              <li>It's re-encrypted with keys from your recovery phrase and stored in your vault.</li>
-              <li>An encrypted backup is saved on this device.</li>
-              <li>Your account switches to signing in with this Vault.</li>
+              <li>Your account data downloads to this device and is decrypted here — nowhere else.</li>
+              <li>It's re-encrypted so only your recovery phrase can unlock it.</li>
+              <li>An encrypted backup of everything is saved on this device.</li>
+              <li>Sign-in switches from your password to this Vault.</li>
             </ol>
             <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
               <p class="text-xs text-amber-300">
-                After the upgrade, your web password no longer signs you in —
-                it becomes this vault's unlock password instead. Signing in on
-                other browsers and devices happens through this Vault.
+                Afterward your password stops signing you in anywhere — it
+                becomes this Vault's unlock password. Every browser and
+                device signs in through this Vault instead.
               </p>
             </div>
+            <p class="mb-4 text-xs text-gray-500">
+              If the upgrade is interrupted, nothing is lost — your account
+              stays exactly as it is until the final step completes, and you
+              can simply run it again.
+            </p>
 
             {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
 
@@ -1358,10 +1370,16 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
               </svg>
             </div>
-            <h2 class="mb-2 text-xl font-bold text-white">Your Account Lives Here Now</h2>
-            <p class="mb-6 text-sm text-gray-400">
-              Your identity and data moved into this Vault. Password sign-in is
-              off — from now on, you approve sign-ins here.
+            <h2 class="mb-2 text-xl font-bold text-white">This Vault Is Your Account Now</h2>
+            <p class="mb-3 text-sm text-gray-400">
+              Your identity, your data, and your sign-in all moved here.
+              Your old password now only unlocks this Vault — sign-ins
+              everywhere else are approved from it.
+            </p>
+            <p class="mb-6 text-xs text-amber-300">
+              Your recovery phrase is now the one key to your account. No one
+              — including Flowsta — can recover it for you, so keep the
+              phrase somewhere safe.
             </p>
 
             <div class="mb-6 rounded-lg bg-gray-900 p-4 text-left">
@@ -1416,6 +1434,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </div>
             <h2 class="mb-2 text-xl font-bold text-white">Setting Up Your Vault...</h2>
             <p class="text-sm text-gray-400">{progressMessage.value}</p>
+            {migrating.value && (
+              <p class="mt-4 text-xs text-gray-500">
+                Your account doesn't change until the final step succeeds —
+                if this is interrupted, you can safely run the upgrade again.
+              </p>
+            )}
           </div>
         )}
 
