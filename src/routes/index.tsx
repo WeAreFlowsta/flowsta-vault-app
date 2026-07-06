@@ -404,7 +404,7 @@ export default component$(() => {
       {/* Public profile — the identity hero: your link front and center,
           Change lives on the link itself, DID shown in full as the quiet
           technical line (copy / document). */}
-      <div class="mb-6 rounded-xl border border-white/10 bg-white/[0.06] p-5">
+      <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
         <div class="mb-3 flex items-center justify-between">
           <h3 class="text-lg font-semibold text-white">Public Profile</h3>
           <PillButton onClick$={() => open(`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`)}>
