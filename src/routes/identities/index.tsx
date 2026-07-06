@@ -275,30 +275,15 @@ export default component$(() => {
 
   return (
     <div>
-      <h1 class="mb-6 text-2xl font-bold text-white">Connections</h1>
+      <h1 class="mb-1 text-2xl font-bold text-white">Connections</h1>
+      <p class="mb-6 text-sm text-gray-400">
+        Apps and sites that can use your identity. Disconnect anything you no
+        longer use.
+      </p>
 
-      {/* Your account — the story depends on the hosting model. */}
-      {deviceHosted.value ? (
-        <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
-          <div class="mb-2 flex items-center gap-2">
-            <svg class="h-5 w-5 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
-              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <h3 class="text-lg font-semibold text-white">Your Flowsta Account</h3>
-          </div>
-          <p class="text-sm text-gray-400">
-            This Vault holds your account — your keys, your data, your
-            approvals. Signing in on flowsta.com or any connected site uses
-            this same identity; there is no separate web account to link.
-          </p>
-          {linkedWebKey.value && (
-            <p class="mt-2 text-xs text-gray-500">
-              Includes your pre-upgrade history: records made with your
-              original account key stay attributed to you.
-            </p>
-          )}
-        </div>
-      ) : (
+      {/* Sync-mode vaults companion a web account and need the link flow;
+          for everyone else the page needs no preamble — the list IS the page. */}
+      {!deviceHosted.value && (
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
         <div class="mb-3 flex items-center gap-2">
           <svg class="h-5 w-5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
@@ -674,23 +659,6 @@ export default component$(() => {
         </div>
       )}
 
-      {/* Web connected sites info */}
-      <div class="mt-6 rounded-lg border border-gray-700 bg-black/30 p-4">
-        <div class="flex items-start gap-3">
-          <svg class="h-5 w-5 text-gray-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
-          </svg>
-          <div>
-            <h4 class="text-sm font-medium text-gray-300">One place for everything connected</h4>
-            <p class="mt-1 text-xs text-gray-500">
-              <span class="text-violet-400">App</span> rows are locally linked
-              apps managed only here. <span class="text-blue-400">Web</span>{" "}
-              rows are sites you signed into with Flowsta — also viewable on
-              your flowsta.com dashboard.
-            </p>
-          </div>
-        </div>
-      </div>
     </div>
   );
 });
