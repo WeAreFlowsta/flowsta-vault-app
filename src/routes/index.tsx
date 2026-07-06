@@ -5,6 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
 import { listen } from "@tauri-apps/api/event";
 import { CopyButton } from "~/components/ui/CopyButton";
+import { PillButton } from "~/components/ui/PillButton";
+import { GlassButton } from "~/components/common/GlassButton";
 import { signaturesContext } from "~/lib/context";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 
@@ -407,11 +409,7 @@ export default component$(() => {
           <h3 class="text-sm font-semibold uppercase tracking-wider text-gray-500">
             Public Profile
           </h3>
-          <button
-            type="button"
-            class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-gray-400 transition-colors hover:text-white"
-            onClick$={() => open(`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`)}
-          >
+          <PillButton onClick$={() => open(`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`)}>
             <span class="relative flex h-1.5 w-1.5">
               <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-60" />
               <span class="relative inline-flex h-1.5 w-1.5 rounded-full bg-green-400" />
@@ -420,13 +418,12 @@ export default component$(() => {
             <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
               <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
             </svg>
-          </button>
+          </PillButton>
         </div>
 
         {usernameEditing.value ? (
-          /* Claim / change form — Website form treatment: dark inset input,
-             blue focus ring, solid primary Save. */
-          <div class="rounded-lg bg-black/20 px-4 py-4">
+          /* Claim / change form — Website input treatment. */
+          <div>
             <div class="flex items-center gap-2">
               <span class="hidden shrink-0 font-mono text-sm text-gray-500 sm:inline">
                 {__WEB_URL__.replace(/^https?:\/\//, "")}/
@@ -436,9 +433,8 @@ export default component$(() => {
                 value={usernameInput.value}
                 placeholder="yourname (8+ characters on the free plan)"
                 maxLength={30}
-                // eslint-disable-next-line qwik/no-autofocus
                 autoFocus
-                class="min-w-0 flex-1 rounded-md bg-black/30 px-4 py-2 font-mono text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                class="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-4 py-2 font-mono text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 onInput$={(_, el) => {
                   usernameInput.value = el.value;
                 }}
@@ -448,7 +444,7 @@ export default component$(() => {
               />
               <button
                 type="button"
-                class="rounded-md px-3 py-2 text-sm text-gray-400 transition-colors hover:text-gray-200"
+                class="px-3 py-2 text-sm text-gray-400 transition-colors hover:text-gray-200"
                 disabled={usernameBusy.value}
                 onClick$={() => {
                   usernameEditing.value = false;
@@ -457,57 +453,48 @@ export default component$(() => {
               >
                 Cancel
               </button>
-              <button
-                type="button"
-                class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50"
+              <GlassButton
                 disabled={usernameBusy.value || usernameInput.value.trim().length === 0}
                 onClick$={claimUsername}
               >
                 {usernameBusy.value ? "Saving…" : "Save"}
-              </button>
+              </GlassButton>
             </div>
             {usernameError.value && (
               <p class="mt-2 text-sm text-red-400">{usernameError.value}</p>
             )}
             {usernameNeedsVerify.value && (
-              <div class="mt-2">
-                <button
-                  type="button"
-                  class="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 transition-colors hover:text-white disabled:opacity-50"
-                  disabled={resendBusy.value}
-                  onClick$={resendVerification}
-                >
+              <div class="mt-2 flex items-center gap-2">
+                <PillButton disabled={resendBusy.value} onClick$={resendVerification}>
                   {resendBusy.value ? "Sending…" : "Resend verification email"}
-                </button>
+                </PillButton>
                 {resendNote.value && (
-                  <p class="mt-1.5 text-xs text-gray-400">{resendNote.value}</p>
+                  <p class="text-xs text-gray-400">{resendNote.value}</p>
                 )}
               </div>
             )}
           </div>
         ) : id.web_username ? (
           /* Hero: the profile link, with Change living on the link itself */
-          <div class="rounded-lg border border-white/10 bg-gradient-to-r from-sky-500/15 via-violet-500/[0.07] to-transparent px-4 py-4">
-            <div class="flex items-center justify-between gap-3">
-              <div class="min-w-0 flex-1 truncate font-mono text-lg">
-                <span class="text-gray-500">{__WEB_URL__.replace(/^https?:\/\//, "")}/</span>
-                <span class="font-semibold text-white">{id.web_username}</span>
-              </div>
-              <button
-                type="button"
-                class="flex shrink-0 items-center gap-1 rounded-md border border-gray-600/60 px-2 py-1 text-xs text-gray-400 transition-colors hover:border-gray-500 hover:text-white"
-                onClick$={() => {
-                  usernameInput.value = id.web_username || "";
-                  usernameError.value = "";
-                  usernameEditing.value = true;
-                }}
-              >
-                <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z" />
-                </svg>
-                Change
-              </button>
+          <div class="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-black/30 px-4 py-3">
+            <div class="min-w-0 flex-1 truncate font-mono text-lg">
+              <span class="text-gray-500">{__WEB_URL__.replace(/^https?:\/\//, "")}/</span>
+              <span class="font-semibold text-white">{id.web_username}</span>
             </div>
+            <PillButton
+              accent="amber"
+              class="shrink-0"
+              onClick$={() => {
+                usernameInput.value = id.web_username || "";
+                usernameError.value = "";
+                usernameEditing.value = true;
+              }}
+            >
+              <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z" />
+              </svg>
+              Change
+            </PillButton>
           </div>
         ) : (
           /* No username yet — show what the link looks like today and why
@@ -524,9 +511,7 @@ export default component$(() => {
               </span>{" "}
               — and one identity people recognize everywhere. Change it anytime.
             </p>
-            <button
-              type="button"
-              class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500"
+            <GlassButton
               onClick$={() => {
                 usernameInput.value = "";
                 usernameError.value = "";
@@ -534,29 +519,28 @@ export default component$(() => {
               }}
             >
               Claim a username
-            </button>
+            </GlassButton>
           </div>
         )}
 
         {/* DID — the permanent identifier, shown in full. No collapse. */}
         <div class="mt-3 flex items-start gap-2 px-1">
-          <span class="mt-0.5 shrink-0 text-xs font-medium text-gray-500">DID</span>
-          <code class="min-w-0 flex-1 break-all font-mono text-[11px] leading-relaxed text-gray-400">
+          <span class="mt-1.5 shrink-0 text-xs font-medium text-gray-500">DID</span>
+          <code class="mt-1 min-w-0 flex-1 break-all font-mono text-[11px] leading-relaxed text-gray-400">
             {id.did}
           </code>
           <div class="flex shrink-0 items-center gap-1.5">
             <CopyButton text={id.did} label="Copy DID" />
-            <button
-              type="button"
+            <PillButton
+              accent="sky"
               title="Open the machine-readable DID document"
-              class="flex items-center gap-1 rounded-md border border-gray-600/60 px-2 py-1 text-xs text-gray-400 transition-colors hover:border-gray-500 hover:text-white"
               onClick$={() => open(`${__API_URL__}/did/${id.agent_pub_key}`)}
             >
               <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
                 <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
               </svg>
               Document
-            </button>
+            </PillButton>
           </div>
         </div>
 

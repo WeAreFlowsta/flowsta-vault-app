@@ -14,8 +14,10 @@ export const CopyButton = component$<CopyButtonProps>((props) => {
       type="button"
       title={props.label ?? "Copy"}
       class={[
-        "inline-flex items-center gap-1 rounded px-2 py-1 text-xs",
-        "bg-gray-700/60 hover:bg-gray-600/80 text-gray-300 hover:text-white",
+        // PillButton secondary look — kept in sync with ui/PillButton.tsx
+        "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium",
+        "border border-gray-600 bg-gray-700 text-gray-200",
+        "hover:border-gray-400 hover:text-white",
         "transition-colors duration-200",
         props.class,
       ]

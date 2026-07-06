@@ -21,6 +21,7 @@ import Callout from "~/components/dashboard/Callout";
 import { formatLicense, formatAiGeneration } from "~/lib/sign-it-labels";
 import { pendingSignPathsContext, signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
+import { PillButton } from "~/components/ui/PillButton";
 
 // Build-time API URL — vite's `define` injects this as a compile-time
 // global (see vite.config.ts). It is NOT a property on `window`, so any
@@ -1566,25 +1567,22 @@ export default component$(() => {
                 {sig.action_hash && (
                   <div class="shrink-0 flex flex-wrap gap-2">
                     {((sig as any).signing_app_id === "flowsta_signing_v1_3" || (sig as any).signing_app_id === "flowsta_signing_v1_4") && (
-                      <button
-                        class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-amber-400 hover:text-amber-300 transition-colors"
+                      <PillButton accent="amber"
                         onClick$={() => { editThumbTarget.value = sig; }}
                       >
                         Edit thumbnail
-                      </button>
+                      </PillButton>
                     )}
-                    <button
-                      class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-sky-400 hover:text-sky-400 transition-colors"
+                    <PillButton accent="sky"
                       onClick$={() => { amendTarget.value = sig; }}
                     >
                       Amend
-                    </button>
-                    <button
-                      class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-red-400 hover:text-red-400 transition-colors"
+                    </PillButton>
+                    <PillButton accent="red"
                       onClick$={() => { revokeTarget.value = sig; }}
                     >
                       Revoke
-                    </button>
+                    </PillButton>
                   </div>
                 )}
               </div>

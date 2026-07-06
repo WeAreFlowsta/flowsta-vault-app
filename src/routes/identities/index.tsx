@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { CopyButton } from "~/components/ui/CopyButton";
 import { GlassButton } from "~/components/common/GlassButton";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
+import { PillButton } from "~/components/ui/PillButton";
 
 declare const __API_URL__: string;
 
@@ -349,12 +350,9 @@ export default component$(() => {
                   Requires a Flowsta web account with the same recovery phrase
                 </p>
               </div>
-              <button
-                onClick$={handleLinkWebAccount}
-                class="shrink-0 rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-gray-900 transition-colors hover:bg-amber-400"
-              >
+              <GlassButton class="shrink-0" onClick$={handleLinkWebAccount}>
                 Link Now
-              </button>
+              </GlassButton>
             </div>
           </div>
         )}
@@ -647,23 +645,21 @@ export default component$(() => {
                   </div>
                   <div class="ml-4 flex items-center gap-2">
                     {site.has_authenticated && (
-                      <button
-                        type="button"
+                      <PillButton
+                        accent="green"
                         title="Trust this site to sign you in without asking"
-                        class="rounded-lg border border-gray-600 px-2.5 py-1 text-xs text-gray-400 transition-colors hover:text-green-400 hover:border-green-800"
                         onClick$={() => handleToggleTrust(site.origin, true)}
                       >
                         Trust
-                      </button>
+                      </PillButton>
                     )}
-                    <button
-                      type="button"
+                    <PillButton
+                      accent="red"
                       title="Clear from this log"
-                      class="rounded-lg px-2 py-1 text-xs text-gray-500 transition-colors hover:text-red-400"
                       onClick$={() => handleRevokeSite(site.origin)}
                     >
                       Clear
-                    </button>
+                    </PillButton>
                   </div>
                 </div>
               ))}

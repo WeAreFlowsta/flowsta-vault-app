@@ -5,6 +5,7 @@ import { CopyButton } from "~/components/ui/CopyButton";
 import { GlassButton } from "~/components/common/GlassButton";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 import Callout from "~/components/dashboard/Callout";
+import { PillButton } from "~/components/ui/PillButton";
 
 interface BackupAppSummary {
   client_id: string;
@@ -401,34 +402,27 @@ export default component$(() => {
                     {deleteConfirm.value === app.client_id ? (
                       <div class="flex items-center gap-2 shrink-0">
                         <span class="text-xs text-red-400">Delete all?</span>
-                        <button
-                          type="button"
-                          disabled={deleting.value}
-                          class="rounded px-2 py-1 text-xs font-medium text-red-400 border border-red-500/50 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+                        <PillButton variant="danger" disabled={deleting.value}
                           onClick$={() => handleDeleteAllBackups(app.client_id)}
                         >
                           {deleting.value ? "..." : "Yes"}
-                        </button>
-                        <button
-                          type="button"
-                          class="rounded px-2 py-1 text-xs font-medium text-gray-400 border border-gray-600 hover:bg-gray-700 transition-colors"
+                        </PillButton>
+                        <PillButton
                           onClick$={() => {
                             deleteConfirm.value = null;
                           }}
                         >
                           No
-                        </button>
+                        </PillButton>
                       </div>
                     ) : (
-                      <button
-                        type="button"
-                        class="text-xs text-gray-500 hover:text-red-400 transition-colors shrink-0"
+                      <PillButton accent="red" class="shrink-0"
                         onClick$={() => {
                           deleteConfirm.value = app.client_id;
                         }}
                       >
                         Delete all
-                      </button>
+                      </PillButton>
                     )}
                   </div>
 
@@ -474,43 +468,33 @@ export default component$(() => {
                                   {isDeleteConfirm ? (
                                     <>
                                       <span class="text-xs text-red-400">Delete?</span>
-                                      <button
-                                        type="button"
-                                        disabled={deletingSingle.value}
-                                        class="rounded px-2 py-1 text-xs font-medium text-red-400 border border-red-500/50 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+                                      <PillButton variant="danger" disabled={deletingSingle.value}
                                         onClick$={() => handleDeleteSingle(backup.client_id, backup.label)}
                                       >
                                         {deletingSingle.value ? "..." : "Yes"}
-                                      </button>
-                                      <button
-                                        type="button"
-                                        class="rounded px-2 py-1 text-xs font-medium text-gray-400 border border-gray-600 hover:bg-gray-700 transition-colors"
+                                      </PillButton>
+                                      <PillButton
                                         onClick$={() => {
                                           deleteSingleConfirm.value = null;
                                         }}
                                       >
                                         No
-                                      </button>
+                                      </PillButton>
                                     </>
                                   ) : (
                                     <>
-                                      <button
-                                        type="button"
-                                        disabled={isExporting}
-                                        class="rounded px-2 py-1 text-xs font-medium text-amber-400 border border-amber-500/50 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+                                      <PillButton accent="amber" disabled={isExporting}
                                         onClick$={() => handleExportSingle(backup.client_id, backup.label)}
                                       >
                                         {isExporting ? "..." : "Export"}
-                                      </button>
-                                      <button
-                                        type="button"
-                                        class="text-xs text-gray-500 hover:text-red-400 transition-colors"
+                                      </PillButton>
+                                      <PillButton accent="red"
                                         onClick$={() => {
                                           deleteSingleConfirm.value = labelKey;
                                         }}
                                       >
                                         Delete
-                                      </button>
+                                      </PillButton>
                                     </>
                                   )}
                                 </div>

@@ -9,6 +9,7 @@ import EditHistoryExpander from "~/components/sign-it/EditHistoryExpander";
 import { formatLicense, formatAiGeneration } from "~/lib/sign-it-labels";
 import { signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
+import { PillButton } from "~/components/ui/PillButton";
 
 function getDefaultThumbnail(sig: any): string {
   const hashType = sig.perceptual_hash?.hash_type;
@@ -173,25 +174,22 @@ export default component$(() => {
                       {sig.action_hash && (
                         <div class="ml-auto flex flex-wrap gap-2">
                           {(sig.signing_app_id === "flowsta_signing_v1_3" || sig.signing_app_id === "flowsta_signing_v1_4") && (
-                            <button
-                              class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-amber-400 hover:text-amber-300 transition-colors"
+                            <PillButton accent="amber"
                               onClick$={() => { editThumbTarget.value = sig; }}
                             >
                               Edit thumbnail
-                            </button>
+                            </PillButton>
                           )}
-                          <button
-                            class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-sky-400 hover:text-sky-400 transition-colors"
+                          <PillButton accent="sky"
                             onClick$={() => { amendTarget.value = sig; }}
                           >
                             Amend
-                          </button>
-                          <button
-                            class="rounded-full border border-gray-600 bg-gray-700 px-3 py-1 text-xs font-medium text-gray-200 hover:border-red-400 hover:text-red-400 transition-colors"
+                          </PillButton>
+                          <PillButton accent="red"
                             onClick$={() => { revokeTarget.value = sig; }}
                           >
                             Revoke
-                          </button>
+                          </PillButton>
                         </div>
                       )}
                     </div>
