@@ -1188,45 +1188,31 @@ export default component$(() => {
                       {userProfile.username ? `@${userProfile.username}` : "No username yet — claim one on Overview"}
                     </p>
 
-                    <div class="mt-3 flex items-center justify-between rounded-lg bg-white/[0.06] px-3 py-2">
-                      <span class="text-xs text-gray-300">
+                    <div class="mt-3 rounded-lg bg-white/[0.06] px-3 py-2">
+                      <div class="flex items-center justify-between gap-3">
+                        <span class="text-xs font-medium text-gray-200">
+                          {planInfo.value
+                            ? `${planInfo.value.tier === "free" ? "Free" : planInfo.value.tier.charAt(0).toUpperCase() + planInfo.value.tier.slice(1).replace("_", " ")} plan`
+                            : "Plan"}
+                        </span>
+                        <button
+                          type="button"
+                          class="shrink-0 rounded-md border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-300 transition-colors hover:bg-sky-500/20"
+                          onClick$={() => {
+                            profileMenuOpen.value = false;
+                            open(`${__WEB_URL__}/dashboard/premium/`);
+                          }}
+                        >
+                          {planInfo.value && planInfo.value.tier !== "free" ? "Manage" : "Upgrade"}
+                        </button>
+                      </div>
+                      <p class="mt-0.5 text-xs text-gray-400">
                         {planInfo.value
-                          ? `${planInfo.value.tier === "free" ? "Free" : planInfo.value.tier.charAt(0).toUpperCase() + planInfo.value.tier.slice(1).replace("_", " ")} plan · ${planInfo.value.used}/${planInfo.value.limit} signs`
-                          : "Plan: —"}
-                      </span>
-                      <button
-                        type="button"
-                        class="rounded-md border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-300 transition-colors hover:bg-sky-500/20"
-                        onClick$={() => {
-                          profileMenuOpen.value = false;
-                          open(`${__WEB_URL__}/dashboard/premium/`);
-                        }}
-                      >
-                        {planInfo.value && planInfo.value.tier !== "free" ? "Manage" : "Upgrade"}
-                      </button>
+                          ? `${planInfo.value.used} of ${planInfo.value.limit} signs used this month`
+                          : "Status unavailable offline"}
+                      </p>
                     </div>
 
-                    {userProfile.did && (
-                      <button
-                        type="button"
-                        class="mt-2 w-full rounded-lg px-3 py-2 text-left text-xs text-gray-400 transition-colors hover:bg-gray-800 hover:text-gray-200"
-                        onClick$={async () => {
-                          try {
-                            await navigator.clipboard.writeText(userProfile.did);
-                          } catch { /* clipboard unavailable */ }
-                          profileMenuOpen.value = false;
-                        }}
-                      >
-                        Copy DID
-                      </button>
-                    )}
-                    <Link
-                      href="/settings/"
-                      class="block w-full rounded-lg px-3 py-2 text-left text-xs text-gray-400 transition-colors hover:bg-gray-800 hover:text-gray-200"
-                      onClick$={() => (profileMenuOpen.value = false)}
-                    >
-                      Settings
-                    </Link>
                   </div>
                 </>
               )}
