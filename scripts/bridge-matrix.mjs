@@ -413,12 +413,14 @@ async function signatureOnlyLeg(baselineCount) {
 // do — so the cache comparison happens only after the baseline restore.
 // Picture writes are NOT exercised here: /dev/identity exposes only the
 // picture length, so a test could not restore a real avatar it clobbered.
-async function profileSyncLeg() {
+async function profileSyncLeg(trueBaseline) {
   console.log('\n── Profile sync leg');
   const before = await api('/dev/identity');
   record('identity read-back available', before.status === 200 && !!before.data, JSON.stringify(before.data)?.slice(0, 140));
   if (before.status !== 200) return;
-  const original = before.data.display_name;
+  // Earlier legs rename the vault to profileName — restore to the name
+  // the vault held BEFORE the matrix ran, not to their leftovers.
+  const original = trueBaseline ?? before.data.display_name;
   const originalPicLen = before.data.profile_picture_len;
 
   const testName = `Matrix Sync ${Date.now() % 100000}`;
@@ -463,6 +465,7 @@ async function profileSyncLeg() {
   }
 
   if (PHASE === 'full' || PHASE === 'all') {
+    const identBefore = await api('/dev/identity');
     const quotaBefore = await serverQuota(agentKey);
     const ctx = await happyRow(profileName);
     await deniedRow(ctx, profileName);
@@ -470,7 +473,7 @@ async function profileSyncLeg() {
     await lockedRow({ ...ctx, ...dbl }, profileName);
     await coldStartRow({ ...ctx, ...dbl }, profileName);
     await signatureOnlyLeg(baseline.length);
-    await profileSyncLeg();
+    await profileSyncLeg(identBefore.data?.display_name);
 
     // Quota accounting: 5 publishes (happy sign+amend, double sign, locked
     // sign, cold sign). Server sync is async — give it a moment.
