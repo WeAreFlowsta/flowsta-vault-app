@@ -436,6 +436,73 @@ pub struct ExportResult {
     pub data: serde_json::Value,
 }
 
+/// Wait until the account is export- and link-ready. Old accounts get a
+/// one-time background DNA migration at sign-in (private and/or identity);
+/// the wizard's next steps gate on the versions it produces, so poll the
+/// cheap status probe instead of burning the rate-limited export as one.
+/// Ready accounts pass through on the first call with no delay.
+async fn wait_until_account_ready(
+    api_url: &str,
+    jwt: &str,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct DnaStatus {
+        export_ready: bool,
+        link_ready: bool,
+        migration_status: Option<String>,
+    }
+    let client = reqwest::Client::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8 * 60);
+    let mut announced = false;
+    loop {
+        let resp = client
+            .get(format!("{}/auth/migration/dna-status", api_url.trim_end_matches('/')))
+            .bearer_auth(jwt)
+            .send()
+            .await
+            .map_err(|e| format!("Account status check failed: {}", e))?;
+        let status_code = resp.status();
+        if status_code.is_success() {
+            let st: DnaStatus = resp
+                .json()
+                .await
+                .map_err(|e| format!("Bad status response: {}", e))?;
+            if st.export_ready && st.link_ready {
+                return Ok(());
+            }
+            if st.migration_status.as_deref() == Some("failed") {
+                return Err(
+                    "account_update_failed: the one-time account update did not complete — \
+                     your account is unchanged. Run the upgrade again to retry."
+                        .to_string(),
+                );
+            }
+        }
+        // Older API without the probe: fall through to the export attempt,
+        // which enforces the same gate with a clear error.
+        if status_code.as_u16() == 404 {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(
+                "account_update_timeout: the one-time account update is taking longer than \
+                 expected. Your account is unchanged — try the upgrade again shortly."
+                    .to_string(),
+            );
+        }
+        if !announced {
+            emit_progress(
+                app_handle,
+                "updating",
+                "Bringing your account up to date — a one-time update is running…",
+            );
+            announced = true;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+}
+
 pub(crate) async fn fetch_export(api_url: &str, jwt: &str) -> Result<ExportResult, String> {
     let resp = reqwest::Client::new()
         .post(format!("{}/auth/migration/export", api_base(api_url)))
@@ -679,6 +746,7 @@ pub async fn migrate_custodial_account(
     emit_progress(&app_handle, "account", "Checking your account…");
     let me = fetch_me(&api_url, &jwt).await?;
 
+    wait_until_account_ready(&api_url, &jwt, &app_handle).await?;
     emit_progress(&app_handle, "export", "Fetching your account data…");
     let export = fetch_export(&api_url, &jwt).await?;
     let web_bytes = base64_standard_decode(&export.web_agent_b64)
