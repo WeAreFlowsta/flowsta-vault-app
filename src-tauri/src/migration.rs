@@ -1517,29 +1517,49 @@ mod tests {
     /// Username sign-in entry: the wizard's sign-in accepts a username, the
     /// username survives migration, and username+password login dies with
     /// the flip too.
+    /// Username-entry variant. Claiming a username requires a VERIFIED
+    /// email (server gate), which a synthetic registration can't satisfy —
+    /// so this test uses a durable pre-verified staging fixture account
+    /// (username already claimed) provided via env, and REVERTS the flip at
+    /// the end so the fixture stays custodial and reusable:
+    ///   MIG_TEST_USERNAME_EMAIL / MIG_TEST_USERNAME_PASSWORD /
+    ///   MIG_TEST_USERNAME
+    /// Without the env, the test instead asserts the verified-email gate
+    /// itself and stops (register fresh → claim refused with
+    /// email_not_verified).
     #[tokio::test]
     #[ignore]
     async fn migration_username_entry_against_staging() {
         let client = reqwest::Client::new();
-        let suffix = unique_suffix();
-        let email = format!("migvaultuser-{}@example.com", suffix);
-        let password = format!("Migration-User-{}!x", suffix);
-        let username = format!("migvault{}", suffix); // ≥8 chars = free tier
-        let jwt = register_staging(&client, &email, &password, "Mig User").await;
 
-        let resp = client
-            .put(format!("{}/auth/username", STAGING))
-            .bearer_auth(&jwt)
-            .json(&serde_json::json!({ "username": username }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status().as_u16(),
-            200,
-            "set username: {:?}",
-            resp.text().await
+        let fixture = (
+            std::env::var("MIG_TEST_USERNAME_EMAIL"),
+            std::env::var("MIG_TEST_USERNAME_PASSWORD"),
+            std::env::var("MIG_TEST_USERNAME"),
         );
+        let (password, username) = match fixture {
+            (Ok(_email), Ok(pw), Ok(un)) => (pw, un),
+            _ => {
+                // No fixture — prove the gate: fresh (unverified) accounts
+                // must be refused a username.
+                let suffix = unique_suffix();
+                let email = format!("migvaultuser-{}@example.com", suffix);
+                let password = format!("Migration-User-{}!x", suffix);
+                let jwt = register_staging(&client, &email, &password, "Mig User").await;
+                let resp = client
+                    .put(format!("{}/auth/username", STAGING))
+                    .bearer_auth(&jwt)
+                    .json(&serde_json::json!({ "username": format!("migvault{}", suffix) }))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status().as_u16(), 403, "unverified email must be refused a username");
+                let body = resp.text().await.unwrap_or_default();
+                assert!(body.contains("email_not_verified"), "gate code present: {}", body);
+                eprintln!("(fixture env not set — verified-email gate asserted; full username flow skipped)");
+                return;
+            }
+        };
 
         // Sign in BY USERNAME through the wizard's own command.
         let auth = crate::commands::authenticate_web_account(
@@ -1590,6 +1610,24 @@ mod tests {
             Some(username.as_str()),
             "username preserved post-flip"
         );
+
+        // Revert so the fixture account returns to custodial and stays
+        // reusable for the next run.
+        let resp = client
+            .post(format!("{}/auth/migration/revert", STAGING))
+            .bearer_auth(&grant.token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "fixture revert");
+        let restored = crate::commands::authenticate_web_account(
+            STAGING.into(),
+            username.clone(),
+            password.clone(),
+        )
+        .await;
+        assert!(restored.is_ok(), "fixture password login restored after revert");
     }
 
     /// Existing-signatures variant: a signature made while custodial must
