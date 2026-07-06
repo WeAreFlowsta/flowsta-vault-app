@@ -7,6 +7,7 @@ import { listen } from "@tauri-apps/api/event";
 import { CopyButton } from "~/components/ui/CopyButton";
 import { PillButton } from "~/components/ui/PillButton";
 import { GlassButton } from "~/components/common/GlassButton";
+import ImageCropper from "~/components/sign-it/ImageCropper";
 import { signaturesContext } from "~/lib/context";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 
@@ -103,6 +104,82 @@ export default component$(() => {
   const usernameNeedsVerify = useSignal(false);
   const resendBusy = useSignal(false);
   const resendNote = useSignal("");
+
+  // In-app profile edits — name inline, picture via the cropper modal.
+  const nameEditing = useSignal(false);
+  const nameInput = useSignal("");
+  const nameBusy = useSignal(false);
+  const nameError = useSignal("");
+  const avatarImage = useSignal<string | null>(null);
+  const avatarCanvas = useSignal<HTMLCanvasElement | null>(null);
+  const avatarBusy = useSignal(false);
+  const avatarError = useSignal("");
+
+  // Push the edit to the server's public-profile cache (what flowsta.com/<u>
+  // and Sign It verification enrichment show). Best-effort: the Vault write
+  // is canonical; offline just means the cache catches up on a later edit.
+  const refreshServerProfile = $(async (body: { displayName?: string; profilePicture?: string }) => {
+    try {
+      const grant = await invoke<{ token: string }>("vault_grant_login", {
+        apiUrl: __API_URL__,
+      });
+      const path = body.profilePicture ? "/auth/profile-picture" : "/auth/profile";
+      await fetch(`${__API_URL__}${path}`, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${grant.token}`,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch { /* offline — cache refreshes on a later edit */ }
+  });
+
+  const saveDisplayName = $(async () => {
+    const n = nameInput.value.trim();
+    if (!n || nameBusy.value) return;
+    nameBusy.value = true;
+    nameError.value = "";
+    try {
+      await invoke("update_local_profile", { displayName: n });
+      if (identity.value) identity.value = { ...identity.value, display_name: n };
+      nameEditing.value = false;
+      await refreshServerProfile({ displayName: n });
+    } catch (e) {
+      nameError.value = `${e}`;
+    } finally {
+      nameBusy.value = false;
+    }
+  });
+
+  const handleAvatarChosen = $((_: Event, el: HTMLInputElement) => {
+    const file = el.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      avatarImage.value = e.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+    el.value = "";
+  });
+
+  const saveAvatar = $(async () => {
+    if (!avatarCanvas.value || avatarBusy.value) return;
+    avatarBusy.value = true;
+    avatarError.value = "";
+    try {
+      const pic = avatarCanvas.value.toDataURL("image/jpeg", 0.85);
+      await invoke("update_local_profile", { profilePicture: pic });
+      if (identity.value) identity.value = { ...identity.value, profile_picture: pic };
+      avatarImage.value = null;
+      avatarCanvas.value = null;
+      await refreshServerProfile({ profilePicture: pic });
+    } catch (e) {
+      avatarError.value = `${e}`;
+    } finally {
+      avatarBusy.value = false;
+    }
+  });
 
   const resendVerification = $(async () => {
     if (resendBusy.value) return;
@@ -419,6 +496,94 @@ export default component$(() => {
           </PillButton>
         </div>
 
+        {/* Who you are: picture + name + email */}
+        <div class="mb-4 flex items-center gap-4">
+          <label class="group relative h-14 w-14 shrink-0 cursor-pointer" title="Change picture">
+            <input type="file" accept="image/*" class="hidden" onChange$={handleAvatarChosen} />
+            {id.profile_picture ? (
+              <img
+                src={id.profile_picture}
+                alt="Profile"
+                width={56}
+                height={56}
+                class="h-14 w-14 rounded-full border border-gray-600 object-cover"
+              />
+            ) : (
+              <div class="flex h-14 w-14 items-center justify-center rounded-full bg-blue-600 text-xl font-medium text-white">
+                {(id.display_name || id.web_username || "U").charAt(0).toUpperCase()}
+              </div>
+            )}
+            <span class="absolute inset-0 hidden items-center justify-center rounded-full bg-black/60 group-hover:flex">
+              <svg class="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z" />
+              </svg>
+            </span>
+          </label>
+          <div class="min-w-0 flex-1">
+            {nameEditing.value ? (
+              <div class="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={nameInput.value}
+                  placeholder="Your name"
+                  maxLength={80}
+                  autoFocus
+                  class="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-4 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  onInput$={(_, el) => {
+                    nameInput.value = el.value;
+                  }}
+                  onKeyDown$={(e) => {
+                    if ((e as KeyboardEvent).key === "Enter") saveDisplayName();
+                  }}
+                />
+                <button
+                  type="button"
+                  class="px-3 py-2 text-sm text-gray-400 transition-colors hover:text-gray-200"
+                  disabled={nameBusy.value}
+                  onClick$={() => {
+                    nameEditing.value = false;
+                    nameError.value = "";
+                  }}
+                >
+                  Cancel
+                </button>
+                <GlassButton
+                  disabled={nameBusy.value || nameInput.value.trim().length === 0}
+                  onClick$={saveDisplayName}
+                >
+                  {nameBusy.value ? "Saving…" : "Save"}
+                </GlassButton>
+              </div>
+            ) : (
+              <div class="flex items-center gap-3">
+                <p class={`truncate text-xl font-semibold ${id.display_name ? "text-white" : "text-gray-500"}`}>
+                  {id.display_name || "Add your name"}
+                </p>
+                <PillButton
+                  accent="amber"
+                  class="shrink-0"
+                  onClick$={() => {
+                    nameInput.value = id.display_name || "";
+                    nameError.value = "";
+                    nameEditing.value = true;
+                  }}
+                >
+                  <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z" />
+                  </svg>
+                  Edit
+                </PillButton>
+              </div>
+            )}
+            {nameError.value && (
+              <p class="mt-1 text-xs text-red-400">{nameError.value}</p>
+            )}
+            {id.web_email && !nameEditing.value && (
+              <p class="mt-0.5 truncate text-sm text-gray-400">{id.web_email}</p>
+            )}
+          </div>
+        </div>
+
         {usernameEditing.value ? (
           /* Claim / change form — Website input treatment. */
           <div>
@@ -543,6 +708,46 @@ export default component$(() => {
         </div>
 
       </div>
+
+      {/* Avatar cropper — opens when a picture is picked */}
+      {avatarImage.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div class="mx-4 w-full max-w-md rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
+            <h3 class="mb-4 text-base font-semibold text-white">Change Profile Picture</h3>
+            <ImageCropper
+              imageSrc={avatarImage.value}
+              cropShape="circle"
+              outputSize={300}
+              onCropComplete$={(c) => {
+                avatarCanvas.value = c;
+              }}
+            />
+            {avatarError.value && (
+              <p class="mt-3 text-xs text-red-400">{avatarError.value}</p>
+            )}
+            <div class="mt-4 flex gap-3">
+              <GlassButton
+                variant="secondary"
+                class="flex-1"
+                onClick$={() => {
+                  avatarImage.value = null;
+                  avatarCanvas.value = null;
+                  avatarError.value = "";
+                }}
+              >
+                Cancel
+              </GlassButton>
+              <GlassButton
+                class="flex-1"
+                disabled={avatarBusy.value || !avatarCanvas.value}
+                onClick$={saveAvatar}
+              >
+                {avatarBusy.value ? "Saving…" : "Save"}
+              </GlassButton>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Recent Activity — unified feed: signatures, backups, linked apps. */}
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">

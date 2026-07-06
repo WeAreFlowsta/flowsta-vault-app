@@ -769,10 +769,15 @@ export default component$(() => {
       fetchProfile();
       refreshSignatures();
     });
+    // In-app profile edits (Overview card) — refresh the header chip.
+    const unlistenProfileEditPromise = listen("profile-updated", () => {
+      fetchProfile();
+    });
 
     cleanup(() => {
       unlistenPromise.then((unlisten) => unlisten());
       unlistenProfilePromise.then((unlisten) => unlisten());
+      unlistenProfileEditPromise.then((unlisten) => unlisten());
     });
   });
 

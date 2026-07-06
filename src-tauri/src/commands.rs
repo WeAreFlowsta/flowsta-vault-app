@@ -234,6 +234,10 @@ pub struct AppState {
     /// head has moved"). Cleared on lock and on conductor start; filled
     /// once per cell and reused everywhere.
     pub cell_credentials: Mutex<HashMap<holochain_types::prelude::CellId, CachedCellCredentials>>,
+    /// Committing operations write to the device's source chains — run them
+    /// one at a time (shared by the IPC bridge and in-app commands). Two
+    /// concurrent publishes would fight over the chain head and one fails.
+    pub commit_serial: tokio::sync::Mutex<()>,
     /// Single-flights credential fills: N concurrent cache misses must not
     /// each commit a cap grant (three startup probes racing = three chain
     /// writes = "chain head has moved" under a user's first sign).
@@ -348,6 +352,7 @@ impl AppState {
             dev_relock_passphrase: Mutex::new(None),
             cell_credentials: Mutex::new(HashMap::new()),
             credentials_fill_lock: tokio::sync::Mutex::new(()),
+            commit_serial: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -4847,3 +4852,206 @@ pub fn increment_quota_used(state: State<'_, Arc<AppState>>) -> Result<Option<cr
     crate::quota_cache::increment_used(&state.data_dir)
 }
 
+
+// ── Shared profile write (sealed store + config mirror) ────────────────────
+
+pub(crate) enum ProfileWriteError {
+    /// Conductor not ready yet — retryable.
+    NotReady(String),
+    /// The write itself failed.
+    Failed(String),
+}
+
+/// Write display name / picture into the sealed store (canonical) and
+/// mirror into the vault config. Shared by the IPC /profile-update route
+/// (web-delegated, post-approval) and the in-app editor command below.
+pub(crate) async fn write_profile_records(
+    state: &Arc<AppState>,
+    display_name: Option<String>,
+    picture: Option<String>,
+) -> Result<(), ProfileWriteError> {
+    fn unix_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+    let _commit_guard = state.commit_serial.lock().await;
+
+    // Write the sealed record(s): display name lives on "user_profile",
+    // the picture on "profile_picture" (v1.11 shapes, sealed in v2).
+    let now_us = (unix_now() as i64) * 1_000_000;
+    let now_ms = (unix_now() as u64) * 1000;
+    let existing = crate::sealed::sealed_list_inner(state)
+        .await
+        .map_err(ProfileWriteError::NotReady)?;
+
+    let store_err = ProfileWriteError::Failed;
+
+    if let Some(ref name) = display_name {
+        // Newest-first ordering from sealed_list — the first match is live.
+        let current = existing.iter().find(|r| r.entry_type == "user_profile");
+        match current {
+            Some(record) => {
+                let mut body = record.body.clone();
+                body["display_name"] = serde_json::json!(name);
+                body["updated_at"] = serde_json::json!(now_us);
+                crate::sealed::sealed_replace_inner(
+                    state,
+                    &record.action_hash,
+                    "user_profile".into(),
+                    body,
+                    record.refs.clone(),
+                    record.created_at,
+                )
+                .await
+                .map_err(store_err)?;
+            }
+            None => {
+                let email = {
+                    let config = state.vault_config.lock().unwrap();
+                    config
+                        .as_ref()
+                        .and_then(|c| c.web_email.clone())
+                        .unwrap_or_default()
+                };
+                crate::sealed::sealed_store_inner(
+                    state,
+                    "user_profile".into(),
+                    serde_json::json!({
+                        "email": email,
+                        "username": null,
+                        "display_name": name,
+                        "created_at": now_us,
+                        "updated_at": now_us,
+                    }),
+                    Vec::new(),
+                    now_ms,
+                )
+                .await
+                .map_err(store_err)?;
+            }
+        }
+    }
+
+    if let Some(ref pic) = picture {
+        let body = serde_json::json!({
+            "profile_picture": pic,
+            "has_custom_picture": true,
+            "updated_at": now_us,
+        });
+        let current = existing.iter().find(|r| r.entry_type == "profile_picture");
+        match current {
+            Some(record) => {
+                crate::sealed::sealed_replace_inner(
+                    state,
+                    &record.action_hash,
+                    "profile_picture".into(),
+                    body,
+                    record.refs.clone(),
+                    record.created_at,
+                )
+                .await
+                .map_err(store_err)?;
+            }
+            None => {
+                crate::sealed::sealed_store_inner(
+                    state,
+                    "profile_picture".into(),
+                    body,
+                    Vec::new(),
+                    now_ms,
+                )
+                .await
+                .map_err(store_err)?;
+            }
+        }
+    }
+
+    // Mirror into the vault config so the app's own UI shows the change
+    // immediately; persist with the cached unlock passphrase (best-effort —
+    // the sealed records above are the canonical store).
+    {
+        let passphrase = {
+            let mut guard = state.unlock_passphrase.lock().unwrap();
+            guard
+                .as_mut()
+                .and_then(|locked| String::from_utf8(locked.lock().to_vec()).ok())
+        };
+        let mut config = state.vault_config.lock().unwrap();
+        if let Some(cfg) = config.as_mut() {
+            if let Some(ref name) = display_name {
+                cfg.display_name = Some(name.clone());
+            }
+            if let Some(ref pic) = picture {
+                cfg.profile_picture = Some(pic.clone());
+            }
+            if let Some(pw) = passphrase {
+                let vault_path = state.vault_path.lock().unwrap().clone();
+                match crate::vault::encrypt_vault(cfg, &pw) {
+                    Ok(mut encrypted) => {
+                        encrypted.display_email =
+                            cfg.web_email.clone().or(cfg.web_username.clone());
+                        if let Err(e) = crate::vault::save_vault(&vault_path, &encrypted) {
+                            log::warn!("Profile config persist failed (non-fatal): {}", e);
+                        }
+                    }
+                    Err(e) => log::warn!("Profile config encrypt failed (non-fatal): {}", e),
+                }
+            }
+        }
+    }
+
+
+    Ok(())
+}
+
+/// In-app profile edit: display name and/or picture. Same writes as the
+/// web-delegated /profile-update bridge route, but no approval dialog —
+/// the user is acting directly inside their own Vault. The frontend
+/// refreshes the server's public-profile cache afterwards (best-effort,
+/// via a vault-grant).
+#[tauri::command]
+pub async fn update_local_profile(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    display_name: Option<String>,
+    profile_picture: Option<String>,
+) -> Result<(), String> {
+    let display_name = display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if let Some(ref name) = display_name {
+        if name.len() > 80 {
+            return Err("Display name must be 80 characters or fewer.".into());
+        }
+    }
+    let picture = profile_picture.filter(|p| !p.is_empty());
+    if let Some(ref p) = picture {
+        let ok_scheme = p.starts_with("data:image/") || p.starts_with("https://");
+        if !ok_scheme || p.len() > 800_000 {
+            return Err(
+                "Profile picture must be a data:image/... URI or https URL under 800 KB.".into(),
+            );
+        }
+    }
+    if display_name.is_none() && picture.is_none() {
+        return Err("Nothing to update.".into());
+    }
+    if state.vault_config.lock().unwrap().is_none() {
+        return Err("Vault is locked.".into());
+    }
+    write_profile_records(state.inner(), display_name, picture)
+        .await
+        .map_err(|e| match e {
+            ProfileWriteError::NotReady(m) => {
+                format!("Your Vault is still starting up ({}) — try again in a moment.", m)
+            }
+            ProfileWriteError::Failed(m) => format!("Profile write failed: {}", m),
+        })?;
+    use tauri::Emitter;
+    let _ = app.emit("profile-updated", serde_json::json!({}));
+    Ok(())
+}

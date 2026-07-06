@@ -325,6 +325,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_conductor_status,
             commands::get_vault_status,
+            commands::update_local_profile,
             commands::setup_vault,
             device_identity::generate_new_mnemonic,
             device_identity::register_device_identity,

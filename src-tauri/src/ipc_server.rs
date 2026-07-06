@@ -98,10 +98,6 @@ pub struct IpcState {
     pub app_state: Arc<AppState>,
     pub app_handle: tauri::AppHandle,
     pub op_jobs: OpJobs,
-    /// Committing operations write to the device's source chains — run them
-    /// one at a time. Two concurrent publishes (double-click race, two tabs)
-    /// would otherwise fight over the chain head and one would fail.
-    pub commit_serial: tokio::sync::Mutex<()>,
 }
 
 /// Dev-only: auto-approve all bridge dialogs so the full operation matrix
@@ -2263,7 +2259,7 @@ async fn sign_document_core(
     // proof the signature exists on the network.
     set_job_stage(&state, &job_id, "publishing");
     let _commit_guard = if req.commit {
-        Some(state.commit_serial.lock().await)
+        Some(state.app_state.commit_serial.lock().await)
     } else {
         None
     };
@@ -2333,7 +2329,7 @@ async fn sign_document_core(
                     let bg_hash = hash.clone();
                     let bg_file = req.file_hash.clone();
                     tokio::spawn(async move {
-                        let _guard = bg.commit_serial.lock().await;
+                        let _guard = bg.app_state.commit_serial.lock().await;
                         match crate::commands::set_thumbnail_inner(
                             &bg.app_state,
                             bg_hash.clone(),
@@ -2647,149 +2643,27 @@ async fn profile_update_core(
     );
 
     set_job_stage(&state, &job_id, "publishing");
-    let _commit_guard = state.commit_serial.lock().await;
-    // Write the sealed record(s): display name lives on "user_profile",
-    // the picture on "profile_picture" (v1.11 shapes, sealed in v2).
-    let now_us = (unix_now() as i64) * 1_000_000;
-    let now_ms = (unix_now() as u64) * 1000;
-    let existing = crate::sealed::sealed_list_inner(&state.app_state)
+    crate::commands::write_profile_records(&state.app_state, display_name.clone(), picture.clone())
         .await
-        .map_err(|e| {
-            (
+        .map_err(|e| match e {
+            crate::commands::ProfileWriteError::NotReady(msg) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(IpcError {
                     error: "conductor_not_ready".into(),
                     description: Some(format!(
                         "Your Vault is still starting up ({}) — try again in a moment.",
-                        e
+                        msg
                     )),
                 }),
-            )
+            ),
+            crate::commands::ProfileWriteError::Failed(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(IpcError {
+                    error: "write_failed".into(),
+                    description: Some(format!("Profile write failed: {}", msg)),
+                }),
+            ),
         })?;
-
-    let store_err = |e: String| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(IpcError {
-                error: "write_failed".into(),
-                description: Some(format!("Profile write failed: {}", e)),
-            }),
-        )
-    };
-
-    if let Some(ref name) = display_name {
-        // Newest-first ordering from sealed_list — the first match is live.
-        let current = existing.iter().find(|r| r.entry_type == "user_profile");
-        match current {
-            Some(record) => {
-                let mut body = record.body.clone();
-                body["display_name"] = serde_json::json!(name);
-                body["updated_at"] = serde_json::json!(now_us);
-                crate::sealed::sealed_replace_inner(
-                    &state.app_state,
-                    &record.action_hash,
-                    "user_profile".into(),
-                    body,
-                    record.refs.clone(),
-                    record.created_at,
-                )
-                .await
-                .map_err(store_err)?;
-            }
-            None => {
-                let email = {
-                    let config = state.app_state.vault_config.lock().unwrap();
-                    config
-                        .as_ref()
-                        .and_then(|c| c.web_email.clone())
-                        .unwrap_or_default()
-                };
-                crate::sealed::sealed_store_inner(
-                    &state.app_state,
-                    "user_profile".into(),
-                    serde_json::json!({
-                        "email": email,
-                        "username": null,
-                        "display_name": name,
-                        "created_at": now_us,
-                        "updated_at": now_us,
-                    }),
-                    Vec::new(),
-                    now_ms,
-                )
-                .await
-                .map_err(store_err)?;
-            }
-        }
-    }
-
-    if let Some(ref pic) = picture {
-        let body = serde_json::json!({
-            "profile_picture": pic,
-            "has_custom_picture": true,
-            "updated_at": now_us,
-        });
-        let current = existing.iter().find(|r| r.entry_type == "profile_picture");
-        match current {
-            Some(record) => {
-                crate::sealed::sealed_replace_inner(
-                    &state.app_state,
-                    &record.action_hash,
-                    "profile_picture".into(),
-                    body,
-                    record.refs.clone(),
-                    record.created_at,
-                )
-                .await
-                .map_err(store_err)?;
-            }
-            None => {
-                crate::sealed::sealed_store_inner(
-                    &state.app_state,
-                    "profile_picture".into(),
-                    body,
-                    Vec::new(),
-                    now_ms,
-                )
-                .await
-                .map_err(store_err)?;
-            }
-        }
-    }
-
-    // Mirror into the vault config so the app's own UI shows the change
-    // immediately; persist with the cached unlock passphrase (best-effort —
-    // the sealed records above are the canonical store).
-    {
-        let passphrase = {
-            let mut guard = state.app_state.unlock_passphrase.lock().unwrap();
-            guard
-                .as_mut()
-                .and_then(|locked| String::from_utf8(locked.lock().to_vec()).ok())
-        };
-        let mut config = state.app_state.vault_config.lock().unwrap();
-        if let Some(cfg) = config.as_mut() {
-            if let Some(ref name) = display_name {
-                cfg.display_name = Some(name.clone());
-            }
-            if let Some(ref pic) = picture {
-                cfg.profile_picture = Some(pic.clone());
-            }
-            if let Some(pw) = passphrase {
-                let vault_path = state.app_state.vault_path.lock().unwrap().clone();
-                match crate::vault::encrypt_vault(cfg, &pw) {
-                    Ok(mut encrypted) => {
-                        encrypted.display_email =
-                            cfg.web_email.clone().or(cfg.web_username.clone());
-                        if let Err(e) = crate::vault::save_vault(&vault_path, &encrypted) {
-                            log::warn!("Profile config persist failed (non-fatal): {}", e);
-                        }
-                    }
-                    Err(e) => log::warn!("Profile config encrypt failed (non-fatal): {}", e),
-                }
-            }
-        }
-    }
 
     let _ = state
         .app_handle
@@ -3053,7 +2927,7 @@ async fn revoke_signature_core(
     cell_op_approval(&state, "revoke", origin.clone(), req.reason.clone(), test_deny).await?;
 
     set_job_stage(&state, &job_id, "publishing");
-    let _commit_guard = state.commit_serial.lock().await;
+    let _commit_guard = state.app_state.commit_serial.lock().await;
     let revocation = crate::commands::revoke_signature_inner(
         &state.app_state,
         req.action_hash.clone(),
@@ -3158,7 +3032,7 @@ async fn set_thumbnail_core(
     cell_op_approval(&state, "thumbnail", origin.clone(), None, test_deny).await?;
 
     set_job_stage(&state, &job_id, "publishing");
-    let _commit_guard = state.commit_serial.lock().await;
+    let _commit_guard = state.app_state.commit_serial.lock().await;
     let thumb_hash = crate::commands::set_thumbnail_inner(
         &state.app_state,
         req.action_hash.clone(),
@@ -3652,7 +3526,6 @@ pub async fn start_ipc_server(
         app_state,
         app_handle,
         op_jobs: OpJobs::default(),
-        commit_serial: tokio::sync::Mutex::new(()),
     });
 
     // CORS: deliberately permissive. Third-party desktop apps use varied
