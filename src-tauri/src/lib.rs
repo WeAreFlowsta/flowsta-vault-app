@@ -139,11 +139,22 @@ pub fn run() {
                     .build(),
             )?;
 
-            // Set up data directory for vault storage
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("Failed to get app data directory");
+            // Set up data directory for vault storage.
+            // Debug builds honor FLOWSTA_VAULT_DATA_DIR so test instances
+            // (e.g. the two-device restore harness) can run beside a dev
+            // vault without sharing its data. Never active in release.
+            let data_dir = {
+                let override_dir = if cfg!(debug_assertions) {
+                    std::env::var("FLOWSTA_VAULT_DATA_DIR").ok().map(std::path::PathBuf::from)
+                } else {
+                    None
+                };
+                override_dir.unwrap_or_else(|| {
+                    app.path()
+                        .app_data_dir()
+                        .expect("Failed to get app data directory")
+                })
+            };
             std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
 
             log::info!("Flowsta Vault starting up (v{})", env!("CARGO_PKG_VERSION"));

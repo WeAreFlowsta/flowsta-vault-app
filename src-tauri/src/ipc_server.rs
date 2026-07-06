@@ -3326,6 +3326,36 @@ async fn dev_identity_handler(
     }))))
 }
 
+/// Dev-only: counts of sealed records by entry type. Lets the restore
+/// harness assert exactly which private records survived (or didn't)
+/// without exposing record contents.
+async fn dev_sealed_handler(
+    State(state): State<Arc<IpcState>>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError { error: "not_found".into(), description: None }),
+        ));
+    }
+    let records = crate::sealed::sealed_list_inner(&state.app_state)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(IpcError { error: "conductor_not_ready".into(), description: Some(e) }),
+            )
+        })?;
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for r in &records {
+        *counts.entry(r.entry_type.clone()).or_insert(0) += 1;
+    }
+    Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({
+        "total": records.len(),
+        "counts_by_entry_type": counts,
+    }))))
+}
+
 async fn dev_lock_handler(
     State(state): State<Arc<IpcState>>,
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
@@ -3593,6 +3623,7 @@ pub async fn start_ipc_server(
         // active in a debug build (never active in release).
         .route("/dev/status", get(dev_status_handler))
         .route("/dev/identity", get(dev_identity_handler))
+        .route("/dev/sealed", get(dev_sealed_handler))
         .route("/dev/lock", post(dev_lock_handler))
         .route("/dev/unlock", post(dev_unlock_handler))
         .layer(cors)
