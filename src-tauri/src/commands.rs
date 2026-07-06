@@ -1286,6 +1286,7 @@ pub fn get_identity(state: State<'_, Arc<AppState>>) -> Result<VaultIdentity, St
         web_email: config.web_email.clone(),
         web_username: config.web_username.clone(),
         web_agent_pub_key,
+        hosting_model: config.hosting_model.clone(),
     })
 }
 
@@ -1300,6 +1301,9 @@ pub struct VaultIdentity {
     pub web_email: Option<String>,
     pub web_username: Option<String>,
     pub web_agent_pub_key: Option<String>,
+    /// "device-hosted" = this vault IS the account; anything else = a
+    /// custodial-linked (sync-mode) vault companioning a web account.
+    pub hosting_model: Option<String>,
 }
 
 /// Validate a recovery phrase without storing it.

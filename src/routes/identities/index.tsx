@@ -38,6 +38,9 @@ function timeAgo(unixSecs: number): string {
 }
 
 export default component$(() => {
+  // Hosting model drives the account card: device-hosted vaults ARE the
+  // account (nothing to link); sync-mode vaults companion a web account.
+  const deviceHosted = useSignal(false);
   // Web account link state
   const linkStatus = useSignal<"idle" | "linking" | "success" | "error">("idle");
   const linkMessage = useSignal("");
@@ -117,6 +120,7 @@ export default component$(() => {
           installed_app_ids: string[];
           created_at: number;
           web_agent_pub_key: string | null;
+          hosting_model: string | null;
         }>("get_identity"),
         invoke<{ app_name: string; app_agent_pub_key: string; linked_at: number; client_id: string | null }[]>(
           "get_linked_third_party_apps"
@@ -125,6 +129,7 @@ export default component$(() => {
         invoke<Record<string, string[]>>("get_all_linked_app_scopes"),
       ]);
 
+      deviceHosted.value = identity.hosting_model === "device-hosted";
       if (identity.web_agent_pub_key) {
         linkedWebKey.value = identity.web_agent_pub_key;
         linkStatus.value = "success";
@@ -267,7 +272,28 @@ export default component$(() => {
     <div>
       <h1 class="mb-6 text-2xl font-bold text-white">Connections</h1>
 
-      {/* Flowsta Web Account */}
+      {/* Your account — the story depends on the hosting model. */}
+      {deviceHosted.value ? (
+        <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
+          <div class="mb-2 flex items-center gap-2">
+            <svg class="h-5 w-5 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <h3 class="text-lg font-semibold text-white">Your Flowsta Account</h3>
+          </div>
+          <p class="text-sm text-gray-400">
+            This Vault holds your account — your keys, your data, your
+            approvals. Signing in on flowsta.com or any connected site uses
+            this same identity; there is no separate web account to link.
+          </p>
+          {linkedWebKey.value && (
+            <p class="mt-2 text-xs text-gray-500">
+              Includes your pre-upgrade history: records made with your
+              original account key stay attributed to you.
+            </p>
+          )}
+        </div>
+      ) : (
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
         <div class="mb-3 flex items-center gap-2">
           <svg class="h-5 w-5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.5}>
@@ -326,6 +352,7 @@ export default component$(() => {
           </div>
         )}
       </div>
+      )}
 
       {/* Apps & Sites list */}
       <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
@@ -491,33 +518,37 @@ export default component$(() => {
               >
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center gap-2">
-                    {site.logo_url ? (
-                      <img src={site.logo_url} alt="" width={24} height={24} class="h-6 w-6 shrink-0 rounded" />
+                    {site.logoUrl ? (
+                      <img src={site.logoUrl} alt="" width={24} height={24} class="h-6 w-6 shrink-0 rounded" />
                     ) : (
                       <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-blue-900/50 text-xs text-blue-400">
-                        {(site.name || "?").charAt(0).toUpperCase()}
+                        {(site.appName || site.clientId || "?").charAt(0).toUpperCase()}
                       </div>
                     )}
-                    <span class="truncate text-sm font-medium text-white">{site.name}</span>
+                    <span class="truncate text-sm font-medium text-white">
+                      {site.appName || site.clientId || "Web sign-in"}
+                    </span>
                     <span class="rounded-full border border-blue-800 bg-blue-900/20 px-2 py-0.5 text-[10px] font-medium text-blue-400">
                       Web
                     </span>
                   </div>
                   <div class="mt-1 flex items-center gap-3 text-xs text-gray-500">
-                    {site.first_connected_at && (
+                    {site.firstConnectedAt && (
                       <span>
-                        Connected {new Date(site.first_connected_at).toLocaleDateString()}
+                        Connected {new Date(site.firstConnectedAt).toLocaleDateString()}
                       </span>
                     )}
-                    {site.scope && (
-                      <span class="truncate">Access: {String(site.scope).split(" ").join(", ")}</span>
+                    {Array.isArray(site.permissions) && site.permissions.length > 0 && (
+                      <span class="truncate">
+                        Access: {site.permissions.filter((x: string) => x !== "openid").join(", ")}
+                      </span>
                     )}
                   </div>
                 </div>
                 <GlassButton
                   variant="danger"
                   disabled={revokingWebId.value === site.id}
-                  onClick$={() => disconnectWebSite(site.id, site.name)}
+                  onClick$={() => disconnectWebSite(site.id, site.appName || "this site")}
                 >
                   {revokingWebId.value === site.id ? "…" : "Disconnect"}
                 </GlassButton>
