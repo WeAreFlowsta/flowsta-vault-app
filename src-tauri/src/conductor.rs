@@ -80,6 +80,108 @@ fn find_available_admin_port() -> Result<u16, String> {
     ))
 }
 
+/// A resolved network entry: where this conductor session will do peer
+/// discovery (bootstrap), SBD signaling, and Iroh relay. The primary is
+/// Flowsta's auth-gated server; fallbacks are OPEN community/backup
+/// bootstrap-srv instances (no auth material — the gate's hook dies with
+/// the primary infrastructure, so fallbacks don't gate).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BootstrapTarget {
+    pub bootstrap_url: String,
+    pub signal_url: String,
+    /// Standard PADDED base64 (the conductor's decoder rejects unpadded).
+    pub auth_material: Option<String>,
+}
+
+impl BootstrapTarget {
+    fn primary() -> Self {
+        let bootstrap_url = option_env!("FLOWSTA_BOOTSTRAP_URL")
+            .unwrap_or("https://bootstrap.flowsta.com")
+            .to_string();
+        let signal_url = option_env!("FLOWSTA_SIGNAL_URL")
+            .unwrap_or("wss://bootstrap.flowsta.com")
+            .to_string();
+        let auth_material = match option_env!("FLOWSTA_AUTH_MATERIAL") {
+            Some(m) if !m.is_empty() => Some(m.to_string()),
+            _ => None,
+        };
+        Self { bootstrap_url, signal_url, auth_material }
+    }
+
+    /// Comma-separated bootstrap URLs baked at build time
+    /// (FLOWSTA_BOOTSTRAP_FALLBACKS). Signal derives from each URL's host;
+    /// no auth material — fallbacks are open by design.
+    fn fallbacks() -> Vec<Self> {
+        option_env!("FLOWSTA_BOOTSTRAP_FALLBACKS")
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(|u| {
+                let bootstrap_url = u.trim_end_matches('/').to_string();
+                let host = bootstrap_url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://");
+                Self {
+                    bootstrap_url: bootstrap_url.clone(),
+                    signal_url: format!("wss://{}", host),
+                    auth_material: None,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Is a bootstrap server answering? kitsune2-bootstrap-srv serves
+/// GET /health directly (200, no auth) — verified against the live
+/// fleet; community nodes run the same binary, so the probe is
+/// universal.
+async fn bootstrap_alive(url: &str) -> bool {
+    let health = format!("{}/health", url.trim_end_matches('/'));
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(2500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    matches!(client.get(&health).send().await, Ok(r) if r.status().is_success())
+}
+
+/// Pick the network entry for this conductor session. With no fallbacks
+/// baked in, this returns the primary immediately — no probes, no added
+/// latency, byte-identical config to before. With fallbacks configured:
+/// probe the primary; if it's dark, take the first live fallback
+/// (rediscovery + relay re-home happen naturally on the new server).
+/// If EVERYTHING is dark (fully offline), still use the primary — the
+/// conductor works locally and reconnects when anything returns.
+pub async fn resolve_bootstrap_target() -> BootstrapTarget {
+    let primary = BootstrapTarget::primary();
+    let fallbacks = BootstrapTarget::fallbacks();
+    if fallbacks.is_empty() {
+        return primary;
+    }
+    if bootstrap_alive(&primary.bootstrap_url).await {
+        return primary;
+    }
+    log::warn!(
+        "[bootstrap] primary {} unreachable — probing {} fallback(s)",
+        primary.bootstrap_url,
+        fallbacks.len()
+    );
+    for fb in fallbacks {
+        if bootstrap_alive(&fb.bootstrap_url).await {
+            log::warn!(
+                "[bootstrap] using OPEN fallback {} for this session",
+                fb.bootstrap_url
+            );
+            return fb;
+        }
+    }
+    log::warn!("[bootstrap] no rendezvous reachable — keeping primary (offline mode)");
+    primary
+}
+
 /// Generate conductor-config.yaml for the desktop app.
 ///
 /// Holochain 0.6.1 / Iroh config format. The config is regenerated from
@@ -90,17 +192,15 @@ pub fn generate_conductor_config(
     conductor_dir: &Path,
     lair_connection_url: &str,
     admin_port: u16,
+    target: &BootstrapTarget,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(conductor_dir)
         .map_err(|e| format!("Failed to create conductor directory: {}", e))?;
 
-    // Bootstrap/signal URLs default to production. Override at compile time
-    // (option_env! is read at `cargo build` time) for staging/dev — see the
-    // `tauri:dev-staging` script in package.json.
-    let bootstrap_url = option_env!("FLOWSTA_BOOTSTRAP_URL")
-        .unwrap_or("https://bootstrap.flowsta.com");
-    let signal_url = option_env!("FLOWSTA_SIGNAL_URL")
-        .unwrap_or("wss://bootstrap.flowsta.com");
+    // URLs and auth come pre-resolved (primary vs fallback) from
+    // resolve_bootstrap_target() — see BootstrapTarget above.
+    let bootstrap_url = target.bootstrap_url.as_str();
+    let signal_url = target.signal_url.as_str();
 
     // Iroh's relay is hosted by the same Flowsta bootstrap server as peer
     // discovery + SBD, so the relay_url is *derived* from the bootstrap URL
@@ -128,7 +228,7 @@ pub fn generate_conductor_config(
     // Empty / unset env var → field omitted from the YAML, conductor
     // talks to bootstrap anonymously (works fine until the server flips
     // to required-auth).
-    let auth_lines = match option_env!("FLOWSTA_AUTH_MATERIAL") {
+    let auth_lines = match &target.auth_material {
         Some(material) if !material.is_empty() => format!(
             "  base64_auth_material_bootstrap: \"{m}\"\n  base64_auth_material_relay: \"{m}\"\n",
             m = material,
@@ -503,8 +603,13 @@ async fn start_holochain_attempt(
         Ok(p) => p,
         Err(e) => fail_with_lair_cleanup!(e),
     };
-    let config_path = match generate_conductor_config(&conductor_dir, &connection_url, admin_port)
-    {
+    let bootstrap_target = resolve_bootstrap_target().await;
+    let config_path = match generate_conductor_config(
+        &conductor_dir,
+        &connection_url,
+        admin_port,
+        &bootstrap_target,
+    ) {
         Ok(p) => p,
         Err(e) => fail_with_lair_cleanup!(e),
     };
@@ -633,4 +738,45 @@ async fn start_holochain_attempt(
         app_port,
         seed_info,
     })
+}
+
+#[cfg(test)]
+mod bootstrap_target_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_target_config_omits_auth_and_derives_relay() {
+        let dir = std::env::temp_dir().join("flowsta-test-conductor-fb");
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = BootstrapTarget {
+            bootstrap_url: "https://node1.example.com".into(),
+            signal_url: "wss://node1.example.com".into(),
+            auth_material: None,
+        };
+        let path = generate_conductor_config(&dir, "unix:///tmp/lair", 4444, &target).unwrap();
+        let cfg = std::fs::read_to_string(path).unwrap();
+        assert!(cfg.contains("bootstrap_url: https://node1.example.com"));
+        assert!(cfg.contains("relay_url: https://node1.example.com./"));
+        assert!(
+            !cfg.contains("auth_material"),
+            "open fallbacks must not carry auth material"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn primary_target_config_carries_auth_material() {
+        let dir = std::env::temp_dir().join("flowsta-test-conductor-pri");
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = BootstrapTarget {
+            bootstrap_url: "https://bootstrap.example.com".into(),
+            signal_url: "wss://bootstrap.example.com".into(),
+            auth_material: Some("eyJmb28iOiJiYXIifQ==".into()),
+        };
+        let path = generate_conductor_config(&dir, "unix:///tmp/lair", 4444, &target).unwrap();
+        let cfg = std::fs::read_to_string(path).unwrap();
+        assert!(cfg.contains("base64_auth_material_bootstrap: \"eyJmb28iOiJiYXIifQ==\""));
+        assert!(cfg.contains("base64_auth_material_relay: \"eyJmb28iOiJiYXIifQ==\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
