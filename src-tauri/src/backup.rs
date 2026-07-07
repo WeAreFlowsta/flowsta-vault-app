@@ -9,6 +9,7 @@
 //! from the Your Data page in the vault UI.
 
 use crate::commands::AppState;
+use crate::key_derivation::base64_standard_encode;
 use aes_gcm::{aead::Aead, Aes256Gcm, Nonce};
 use hmac::{Hmac, Mac};
 use rand::{rngs::OsRng, RngCore};
@@ -622,6 +623,7 @@ pub fn canonicalize_for_export(payload: &serde_json::Value) -> serde_json::Value
 pub fn export_all_data(
     app_state: &AppState,
     signatures: Option<Vec<serde_json::Value>>,
+    sealed_records: Option<Vec<serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let config = {
         let config = app_state.vault_config.lock().unwrap();
@@ -666,6 +668,10 @@ pub fn export_all_data(
                         "size_bytes": meta.data_size,
                         "content_type": meta.content_type,
                         "data": data_value,
+                        // Raw bytes (base64) for lossless re-import — the
+                        // human-readable `data` above is for the user; this
+                        // is what import_vault_export re-stores verbatim.
+                        "restore_base64": base64_standard_encode(&data),
                     }));
                 }
                 Err(e) => {
@@ -798,6 +804,22 @@ pub fn export_all_data(
             ),
             "count": signatures.as_ref().map(|s| s.len()).unwrap_or(0),
             "signatures": signatures.unwrap_or_default(),
+        },
+
+        // ── Sealed private records ──────────────────────────────────
+        // The canonical private data post-R2 (profile, activity, app
+        // records in the encrypted v2 cell). Body is the DECRYPTED JSON
+        // — CAL-readable AND what import_vault_export re-stores.
+        "sealed_records": {
+            "_readme": concat!(
+                "Your private records, decrypted. These live only on your ",
+                "device (they do not gossip to Flowsta or anyone else), so ",
+                "this export — or a premium encrypted backup — is how they ",
+                "survive losing this machine. Import restores them after a ",
+                "recovery-phrase reinstall.",
+            ),
+            "count": sealed_records.as_ref().map(|r| r.len()).unwrap_or(0),
+            "records": sealed_records.unwrap_or_default(),
         },
     });
 

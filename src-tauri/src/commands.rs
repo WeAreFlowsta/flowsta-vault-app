@@ -2714,7 +2714,170 @@ pub async fn export_all_data(
             None
         }
     };
-    crate::backup::export_all_data(&state, signatures)
+    // Sealed private records — the canonical private data, decrypted for
+    // the export (they live only on this device). Non-fatal on failure.
+    let sealed = match crate::sealed::sealed_list_inner(state.inner()).await {
+        Ok(items) => Some(
+            items
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "entry_type": r.entry_type,
+                        "action_hash": r.action_hash,
+                        "created_at": r.created_at,
+                        "body": r.body,
+                        "refs": r.refs,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Err(e) => {
+            log::warn!("export_all_data: failed to list sealed records: {}", e);
+            None
+        }
+    };
+    crate::backup::export_all_data(&state, signatures, sealed)
+}
+
+/// Import a previously-exported vault file after a recovery-phrase
+/// restore: re-store the sealed private records and app backups. Keys,
+/// identity, signatures and server mirrors are NOT imported — the phrase
+/// owns identity, the DHT gossips signatures back, the server owns its
+/// mirrors. Idempotent: re-running skips records already present.
+#[tauri::command]
+pub async fn import_vault_export(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Could not read the export file: {}", e))?;
+    let export: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|_| "That file is not a valid Flowsta export".to_string())?;
+
+    // Identity gate — never import one person's data into another's vault.
+    let my_agent = {
+        let cfg = state.vault_config.lock().unwrap();
+        cfg.as_ref().ok_or("Vault is locked")?.agent_pub_key.clone()
+    };
+    let export_agent = export
+        .get("you")
+        .and_then(|y| y.get("agent_pub_key"))
+        .and_then(|v| v.as_str())
+        .ok_or("Export is missing its identity (you.agent_pub_key)")?;
+    if export_agent != my_agent {
+        return Err(format!(
+            "This export belongs to a different identity ({}…) than this vault ({}…). Restore the matching recovery phrase first.",
+            &export_agent.chars().take(12).collect::<String>(),
+            &my_agent.chars().take(12).collect::<String>(),
+        ));
+    }
+
+    // ── Sealed records ──────────────────────────────────────────────
+    // Dedupe on (entry_type, created_at) exactly like the migration
+    // importer, so re-running is a no-op for records already present.
+    let existing = crate::sealed::sealed_list_inner(state.inner())
+        .await
+        .map_err(|e| format!("Could not read current records: {}", e))?;
+    let already: std::collections::HashSet<(String, u64)> = existing
+        .iter()
+        .map(|r| (r.entry_type.clone(), r.created_at))
+        .collect();
+
+    let records = export
+        .get("sealed_records")
+        .and_then(|s| s.get("records"))
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut sealed_restored = 0usize;
+    let mut sealed_skipped = 0usize;
+    let _guard = state.commit_serial.lock().await;
+    for rec in &records {
+        let entry_type = rec.get("entry_type").and_then(|v| v.as_str()).unwrap_or("");
+        let created_at = rec.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let body = rec.get("body").cloned().unwrap_or(serde_json::Value::Null);
+        let refs: Vec<String> = rec
+            .get("refs")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if entry_type.is_empty() || body.is_null() {
+            continue;
+        }
+        if already.contains(&(entry_type.to_string(), created_at)) {
+            sealed_skipped += 1;
+            continue;
+        }
+        crate::sealed::sealed_store_inner(
+            state.inner(),
+            entry_type.to_string(),
+            body,
+            refs,
+            created_at,
+        )
+        .await
+        .map_err(|e| format!("Failed to restore a {} record: {}", entry_type, e))?;
+        sealed_restored += 1;
+    }
+    drop(_guard);
+
+    // ── App backups ─────────────────────────────────────────────────
+    // Re-save each snapshot's raw bytes verbatim (re-encrypted under this
+    // device's backup key — identical, since the seed is re-derived from
+    // the same phrase). Apps then self-restore via their own flow.
+    let mut backups_restored = 0usize;
+    if let Some(apps) = export
+        .get("app_data")
+        .and_then(|a| a.get("apps"))
+        .and_then(|a| a.as_array())
+    {
+        for app in apps {
+            let client_id = app.get("client_id").and_then(|v| v.as_str()).unwrap_or("");
+            let app_name = app.get("app_name").and_then(|v| v.as_str()).unwrap_or(client_id);
+            if client_id.is_empty() {
+                continue;
+            }
+            if let Some(snaps) = app.get("snapshots").and_then(|s| s.as_array()) {
+                for snap in snaps {
+                    let raw_b64 = match snap.get("restore_base64").and_then(|v| v.as_str()) {
+                        Some(b) => b,
+                        None => continue, // older export without restore bytes — skip
+                    };
+                    let bytes = match base64_standard_decode(raw_b64) {
+                        Ok(b) => b,
+                        Err(_) => continue,
+                    };
+                    let label = snap.get("label").and_then(|v| v.as_str());
+                    let content_type = snap.get("content_type").and_then(|v| v.as_str());
+                    if crate::backup::save_backup(
+                        state.inner(),
+                        client_id,
+                        app_name,
+                        label,
+                        &bytes,
+                        content_type,
+                    )
+                    .is_ok()
+                    {
+                        backups_restored += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    log::info!(
+        "[import] sealed restored {} (skipped {}), backups restored {}",
+        sealed_restored,
+        sealed_skipped,
+        backups_restored
+    );
+    Ok(serde_json::json!({
+        "sealed_restored": sealed_restored,
+        "sealed_skipped": sealed_skipped,
+        "backups_restored": backups_restored,
+    }))
 }
 
 /// List individual backup metadata for a specific app.

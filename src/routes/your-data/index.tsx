@@ -62,6 +62,26 @@ interface VaultIdentity {
   web_agent_pub_key: string | null;
 }
 
+interface SealedListItem {
+  action_hash: string;
+  entry_type: string;
+  created_at: number;
+  body: unknown;
+  refs: string[];
+}
+
+interface ImportResult {
+  sealed_restored: number;
+  sealed_skipped: number;
+  backups_restored: number;
+}
+
+/** "profile" -> "Profile", "app_record" -> "App record" */
+function formatEntryType(t: string): string {
+  const words = t.replace(/[_-]/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const k = 1024;
@@ -110,6 +130,15 @@ export default component$(() => {
   const exporting = useSignal(false);
   const exportSuccess = useSignal(false);
 
+  // Sealed private records, aggregated to counts by entry type
+  const sealedCounts = useSignal<Record<string, number>>({});
+  const sealedTotal = useSignal(0);
+
+  // Import state
+  const importing = useSignal(false);
+  const importResult = useSignal<ImportResult | null>(null);
+  const importError = useSignal<string | null>(null);
+
   // Expanded app -> its individual backups
   const expandedApp = useSignal<string | null>(null);
   const appBackups = useSignal<BackupMeta[]>([]);
@@ -143,6 +172,59 @@ export default component$(() => {
       console.error("Failed to load your data:", e);
     } finally {
       loading.value = false;
+    }
+
+    // Private records load separately — needs the conductor, and a failure
+    // here shouldn't blank the rest of the page.
+    try {
+      const records = await invoke<SealedListItem[]>("sealed_list");
+      const counts: Record<string, number> = {};
+      for (const r of records) {
+        counts[r.entry_type] = (counts[r.entry_type] || 0) + 1;
+      }
+      sealedCounts.value = counts;
+      sealedTotal.value = records.length;
+    } catch (e) {
+      console.error("Failed to load private records:", e);
+    }
+  });
+
+  const refreshAfterImport = $(async () => {
+    try {
+      const [stats, records] = await Promise.all([
+        invoke<BackupStats>("get_backup_stats"),
+        invoke<SealedListItem[]>("sealed_list"),
+      ]);
+      backupStats.value = stats;
+      const counts: Record<string, number> = {};
+      for (const r of records) {
+        counts[r.entry_type] = (counts[r.entry_type] || 0) + 1;
+      }
+      sealedCounts.value = counts;
+      sealedTotal.value = records.length;
+    } catch (e) {
+      console.error("Refresh after import failed:", e);
+    }
+  });
+
+  const handleImport = $(async () => {
+    importError.value = null;
+    importResult.value = null;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const path = await open({
+      multiple: false,
+      filters: [{ name: "Flowsta export", extensions: ["json"] }],
+    });
+    if (!path || typeof path !== "string") return;
+    importing.value = true;
+    try {
+      const result = await invoke<ImportResult>("import_vault_export", { path });
+      importResult.value = result;
+      await refreshAfterImport();
+    } catch (e) {
+      importError.value = String(e);
+    } finally {
+      importing.value = false;
     }
   });
 
@@ -333,6 +415,38 @@ export default component$(() => {
         )}
       </div>
 
+      {/* Private Records */}
+      <div class="mb-6 rounded-xl border border-gray-700 bg-[#15203a] p-6">
+        <div class="mb-2 flex items-center justify-between">
+          <h3 class="text-lg font-semibold text-white">Private Records</h3>
+          {sealedTotal.value > 0 && (
+            <span class="text-sm text-gray-400">
+              {sealedTotal.value} record{sealedTotal.value !== 1 ? "s" : ""}
+            </span>
+          )}
+        </div>
+        <p class="mb-4 text-sm text-gray-400">
+          Your profile, activity, and app records — encrypted and stored only
+          in this vault, on this device. Nothing here is on any server, which
+          is the point: no one in the middle. It also means only your export
+          file keeps these safe if this device is lost.
+        </p>
+        {sealedTotal.value === 0 ? (
+          <p class="rounded-lg border border-gray-800 bg-black/30 p-4 text-sm text-gray-400">
+            No private records yet.
+          </p>
+        ) : (
+          <div class="space-y-2 text-sm">
+            {Object.entries(sealedCounts.value).map(([type, count]) => (
+              <div key={type} class="flex items-center justify-between">
+                <span class="text-gray-400">{formatEntryType(type)}</span>
+                <span class="text-white">{count}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* App Backups */}
       <div class="mb-6 rounded-xl border border-gray-700 bg-[#15203a] p-6">
         <div class="mb-4 flex items-center justify-between">
@@ -513,12 +627,14 @@ export default component$(() => {
       </div>
 
       {/* Export */}
-      <div class="rounded-xl border border-gray-700 bg-[#15203a] p-6">
+      <div class="mb-6 rounded-xl border border-gray-700 bg-[#15203a] p-6">
         <h3 class="mb-2 text-lg font-semibold text-white">Export All Data</h3>
         <p class="mb-4 text-sm text-gray-400">
-          Download a complete copy of your vault — your identity, cryptographic
-          keys, connected apps, and all app data backups. This gives you
-          everything you need to recreate your Flowsta identity independently.
+          Download a complete copy of your vault — your identity keys, private
+          records, connected apps, and your app data backups. Your recovery
+          phrase can restore your <em>identity</em> anywhere; this file is how
+          your <em>data</em> survives losing this device. Everything in it is
+          readable JSON you own outright — no Flowsta needed to use it.
         </p>
 
         <div class="mb-4">
@@ -544,6 +660,48 @@ export default component$(() => {
           disabled={exporting.value}
         >
           {exporting.value ? "Exporting..." : "Download Export"}
+        </GlassButton>
+      </div>
+
+      {/* Restore from export */}
+      <div class="rounded-xl border border-gray-700 bg-[#15203a] p-6">
+        <h3 class="mb-2 text-lg font-semibold text-white">
+          Restore from an Export
+        </h3>
+        <p class="mb-4 text-sm text-gray-400">
+          Reset your vault or moved to a new device? After restoring your
+          identity with your recovery phrase, import an export file to bring
+          your private records and app backups home. Only your own exports
+          work — the file must match this vault's identity. Safe to run more
+          than once: records you already have are skipped, never duplicated.
+        </p>
+
+        {importError.value && (
+          <div class="mb-4">
+            <Callout intent="warning" title="Import didn't complete">
+              <p>{importError.value}</p>
+            </Callout>
+          </div>
+        )}
+
+        {importResult.value && (
+          <div class="mb-4">
+            <Callout intent="success">
+              <p>
+                Restored {importResult.value.sealed_restored} private record
+                {importResult.value.sealed_restored !== 1 ? "s" : ""} and{" "}
+                {importResult.value.backups_restored} app backup
+                {importResult.value.backups_restored !== 1 ? "s" : ""}
+                {importResult.value.sealed_skipped > 0 &&
+                  ` (${importResult.value.sealed_skipped} already here)`}
+                .
+              </p>
+            </Callout>
+          </div>
+        )}
+
+        <GlassButton onClick$={handleImport} disabled={importing.value}>
+          {importing.value ? "Importing..." : "Choose Export File"}
         </GlassButton>
       </div>
     </div>

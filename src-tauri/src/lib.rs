@@ -408,6 +408,7 @@ pub fn run() {
             commands::get_backup_stats,
             commands::delete_app_backup,
             commands::export_all_data,
+            commands::import_vault_export,
             commands::list_app_backup_details,
             commands::export_single_backup,
             commands::delete_single_backup,
