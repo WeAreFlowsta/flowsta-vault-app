@@ -74,6 +74,7 @@ interface ImportResult {
   sealed_restored: number;
   sealed_skipped: number;
   backups_restored: number;
+  backups_skipped: number;
 }
 
 /** "profile" -> "Profile", "app_record" -> "App record" */
@@ -734,13 +735,23 @@ export default component$(() => {
           <div class="mb-4">
             <Callout intent="success">
               <p>
-                Restored {importResult.value.sealed_restored} private record
-                {importResult.value.sealed_restored !== 1 ? "s" : ""} and{" "}
-                {importResult.value.backups_restored} app backup
-                {importResult.value.backups_restored !== 1 ? "s" : ""}
-                {importResult.value.sealed_skipped > 0 &&
-                  ` (${importResult.value.sealed_skipped} already here)`}
-                .
+                {importResult.value.sealed_restored === 0 &&
+                importResult.value.backups_restored === 0
+                  ? "Everything in that export is already here — nothing to restore."
+                  : `Restored ${importResult.value.sealed_restored} private record${
+                      importResult.value.sealed_restored !== 1 ? "s" : ""
+                    } and ${importResult.value.backups_restored} app backup${
+                      importResult.value.backups_restored !== 1 ? "s" : ""
+                    }${
+                      importResult.value.sealed_skipped +
+                        importResult.value.backups_skipped >
+                      0
+                        ? ` (${
+                            importResult.value.sealed_skipped +
+                            importResult.value.backups_skipped
+                          } already here)`
+                        : ""
+                    }.`}
               </p>
             </Callout>
           </div>

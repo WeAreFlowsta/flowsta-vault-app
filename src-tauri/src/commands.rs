@@ -2827,6 +2827,7 @@ pub async fn import_vault_export(
     // device's backup key — identical, since the seed is re-derived from
     // the same phrase). Apps then self-restore via their own flow.
     let mut backups_restored = 0usize;
+    let mut backups_skipped = 0usize;
     if let Some(apps) = export
         .get("app_data")
         .and_then(|a| a.get("apps"))
@@ -2838,17 +2839,31 @@ pub async fn import_vault_export(
             if client_id.is_empty() {
                 continue;
             }
+            // Labels already present stay untouched — same-label saves
+            // overwrite, so without this a re-run reports phantom restores.
+            let existing_labels: std::collections::HashSet<String> =
+                crate::backup::list_app_backups(&state.data_dir, client_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|m| m.label)
+                    .collect();
             if let Some(snaps) = app.get("snapshots").and_then(|s| s.as_array()) {
                 for snap in snaps {
                     let raw_b64 = match snap.get("restore_base64").and_then(|v| v.as_str()) {
                         Some(b) => b,
                         None => continue, // older export without restore bytes — skip
                     };
+                    let label = snap.get("label").and_then(|v| v.as_str());
+                    if let Some(l) = label {
+                        if existing_labels.contains(l) {
+                            backups_skipped += 1;
+                            continue;
+                        }
+                    }
                     let bytes = match base64_standard_decode(raw_b64) {
                         Ok(b) => b,
                         Err(_) => continue,
                     };
-                    let label = snap.get("label").and_then(|v| v.as_str());
                     let content_type = snap.get("content_type").and_then(|v| v.as_str());
                     if crate::backup::save_backup(
                         state.inner(),
@@ -2868,15 +2883,17 @@ pub async fn import_vault_export(
     }
 
     log::info!(
-        "[import] sealed restored {} (skipped {}), backups restored {}",
+        "[import] sealed restored {} (skipped {}), backups restored {} (skipped {})",
         sealed_restored,
         sealed_skipped,
-        backups_restored
+        backups_restored,
+        backups_skipped
     );
     Ok(serde_json::json!({
         "sealed_restored": sealed_restored,
         "sealed_skipped": sealed_skipped,
         "backups_restored": backups_restored,
+        "backups_skipped": backups_skipped,
     }))
 }
 

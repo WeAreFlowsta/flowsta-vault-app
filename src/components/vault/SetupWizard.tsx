@@ -54,6 +54,10 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const progressMessage = useSignal("");
   const result = useStore({ agentPubKey: "", did: "" });
   const showTechDetails = useSignal(false);
+  // True only for the phrase-restore path — the done screen then nudges
+  // toward importing an export file, since the phrase brings back identity
+  // but not data.
+  const restoredFromPhrase = useSignal(false);
 
   // Create-new-identity state (device-hosted identity)
   const createEmail = useSignal("");
@@ -568,6 +572,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       restorePassword2.value = "";
       result.agentPubKey = setupResult.agent_pub_key;
       result.did = setupResult.did;
+      restoredFromPhrase.value = true;
       step.value = "done";
     } catch (e) {
       const msg = String(e);
@@ -1503,6 +1508,21 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 </div>
               )}
             </div>
+
+            {restoredFromPhrase.value && (
+              <div class="mb-6 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4 text-left">
+                <p class="mb-1 text-sm font-medium text-sky-300">
+                  Now bring your data home
+                </p>
+                <p class="text-sm text-gray-400">
+                  Your recovery phrase restores your identity — your private
+                  records and app backups come from your export file. Open the
+                  dashboard, go to <span class="text-white">Your Data</span>,
+                  and choose{" "}
+                  <span class="text-white">Restore from an Export</span>.
+                </p>
+              </div>
+            )}
 
             <GlassButton onClick$={props.onComplete$}>
               Open Dashboard
