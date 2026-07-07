@@ -513,6 +513,10 @@ export default component$(() => {
           <div class="space-y-3">
             {backupStats.value.apps.map((app) => {
               const isExpanded = expandedApp.value === app.client_id;
+              // The vault's own migration snapshot lives in the same store
+              // as third-party app backups — present it as what it is, not
+              // as an app that stopped backing up.
+              const isMigrationSnapshot = app.client_id === "flowsta";
 
               return (
                 <div
@@ -532,11 +536,27 @@ export default component$(() => {
                         &#9654;
                       </span>
                       <div class="min-w-0">
-                        <p class="font-medium text-white">{app.app_name}</p>
+                        <p class="font-medium text-white">
+                          {isMigrationSnapshot
+                            ? "Flowsta Account — migration snapshot"
+                            : app.app_name}
+                        </p>
                         <p class="mt-0.5 text-xs text-gray-400">
-                          {app.backup_count} backup{app.backup_count !== 1 ? "s" : ""}{" "}
-                          &middot; {formatBytes(app.total_size)} &middot; Last{" "}
-                          {timeAgo(app.last_backup_at)}
+                          {isMigrationSnapshot ? (
+                            <>
+                              Your account exactly as it arrived on this
+                              device &middot; {formatDate(app.last_backup_at)}{" "}
+                              &middot; doesn't update — your live data is in
+                              Private Records above
+                            </>
+                          ) : (
+                            <>
+                              {app.backup_count} backup
+                              {app.backup_count !== 1 ? "s" : ""} &middot;{" "}
+                              {formatBytes(app.total_size)} &middot; Last{" "}
+                              {timeAgo(app.last_backup_at)}
+                            </>
+                          )}
                         </p>
                       </div>
                     </button>
@@ -592,7 +612,9 @@ export default component$(() => {
                               >
                                 <div class="min-w-0">
                                   <p class="text-sm text-white">
-                                    {backup.label || "latest"}
+                                    {backup.label?.startsWith("account-migration-")
+                                      ? "Migration snapshot"
+                                      : backup.label || "latest"}
                                   </p>
                                   <p class="text-xs text-gray-500">
                                     {formatDateTime(backup.created_at)} &middot;{" "}
