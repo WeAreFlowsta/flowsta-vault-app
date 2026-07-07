@@ -279,6 +279,8 @@ export default component$(() => {
     origin: string | null;
     commit?: boolean;
     amends?: boolean;
+    sponsored_by?: string | null;
+    sponsor_exhausted?: boolean;
   } | null>(null);
 
   // A Flowsta page's committing request is waiting for the conductor —
@@ -518,6 +520,8 @@ export default component$(() => {
       origin: string | null;
       commit: boolean;
       amends: boolean;
+      sponsored_by?: string | null;
+      sponsor_exhausted?: boolean;
     }>("document-sign-request", (event) => {
       pendingDocumentSign.value = event.payload;
     });
@@ -1963,6 +1967,18 @@ export default component$(() => {
               )}
             </div>
 
+            {pendingDocumentSign.value.commit && pendingDocumentSign.value.sponsored_by && (
+              <p class="mb-2 text-xs text-emerald-400">
+                Sponsored by {pendingDocumentSign.value.sponsored_by} — this
+                signature doesn't use your personal quota.
+              </p>
+            )}
+            {pendingDocumentSign.value.commit && pendingDocumentSign.value.sponsor_exhausted && (
+              <p class="mb-2 text-xs text-amber-400">
+                {pendingDocumentSign.value.app_name}'s signing pool is used up
+                for this period — this signature will use your personal quota.
+              </p>
+            )}
             <p class="mb-4 text-xs text-gray-400">
               {pendingDocumentSign.value.commit
                 ? pendingDocumentSign.value.amends

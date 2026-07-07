@@ -2062,6 +2062,10 @@ async fn sign_document_core(
     // is up BEFORE asking for approval — an approval must always be able to
     // commit. (The conductor spawns on unlock; right after a restart it can
     // need a minute.) The UI shows a visible "preparing" banner for the wait.
+    // Sponsorship (org pays for app-initiated signs) — resolved by the quota
+    // gate below; drives the approval dialog and the post-commit accounting.
+    let mut sponsor_state: Option<crate::commands::SponsorState> = None;
+
     if req.commit {
         set_job_stage(&state, &job_id, "preparing");
 
@@ -2070,18 +2074,34 @@ async fn sign_document_core(
         // when the period's signatures are used up. An amend counts like
         // any other published signature.
         let api_url = option_env!("FLOWSTA_API_URL").unwrap_or("https://auth-api.flowsta.com");
-        if let Some(q) = crate::commands::current_sign_quota(&state.app_state, api_url).await {
+        let quota_state =
+            crate::commands::current_sign_quota(&state.app_state, api_url, req.client_id.as_deref())
+                .await;
+        if let Some((q, sponsor)) = quota_state {
+            sponsor_state = sponsor;
+            let sponsor = &sponsor_state;
             if q.limit >= 1 && q.used >= q.limit {
+                let description = match sponsor {
+                    // Sponsor pool dry AND the personal quota is also full.
+                    Some(sp) if sp.exhausted => format!(
+                        "{}'s signing pool for this period is used up, and you've used all {} of your own signature{} ({} plan). Upgrade at flowsta.com/dashboard/premium to keep signing.",
+                        sp.app_name,
+                        q.limit,
+                        if q.limit == 1 { "" } else { "s" },
+                        q.tier
+                    ),
+                    _ => format!(
+                        "You've used all {} signature{} for this period ({} plan). Upgrade at flowsta.com/dashboard/premium to keep signing.",
+                        q.limit,
+                        if q.limit == 1 { "" } else { "s" },
+                        q.tier
+                    ),
+                };
                 return Err((
                     StatusCode::FORBIDDEN,
                     Json(IpcError {
                         error: "quota_exceeded".into(),
-                        description: Some(format!(
-                            "You've used all {} signature{} for this period ({} plan). Upgrade at flowsta.com/dashboard/premium to keep signing.",
-                            q.limit,
-                            if q.limit == 1 { "" } else { "s" },
-                            q.tier
-                        )),
+                        description: Some(description),
                     }),
                 ));
             }
@@ -2138,6 +2158,9 @@ async fn sign_document_core(
         "origin": origin,
         "commit": req.commit,
         "amends": supersedes_bytes.is_some(),
+        // Whose quota this signature draws from — the dialog says so.
+        "sponsored_by": sponsor_state.as_ref().filter(|sp| !sp.exhausted).map(|sp| sp.app_name.clone()),
+        "sponsor_exhausted": sponsor_state.as_ref().map(|sp| sp.exhausted).unwrap_or(false),
     });
     set_job_stage(&state, &job_id, "awaiting_approval");
     raise_window(&state.app_handle);
@@ -2298,16 +2321,26 @@ async fn sign_document_core(
                 // A published signature counts against the sign quota just
                 // like an in-app sign: bump the local cache and push the
                 // count to the server so web quota meters update.
-                if let Err(e) = crate::quota_cache::increment_used(&state.app_state.data_dir) {
+                let sponsored_active =
+                    sponsor_state.as_ref().map(|sp| !sp.exhausted).unwrap_or(false);
+                if sponsored_active {
+                    // The org pool paid — the personal meter is untouched.
+                } else if let Err(e) = crate::quota_cache::increment_used(&state.app_state.data_dir) {
                     log::warn!("Quota cache increment failed (non-fatal): {}", e);
                 }
                 let sync_state = state.app_state.clone();
+                let sync_client_id = req.client_id.clone();
                 let api_url = option_env!("FLOWSTA_API_URL")
                     .unwrap_or("https://auth-api.flowsta.com")
                     .to_string();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::commands::sync_quota_to_server_inner(&sync_state, api_url, 1).await
+                    if let Err(e) = crate::commands::sync_quota_to_server_inner(
+                        &sync_state,
+                        api_url,
+                        1,
+                        sync_client_id,
+                    )
+                    .await
                     {
                         log::warn!("Quota sync after published sign failed (non-fatal): {}", e);
                     }

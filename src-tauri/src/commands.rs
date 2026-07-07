@@ -4885,13 +4885,14 @@ pub async fn sync_quota_to_server(
     api_url: String,
     count: u32,
 ) -> Result<bool, String> {
-    sync_quota_to_server_inner(state.inner(), api_url, count).await
+    sync_quota_to_server_inner(state.inner(), api_url, count, None).await
 }
 
 pub(crate) async fn sync_quota_to_server_inner(
     state: &Arc<AppState>,
     api_url: String,
     count: u32,
+    client_id: Option<String>,
 ) -> Result<bool, String> {
     if count == 0 { return Ok(false); }
 
@@ -4923,8 +4924,15 @@ pub(crate) async fn sync_quota_to_server_inner(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    // Canonical payload matches the API's verification string
-    let canonical = format!("flowsta-quota-sync:{}:{}:{}", desktop_agent_key, timestamp_ms, count);
+    // Canonical payload matches the API's verification string. v2 includes
+    // the client_id so a sponsored sign's attribution is inside the signature.
+    let canonical = match &client_id {
+        Some(cid) => format!(
+            "flowsta-quota-sync:{}:{}:{}:{}",
+            desktop_agent_key, timestamp_ms, count, cid
+        ),
+        None => format!("flowsta-quota-sync:{}:{}:{}", desktop_agent_key, timestamp_ms, count),
+    };
     let signature = crate::key_derivation::sign_with_device_seed(&device_seed, canonical.as_bytes());
     let sig_hex = hex::encode(signature);
 
@@ -4937,6 +4945,7 @@ pub(crate) async fn sync_quota_to_server_inner(
             "count": count,
             "timestamp": timestamp_ms,
             "signature": sig_hex,
+            "client_id": client_id,
         }))
         .send()
         .await
@@ -4958,10 +4967,18 @@ pub(crate) async fn sync_quota_to_server_inner(
 /// meter), falling back to the local cache when offline. `None` means no
 /// quota state is knowable — the caller should allow the sign, since the
 /// server still meters via quota sync.
+/// Sponsorship state for an app-initiated sign: which app's org pool pays,
+/// or that the pool is dry and the personal quota pays instead.
+pub(crate) struct SponsorState {
+    pub app_name: String,
+    pub exhausted: bool,
+}
+
 pub(crate) async fn current_sign_quota(
     state: &Arc<AppState>,
     api_url: &str,
-) -> Option<crate::quota_cache::QuotaCache> {
+    client_id: Option<&str>,
+) -> Option<(crate::quota_cache::QuotaCache, Option<SponsorState>)> {
     // Prefer the linked web account's key (the one a subscription is
     // attached to) over the local device key — same rule as the in-app UI.
     let agent_key = {
@@ -4974,11 +4991,14 @@ pub(crate) async fn current_sign_quota(
     };
 
     if let Some(key) = agent_key {
-        let url = format!(
+        let mut url = format!(
             "{}/api/v1/sign-it/quota/by-agent?agent_pub_key={}",
             api_url,
             urlencoding_encode(&key)
         );
+        if let Some(cid) = client_id {
+            url.push_str(&format!("&client_id={}", urlencoding_encode(cid)));
+        }
         let fresh = async {
             let resp = reqwest::Client::new()
                 .get(&url)
@@ -4994,6 +5014,18 @@ pub(crate) async fn current_sign_quota(
         .await;
 
         if let Some(v) = fresh {
+            let sponsor = v.get("sponsor").map(|sp| SponsorState {
+                app_name: sp
+                    .get("app_name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("the app")
+                    .to_string(),
+                exhausted: sp
+                    .get("exhausted")
+                    .and_then(|e| e.as_bool())
+                    .unwrap_or(false),
+            });
+            let sponsored_active = sponsor.as_ref().map(|s| !s.exhausted).unwrap_or(false);
             let cache = crate::quota_cache::QuotaCache {
                 tier: v
                     .get("tier")
@@ -5012,15 +5044,24 @@ pub(crate) async fn current_sign_quota(
                     .unwrap_or(0),
                 write_counter: 0,
             };
+            if sponsored_active {
+                // Org-pool numbers — NOT the user's personal meter. Never
+                // write them into the personal quota cache.
+                return Some((cache, sponsor));
+            }
             match crate::quota_cache::write(&state.data_dir, cache) {
-                Ok(written) => return Some(written),
+                Ok(written) => return Some((written, sponsor)),
                 Err(e) => log::warn!("Quota cache write failed (non-fatal): {}", e),
             }
         }
     }
 
-    // Offline / lookup failed: trust the HMAC-signed local cache.
-    crate::quota_cache::read(&state.data_dir).ok().flatten()
+    // Offline / lookup failed: trust the HMAC-signed local cache. Sponsor
+    // state is unknowable offline — sync settles attribution later.
+    crate::quota_cache::read(&state.data_dir)
+        .ok()
+        .flatten()
+        .map(|c| (c, None))
 }
 
 /// Minimal percent-encoding for a URL query value (avoids a new dep).
