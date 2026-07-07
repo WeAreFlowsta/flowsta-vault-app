@@ -712,7 +712,7 @@ pub fn export_all_data(
         // ── Who you are ───────────────────────────────────────────
         "you": {
             "_readme": concat!(
-                "Your Flowsta identity. The DID is your decentralised ",
+                "Your Flowsta identity. The DID is your decentralized ",
                 "identifier. The agent_pub_key is your Holochain network ",
                 "address.",
             ),

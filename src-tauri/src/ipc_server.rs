@@ -1486,13 +1486,25 @@ async fn backup_handler(
         req.content_type.as_deref(),
     )
     .map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(IpcError {
-                error: "backup_failed".into(),
-                description: Some(e),
-            }),
-        )
+        // Surface the size limit as its own code — the SDK maps it to
+        // BackupTooLargeError (also matches on HTTP 413).
+        if e.starts_with("Backup too large") {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(IpcError {
+                    error: "backup_too_large".into(),
+                    description: Some(e),
+                }),
+            )
+        } else {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(IpcError {
+                    error: "backup_failed".into(),
+                    description: Some(e),
+                }),
+            )
+        }
     })?;
 
     Ok(axum::response::IntoResponse::into_response(Json(
