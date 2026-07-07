@@ -465,12 +465,14 @@ export default component$(() => {
           </p>
         ) : (
           <div class="space-y-2 text-sm">
-            {Object.entries(sealedCounts.value).map(([type, count]) => (
-              <div key={type} class="flex items-center justify-between">
-                <span class="text-gray-400">{formatEntryType(type)}</span>
-                <span class="text-white">{count}</span>
-              </div>
-            ))}
+            {Object.entries(sealedCounts.value)
+              .filter(([, count]) => count > 0)
+              .map(([type, count]) => (
+                <div key={type} class="flex items-center justify-between">
+                  <span class="text-gray-400">{formatEntryType(type)}</span>
+                  <span class="text-white">{count}</span>
+                </div>
+              ))}
           </div>
         )}
       </div>
