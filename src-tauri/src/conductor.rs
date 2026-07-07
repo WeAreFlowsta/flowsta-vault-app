@@ -182,6 +182,38 @@ pub async fn resolve_bootstrap_target() -> BootstrapTarget {
     primary
 }
 
+/// Canonical relay URL for a bootstrap server. kitsune2/Iroh want the
+/// canonical FQDN form — trailing dot on the HOSTNAME, trailing slash:
+/// `https://bootstrap.flowsta.com./`. The dot belongs to the hostname,
+/// so with an explicit port it goes BEFORE the colon, and IP literals
+/// never get one (a dotted IP is invalid).
+fn derive_relay_url(bootstrap_url: &str) -> String {
+    let trimmed = bootstrap_url.trim_end_matches('/');
+    let (scheme, rest) = match trimmed.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => return format!("{}./", trimmed.trim_end_matches('.')),
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        // rsplit handles hostname:port; a bare IPv4 has dots not colons.
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
+        _ => (rest, None),
+    };
+    let is_ip_literal = host
+        .trim_end_matches('.')
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '.')
+        || host.contains('[');
+    let canon_host = if is_ip_literal {
+        host.trim_end_matches('.').to_string()
+    } else {
+        format!("{}.", host.trim_end_matches('.'))
+    };
+    match port {
+        Some(p) => format!("{}://{}:{}/", scheme, canon_host, p),
+        None => format!("{}://{}/", scheme, canon_host),
+    }
+}
+
 /// Generate conductor-config.yaml for the desktop app.
 ///
 /// Holochain 0.6.1 / Iroh config format. The config is regenerated from
@@ -202,16 +234,11 @@ pub fn generate_conductor_config(
     let bootstrap_url = target.bootstrap_url.as_str();
     let signal_url = target.signal_url.as_str();
 
-    // Iroh's relay is hosted by the same Flowsta bootstrap server as peer
-    // discovery + SBD, so the relay_url is *derived* from the bootstrap URL
-    // rather than carried as a separate env var — that makes it impossible
-    // for a staging build to point its relay at production by accident.
-    // kitsune2 requires the canonical FQDN form: a trailing dot on the host
-    // plus a trailing slash, e.g. https://bootstrap.flowsta.com./
-    let relay_url = format!(
-        "{}./",
-        bootstrap_url.trim_end_matches('/').trim_end_matches('.'),
-    );
+    // Iroh's relay is hosted by the same server as peer discovery + SBD,
+    // so the relay_url is *derived* from the bootstrap URL rather than
+    // carried separately — a staging build can't point its relay at
+    // production by accident, and fallbacks inherit their own relay.
+    let relay_url = derive_relay_url(bootstrap_url);
 
     // Optional auth material for bootstraps that require it (Flowsta's
     // own bootstrap once `--authentication-hook-server` is on). Same value
@@ -743,6 +770,26 @@ async fn start_holochain_attempt(
 #[cfg(test)]
 mod bootstrap_target_tests {
     use super::*;
+
+    #[test]
+    fn relay_derivation_handles_ports_and_ips() {
+        assert_eq!(
+            derive_relay_url("https://bootstrap.flowsta.com"),
+            "https://bootstrap.flowsta.com./"
+        );
+        assert_eq!(
+            derive_relay_url("https://node1.example.com/"),
+            "https://node1.example.com./"
+        );
+        assert_eq!(
+            derive_relay_url("http://node1.example.com:18080"),
+            "http://node1.example.com.:18080/"
+        );
+        assert_eq!(
+            derive_relay_url("http://192.168.1.3:18080"),
+            "http://192.168.1.3:18080/"
+        );
+    }
 
     #[test]
     fn fallback_target_config_omits_auth_and_derives_relay() {
