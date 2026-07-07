@@ -132,6 +132,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FLOWSTA_API_URL: ${{ vars.STAGING_API_URL }}
           FLOWSTA_BOOTSTRAP_URL: ${{ vars.STAGING_BOOTSTRAP_URL }}
+          FLOWSTA_BOOTSTRAP_FALLBACKS: https://node1.flowsta.com
           FLOWSTA_SIGNAL_URL: ${{ vars.STAGING_SIGNAL_URL }}
           # base64(STANDARD) of {"client_id":"<vault-staging-app>"} — same value
           # goes into both base64_auth_material_bootstrap and _relay in the

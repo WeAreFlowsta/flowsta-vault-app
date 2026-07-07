@@ -235,6 +235,10 @@ jobs:
           # is a no-op. client_id is a public identifier; the secret just
           # keeps it out of the workflow file.
           FLOWSTA_AUTH_MATERIAL: ${{ secrets.FLOWSTA_AUTH_MATERIAL_PRODUCTION }}
+          # Open community fallback rendezvous (bootstrap+signal+relay) —
+          # used only when the primary is unreachable. Fire-drill-verified
+          # 2026-07-07. Comma-separated to add more nodes over time.
+          FLOWSTA_BOOTSTRAP_FALLBACKS: https://node1.flowsta.com
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '-' }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
