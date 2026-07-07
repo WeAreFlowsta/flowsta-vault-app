@@ -130,9 +130,12 @@ export default component$(() => {
   const exporting = useSignal(false);
   const exportSuccess = useSignal(false);
 
-  // Sealed private records, aggregated to counts by entry type
+  // Sealed private records, aggregated to counts by entry type.
+  // Status matters: "couldn't reach the conductor" must never render as
+  // "you have no private records".
   const sealedCounts = useSignal<Record<string, number>>({});
   const sealedTotal = useSignal(0);
+  const sealedStatus = useSignal<"loading" | "ready" | "error">("loading");
 
   // Import state
   const importing = useSignal(false);
@@ -152,6 +155,33 @@ export default component$(() => {
 
   // Single backup export
   const exportingLabel = useSignal<string | null>(null);
+
+  // Retries while the conductor finishes starting — right after unlock the
+  // app websocket can lag the UI by many seconds.
+  const loadSealed = $(async () => {
+    sealedStatus.value = "loading";
+    const attempts = 8;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const records = await invoke<SealedListItem[]>("sealed_list");
+        const counts: Record<string, number> = {};
+        for (const r of records) {
+          counts[r.entry_type] = (counts[r.entry_type] || 0) + 1;
+        }
+        sealedCounts.value = counts;
+        sealedTotal.value = records.length;
+        sealedStatus.value = "ready";
+        return;
+      } catch (e) {
+        if (i === attempts - 1) {
+          console.error("Failed to load private records:", e);
+          sealedStatus.value = "error";
+        } else {
+          await new Promise((r) => setTimeout(r, 2500));
+        }
+      }
+    }
+  });
 
   // Load data on mount
   // eslint-disable-next-line qwik/no-use-visible-task
@@ -176,35 +206,16 @@ export default component$(() => {
 
     // Private records load separately — needs the conductor, and a failure
     // here shouldn't blank the rest of the page.
-    try {
-      const records = await invoke<SealedListItem[]>("sealed_list");
-      const counts: Record<string, number> = {};
-      for (const r of records) {
-        counts[r.entry_type] = (counts[r.entry_type] || 0) + 1;
-      }
-      sealedCounts.value = counts;
-      sealedTotal.value = records.length;
-    } catch (e) {
-      console.error("Failed to load private records:", e);
-    }
+    await loadSealed();
   });
 
   const refreshAfterImport = $(async () => {
     try {
-      const [stats, records] = await Promise.all([
-        invoke<BackupStats>("get_backup_stats"),
-        invoke<SealedListItem[]>("sealed_list"),
-      ]);
-      backupStats.value = stats;
-      const counts: Record<string, number> = {};
-      for (const r of records) {
-        counts[r.entry_type] = (counts[r.entry_type] || 0) + 1;
-      }
-      sealedCounts.value = counts;
-      sealedTotal.value = records.length;
+      backupStats.value = await invoke<BackupStats>("get_backup_stats");
     } catch (e) {
       console.error("Refresh after import failed:", e);
     }
+    await loadSealed();
   });
 
   const handleImport = $(async () => {
@@ -431,7 +442,24 @@ export default component$(() => {
           is the point: no one in the middle. It also means only your export
           file keeps these safe if this device is lost.
         </p>
-        {sealedTotal.value === 0 ? (
+        {sealedStatus.value === "loading" ? (
+          <div class="flex items-center gap-3 rounded-lg border border-gray-800 bg-black/30 p-4">
+            <div class="h-4 w-4 animate-spin rounded-full border-2 border-gray-600 border-t-amber-400"></div>
+            <p class="text-sm text-gray-400">
+              Reading your records from this device...
+            </p>
+          </div>
+        ) : sealedStatus.value === "error" ? (
+          <div class="flex items-center justify-between rounded-lg border border-gray-800 bg-black/30 p-4">
+            <p class="text-sm text-gray-400">
+              Couldn't reach your local node to read them — it may still be
+              starting.
+            </p>
+            <PillButton accent="amber" onClick$={loadSealed}>
+              Retry
+            </PillButton>
+          </div>
+        ) : sealedTotal.value === 0 ? (
           <p class="rounded-lg border border-gray-800 bg-black/30 p-4 text-sm text-gray-400">
             No private records yet.
           </p>
