@@ -398,6 +398,7 @@ pub fn run() {
             commands::increment_quota_used,
             commands::sync_quota_to_server,
             commands::claim_web_username,
+            commands::set_web_email,
             commands::get_my_signatures,
             commands::get_my_own_signatures,
             commands::get_my_linked_signatures,

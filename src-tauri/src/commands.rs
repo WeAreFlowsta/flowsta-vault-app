@@ -4728,6 +4728,40 @@ pub(crate) async fn commit_signature_to_dht(
 /// dashboard uses. On success the plaintext is mirrored on-device:
 /// VaultConfig (instant UI) and the sealed user_profile record (the
 /// device-sovereign copy, same field migration preserves).
+/// Remember the account's email in the vault config. Used after a phrase
+/// restore, where the server can't supply it back (it stores only a hash)
+/// — the user re-enters it, the API verifies it against the hash on use,
+/// and from then on the vault knows it again.
+#[tauri::command]
+pub fn set_web_email(state: State<'_, Arc<AppState>>, email: String) -> Result<(), String> {
+    let email = email.trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return Err("That doesn't look like an email address".into());
+    }
+    let passphrase = {
+        let mut guard = state.unlock_passphrase.lock().unwrap();
+        guard
+            .as_mut()
+            .and_then(|locked| String::from_utf8(locked.lock().to_vec()).ok())
+    };
+    let mut config = state.vault_config.lock().unwrap();
+    let cfg = config.as_mut().ok_or("Vault is locked")?;
+    cfg.web_email = Some(email);
+    if let Some(pw) = passphrase {
+        let vault_path = state.vault_path.lock().unwrap().clone();
+        match crate::vault::encrypt_vault(cfg, &pw) {
+            Ok(mut encrypted) => {
+                encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
+                if let Err(e) = crate::vault::save_vault(&vault_path, &encrypted) {
+                    log::warn!("Email config persist failed (non-fatal): {}", e);
+                }
+            }
+            Err(e) => log::warn!("Email config encrypt failed (non-fatal): {}", e),
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn claim_web_username(
     api_url: String,

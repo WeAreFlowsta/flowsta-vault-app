@@ -105,6 +105,10 @@ export default component$(() => {
   const usernameNeedsVerify = useSignal(false);
   const resendBusy = useSignal(false);
   const resendNote = useSignal("");
+  // After a phrase restore the vault doesn't know the email (the server
+  // holds only a hash) — the user types it, the API verifies it against
+  // the hash, and we remember it on success.
+  const resendEmailInput = useSignal("");
 
   // In-app profile edits — name inline, picture via the cropper modal.
   const nameEditing = useSignal(false);
@@ -184,6 +188,12 @@ export default component$(() => {
 
   const resendVerification = $(async () => {
     if (resendBusy.value) return;
+    const email =
+      identity.value?.web_email || resendEmailInput.value.trim().toLowerCase();
+    if (!email) {
+      resendNote.value = "Enter your account email above first.";
+      return;
+    }
     resendBusy.value = true;
     resendNote.value = "";
     try {
@@ -196,12 +206,29 @@ export default component$(() => {
           "content-type": "application/json",
           authorization: `Bearer ${grant.token}`,
         },
-        body: JSON.stringify({ email: identity.value?.web_email ?? "" }),
+        body: JSON.stringify({ email }),
       });
       const data = await resp.json().catch(() => null);
-      resendNote.value = resp.ok
-        ? `Verification email sent to ${identity.value?.web_email} — click the link, then claim your username.`
-        : data?.error || "Could not send the verification email. Try again in a few minutes.";
+      if (resp.ok) {
+        resendNote.value = `Verification email sent to ${email} — click the link, then claim your username.`;
+        // The API accepted it (hash-verified) — remember it in the vault.
+        if (!identity.value?.web_email) {
+          try {
+            await invoke("set_web_email", { email });
+            if (identity.value) {
+              identity.value = { ...identity.value, web_email: email };
+            }
+          } catch (e) {
+            console.warn("Could not persist email to vault config:", e);
+          }
+        }
+      } else if (data?.error === "email_mismatch") {
+        resendNote.value =
+          "That address doesn't match the one this account registered with.";
+      } else {
+        resendNote.value =
+          data?.error || "Could not send the verification email. Try again in a few minutes.";
+      }
     } catch (e) {
       resendNote.value = `${e}`;
     } finally {
@@ -638,13 +665,24 @@ export default component$(() => {
               <p class="mt-2 text-sm text-red-400">{usernameError.value}</p>
             )}
             {usernameNeedsVerify.value && (
-              <div class="mt-2 flex items-center gap-2">
-                <PillButton disabled={resendBusy.value} onClick$={resendVerification}>
-                  {resendBusy.value ? "Sending…" : "Resend verification email"}
-                </PillButton>
-                {resendNote.value && (
-                  <p class="text-xs text-gray-400">{resendNote.value}</p>
+              <div class="mt-2 space-y-2">
+                {!id.web_email && (
+                  <input
+                    type="email"
+                    placeholder="Your account email"
+                    value={resendEmailInput.value}
+                    onInput$={(_, el) => (resendEmailInput.value = el.value)}
+                    class="w-full max-w-xs rounded-md border border-white/10 bg-black/30 px-3 py-1.5 text-sm text-white placeholder-gray-500 focus:border-sky-500 focus:outline-none"
+                  />
                 )}
+                <div class="flex items-center gap-2">
+                  <PillButton disabled={resendBusy.value} onClick$={resendVerification}>
+                    {resendBusy.value ? "Sending…" : "Resend verification email"}
+                  </PillButton>
+                  {resendNote.value && (
+                    <p class="text-xs text-gray-400">{resendNote.value}</p>
+                  )}
+                </div>
               </div>
             )}
           </div>
