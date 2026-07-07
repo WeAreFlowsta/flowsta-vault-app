@@ -117,6 +117,19 @@ impl BootstrapTarget {
             .split(',')
             .map(str::trim)
             .filter(|u| !u.is_empty())
+            // The conductor rejects plaintext relay URLs outright
+            // ("Disallowed plaintext relay URL") — a non-https fallback
+            // could never work, so drop it loudly at parse time.
+            .filter(|u| {
+                let ok = u.starts_with("https://");
+                if !ok {
+                    log::error!(
+                        "[bootstrap] ignoring non-https fallback {} — the conductor forbids plaintext relays",
+                        u
+                    );
+                }
+                ok
+            })
             .map(|u| {
                 let bootstrap_url = u.trim_end_matches('/').to_string();
                 let host = bootstrap_url
