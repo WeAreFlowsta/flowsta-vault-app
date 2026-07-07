@@ -412,12 +412,6 @@ export default component$(() => {
               <span class="text-gray-400">Vault Created</span>
               <span class="text-white">{formatDate(id.created_at)}</span>
             </div>
-            {id.web_agent_pub_key && (
-              <div class="flex items-center justify-between">
-                <span class="text-gray-400">Web Account</span>
-                <span class="text-green-400">Linked</span>
-              </div>
-            )}
             <div class="flex items-center justify-between">
               <span class="text-gray-400">Linked Apps</span>
               <span class="text-white">{linkedAppsCount.value}</span>
