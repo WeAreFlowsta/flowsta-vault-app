@@ -13,8 +13,8 @@
 use crate::commands::AppState;
 use crate::key_derivation::{
     base64_standard_encode, construct_agent_pub_key_bytes, construct_agent_pub_key_string,
-    derive_device_keypair, derive_recovery_lookup_hash, derive_seed, sign_with_device_seed,
-    validate_mnemonic, DEVICE_1_CONSTANT,
+    decode_agent_pub_key_string, derive_device_keypair, derive_recovery_lookup_hash, derive_seed,
+    sign_with_device_seed, validate_mnemonic, DEVICE_1_CONSTANT,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -162,6 +162,12 @@ pub struct VaultGrantResult {
     pub display_name: Option<String>,
     pub username: Option<String>,
     pub profile_picture: Option<String>,
+    /// For migrated accounts only: the original (pre-upgrade) web agent
+    /// key, recovered from the DID, standard-base64 of the 39-byte form —
+    /// the same shape migration stores in `VaultConfig.web_agent_pub_key`.
+    /// None for born-device-hosted accounts. Only `restore_device_identity`
+    /// fills this in.
+    pub web_agent_pub_key: Option<String>,
 }
 
 /// Shared vault-grant flow: fetch a challenge, sign it raw with the device seed,
@@ -233,6 +239,7 @@ async fn vault_grant(
         display_name: user.display_name,
         username: user.username,
         profile_picture: user.profile_picture,
+        web_agent_pub_key: None,
     })
 }
 
@@ -292,11 +299,29 @@ pub async fn restore_device_identity(
     let signing_key =
         derive_device_keypair(&mnemonic).map_err(|e| format!("Key derivation failed: {}", e))?;
     let pub_key_bytes = signing_key.verifying_key().to_bytes();
-    let agent_b64 = base64_standard_encode(&construct_agent_pub_key_bytes(&pub_key_bytes));
+    let device_39 = construct_agent_pub_key_bytes(&pub_key_bytes);
+    let agent_b64 = base64_standard_encode(&device_39);
     let device_seed = derive_seed(&mnemonic, DEVICE_1_CONSTANT)
         .map_err(|e| format!("Device seed derivation failed: {}", e))?;
 
-    vault_grant(&api_url, &device_seed, &agent_b64).await
+    let mut result = vault_grant(&api_url, &device_seed, &agent_b64).await?;
+
+    // A migrated account keeps the DID minted for its ORIGINAL web agent
+    // key; a born-device-hosted account's DID embeds the device key. When
+    // the DID's key differs from ours, it is the legacy web agent — the
+    // handle to the account's pre-upgrade signatures. Migration persists
+    // it in the vault config; a phrase restore must recover it here or
+    // linked-signature reads start from a cold DHT walk instead.
+    if let Some(did_key) = result.did.strip_prefix("did:flowsta:") {
+        if let Some(did_39) = decode_agent_pub_key_string(did_key) {
+            if did_39[3..35] != device_39[3..35] {
+                log::info!("Restore: DID carries a legacy web agent key (migrated account)");
+                result.web_agent_pub_key = Some(base64_standard_encode(&did_39));
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]

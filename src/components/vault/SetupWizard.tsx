@@ -569,6 +569,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         display_name: string | null;
         username: string | null;
         profile_picture: string | null;
+        web_agent_pub_key: string | null;
       }>("restore_device_identity", { apiUrl: __API_URL__, mnemonic: trimmed });
 
       progressMessage.value = "Rebuilding your vault on this device...";
@@ -577,7 +578,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {
           mnemonic: trimmed,
           password: restorePassword.value,
-          webAgentPubKey: null,
+          // Migrated accounts: the original web agent key, recovered from
+          // the DID — restores visibility of pre-upgrade signatures.
+          webAgentPubKey: account.web_agent_pub_key ?? null,
           webEmail: null,
           webUsername: account.username,
           displayName: account.display_name,

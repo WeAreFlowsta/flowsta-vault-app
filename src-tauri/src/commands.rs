@@ -3719,13 +3719,18 @@ async fn query_own_sigs_for_version(
 /// Resolve the set of linked agents to query for cross-agent signatures.
 /// Tries the identity DNA's `get_linked_agents` first, falls back to the
 /// cached web agent key set during auto-link on unlock.
+/// Resolve the agents linked to this identity. Returns the keys plus a
+/// `dht_settled` flag: true only when the DHT walk actually completed
+/// (successful zome call, even if it returned nothing). A timeout or zome
+/// error with no cached key means "unknown", NOT "no linked agents" — the
+/// caller must not treat that empty result as authoritative.
 async fn fetch_linked_agent_keys(
     state: &Arc<AppState>,
     admin_ws: &holochain_client::AdminWebsocket,
     app_port: u16,
     apps: &[holochain_client::AppInfo],
     cached_web_agent_key: Option<String>,
-) -> Vec<holochain_types::prelude::AgentPubKey> {
+) -> (Vec<holochain_types::prelude::AgentPubKey>, bool) {
     use holochain_client::{AppWebsocket, AuthorizeSigningCredentialsPayload,
         ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
     use holochain_types::prelude::{AgentPubKey, ExternIO};
@@ -3738,14 +3743,14 @@ async fn fetch_linked_agent_keys(
         Some(a) => a,
         None => {
             log::info!("No identity DNA with agent_linking found — skipping cross-agent lookup");
-            return Vec::new();
+            return (Vec::new(), true);
         }
     };
 
     let identity_role = match identity_app.cell_info.keys()
         .find(|k| k.starts_with("flowsta_identity")) {
         Some(r) => r.clone(),
-        None => return Vec::new(),
+        None => return (Vec::new(), false),
     };
     let identity_cell_id = match identity_app.cell_info[&identity_role].iter()
         .find_map(|c| match c {
@@ -3753,14 +3758,14 @@ async fn fetch_linked_agent_keys(
             _ => None,
         }) {
         Some(c) => c,
-        None => return Vec::new(),
+        None => return (Vec::new(), false),
     };
 
     let my_agent_key = identity_cell_id.agent_pubkey().clone();
 
     let creds = match cell_credentials_cached(state, admin_ws, &identity_cell_id).await {
         Ok(c) => c,
-        Err(e) => { log::warn!("identity auth creds: {}", e); return Vec::new(); }
+        Err(e) => { log::warn!("identity auth creds: {}", e); return (Vec::new(), false); }
     };
     let issued = match admin_ws.issue_app_auth_token(
         IssueAppAuthenticationTokenPayload::for_installed_app_id(
@@ -3768,7 +3773,7 @@ async fn fetch_linked_agent_keys(
         ),
     ).await {
         Ok(t) => t,
-        Err(e) => { log::warn!("identity token: {}", e); return Vec::new(); }
+        Err(e) => { log::warn!("identity token: {}", e); return (Vec::new(), false); }
     };
     let signer = ClientAgentSigner::default();
     signer.add_credentials(identity_cell_id, creds);
@@ -3779,12 +3784,12 @@ async fn fetch_linked_agent_keys(
         Some("flowsta-vault-linked".into()),
     ).await {
         Ok(ws) => ws,
-        Err(e) => { log::warn!("identity app WS: {}", e); return Vec::new(); }
+        Err(e) => { log::warn!("identity app WS: {}", e); return (Vec::new(), false); }
     };
 
     let payload_mp = match rmp_serde::to_vec_named(&my_agent_key) {
         Ok(p) => p,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), false),
     };
 
     // Seed with the cached web agent key immediately. The Vault(14) log
@@ -3810,6 +3815,7 @@ async fn fetch_linked_agent_keys(
     // Opportunistic DHT pass — 10 s budget. If gossip has already
     // landed the link record, we pick up any extras; otherwise we
     // skip the wait and rely on the cached seed.
+    let mut dht_settled = false;
     let dht_call = identity_ws.call_zome(
         ZomeCallTarget::RoleName(identity_role.into()),
         "agent_linking".into(),
@@ -3818,6 +3824,7 @@ async fn fetch_linked_agent_keys(
     );
     match tokio::time::timeout(std::time::Duration::from_secs(10), dht_call).await {
         Ok(Ok(result)) => {
+            dht_settled = true;
             let extras: Vec<AgentPubKey> = rmp_serde::from_slice(result.as_bytes())
                 .unwrap_or_default();
             for key in extras {
@@ -3830,10 +3837,67 @@ async fn fetch_linked_agent_keys(
         Err(_) => log::info!("get_linked_agents timed out at 10s (using cached only)"),
     }
 
+    // Self-heal: a phrase-restored migrated vault can predate the config
+    // carrying its original web agent key. When the DHT walk is what found
+    // the linked agent, persist it so every later unlock seeds instantly
+    // instead of depending on a cold network walk.
+    if cached_web_agent_key.is_none() {
+        let (device_hosted, config_key_missing) = {
+            let config = state.vault_config.lock().unwrap();
+            match config.as_ref() {
+                Some(c) => (
+                    c.hosting_model.as_deref() == Some("device-hosted"),
+                    c.web_agent_pub_key.is_none(),
+                ),
+                None => (false, false),
+            }
+        };
+        if device_hosted && config_key_missing {
+            if let Some(found) = linked_keys.iter().find(|k| **k != my_agent_key) {
+                let key_b64 = base64_standard_encode(found.get_raw_39());
+                log::info!("Persisting web agent key discovered via the DHT link graph");
+                persist_web_agent_pub_key(state, &key_b64);
+            }
+        }
+    }
+
     if linked_keys.is_empty() {
         log::info!("No linked agents found (no cache, no DHT result)");
     }
-    linked_keys
+    (linked_keys, dht_settled)
+}
+
+/// Store a freshly discovered web agent key in the in-memory cache AND the
+/// encrypted vault config (same shape migration writes: standard base64 of
+/// the 39-byte key). Non-fatal on failure — the in-memory cache still
+/// covers the current session.
+fn persist_web_agent_pub_key(state: &Arc<AppState>, key_b64: &str) {
+    *state.linked_web_agent_key.lock().unwrap() = Some(key_b64.to_string());
+
+    let passphrase = {
+        let mut guard = state.unlock_passphrase.lock().unwrap();
+        guard
+            .as_mut()
+            .and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok())
+    };
+    let Some(pw) = passphrase else {
+        log::warn!("web agent key persist skipped: no cached passphrase");
+        return;
+    };
+    let vault_path = state.vault_path.lock().unwrap().clone();
+    let mut config = state.vault_config.lock().unwrap();
+    if let Some(cfg) = config.as_mut() {
+        cfg.web_agent_pub_key = Some(key_b64.to_string());
+        match crate::vault::encrypt_vault(cfg, &pw) {
+            Ok(mut encrypted) => {
+                encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
+                if let Err(e) = crate::vault::save_vault(&vault_path, &encrypted) {
+                    log::warn!("web agent key persist failed (non-fatal): {}", e);
+                }
+            }
+            Err(e) => log::warn!("web agent key config encrypt failed (non-fatal): {}", e),
+        }
+    }
 }
 
 /// Query linked agents' signatures for one signing DNA version.
@@ -4108,8 +4172,20 @@ pub(crate) async fn get_my_linked_signatures_inner(
     if cached_web_key.is_none() && !device_hosted {
         return Err("auto-link not yet complete (cached web agent key unset)".to_string());
     }
-    let linked_keys = fetch_linked_agent_keys(state, &admin_ws, app_port, &apps, cached_web_key).await;
+    let had_cache = cached_web_key.is_some();
+    let (linked_keys, dht_settled) =
+        fetch_linked_agent_keys(state, &admin_ws, app_port, &apps, cached_web_key).await;
     if linked_keys.is_empty() {
+        // Only a completed DHT walk (or a cached key) can prove "no linked
+        // agents". A cold-DHT timeout on a cacheless vault — e.g. freshly
+        // phrase-restored — is UNKNOWN: report Err so the frontend keeps
+        // its background retry alive instead of freezing on a false
+        // "authoritative empty" for the whole session.
+        if !dht_settled && !had_cache {
+            return Err(
+                "linked agents unresolved (cold DHT, no cached web agent key) — retry".to_string(),
+            );
+        }
         log::info!("[get_my_linked_signatures] no linked agents — authoritative empty");
         return Ok(LinkedSignaturesResult {
             signatures: Vec::new(),
@@ -4175,7 +4251,7 @@ async fn get_my_signatures_inner(
             .map(|app| query_own_sigs_for_version(state, &admin_ws, app_port, app)),
     );
     let keys_future = fetch_linked_agent_keys(state, &admin_ws, app_port, &apps, cached_web_key);
-    let (own_results, linked_keys) = tokio::join!(own_future, keys_future);
+    let (own_results, (linked_keys, _dht_settled)) = tokio::join!(own_future, keys_future);
 
     // Best-effort: this combined call is for `export_all_data` where a
     // missing per-version result shouldn't fail the whole export.
