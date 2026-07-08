@@ -8,7 +8,7 @@ import { CopyButton } from "~/components/ui/CopyButton";
 import { PillButton } from "~/components/ui/PillButton";
 import { GlassButton } from "~/components/common/GlassButton";
 import ImageCropper from "~/components/sign-it/ImageCropper";
-import { signaturesContext } from "~/lib/context";
+import { connectionStatusContext, signaturesContext } from "~/lib/context";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 
 declare const __API_URL__: string;
@@ -94,6 +94,28 @@ export default component$(() => {
   // Plan/quota status — public endpoint, keyed to the account the
   // subscription is attached to. Upgrading is a web (Stripe) flow.
   const planInfo = useSignal<{ tier: string; used: number; limit: number } | null>(null);
+  // Plan fetch is retryable: it aborts fast while offline (fire-drill
+  // finding) and re-runs when connectivity returns or the profile syncs.
+  const fetchPlan = $(async () => {
+    const id = identity.value;
+    if (!id) return;
+    try {
+      const key = id.hosting_model === "device-hosted"
+        ? id.agent_pub_key
+        : (id.web_agent_pub_key || id.agent_pub_key);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const resp = await fetch(
+        `${__API_URL__}/api/v1/sign-it/quota/by-agent?agent_pub_key=${encodeURIComponent(key)}`,
+        { cache: "no-store", signal: controller.signal },
+      );
+      clearTimeout(timer);
+      if (resp.ok) {
+        const q = await resp.json();
+        planInfo.value = { tier: q.tier || "free", used: q.used ?? 0, limit: q.limit ?? 0 };
+      }
+    } catch { /* offline — plan card shows a dash */ }
+  });
 
   // Username claim/change — the registrar lives server-side (uniqueness,
   // login lookup, the public URL, billing tiers); the command authenticates
@@ -263,6 +285,17 @@ export default component$(() => {
   // Shared signatures store from layout — count + last-known list are
   // already populated from cache by the time the user reaches Overview.
   const sigStore = useContext(signaturesContext);
+  const connectionStatus = useContext(connectionStatusContext);
+
+  // Back online with an empty plan card (offline unlock / fire-drill
+  // reconnect): fetch it now instead of waiting for a page reload.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track }) => {
+    const status = track(() => connectionStatus.value);
+    if (status === "online" && planInfo.value === null) {
+      fetchPlan();
+    }
+  });
 
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ cleanup }) => {
@@ -281,26 +314,7 @@ export default component$(() => {
       // the OS TCP retry cycle and the page sat in its loading skeleton
       // for minutes.
       loading.value = false;
-      try {
-        // Quota/plan is keyed to the account's CURRENT agent key. For a
-        // device-hosted account that's the vault's own key (after a
-        // migration the old web key stays only for signature attribution);
-        // for a custodial-linked vault it's the web account's key.
-        const key = id.hosting_model === "device-hosted"
-          ? id.agent_pub_key
-          : (id.web_agent_pub_key || id.agent_pub_key);
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 5000);
-        const resp = await fetch(
-          `${__API_URL__}/api/v1/sign-it/quota/by-agent?agent_pub_key=${encodeURIComponent(key)}`,
-          { cache: "no-store", signal: controller.signal },
-        );
-        clearTimeout(timer);
-        if (resp.ok) {
-          const q = await resp.json();
-          planInfo.value = { tier: q.tier || "free", used: q.used ?? 0, limit: q.limit ?? 0 };
-        }
-      } catch { /* offline — plan card shows a dash */ }
+      await fetchPlan();
     } catch {
       // Vault might be locked
     } finally {
@@ -312,6 +326,7 @@ export default component$(() => {
     const refreshIdentity = async () => {
       try {
         identity.value = await invoke<VaultIdentity>("get_identity");
+        fetchPlan();
       } catch { /* ignore */ }
     };
     const unlisten = await listen("profile-synced", refreshIdentity);
