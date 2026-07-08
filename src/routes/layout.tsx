@@ -237,10 +237,15 @@ export default component$(() => {
     try {
       const key = userProfile.agentKey;
       if (!key) return;
+      // 5s abort: an untimed fetch to an unreachable API hangs for the OS
+      // TCP retry cycle (fire-drill finding on the Overview's plan fetch).
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
       const resp = await fetch(
         `${__API_URL__}/api/v1/sign-it/quota/by-agent?agent_pub_key=${encodeURIComponent(key)}`,
-        { cache: "no-store" },
+        { cache: "no-store", signal: controller.signal },
       );
+      clearTimeout(timer);
       if (resp.ok) {
         const q = await resp.json();
         planInfo.value = { tier: q.tier || "free", used: q.used ?? 0, limit: q.limit ?? 0 };

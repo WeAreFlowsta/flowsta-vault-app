@@ -275,6 +275,12 @@ export default component$(() => {
       identity.value = id;
       backupStats.value = stats;
       linkedApps.value = apps;
+      // Paint NOW — everything above is local. The plan fetch below is
+      // network-bound and must never hold the identity render hostage: on
+      // a black-holed API (fire-drill finding) an untimed fetch hangs for
+      // the OS TCP retry cycle and the page sat in its loading skeleton
+      // for minutes.
+      loading.value = false;
       try {
         // Quota/plan is keyed to the account's CURRENT agent key. For a
         // device-hosted account that's the vault's own key (after a
@@ -283,10 +289,13 @@ export default component$(() => {
         const key = id.hosting_model === "device-hosted"
           ? id.agent_pub_key
           : (id.web_agent_pub_key || id.agent_pub_key);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
         const resp = await fetch(
           `${__API_URL__}/api/v1/sign-it/quota/by-agent?agent_pub_key=${encodeURIComponent(key)}`,
-          { cache: "no-store" },
+          { cache: "no-store", signal: controller.signal },
         );
+        clearTimeout(timer);
         if (resp.ok) {
           const q = await resp.json();
           planInfo.value = { tier: q.tier || "free", used: q.used ?? 0, limit: q.limit ?? 0 };
