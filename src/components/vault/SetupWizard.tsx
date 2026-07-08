@@ -499,7 +499,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
     try {
       // B5: register the device pubkey with Flowsta (A3) — zero API cells.
       progressMessage.value = "Registering your identity with Flowsta...";
-      await invoke("register_device_identity", {
+      const reg = await invoke<{
+        user_id: string;
+        did: string;
+        agent_pub_key: string;
+        profile_picture: string | null;
+      }>("register_device_identity", {
         apiUrl: __API_URL__,
         mnemonic: newMnemonic.value,
         email: createEmail.value.trim(),
@@ -516,7 +521,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           webEmail: createEmail.value.trim(),
           webUsername: null,
           displayName: createDisplayName.value.trim() || null,
-          profilePicture: null,
+          // The server generates an identicon from the DID at registration —
+          // store it so the identity has a face from the first unlock.
+          profilePicture: reg.profile_picture ?? null,
           hostingModel: "device-hosted",
         }
       );

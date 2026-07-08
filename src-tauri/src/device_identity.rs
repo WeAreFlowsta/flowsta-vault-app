@@ -40,6 +40,10 @@ pub struct RegisterResult {
     pub user_id: String,
     pub did: String,
     pub agent_pub_key: String,
+    /// Server-generated identicon (from the DID) — the account's default
+    /// picture until the user uploads one. The wizard stores it in the
+    /// vault config so the identity has a face from the first unlock.
+    pub profile_picture: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -151,6 +155,7 @@ pub async fn register_device_identity(
         agent_pub_key: user.agent_pub_key.unwrap_or_else(|| {
             construct_agent_pub_key_string(&pub_key_bytes)
         }),
+        profile_picture: user.profile_picture,
     })
 }
 
