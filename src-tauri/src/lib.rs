@@ -349,6 +349,7 @@ pub fn run() {
             sealed::sealed_store,
             sealed::sealed_list,
             migration::migration_new_phrase,
+            migration::phrase_migration_login,
             migration::migrate_custodial_account,
             commands::respond_profile_update_request,
             commands::respond_cell_op_request,

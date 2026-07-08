@@ -48,6 +48,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const jwt = useSignal("");
   const webUser = useStore({ email: "", username: "", agentPubKey: "", displayName: "", profilePicture: "" });
   const mnemonic = useSignal("");
+  // Phrase-first upgrade: set when a restore attempt finds no Vault
+  // identity but the phrase may belong to a flowsta.com account.
+  const phraseUpgradeOffer = useSignal(false);
   const phraseVerified = useSignal(false);
   const error = useSignal("");
   const loading = useSignal(false);
@@ -536,6 +539,47 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
     }
   });
 
+  // ── Phrase-first account upgrade ──
+  // The recovery phrase alone proves ownership of a flowsta.com account
+  // (its derived key must decrypt the recovery email server-side). The
+  // command rotates the password to a throwaway and returns the same
+  // (jwt, email, password) triple the password sign-in produces, so the
+  // standard upgrade continuation runs unchanged from here.
+  const handlePhraseUpgrade = $(async () => {
+    error.value = "";
+    loading.value = true;
+    const trimmed = mnemonic.value.trim().toLowerCase().replace(/\s+/g, " ");
+    try {
+      step.value = "progress";
+      progressMessage.value = "Verifying your recovery phrase with Flowsta...";
+      const res = await invoke<{
+        token: string;
+        email: string;
+        password: string;
+        agent_pub_key: string;
+      }>("phrase_migration_login", { apiUrl: __API_URL__, phrase: trimmed });
+
+      phraseUpgradeOffer.value = false;
+      webUser.email = res.email;
+      webUser.agentPubKey = res.agent_pub_key;
+      email.value = res.email;
+      loginPassword.value = res.password;
+      jwt.value = res.token;
+      await fetchProfile(jwt.value);
+      await checkPhraseAndProceed(jwt.value);
+    } catch (e) {
+      step.value = "restore-phrase";
+      const msg = String(e);
+      error.value = msg.includes("no_account_for_phrase")
+        ? "No Flowsta account matches this phrase either — double-check the words."
+        : msg.includes("account_blocked")
+          ? "This account is blocked. Contact support."
+          : msg;
+    } finally {
+      loading.value = false;
+    }
+  });
+
   // ── Restore from phrase (B6) ──
 
   const handleRestoreDevice = $(async () => {
@@ -600,7 +644,10 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       const msg = String(e);
       step.value = "restore-phrase";
       if (msg.includes("unknown_agent_key")) {
-        error.value = "No Vault-created identity found for this phrase. If you signed up on flowsta.com, use 'Sign in with your Flowsta account' instead.";
+        // Not a Vault identity — but it may be a flowsta.com account's
+        // recovery phrase. Offer the phrase-first upgrade right here.
+        phraseUpgradeOffer.value = true;
+        error.value = "";
       } else if (msg.includes("not_device_hosted")) {
         error.value = "This phrase belongs to a flowsta.com web account. Use 'Sign in with your Flowsta account' to restore it.";
       } else if (msg.includes("account_blocked")) {
@@ -880,7 +927,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               rows={4}
               placeholder="word1 word2 word3 ... word24"
               value={mnemonic.value}
-              onInput$={(e) => { mnemonic.value = (e.target as HTMLTextAreaElement).value; error.value = ""; }}
+              onInput$={(e) => { mnemonic.value = (e.target as HTMLTextAreaElement).value; error.value = ""; phraseUpgradeOffer.value = false; }}
             />
 
             <div class="mb-4">
@@ -906,8 +953,32 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
 
             {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
 
+            {/* Phrase-first upgrade: no Vault identity for this phrase, but
+                it may be a flowsta.com account's recovery phrase — the
+                phrase alone proves ownership and starts the upgrade. */}
+            {phraseUpgradeOffer.value && (
+              <div class="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
+                <p class="mb-1 text-sm font-semibold text-white">
+                  No Vault identity found — but this could be a flowsta.com
+                  recovery phrase
+                </p>
+                <p class="mb-3 text-xs text-gray-300">
+                  If you saved this phrase for a flowsta.com account, it can
+                  upgrade that account to this device right now — no password
+                  needed. Your identity and signatures come with you.
+                </p>
+                <GlassButton
+                  class="w-full"
+                  disabled={loading.value}
+                  onClick$={handlePhraseUpgrade}
+                >
+                  {loading.value ? "Verifying phrase..." : "Upgrade my flowsta.com account"}
+                </GlassButton>
+              </div>
+            )}
+
             <div class="flex justify-between">
-              <GlassButton variant="secondary" onClick$={() => { mnemonic.value = ""; error.value = ""; step.value = "choose"; }}>
+              <GlassButton variant="secondary" onClick$={() => { mnemonic.value = ""; phraseUpgradeOffer.value = false; error.value = ""; step.value = "choose"; }}>
                 Back
               </GlassButton>
               <GlassButton

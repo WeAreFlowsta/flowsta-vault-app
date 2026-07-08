@@ -703,6 +703,101 @@ fn emit_progress(app: &tauri::AppHandle, stage: &'static str, message: &str) {
 }
 
 #[derive(Serialize)]
+pub struct PhraseMigrationLogin {
+    pub token: String,
+    pub email: String,
+    /// Throwaway password minted during the phrase proof — feeds the
+    /// standard migration continuation, then dies with the custodial
+    /// account at the flip.
+    pub password: String,
+    pub agent_pub_key: String,
+}
+
+/// Phrase-first entry to the account upgrade: prove ownership of a
+/// flowsta.com account with the recovery phrase alone — no password.
+///
+/// Mechanics: the recovery-reset endpoint's proof is cryptographic (the
+/// phrase-derived key must decrypt the account's recovery-encrypted
+/// email), and the reset re-encrypts the account's data under the new
+/// password in the same step. We set that password to a random throwaway
+/// the user never sees, then hand the wizard the same (jwt, email,
+/// password) triple the password sign-in produces — the entire tested
+/// migration pipeline runs unchanged from there. 2FA never blocks this
+/// path: phrase recovery already outranks it, matching the web's old
+/// forgot-password semantics.
+#[tauri::command]
+pub async fn phrase_migration_login(
+    api_url: String,
+    phrase: String,
+) -> Result<PhraseMigrationLogin, String> {
+    let mnemonic = normalize_mnemonic(&phrase);
+    if !validate_mnemonic(&mnemonic) {
+        return Err("Invalid recovery phrase".into());
+    }
+
+    // Strong random throwaway: a fresh 24-word mnemonic is 256 bits of
+    // entropy and satisfies every password rule the API applies.
+    let throwaway = crate::device_identity::generate_new_mnemonic()?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "{}/auth/reset-password-with-phrase",
+            api_url.trim_end_matches('/')
+        ))
+        .json(&serde_json::json!({
+            "recoveryPhrase": mnemonic,
+            "newPassword": throwaway,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach API: {}", e))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Invalid API response: {}", e))?;
+
+    if !status.is_success() {
+        let code = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("phrase_login_failed");
+        if status.as_u16() == 404 {
+            return Err("no_account_for_phrase".into());
+        }
+        return Err(code.to_string());
+    }
+
+    let token = body
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or("Reset succeeded but no token returned")?
+        .to_string();
+    let user = body.get("user").cloned().unwrap_or_default();
+    let email = user
+        .get("emailPlain")
+        .and_then(|v| v.as_str())
+        .ok_or("Reset succeeded but no email returned — is the API up to date?")?
+        .to_string();
+    let agent_pub_key = user
+        .get("agentPubKey")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    log::info!("[migration] phrase-first sign-in proved account ownership");
+
+    Ok(PhraseMigrationLogin {
+        token,
+        email,
+        password: throwaway,
+        agent_pub_key,
+    })
+}
+
+#[derive(Serialize)]
 pub struct MigrationSummary {
     pub records_migrated: usize,
     pub sessions_skipped: usize,
