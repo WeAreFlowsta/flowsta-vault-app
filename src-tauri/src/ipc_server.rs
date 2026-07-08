@@ -211,6 +211,12 @@ fn track_request(state: &AppState, origin: Option<&str>, action: &str) {
 #[derive(Serialize)]
 struct StatusResponse {
     unlocked: bool,
+    /// Whether a vault (an identity) exists on this device at all. A fresh
+    /// install answers on this port before setup — without this flag,
+    /// "installed but no identity yet" is indistinguishable from "locked",
+    /// and the login page would tell a brand-new user to unlock instead of
+    /// walking them through creating their identity.
+    initialized: bool,
     agent_pub_key: Option<String>,
     did: Option<String>,
     version: String,
@@ -292,6 +298,12 @@ async fn status_handler(
         )
     };
 
+    // A vault file on disk = an identity exists (locked or not).
+    let initialized = {
+        let vault_path = state.app_state.vault_path.lock().unwrap();
+        crate::vault::vault_exists(&vault_path)
+    };
+
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "status");
 
@@ -301,6 +313,7 @@ async fn status_handler(
     // Phase 3: return only fields the app was granted at link time.
     Json(StatusResponse {
         unlocked,
+        initialized,
         agent_pub_key,
         did,
         version: env!("CARGO_PKG_VERSION").to_string(),
