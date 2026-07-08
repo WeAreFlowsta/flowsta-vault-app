@@ -899,6 +899,7 @@ pub async fn migrate_custodial_account(
             mapped.display_name.clone().or(me.display_name.clone()),
             me.profile_picture.clone(),
             Some("device-hosted".to_string()),
+            false, // migration is online by construction — no reconcile needed
             app_handle.clone(),
             &state,
         )?;

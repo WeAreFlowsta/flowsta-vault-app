@@ -182,7 +182,14 @@ async fn vault_grant(
     device_seed: &[u8; 32],
     agent_b64: &str,
 ) -> Result<VaultGrantResult, String> {
-    let client = reqwest::Client::new();
+    // 10s timeout: without one, a HUNG (not refused) API held the restore
+    // wizard's spinner forever. Send errors carry the `api_unreachable:`
+    // marker — the documented offline signal alongside `unknown_agent_key`
+    // and `not_device_hosted` in the error contract.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client build failed: {}", e))?;
     let base = api_url.trim_end_matches('/');
 
     let resp = client
@@ -190,7 +197,7 @@ async fn vault_grant(
         .json(&serde_json::json!({ "client_id": VAULT_CLIENT_ID }))
         .send()
         .await
-        .map_err(|e| format!("Challenge request failed: {}", e))?;
+        .map_err(|e| format!("api_unreachable: challenge request failed: {}", e))?;
     let status = resp.status();
     #[derive(Deserialize)]
     struct ChallengeResp {
@@ -225,7 +232,7 @@ async fn vault_grant(
         }))
         .send()
         .await
-        .map_err(|e| format!("Token request failed: {}", e))?;
+        .map_err(|e| format!("api_unreachable: token request failed: {}", e))?;
     let status = resp.status();
     let body: ApiEnvelope = resp
         .json()
@@ -306,6 +313,130 @@ pub async fn vault_grant_login(
     Ok(result)
 }
 
+/// Reconcile the account layer after an OFFLINE restore: one A4 grant
+/// fills the fields the offline path couldn't fetch (username, display
+/// name, picture, legacy web key), then clears `pending_reconcile`.
+///
+/// Cadence contract (API-audit): the challenge endpoint allows 20/15min
+/// per IP and every SUCCESSFUL grant writes an auth_events row — so this
+/// is attempted once per conductor start plus once when the frontend
+/// sees the API come back online. Never a poll loop.
+///
+/// Fill rule: only-None fields — offline in-app edits are never
+/// clobbered.
+pub(crate) async fn reconcile_account_layer(
+    state: &Arc<AppState>,
+    api_url: &str,
+    app_handle: &tauri::AppHandle,
+) {
+    use tauri::Emitter;
+
+    let (pending, seed_vec, agent_b64) = {
+        let config = state.vault_config.lock().unwrap();
+        match config.as_ref() {
+            Some(c) => (
+                c.pending_reconcile,
+                c.device_seed.clone(),
+                c.agent_pub_key_raw_b64.clone(),
+            ),
+            None => (false, None, None),
+        }
+    };
+    if !pending {
+        return;
+    }
+    let (Some(seed_vec), Some(agent_b64)) = (seed_vec, agent_b64) else {
+        return;
+    };
+    if seed_vec.len() != 32 {
+        return;
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&seed_vec);
+
+    match vault_grant(api_url, &seed, &agent_b64).await {
+        Ok(grant) => {
+            let legacy_web_key = derive_legacy_web_key(&grant.did, &agent_b64);
+
+            // Persist under the cached passphrase (set_web_email pattern).
+            let passphrase = {
+                let mut guard = state.unlock_passphrase.lock().unwrap();
+                guard
+                    .as_mut()
+                    .and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok())
+            };
+            let Some(pw) = passphrase else {
+                log::warn!("[reconcile] skipped: no cached passphrase");
+                return;
+            };
+            let vault_path = state.vault_path.lock().unwrap().clone();
+            {
+                let mut config = state.vault_config.lock().unwrap();
+                if let Some(cfg) = config.as_mut() {
+                    if cfg.display_name.is_none() {
+                        cfg.display_name = grant.display_name.clone();
+                    }
+                    if cfg.web_username.is_none() {
+                        cfg.web_username = grant.username.clone();
+                    }
+                    if cfg.profile_picture.is_none() {
+                        cfg.profile_picture = grant.profile_picture.clone();
+                    }
+                    if cfg.web_agent_pub_key.is_none() {
+                        cfg.web_agent_pub_key = legacy_web_key.clone();
+                    }
+                    cfg.pending_reconcile = false;
+                    match crate::vault::encrypt_vault(cfg, &pw) {
+                        Ok(mut encrypted) => {
+                            encrypted.display_email =
+                                cfg.web_email.clone().or(cfg.web_username.clone());
+                            if let Err(e) = crate::vault::save_vault(&vault_path, &encrypted) {
+                                log::warn!("[reconcile] persist failed (non-fatal): {}", e);
+                            }
+                        }
+                        Err(e) => log::warn!("[reconcile] encrypt failed (non-fatal): {}", e),
+                    }
+                }
+            }
+            if let Some(ref key) = legacy_web_key {
+                *state.linked_web_agent_key.lock().unwrap() = Some(key.clone());
+            }
+            // The frontend refetches profile + signatures on this event.
+            let _ = app_handle.emit("profile-synced", ());
+            log::info!("[reconcile] account layer reattached — pending_reconcile cleared");
+        }
+        Err(e) if e.contains("api_unreachable") => {
+            log::info!("[reconcile] API still unreachable — retrying on next unlock/online");
+        }
+        Err(e) if e.contains("unknown_agent_key") => {
+            // Offline-restored phrase with no registered account. Leave the
+            // flag set: Build 2's deferred registration is the eventual
+            // answer; retries are cheap (failed grants write nothing).
+            log::info!("[reconcile] no Flowsta account for this identity yet — leaving pending");
+        }
+        Err(e) if e.contains("not_device_hosted") => {
+            log::warn!(
+                "[reconcile] this phrase belongs to a custodial flowsta.com account — \
+                 restore online (or sign in with the Flowsta account) to upgrade it"
+            );
+        }
+        Err(e) => log::warn!("[reconcile] grant failed: {}", e),
+    }
+}
+
+/// Frontend-triggered reconcile attempt — invoked when the connectivity
+/// poll observes the API coming back online (and harmless any other
+/// time: no-ops instantly unless `pending_reconcile` is set).
+#[tauri::command]
+pub async fn attempt_account_reconcile(
+    api_url: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    reconcile_account_layer(state.inner(), &api_url, &app_handle).await;
+    Ok(())
+}
+
 /// If `did` embeds an agent key DIFFERENT from ours, return it in the
 /// vault-config shape (standard base64 of the 39-byte key). A migrated
 /// account's DID carries its original (pre-upgrade) web agent key; a
@@ -373,6 +504,9 @@ pub(crate) async fn heal_web_agent_key_from_did(
 /// - contains `unknown_agent_key` -> no device-hosted account for this phrase
 /// - contains `not_device_hosted` -> phrase belongs to a custodial web account
 ///   (use the restore-from-web sign-in path instead)
+/// - contains `api_unreachable` -> Flowsta's API can't be reached — offer the
+///   OFFLINE restore (identity rebuilds locally; account layer reconciles
+///   when the API returns)
 #[tauri::command]
 pub async fn restore_device_identity(
     api_url: String,

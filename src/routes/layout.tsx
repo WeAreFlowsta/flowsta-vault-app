@@ -382,14 +382,31 @@ export default component$(() => {
     }
   });
 
+  // Three states: "online" = API reachable; "dht-only" = API unreachable
+  // but the conductor is up (identity + signing still work via community
+  // nodes); "offline" = neither. When the API comes BACK, fire one
+  // account-layer reconcile attempt (no-op unless an offline restore left
+  // pending_reconcile set).
+  const applyConnectivity = $((online: boolean) => {
+    const prev = connectionStatus.value;
+    connectionStatus.value = online
+      ? "online"
+      : conductorStatus.value === "ready"
+        ? "dht-only"
+        : "offline";
+    if (online && prev !== "online") {
+      invoke("attempt_account_reconcile", { apiUrl: __API_URL__ }).catch(() => {});
+    }
+  });
+
   const checkConnectivity = $(async () => {
     try {
       const online = await invoke<boolean>("check_api_connectivity", {
         apiUrl: __API_URL__,
       });
-      connectionStatus.value = online ? "online" : "offline";
+      applyConnectivity(online);
     } catch {
-      connectionStatus.value = "offline";
+      applyConnectivity(false);
     }
   });
 
@@ -424,9 +441,9 @@ export default component$(() => {
         const online = await invoke<boolean>("check_api_connectivity", {
           apiUrl: __API_URL__,
         });
-        connectionStatus.value = online ? "online" : "offline";
+        applyConnectivity(online);
       } catch {
-        connectionStatus.value = "offline";
+        applyConnectivity(false);
       }
     }, 30_000);
 
@@ -1128,8 +1145,13 @@ export default component$(() => {
     );
   }
 
-  // Only show profile if displayName is set — never show raw hashes
-  const displayName = userProfile.displayName || "";
+  // Prefer the display name; fall back to @username, then a neutral label —
+  // never raw hashes, and never a VANISHED chip (offline restores have no
+  // account-layer fields until reconcile).
+  const displayName =
+    userProfile.displayName ||
+    (userProfile.username ? "@" + userProfile.username : "") ||
+    "Your identity";
 
   // Dashboard: full-width header at top, then sidebar + content below
   return (

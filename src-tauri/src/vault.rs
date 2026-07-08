@@ -118,6 +118,15 @@ pub struct VaultConfig {
     /// Whether 2FA was enabled on the web account at migration time.
     #[serde(default)]
     pub totp_enabled: Option<bool>,
+
+    /// True when this vault was restored OFFLINE (Flowsta's API unreachable):
+    /// the identity is fully functional — keys derived locally, network via
+    /// community bootstrap — but the account-layer fields (username, display
+    /// name, picture, legacy web key) haven't been fetched yet. The reconcile
+    /// task clears this after one successful A4 grant. Missing on legacy
+    /// vaults → false.
+    #[serde(default)]
+    pub pending_reconcile: bool,
 }
 
 /// Encrypted vault on disk (serialized as JSON).
@@ -350,6 +359,7 @@ mod tests {
             totp_secret: None,
             totp_backup_codes: None,
             totp_enabled: None,
+            pending_reconcile: false,
         };
 
         let encrypted = encrypt_vault(&config, "test-password-123").unwrap();
@@ -396,6 +406,7 @@ mod tests {
             totp_secret: None,
             totp_backup_codes: None,
             totp_enabled: None,
+            pending_reconcile: false,
         };
 
         let encrypted = encrypt_vault(&config, "correct-password").unwrap();

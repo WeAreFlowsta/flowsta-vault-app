@@ -25,6 +25,7 @@ interface VaultIdentity {
   web_username: string | null;
   web_agent_pub_key: string | null;
   hosting_model: string | null;
+  pending_reconcile: boolean;
 }
 
 interface BackupRecordSummary {
@@ -403,6 +404,26 @@ export default component$(() => {
 
   return (
     <div>
+      {/* Offline-restore reconcile banner: identity is network-confirmed;
+          only the account-layer conveniences are still detached. Clears
+          itself when the reconcile task lands (profile-synced refetch). */}
+      {id?.pending_reconcile && (
+        <div class="mb-6 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4">
+          <p class="mb-1 text-sm font-semibold text-sky-200">
+            Restored offline — your identity is active on the Flowsta network
+          </p>
+          <p class="text-xs text-gray-400">
+            {sigCount > 0
+              ? `✓ ${sigCount} record${sigCount === 1 ? "" : "s"} found via community nodes — the network itself confirms this identity.`
+              : sigsLoaded
+                ? "No public records yet for this identity — that's normal for identities that haven't signed anything."
+                : "Looking for your records on the community network…"}
+            {" "}Your @username, display name, and email reconnect
+            automatically when Flowsta is reachable.
+          </p>
+        </div>
+      )}
+
       {/* Stats Grid */}
       <div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {/* Signatures */}

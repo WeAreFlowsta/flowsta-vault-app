@@ -451,6 +451,7 @@ pub struct SetupResult {
 /// The web login password is used to encrypt the vault on disk.
 /// After setup, spawns the Holochain conductor in the background.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn setup_vault(
     mnemonic: String,
     password: String,
@@ -460,6 +461,7 @@ pub fn setup_vault(
     display_name: Option<String>,
     profile_picture: Option<String>,
     hosting_model: Option<String>,
+    pending_reconcile: Option<bool>,
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SetupResult, String> {
@@ -472,6 +474,7 @@ pub fn setup_vault(
         display_name,
         profile_picture,
         hosting_model,
+        pending_reconcile.unwrap_or(false),
         app_handle,
         &state,
     )
@@ -489,6 +492,7 @@ pub(crate) fn setup_vault_inner(
     display_name: Option<String>,
     profile_picture: Option<String>,
     hosting_model: Option<String>,
+    pending_reconcile: bool,
     app_handle: tauri::AppHandle,
     state: &Arc<AppState>,
 ) -> Result<SetupResult, String> {
@@ -561,6 +565,7 @@ pub(crate) fn setup_vault_inner(
         totp_secret: None,
         totp_backup_codes: None,
         totp_enabled: None,
+        pending_reconcile,
     };
 
     // Encrypt and save (with unencrypted display identifier for unlock screen)
@@ -976,6 +981,20 @@ fn spawn_conductor_startup(
                         )
                         .await;
 
+                        // Offline-restore reconcile: reattach the account
+                        // layer (username/display/picture/legacy web key)
+                        // after a restore done with the API unreachable.
+                        // No-op unless pending_reconcile is set; also
+                        // re-attempted by the frontend when connectivity
+                        // returns mid-session.
+                        crate::device_identity::reconcile_account_layer(
+                            &state,
+                            option_env!("FLOWSTA_API_URL")
+                                .unwrap_or("https://auth-api.flowsta.com"),
+                            &app_handle_ref,
+                        )
+                        .await;
+
                         // Auto-link with web account if not yet linked on DHT.
                         // Always attempt after identity DNA update (attestation is on old network).
                         let should_link = {
@@ -1321,6 +1340,7 @@ pub fn get_identity(state: State<'_, Arc<AppState>>) -> Result<VaultIdentity, St
         web_username: config.web_username.clone(),
         web_agent_pub_key,
         hosting_model: config.hosting_model.clone(),
+        pending_reconcile: config.pending_reconcile,
     })
 }
 
@@ -1338,6 +1358,9 @@ pub struct VaultIdentity {
     /// "device-hosted" = this vault IS the account; anything else = a
     /// custodial-linked (sync-mode) vault companioning a web account.
     pub hosting_model: Option<String>,
+    /// True after an OFFLINE restore until the account layer (username,
+    /// display name, picture) has been reattached via one A4 grant.
+    pub pending_reconcile: bool,
 }
 
 /// Validate a recovery phrase without storing it.
