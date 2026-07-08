@@ -1960,10 +1960,9 @@ pub async fn change_vault_password(
     let _restart_guard = state.conductor_restart_lock.lock().await;
 
     let vault_path = state.vault_path.lock().unwrap().clone();
-    let (config_snapshot, device_seed) = {
+    let config_snapshot = {
         let cfg_guard = state.vault_config.lock().unwrap();
-        let cfg = cfg_guard.as_ref().ok_or("Vault is locked")?;
-        (cfg.clone(), cfg.device_seed.clone())
+        cfg_guard.as_ref().ok_or("Vault is locked")?.clone()
     };
 
     // 1. Verify the current password against the on-disk vault file.
@@ -2046,15 +2045,18 @@ pub async fn change_vault_password(
 
     log::info!("Vault password changed — restarting conductor under the new passphrase.");
 
-    // 8. Restart the conductor stack under the new passphrase.
+    // 8. Restart the conductor stack under the new passphrase — via the
+    // watchdog's recovery path, so it serialises on conductor_restart_lock
+    // with any concurrent command that noticed the stopped conductor. A
+    // parallel spawn here raced the watchdog and double-started the stack
+    // (orphan lair + zombie conductor, seen live 2026-07-08). The command
+    // therefore returns only once the conductor is back up.
     drop(_restart_guard);
-    spawn_conductor_startup(
-        device_seed,
-        state.data_dir.clone(),
-        new_password,
-        app_handle,
-        state.inner().clone(),
-    );
+    if let Err(e) = ensure_conductor_alive(state.inner(), &app_handle).await {
+        // The password change itself is complete — report the conductor
+        // problem through the status channel, not as a command failure.
+        log::warn!("post-password-change conductor start: {}", e);
+    }
 
     Ok(())
 }

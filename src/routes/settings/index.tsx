@@ -50,7 +50,7 @@ export default component$(() => {
       });
 
       changeSuccess.value =
-        "Password changed. Your Vault is reconnecting to the network with the new password — this takes a few seconds.";
+        "Password changed and your Vault reconnected with the new password.";
       currentPassword.value = "";
       newPassword.value = "";
       confirmPassword.value = "";
