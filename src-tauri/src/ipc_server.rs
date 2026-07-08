@@ -220,6 +220,12 @@ struct StatusResponse {
     profile_picture: Option<String>,
     /// Only populated when the requesting app has the "username" scope.
     web_username: Option<String>,
+    /// Only populated for Flowsta first-party origins (https://*.flowsta.com)
+    /// — the OAuth consent page uses it to pre-fill the email the user may
+    /// choose to share with an app. Never served to third-party origins:
+    /// apps only ever receive the email through the server AFTER the user
+    /// consents (and the server hash-verifies it).
+    web_email: Option<String>,
 }
 
 /// Resolve the caller's origin to the `client_id` of a linked third-party app.
@@ -273,7 +279,7 @@ async fn status_handler(
     headers: HeaderMap,
 ) -> Json<StatusResponse> {
     // Phase 1: extract vault fields, then drop the lock before any other locks.
-    let (unlocked, agent_pub_key, did, display_name_raw, profile_picture_raw, web_username_raw) = {
+    let (unlocked, agent_pub_key, did, display_name_raw, profile_picture_raw, web_username_raw, web_email_raw) = {
         let config = state.app_state.vault_config.lock().unwrap();
         (
             config.is_some(),
@@ -282,6 +288,7 @@ async fn status_handler(
             config.as_ref().and_then(|c| c.display_name.clone()),
             config.as_ref().and_then(|c| c.profile_picture.clone()),
             config.as_ref().and_then(|c| c.web_username.clone()),
+            config.as_ref().and_then(|c| c.web_email.clone()),
         )
     };
 
@@ -300,6 +307,8 @@ async fn status_handler(
         display_name: scopes.contains(&"display_name".to_string()).then_some(display_name_raw).flatten(),
         profile_picture: scopes.contains(&"profile_picture".to_string()).then_some(profile_picture_raw).flatten(),
         web_username: scopes.contains(&"username".to_string()).then_some(web_username_raw).flatten(),
+        // First-party only (consent-page pre-fill) — see field doc.
+        web_email: is_flowsta_origin(origin.as_deref()).then_some(web_email_raw).flatten(),
     })
 }
 
