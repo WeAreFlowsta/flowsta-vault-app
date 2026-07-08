@@ -793,6 +793,11 @@ export default component$(() => {
     // sigs that the first fetch may have missed.
     const unlistenProfilePromise = listen("profile-synced", () => {
       fetchProfile();
+      // New linked-agent info just arrived (auto-link or the offline-restore
+      // reconcile) — an earlier "authoritative no-linked-agents" verdict is
+      // stale now. Without this reset the fire-drill's recovered signature
+      // stayed hidden until the next unlock.
+      linkedConfirmedNone.value = false;
       refreshSignatures();
     });
     // In-app profile edits (Overview card) — refresh the header chip.
