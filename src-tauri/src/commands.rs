@@ -963,6 +963,19 @@ fn spawn_conductor_startup(
                             }
                         }
 
+                        // Startup heal for migrated vaults whose config lacks
+                        // that key (phrase restores predating the wizard-side
+                        // recovery): derive it from the account DID. No-op for
+                        // everyone else; persist_web_agent_pub_key seeds the
+                        // in-memory cache too, so the signatures view's
+                        // background retry picks it up on its next pass.
+                        crate::device_identity::heal_web_agent_key_from_did(
+                            &state,
+                            option_env!("FLOWSTA_API_URL")
+                                .unwrap_or("https://auth-api.flowsta.com"),
+                        )
+                        .await;
+
                         // Auto-link with web account if not yet linked on DHT.
                         // Always attempt after identity DNA update (attestation is on old network).
                         let should_link = {

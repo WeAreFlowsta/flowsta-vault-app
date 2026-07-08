@@ -279,12 +279,8 @@ pub async fn vault_grant_login(
 
     let result = vault_grant(&api_url, &seed, &agent_b64).await?;
 
-    // Self-heal for migrated vaults that predate the config carrying
-    // their original web agent key (e.g. rebuilt via phrase restore
-    // before that was recovered): the account DID still embeds it —
-    // derive and persist so pre-upgrade signature reads work without a
-    // DHT link walk. This runs on the dashboard's routine post-unlock
-    // grant, so affected vaults heal on their next normal use.
+    // Self-heal for migrated vaults whose config lacks the original web
+    // agent key — the account DID still embeds it.
     let needs_web_key = {
         let config = state.vault_config.lock().unwrap();
         config
@@ -296,26 +292,72 @@ pub async fn vault_grant_login(
             .unwrap_or(false)
     };
     if needs_web_key {
-        if let Some(did_key) = result.did.strip_prefix("did:flowsta:") {
-            if let Some(did_39) = decode_agent_pub_key_flexible(did_key) {
-                let device_39 = crate::commands::base64_standard_decode(&agent_b64).ok();
-                let is_legacy_web = device_39
-                    .map(|d| d.len() == 39 && did_39[3..35] != d[3..35])
-                    .unwrap_or(false);
-                if is_legacy_web {
-                    log::info!(
-                        "Recovered legacy web agent key from account DID — persisting"
-                    );
-                    crate::commands::persist_web_agent_pub_key(
-                        state.inner(),
-                        &base64_standard_encode(&did_39),
-                    );
-                }
-            }
+        if let Some(key_b64) = derive_legacy_web_key(&result.did, &agent_b64) {
+            log::info!("Recovered legacy web agent key from account DID — persisting");
+            crate::commands::persist_web_agent_pub_key(state.inner(), &key_b64);
         }
     }
 
     Ok(result)
+}
+
+/// If `did` embeds an agent key DIFFERENT from ours, return it in the
+/// vault-config shape (standard base64 of the 39-byte key). A migrated
+/// account's DID carries its original (pre-upgrade) web agent key; a
+/// born-device-hosted account's DID embeds the device key itself.
+pub(crate) fn derive_legacy_web_key(did: &str, device_agent_b64: &str) -> Option<String> {
+    let did_key = did.strip_prefix("did:flowsta:")?;
+    let did_39 = decode_agent_pub_key_flexible(did_key)?;
+    let device = crate::commands::base64_standard_decode(device_agent_b64).ok()?;
+    if device.len() != 39 || did_39[3..35] == device[3..35] {
+        return None;
+    }
+    Some(base64_standard_encode(&did_39))
+}
+
+/// Startup self-heal: recover a migrated account's original web agent key
+/// from its DID when the vault config lacks it (phrase restores that
+/// predate the wizard-side recovery). Runs after conductor startup; cheap
+/// no-op when nothing is missing, silent no-op offline.
+pub(crate) async fn heal_web_agent_key_from_did(
+    state: &std::sync::Arc<crate::AppState>,
+    api_url: &str,
+) {
+    let (needs, seed_vec, agent_b64) = {
+        let config = state.vault_config.lock().unwrap();
+        match config.as_ref() {
+            Some(c) => (
+                c.hosting_model.as_deref() == Some("device-hosted")
+                    && c.web_agent_pub_key.is_none(),
+                c.device_seed.clone(),
+                c.agent_pub_key_raw_b64.clone(),
+            ),
+            None => (false, None, None),
+        }
+    };
+    if !needs {
+        return;
+    }
+    let (Some(seed_vec), Some(agent_b64)) = (seed_vec, agent_b64) else {
+        return;
+    };
+    if seed_vec.len() != 32 {
+        return;
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&seed_vec);
+
+    match vault_grant(api_url, &seed, &agent_b64).await {
+        Ok(grant) => {
+            if let Some(key_b64) = derive_legacy_web_key(&grant.did, &agent_b64) {
+                log::info!("Recovered legacy web agent key from account DID — persisting");
+                crate::commands::persist_web_agent_pub_key(state, &key_b64);
+            } else {
+                log::info!("Web-key heal: DID matches device key (born device-hosted) — nothing to recover");
+            }
+        }
+        Err(e) => log::info!("Web-key heal grant skipped (offline?): {}", e),
+    }
 }
 
 /// Restore a device-hosted identity from the recovery phrase alone.
@@ -350,13 +392,9 @@ pub async fn restore_device_identity(
     // handle to the account's pre-upgrade signatures. Migration persists
     // it in the vault config; a phrase restore must recover it here or
     // linked-signature reads start from a cold DHT walk instead.
-    if let Some(did_key) = result.did.strip_prefix("did:flowsta:") {
-        if let Some(did_39) = decode_agent_pub_key_flexible(did_key) {
-            if did_39[3..35] != device_39[3..35] {
-                log::info!("Restore: DID carries a legacy web agent key (migrated account)");
-                result.web_agent_pub_key = Some(base64_standard_encode(&did_39));
-            }
-        }
+    result.web_agent_pub_key = derive_legacy_web_key(&result.did, &agent_b64);
+    if result.web_agent_pub_key.is_some() {
+        log::info!("Restore: DID carries a legacy web agent key (migrated account)");
     }
 
     Ok(result)
