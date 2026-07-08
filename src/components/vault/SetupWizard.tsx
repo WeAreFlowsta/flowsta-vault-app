@@ -69,6 +69,25 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const verifyWords = useStore<{ [k: number]: string }>({});
   const phraseSaved = useSignal(false);
   const copied = useSignal(false);
+  const downloaded = useSignal(false);
+  const downloadPhrase = $(async () => {
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const path = await save({
+        defaultPath: "flowsta-recovery-phrase.txt",
+        filters: [{ name: "Text", extensions: ["txt"] }],
+      });
+      if (!path) return;
+      await invoke("write_json_file", {
+        path,
+        content: `Flowsta recovery phrase — these 24 words ARE your identity.\nAnyone with these words can become you. Keep this file offline —\nprint it or move it to secure storage, then delete it from this computer.\n\n${newMnemonic.value}\n`,
+      });
+      downloaded.value = true;
+      setTimeout(() => { downloaded.value = false; }, 2000);
+    } catch (e) {
+      console.error("phrase download failed:", e);
+    }
+  });
   // Restore-from-phrase state (B6)
   const restorePassword = useSignal("");
   const restorePassword2 = useSignal("");
@@ -754,6 +773,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               </p>
             </div>
 
+            {!phraseSaved.value && (
+            <>
             <div class="mb-4 grid grid-cols-3 gap-2 rounded-md bg-gray-900 p-4">
               {newMnemonic.value.split(" ").map((word, i) => (
                 <div key={i} class="flex items-baseline gap-1.5">
@@ -781,10 +802,19 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               >
                 {copied.value ? "Copied ✓" : "Copy phrase"}
               </button>
+              <button
+                type="button"
+                class="text-xs text-amber-400 hover:text-amber-300 transition-colors"
+                onClick$={downloadPhrase}
+              >
+                {downloaded.value ? "Downloaded ✓" : "Download as file"}
+              </button>
               <span class="text-[10px] text-gray-500">
                 Paste into a password manager. Clear your clipboard afterward.
               </span>
             </div>
+            </>
+            )}
 
             {!phraseSaved.value ? (
               <GlassButton onClick$={() => { phraseSaved.value = true; error.value = ""; }}>
@@ -793,7 +823,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             ) : (
               <div>
                 <p class="mb-3 text-sm text-gray-400">
-                  Confirm by typing these words from what you wrote down:
+                  The phrase is hidden now — type these words from what you
+                  wrote down or saved:
                 </p>
                 <div class="mb-4 flex flex-col gap-3">
                   {verifyIndices.value.map((i) => (
@@ -1250,6 +1281,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               </p>
             </div>
 
+            {!phraseSaved.value && (
+            <>
             <div class="mb-4 grid grid-cols-3 gap-2 rounded-md bg-gray-900 p-4">
               {newMnemonic.value.split(" ").map((word, i) => (
                 <div key={i} class="flex items-baseline gap-1.5">
@@ -1275,10 +1308,19 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               >
                 {copied.value ? "Copied ✓" : "Copy phrase"}
               </button>
+              <button
+                type="button"
+                class="text-xs text-amber-400 hover:text-amber-300 transition-colors"
+                onClick$={downloadPhrase}
+              >
+                {downloaded.value ? "Downloaded ✓" : "Download as file"}
+              </button>
               <span class="text-[10px] text-gray-500">
                 Paste into a password manager. Clear your clipboard afterward.
               </span>
             </div>
+            </>
+            )}
 
             {!phraseSaved.value ? (
               <GlassButton onClick$={() => { phraseSaved.value = true; error.value = ""; }}>
@@ -1287,7 +1329,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             ) : (
               <div>
                 <p class="mb-3 text-sm text-gray-400">
-                  Confirm by typing these words from what you wrote down:
+                  The phrase is hidden now — type these words from what you
+                  wrote down or saved:
                 </p>
                 <div class="mb-4 flex flex-col gap-3">
                   {verifyIndices.value.map((i) => (
