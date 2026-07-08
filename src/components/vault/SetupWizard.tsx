@@ -55,10 +55,6 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   // phrase-first sign-in decrypted the recovery email with it) — the
   // upgrade flow then skips the re-entry step.
   const phraseProven = useSignal(false);
-  // Set when a restore attempt found Flowsta's API unreachable — the
-  // identity can still be rebuilt entirely locally (keys from the phrase,
-  // network via community nodes); account details reconcile later.
-  const offlineRestoreOffer = useSignal(false);
   // True when this vault was created via the offline path — the done
   // screen explains the reconcile story.
   const restoredOffline = useSignal(false);
@@ -612,7 +608,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
     const trimmed = mnemonic.value.trim().toLowerCase().replace(/\s+/g, " ");
     try {
       step.value = "progress";
-      progressMessage.value = "Rebuilding your identity on this device...";
+      progressMessage.value =
+        "Flowsta unreachable — restoring from your phrase and the community network...";
       const setupResult = await invoke<{ agent_pub_key: string; did: string }>(
         "setup_vault",
         {
@@ -630,7 +627,6 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       mnemonic.value = "";
       restorePassword.value = "";
       restorePassword2.value = "";
-      offlineRestoreOffer.value = false;
       result.agentPubKey = setupResult.agent_pub_key;
       result.did = setupResult.did;
       restoredFromPhrase.value = true;
@@ -706,12 +702,15 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       step.value = "done";
     } catch (e) {
       const msg = String(e);
-      step.value = "restore-phrase";
       if (msg.includes("api_unreachable")) {
-        // Flowsta can't be reached — the identity itself doesn't need it.
-        offlineRestoreOffer.value = true;
-        error.value = "";
-      } else if (msg.includes("unknown_agent_key")) {
+        // Flowsta can't be reached — the identity never needed it. Proceed
+        // offline automatically; the done screen and the dashboard banner
+        // carry the reconcile story.
+        await handleOfflineRestore();
+        return;
+      }
+      step.value = "restore-phrase";
+      if (msg.includes("unknown_agent_key")) {
         // Not a Vault identity — but it may be a flowsta.com account's
         // recovery phrase. Offer the phrase-first upgrade right here.
         phraseUpgradeOffer.value = true;
@@ -995,7 +994,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               rows={4}
               placeholder="word1 word2 word3 ... word24"
               value={mnemonic.value}
-              onInput$={(e) => { mnemonic.value = (e.target as HTMLTextAreaElement).value; error.value = ""; phraseUpgradeOffer.value = false; phraseProven.value = false; offlineRestoreOffer.value = false; }}
+              onInput$={(e) => { mnemonic.value = (e.target as HTMLTextAreaElement).value; error.value = ""; phraseUpgradeOffer.value = false; phraseProven.value = false; }}
             />
 
             <div class="mb-4">
@@ -1020,31 +1019,6 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </div>
 
             {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
-
-            {/* Offline restore: Flowsta unreachable — identity rebuilds
-                locally, confirmed by the network itself; account details
-                reconcile when the API returns. */}
-            {offlineRestoreOffer.value && (
-              <div class="mb-4 rounded-lg border border-sky-500/30 bg-sky-500/10 p-4">
-                <p class="mb-1 text-sm font-semibold text-white">
-                  Flowsta can't be reached — restore offline
-                </p>
-                <p class="mb-3 text-xs text-gray-300">
-                  Your identity doesn't need Flowsta's servers: your keys
-                  rebuild from the phrase on this device, and your records
-                  return through the community network. Your @username and
-                  email reconnect automatically when Flowsta is reachable
-                  again.
-                </p>
-                <GlassButton
-                  class="w-full"
-                  disabled={loading.value}
-                  onClick$={handleOfflineRestore}
-                >
-                  {loading.value ? "Restoring..." : "Restore offline"}
-                </GlassButton>
-              </div>
-            )}
 
             {/* Phrase-first upgrade: no Vault identity for this phrase, but
                 it may be a flowsta.com account's recovery phrase — the
@@ -1071,7 +1045,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             )}
 
             <div class="flex justify-between">
-              <GlassButton variant="secondary" onClick$={() => { mnemonic.value = ""; phraseUpgradeOffer.value = false; offlineRestoreOffer.value = false; error.value = ""; step.value = "choose"; }}>
+              <GlassButton variant="secondary" onClick$={() => { mnemonic.value = ""; phraseUpgradeOffer.value = false; error.value = ""; step.value = "choose"; }}>
                 Back
               </GlassButton>
               <GlassButton
