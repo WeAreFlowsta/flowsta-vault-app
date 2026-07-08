@@ -3,26 +3,12 @@ import Callout from "~/components/dashboard/Callout";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
-import { connectionStatusContext, autoLockContext } from "~/lib/context";
+import { autoLockContext } from "~/lib/context";
 import { clearSignaturesCache } from "~/lib/signatures-cache";
 
-declare const __API_URL__: string;
 declare const __APP_VERSION__: string;
 
-const PASSWORD_RULES = [
-  { test: (p: string) => p.length >= 8, label: "At least 8 characters" },
-  { test: (p: string) => /[A-Z]/.test(p), label: "One uppercase letter" },
-  { test: (p: string) => /[a-z]/.test(p), label: "One lowercase letter" },
-  { test: (p: string) => /[0-9]/.test(p), label: "One number" },
-  {
-    test: (p: string) => /[!@#$%^&*()_+\-=\[\]{};\':"|,.<>\/?]/.test(p),
-    label: "One special character",
-  },
-];
-
-
 export default component$(() => {
-  const connectionStatus = useContext(connectionStatusContext);
   const autoLockMinutes = useContext(autoLockContext);
 
   const activeTab = useSignal<"general" | "about">("general");
@@ -34,18 +20,11 @@ export default component$(() => {
   const changing = useSignal(false);
   const changeError = useSignal("");
   const changeSuccess = useSignal("");
-  const needsEmail = useSignal(false);
-  const emailOverride = useSignal("");
 
   const showResetConfirm = useSignal(false);
   const resetting = useSignal(false);
 
-  const isOnline = connectionStatus.value === "online";
-
-  // Validate new password meets all rules
-  const passwordValid =
-    newPassword.value.length > 0 &&
-    PASSWORD_RULES.every((r) => r.test(newPassword.value));
+  const passwordValid = newPassword.value.length >= 10;
   const passwordsMatch =
     newPassword.value.length > 0 &&
     newPassword.value === confirmPassword.value;
@@ -53,13 +32,11 @@ export default component$(() => {
     newPassword.value.length > 0 &&
     newPassword.value !== currentPassword.value;
   const canSubmit =
-    isOnline &&
     !changing.value &&
     currentPassword.value.length > 0 &&
     passwordValid &&
     passwordsMatch &&
-    notSameAsOld &&
-    (!needsEmail.value || emailOverride.value.length > 0);
+    notSameAsOld;
 
   const handleChangePassword = $(async () => {
     changeError.value = "";
@@ -67,30 +44,18 @@ export default component$(() => {
     changing.value = true;
 
     try {
-      const params: Record<string, string> = {
-        apiUrl: __API_URL__,
+      await invoke("change_vault_password", {
         currentPassword: currentPassword.value,
         newPassword: newPassword.value,
-      };
-      if (needsEmail.value && emailOverride.value) {
-        params.emailOrUsername = emailOverride.value;
-      }
+      });
 
-      const message = await invoke<string>("change_password", params);
-
-      changeSuccess.value = message;
+      changeSuccess.value =
+        "Password changed. Your Vault is reconnecting to the network with the new password — this takes a few seconds.";
       currentPassword.value = "";
       newPassword.value = "";
       confirmPassword.value = "";
-      needsEmail.value = false;
-      emailOverride.value = "";
     } catch (e) {
-      const err = String(e);
-      if (err === "NEEDS_EMAIL") {
-        needsEmail.value = true;
-      } else {
-        changeError.value = err;
-      }
+      changeError.value = String(e);
     } finally {
       changing.value = false;
     }
@@ -154,25 +119,94 @@ export default component$(() => {
             <h3 class="mb-2 text-lg font-semibold text-white">
               Change Password
             </h3>
-            {/* Deliberately disabled: a password change re-encrypts the
-                vault file but cannot yet rotate the local keystore
-                passphrase, which would leave the network layer unable to
-                start on the next launch. Re-enable together with keystore
-                rotation. */}
             <p class="mb-4 text-sm text-gray-400">
-              Your unlock password was set when this vault was created.
-              Password changes are coming in a vault update — they need the
-              local keystore to be re-encrypted in the same step, and doing
-              it halfway would break your Vault's network connection.
+              Your password protects this vault on this device. Changing it
+              happens entirely locally — no server is involved — and your
+              Vault briefly restarts its network connection to apply it.
             </p>
-            <Callout intent="info">
-              <p>
-                Need a different password now? Back up your recovery phrase,
-                then use Reset Vault below and restore from the phrase —
-                you'll choose a new password during restore. Your identity,
-                signatures, and data are preserved.
+
+            <div class="max-w-md space-y-4">
+              <div>
+                <label class="mb-1 block text-sm font-medium text-gray-300">
+                  Current password
+                </label>
+                <input
+                  type="password"
+                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                  placeholder="Your current password"
+                  value={currentPassword.value}
+                  onInput$={(e) => {
+                    currentPassword.value = (e.target as HTMLInputElement).value;
+                    changeError.value = "";
+                  }}
+                />
+              </div>
+              <div>
+                <label class="mb-1 block text-sm font-medium text-gray-300">
+                  New password
+                </label>
+                <input
+                  type="password"
+                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                  placeholder="At least 10 characters"
+                  value={newPassword.value}
+                  onInput$={(e) => {
+                    newPassword.value = (e.target as HTMLInputElement).value;
+                    changeError.value = "";
+                  }}
+                />
+                {newPassword.value.length > 0 && !passwordValid && (
+                  <p class="mt-1 text-xs text-gray-500">
+                    Must be at least 10 characters.
+                  </p>
+                )}
+                {newPassword.value.length > 0 && !notSameAsOld && (
+                  <p class="mt-1 text-xs text-gray-500">
+                    Must be different from your current password.
+                  </p>
+                )}
+              </div>
+              <div>
+                <label class="mb-1 block text-sm font-medium text-gray-300">
+                  Confirm new password
+                </label>
+                <input
+                  type="password"
+                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                  placeholder="Repeat your new password"
+                  value={confirmPassword.value}
+                  onInput$={(e) => {
+                    confirmPassword.value = (e.target as HTMLInputElement).value;
+                    changeError.value = "";
+                  }}
+                />
+                {confirmPassword.value.length > 0 && !passwordsMatch && (
+                  <p class="mt-1 text-xs text-gray-500">
+                    Passwords don't match.
+                  </p>
+                )}
+              </div>
+
+              {changeError.value && (
+                <Callout intent="danger">{changeError.value}</Callout>
+              )}
+              {changeSuccess.value && (
+                <Callout intent="success">{changeSuccess.value}</Callout>
+              )}
+
+              <GlassButton
+                variant="primary"
+                disabled={!canSubmit}
+                onClick$={handleChangePassword}
+              >
+                {changing.value ? "Changing..." : "Change Password"}
+              </GlassButton>
+
+              <p class="text-xs text-gray-500">
+                Your recovery phrase is unaffected — it can always restore
+                this identity, whatever the password.
               </p>
-            </Callout>
+            </div>
           </div>
 
           {/* Auto-lock */}

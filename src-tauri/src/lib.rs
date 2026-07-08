@@ -369,7 +369,7 @@ pub fn run() {
             commands::re_encrypt_vault,
             commands::get_auto_lock_minutes,
             commands::set_auto_lock_minutes,
-            commands::change_password,
+            commands::change_vault_password,
             commands::link_web_account,
             commands::get_linked_agents,
             commands::get_connected_sites,

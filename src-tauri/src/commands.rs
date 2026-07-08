@@ -1798,6 +1798,254 @@ pub fn re_encrypt_vault(
     Ok(())
 }
 
+/// Re-wrap the conductor's SQLCipher key file (`databases/db.key`) under a
+/// new passphrase. The inner 32-byte database key is unchanged — only the
+/// passphrase wrapping rotates — so the databases themselves stay readable.
+///
+/// File format (holochain_sqlite 0.6.1 `DbKey`):
+/// `base64url_no_pad( nonce[24] ‖ secretbox(key[32])[48] ‖ argon2_salt[16] )`
+/// where the secretbox secret = argon2id(passphrase, salt, MODERATE/MODERATE).
+///
+/// Repair-idempotent: if the file no longer opens with the current password
+/// but already opens with the new one (a previous change was interrupted
+/// between file writes), it is left as-is and Ok is returned.
+fn rekey_conductor_db_key(
+    db_key_path: &std::path::Path,
+    current_password: &str,
+    new_password: &str,
+) -> Result<(), String> {
+    use base64::Engine as _;
+    use lair_keystore_api::dependencies::sodoken;
+
+    const NONCE: usize = sodoken::secretbox::XSALSA_NONCEBYTES;
+    const MAC: usize = sodoken::secretbox::XSALSA_MACBYTES;
+    const SALT: usize = sodoken::argon2::ARGON2_ID_SALTBYTES;
+
+    let b64 = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let locked = std::fs::read_to_string(db_key_path)
+        .map_err(|e| format!("Failed to read db.key: {}", e))?;
+    let buf = b64
+        .decode(locked.trim())
+        .map_err(|e| format!("db.key is not valid base64: {}", e))?;
+    if buf.len() != NONCE + 32 + MAC + SALT {
+        return Err(format!("db.key has unexpected length {}", buf.len()));
+    }
+
+    let derive = |passphrase: &str,
+                  salt: &[u8; SALT]|
+     -> Result<sodoken::SizedLockedArray<32>, String> {
+        let mut secret = sodoken::SizedLockedArray::<32>::new()
+            .map_err(|e| format!("Secure alloc failed: {}", e))?;
+        sodoken::argon2::blocking_argon2id(
+            &mut *secret.lock(),
+            passphrase.as_bytes(),
+            salt,
+            sodoken::argon2::ARGON2_ID_OPSLIMIT_MODERATE,
+            sodoken::argon2::ARGON2_ID_MEMLIMIT_MODERATE,
+        )
+        .map_err(|e| format!("argon2id failed: {}", e))?;
+        Ok(secret)
+    };
+
+    let mut salt = [0u8; SALT];
+    salt.copy_from_slice(&buf[NONCE + 32 + MAC..]);
+    let nonce: [u8; NONCE] = buf[..NONCE].try_into().unwrap();
+    let cipher = &buf[NONCE..NONCE + 32 + MAC];
+
+    let mut db_key = sodoken::SizedLockedArray::<32>::new()
+        .map_err(|e| format!("Secure alloc failed: {}", e))?;
+
+    let mut secret = derive(current_password, &salt)?;
+    let opens_with_current =
+        sodoken::secretbox::xsalsa_open_easy(&mut *db_key.lock(), cipher, &nonce, &secret.lock())
+            .is_ok();
+    if !opens_with_current {
+        let mut new_secret = derive(new_password, &salt)?;
+        let opens_with_new = sodoken::secretbox::xsalsa_open_easy(
+            &mut *db_key.lock(),
+            cipher,
+            &nonce,
+            &new_secret.lock(),
+        )
+        .is_ok();
+        if opens_with_new {
+            log::warn!("db.key already wrapped with the new password — skipping rewrap");
+            return Ok(());
+        }
+        return Err("The conductor's database key doesn't open with the current password".into());
+    }
+
+    // Re-wrap under the new password with a fresh nonce. The salt MUST be
+    // preserved: holochain also feeds it to SQLCipher as `PRAGMA cipher_salt`
+    // (the databases use a plaintext header, so the salt exists only in this
+    // file) — rotating it would make every database unreadable.
+    let mut new_nonce = [0u8; NONCE];
+    sodoken::random::randombytes_buf(&mut new_nonce).map_err(|e| format!("RNG failed: {}", e))?;
+
+    let mut new_secret = derive(new_password, &salt)?;
+    let mut new_cipher = vec![0u8; 32 + MAC];
+    sodoken::secretbox::xsalsa_easy(
+        &mut new_cipher,
+        &new_nonce,
+        &*db_key.lock(),
+        &new_secret.lock(),
+    )
+    .map_err(|e| format!("secretbox seal failed: {}", e))?;
+
+    let mut out = Vec::with_capacity(NONCE + 32 + MAC + SALT);
+    out.extend_from_slice(&new_nonce);
+    out.extend_from_slice(&new_cipher);
+    out.extend_from_slice(&salt);
+
+    // Atomic replace so a crash can't leave a truncated key file.
+    let tmp = db_key_path.with_extension("key.tmp");
+    std::fs::write(&tmp, b64.encode(&out)).map_err(|e| format!("Failed to write db.key: {}", e))?;
+    std::fs::rename(&tmp, db_key_path).map_err(|e| format!("Failed to replace db.key: {}", e))?;
+
+    log::info!("Conductor db.key re-wrapped under the new password.");
+    Ok(())
+}
+
+/// Change the vault password — fully local, no server involved.
+///
+/// The password protects three things on this device, all rotated in one
+/// step: the encrypted vault file, the conductor's database key file
+/// (`databases/db.key`), and the lair keystore. Lair has no rekey
+/// operation, so its store is deleted and re-initialized on the restart
+/// that follows — the device key is re-imported from the vault's seed on
+/// every conductor start, so no key material is lost.
+///
+/// Interruption-safe: each step is idempotent or repairable, so re-running
+/// the command with the same passwords completes a change that was cut off
+/// midway (see `rekey_conductor_db_key`'s repair path).
+#[tauri::command]
+pub async fn change_vault_password(
+    current_password: String,
+    new_password: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if new_password.len() < 10 {
+        return Err("New password must be at least 10 characters".into());
+    }
+    if new_password == current_password {
+        return Err("New password must be different from the current password".into());
+    }
+
+    // Don't run while a conductor start is in flight — lair and the
+    // database key file are being actively created underneath us.
+    {
+        let status = state.conductor_status.lock().unwrap().clone();
+        if matches!(status, ConductorStatus::Starting { .. }) {
+            return Err("The vault is still starting up — try again in a moment.".into());
+        }
+    }
+
+    // Serialise with the runtime watchdog so it can't restart the
+    // conductor with the old passphrase mid-change.
+    let _restart_guard = state.conductor_restart_lock.lock().await;
+
+    let vault_path = state.vault_path.lock().unwrap().clone();
+    let (config_snapshot, device_seed) = {
+        let cfg_guard = state.vault_config.lock().unwrap();
+        let cfg = cfg_guard.as_ref().ok_or("Vault is locked")?;
+        (cfg.clone(), cfg.device_seed.clone())
+    };
+
+    // 1. Verify the current password against the on-disk vault file.
+    {
+        let encrypted =
+            load_vault(&vault_path).map_err(|e| format!("Failed to read vault: {}", e))?;
+        let current = current_password.clone();
+        tokio::task::spawn_blocking(move || {
+            decrypt_vault(&encrypted, &current)
+                .map(|_| ())
+                .map_err(|_| "Current password is incorrect".to_string())
+        })
+        .await
+        .map_err(|e| format!("Verify task failed: {}", e))??;
+    }
+
+    // 2. Re-wrap the conductor's database key. Safe while the conductor is
+    // running (it only reads db.key at startup), and doing it before the
+    // shutdown means a failure here leaves the running stack untouched.
+    let db_key_path = state.data_dir.join("conductor").join("databases").join("db.key");
+    if db_key_path.exists() {
+        let current = current_password.clone();
+        let new = new_password.clone();
+        tokio::task::spawn_blocking(move || rekey_conductor_db_key(&db_key_path, &current, &new))
+            .await
+            .map_err(|e| format!("Rekey task failed: {}", e))??;
+    } else {
+        // No conductor databases yet — the key file will be generated
+        // under the new (cached) passphrase on the next start.
+        log::info!("No db.key found — skipping database key rewrap");
+    }
+
+    // 3. Compute the re-encrypted vault file before stopping anything.
+    let mut new_encrypted = {
+        let cfg = config_snapshot.clone();
+        let pw = new_password.clone();
+        tokio::task::spawn_blocking(move || encrypt_vault(&cfg, &pw))
+            .await
+            .map_err(|e| format!("Encrypt task failed: {}", e))?
+            .map_err(|e| format!("Encryption failed: {}", e))?
+    };
+    new_encrypted.display_email = config_snapshot
+        .web_email
+        .clone()
+        .or(config_snapshot.web_username.clone());
+
+    // 4. Stop the conductor + lair.
+    if let Some(handle) = state.conductor_handle.lock().unwrap().take() {
+        handle.shutdown();
+    }
+    *state.conductor_status.lock().unwrap() = ConductorStatus::Starting {
+        message: "Applying new password...".into(),
+    };
+    let _ = app_handle.emit(
+        "conductor-status",
+        ConductorStatus::Starting {
+            message: "Applying new password...".into(),
+        },
+    );
+
+    // 5. Delete the lair keystore — it has no rekey operation. The next
+    // start re-initializes it under the new passphrase and re-imports the
+    // device seed (conductor startup does this on every launch).
+    let lair_dir = state.data_dir.join("lair");
+    if lair_dir.exists() {
+        std::fs::remove_dir_all(&lair_dir)
+            .map_err(|e| format!("Failed to reset lair keystore: {}", e))?;
+    }
+
+    // 6. Save the re-encrypted vault file.
+    save_vault(&vault_path, &new_encrypted).map_err(|e| format!("Save failed: {}", e))?;
+
+    // 7. Swap the cached unlock passphrase so the watchdog and background
+    // config writes (e.g. claim_web_username) use the new password.
+    *state.unlock_passphrase.lock().unwrap() = Some(
+        lair_keystore_api::dependencies::sodoken::LockedArray::from(
+            new_password.as_bytes().to_vec(),
+        ),
+    );
+
+    log::info!("Vault password changed — restarting conductor under the new passphrase.");
+
+    // 8. Restart the conductor stack under the new passphrase.
+    drop(_restart_guard);
+    spawn_conductor_startup(
+        device_seed,
+        state.data_dir.clone(),
+        new_password,
+        app_handle,
+        state.inner().clone(),
+    );
+
+    Ok(())
+}
+
 /// Get the auto-lock timeout in minutes (0 = never).
 #[tauri::command]
 pub fn get_auto_lock_minutes(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
@@ -1847,164 +2095,6 @@ pub fn set_auto_lock_minutes(
 
     log::info!("Auto-lock set to {} minutes.", minutes);
     Ok(())
-}
-
-/// Change the Flowsta account password (web + local vault).
-///
-/// Flow:
-/// 1. Login with current password to get a JWT
-/// 2. Call POST /auth/change-password with the JWT
-/// 3. Re-encrypt the local vault with the new password
-#[tauri::command]
-pub async fn change_password(
-    api_url: String,
-    current_password: String,
-    new_password: String,
-    email_or_username: Option<String>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<String, String> {
-    // Use provided email_or_username override, or read from vault config
-    let login_identifier = if let Some(ref provided) = email_or_username {
-        if !provided.is_empty() {
-            provided.clone()
-        } else {
-            return Err("NEEDS_EMAIL".into());
-        }
-    } else {
-        let config = state.vault_config.lock().unwrap();
-        let config = config.as_ref().ok_or("Vault is locked")?;
-
-        // Try web_email first (must look like an actual email, not a hash)
-        if let Some(ref email) = config.web_email {
-            if email.contains('@') {
-                email.clone()
-            } else if let Some(ref username) = config.web_username {
-                username.clone()
-            } else {
-                return Err("NEEDS_EMAIL".into());
-            }
-        } else if let Some(ref username) = config.web_username {
-            username.clone()
-        } else {
-            return Err("No web account linked to this vault. Link your account from the Identities page first.".into());
-        }
-    };
-
-    log::info!("Changing password for account: {}", login_identifier);
-
-    // Step 1: Login to get a JWT
-    let client = reqwest::Client::new();
-    let login_url = format!("{}/auth/login", api_url.trim_end_matches('/'));
-
-    let login_resp = client
-        .post(&login_url)
-        .json(&serde_json::json!({
-            "emailOrUsername": login_identifier,
-            "password": current_password,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to reach API: {}", e))?;
-
-    if !login_resp.status().is_success() {
-        let body: serde_json::Value = login_resp.json().await.unwrap_or_default();
-        let err = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Current password is incorrect");
-        return Err(err.to_string());
-    }
-
-    let login_body: serde_json::Value = login_resp
-        .json()
-        .await
-        .map_err(|e| format!("Invalid login response: {}", e))?;
-
-    // Handle 2FA — password change from vault doesn't support 2FA re-auth
-    if login_body
-        .get("requires2FA")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        return Err("Password change requires completing 2FA. Please change your password on the web dashboard instead.".into());
-    }
-
-    let token = login_body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .ok_or("Login succeeded but no token returned")?;
-
-    // Fix vault email if it was missing or invalid (self-healing for legacy vaults)
-    let real_email = login_body
-        .get("user")
-        .and_then(|u| u.get("email"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    if let Some(ref email) = real_email {
-        let mut config = state.vault_config.lock().unwrap();
-        if let Some(ref mut cfg) = *config {
-            let needs_fix = cfg
-                .web_email
-                .as_ref()
-                .map(|e| !e.contains('@'))
-                .unwrap_or(true);
-            if needs_fix {
-                log::info!("Fixing vault web_email from API response");
-                cfg.web_email = Some(email.clone());
-            }
-        }
-    }
-
-    // Step 2: Call change-password API
-    let change_url = format!("{}/auth/change-password", api_url.trim_end_matches('/'));
-
-    let change_resp = client
-        .post(&change_url)
-        .header("Authorization", format!("Bearer {}", token))
-        .json(&serde_json::json!({
-            "currentPassword": current_password,
-            "newPassword": new_password,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to reach API: {}", e))?;
-
-    if !change_resp.status().is_success() {
-        let body: serde_json::Value = change_resp.json().await.unwrap_or_default();
-        let err = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Password change failed");
-        return Err(err.to_string());
-    }
-
-    let change_body: serde_json::Value = change_resp
-        .json()
-        .await
-        .map_err(|e| format!("Invalid change-password response: {}", e))?;
-
-    // Step 3: Re-encrypt local vault with new password
-    {
-        let vault_path = state.vault_path.lock().unwrap();
-        let config = state.vault_config.lock().unwrap();
-        let config = config.as_ref().ok_or("Vault is locked")?;
-
-        let mut encrypted = encrypt_vault(config, &new_password)
-            .map_err(|e| format!("Local vault re-encryption failed: {}", e))?;
-        encrypted.display_email = config.web_email.clone().or(config.web_username.clone());
-        save_vault(&vault_path, &encrypted)
-            .map_err(|e| format!("Failed to save re-encrypted vault: {}", e))?;
-    }
-
-    log::info!("Password changed (web + local vault).");
-
-    let message = change_body
-        .get("message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Password changed successfully")
-        .to_string();
-
-    Ok(message)
 }
 
 // ── Agent Linking Commands ──────────────────────────────────────────
