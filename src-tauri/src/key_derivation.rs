@@ -262,6 +262,27 @@ pub fn decode_agent_pub_key_string(key_string: &str) -> Option<[u8; 39]> {
     Some(result)
 }
 
+/// Decode an agent pubkey string in EITHER encoding seen in the wild:
+/// - Holochain canonical: `"u" + base64url_no_pad(39 bytes)` (uhCAk…, 53 chars)
+/// - API DID hybrid: literal `"uhCAk" + base58(39 bytes)` — what `users.did`
+///   stores on the server (`did:flowsta:uhCAk<base58>`; the uhCAk here is
+///   decorative, the payload is base58 of the FULL 39 bytes)
+///
+/// Returns None if neither decodes to a valid 39-byte agent key.
+pub fn decode_agent_pub_key_flexible(key_string: &str) -> Option<[u8; 39]> {
+    if let Some(k) = decode_agent_pub_key_string(key_string) {
+        return Some(k);
+    }
+    let b58 = key_string.strip_prefix("uhCAk")?;
+    let decoded = bs58::decode(b58).into_vec().ok()?;
+    if decoded.len() != 39 || decoded[0] != 0x84 || decoded[1] != 0x20 || decoded[2] != 0x24 {
+        return None;
+    }
+    let mut result = [0u8; 39];
+    result.copy_from_slice(&decoded);
+    Some(result)
+}
+
 /// Base64url decoding without padding (Holochain multibase format).
 fn base64url_decode_no_pad(input: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u32> {
@@ -518,5 +539,28 @@ mod tests {
         assert_eq!(encoded[2], 0x4e); // length low byte (78)
         // 0x42 < 128 so each element is 1 byte (positive fixint)
         assert_eq!(encoded.len(), 3 + 78); // header + elements
+    }
+
+    #[test]
+    fn test_decode_agent_pub_key_flexible_both_encodings() {
+        let mut key39 = [0u8; 39];
+        key39[0] = 0x84;
+        key39[1] = 0x20;
+        key39[2] = 0x24;
+        for (i, b) in key39.iter_mut().enumerate().skip(3) {
+            *b = i as u8;
+        }
+
+        // Canonical: "u" + base64url_no_pad
+        let canonical = format!("u{}", base64url_encode_no_pad(&key39));
+        assert_eq!(decode_agent_pub_key_flexible(&canonical), Some(key39));
+
+        // API DID hybrid: literal "uhCAk" + base58(full 39 bytes)
+        let hybrid = format!("uhCAk{}", bs58::encode(&key39).into_string());
+        assert_eq!(decode_agent_pub_key_flexible(&hybrid), Some(key39));
+
+        // Garbage rejected
+        assert_eq!(decode_agent_pub_key_flexible("uhCAknope"), None);
+        assert_eq!(decode_agent_pub_key_flexible("did:flowsta:x"), None);
     }
 }

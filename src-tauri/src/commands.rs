@@ -3871,7 +3871,7 @@ async fn fetch_linked_agent_keys(
 /// encrypted vault config (same shape migration writes: standard base64 of
 /// the 39-byte key). Non-fatal on failure — the in-memory cache still
 /// covers the current session.
-fn persist_web_agent_pub_key(state: &Arc<AppState>, key_b64: &str) {
+pub(crate) fn persist_web_agent_pub_key(state: &Arc<AppState>, key_b64: &str) {
     *state.linked_web_agent_key.lock().unwrap() = Some(key_b64.to_string());
 
     let passphrase = {
