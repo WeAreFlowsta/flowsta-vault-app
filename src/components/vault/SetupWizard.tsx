@@ -51,6 +51,10 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   // Phrase-first upgrade: set when a restore attempt finds no Vault
   // identity but the phrase may belong to a flowsta.com account.
   const phraseUpgradeOffer = useSignal(false);
+  // True when mnemonic.value was already PROVEN against the account (the
+  // phrase-first sign-in decrypted the recovery email with it) — the
+  // upgrade flow then skips the re-entry step.
+  const phraseProven = useSignal(false);
   const phraseVerified = useSignal(false);
   const error = useSignal("");
   const loading = useSignal(false);
@@ -560,6 +564,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       }>("phrase_migration_login", { apiUrl: __API_URL__, phrase: trimmed });
 
       phraseUpgradeOffer.value = false;
+      mnemonic.value = trimmed;
+      phraseProven.value = true;
       webUser.email = res.email;
       webUser.agentPubKey = res.agent_pub_key;
       email.value = res.email;
@@ -927,7 +933,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               rows={4}
               placeholder="word1 word2 word3 ... word24"
               value={mnemonic.value}
-              onInput$={(e) => { mnemonic.value = (e.target as HTMLTextAreaElement).value; error.value = ""; phraseUpgradeOffer.value = false; }}
+              onInput$={(e) => { mnemonic.value = (e.target as HTMLTextAreaElement).value; error.value = ""; phraseUpgradeOffer.value = false; phraseProven.value = false; }}
             />
 
             <div class="mb-4">
@@ -1257,7 +1263,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 disabled={loading.value}
                 onClick$={() => {
                   error.value = "";
-                  if (hasWebPhrase.value) {
+                  if (phraseProven.value && mnemonic.value.trim()) {
+                    // Phrase-first entry: the phrase already proved itself
+                    // against the account — no need to ask for it again.
+                    // migrate_custodial_account still verifies it once more.
+                    step.value = "migrate-confirm";
+                  } else if (hasWebPhrase.value) {
                     mnemonic.value = "";
                     step.value = "migrate-phrase";
                   } else {
