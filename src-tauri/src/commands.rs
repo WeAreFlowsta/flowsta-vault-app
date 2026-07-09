@@ -222,6 +222,10 @@ pub struct AppState {
     /// both spawn a fresh conductor — the first one wins, the others
     /// observe the recovered state.
     pub conductor_restart_lock: tokio::sync::Mutex<()>,
+    /// Transient: the deferred (offline-create) registration failed with
+    /// email_already_registered — surfaced via get_identity so the
+    /// Overview can ask for a different address. Cleared on retry.
+    pub registration_conflict: Mutex<bool>,
     /// Dev-only (headless test harness): passphrase stashed by the bridge's
     /// /dev/lock so /dev/unlock can re-unlock without a secret ever leaving
     /// the process. Only written while the auto-approve harness flag is
@@ -349,6 +353,7 @@ impl AppState {
             pending_relay_claim: Mutex::new(None),
             unlock_passphrase: Mutex::new(None),
             conductor_restart_lock: tokio::sync::Mutex::new(()),
+            registration_conflict: Mutex::new(false),
             dev_relock_passphrase: Mutex::new(None),
             cell_credentials: Mutex::new(HashMap::new()),
             credentials_fill_lock: tokio::sync::Mutex::new(()),
@@ -462,6 +467,7 @@ pub fn setup_vault(
     profile_picture: Option<String>,
     hosting_model: Option<String>,
     pending_reconcile: Option<bool>,
+    pending_registration: Option<bool>,
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SetupResult, String> {
@@ -475,6 +481,7 @@ pub fn setup_vault(
         profile_picture,
         hosting_model,
         pending_reconcile.unwrap_or(false),
+        pending_registration.unwrap_or(false),
         app_handle,
         &state,
     )
@@ -493,6 +500,7 @@ pub(crate) fn setup_vault_inner(
     profile_picture: Option<String>,
     hosting_model: Option<String>,
     pending_reconcile: bool,
+    pending_registration: bool,
     app_handle: tauri::AppHandle,
     state: &Arc<AppState>,
 ) -> Result<SetupResult, String> {
@@ -566,6 +574,7 @@ pub(crate) fn setup_vault_inner(
         totp_backup_codes: None,
         totp_enabled: None,
         pending_reconcile,
+        pending_registration,
     };
 
     // Encrypt and save (with unencrypted display identifier for unlock screen)
@@ -1341,6 +1350,8 @@ pub fn get_identity(state: State<'_, Arc<AppState>>) -> Result<VaultIdentity, St
         web_agent_pub_key,
         hosting_model: config.hosting_model.clone(),
         pending_reconcile: config.pending_reconcile,
+        pending_registration: config.pending_registration,
+        registration_conflict: *state.registration_conflict.lock().unwrap(),
     })
 }
 
@@ -1361,6 +1372,12 @@ pub struct VaultIdentity {
     /// True after an OFFLINE restore until the account layer (username,
     /// display name, picture) has been reattached via one A4 grant.
     pub pending_reconcile: bool,
+    /// True for an offline-CREATED identity until its deferred A3
+    /// registration lands.
+    pub pending_registration: bool,
+    /// Transient: the deferred registration hit email_already_registered —
+    /// the Overview asks for a different address.
+    pub registration_conflict: bool,
 }
 
 /// Validate a recovery phrase without storing it.

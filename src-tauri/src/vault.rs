@@ -127,6 +127,13 @@ pub struct VaultConfig {
     /// vaults → false.
     #[serde(default)]
     pub pending_reconcile: bool,
+
+    /// True when this identity was CREATED offline (Flowsta unreachable):
+    /// the phrase ceremony and keys are fully local, and the A3
+    /// registration (using web_email + display_name from this config) is
+    /// deferred to the reconcile task. Identity-first, account-later.
+    #[serde(default)]
+    pub pending_registration: bool,
 }
 
 /// Encrypted vault on disk (serialized as JSON).
@@ -360,6 +367,7 @@ mod tests {
             totp_backup_codes: None,
             totp_enabled: None,
             pending_reconcile: false,
+            pending_registration: false,
         };
 
         let encrypted = encrypt_vault(&config, "test-password-123").unwrap();
@@ -407,6 +415,7 @@ mod tests {
             totp_backup_codes: None,
             totp_enabled: None,
             pending_reconcile: false,
+            pending_registration: false,
         };
 
         let encrypted = encrypt_vault(&config, "correct-password").unwrap();

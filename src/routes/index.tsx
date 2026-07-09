@@ -26,6 +26,8 @@ interface VaultIdentity {
   web_agent_pub_key: string | null;
   hosting_model: string | null;
   pending_reconcile: boolean;
+  pending_registration: boolean;
+  registration_conflict: boolean;
 }
 
 interface BackupRecordSummary {
@@ -94,6 +96,33 @@ export default component$(() => {
   // Plan/quota status — public endpoint, keyed to the account the
   // subscription is attached to. Upgrading is a web (Stripe) flow.
   const planInfo = useSignal<{ tier: string; used: number; limit: number } | null>(null);
+  // Offline-create email collision: retry with a different address.
+  const conflictEmail = useSignal("");
+  const conflictBusy = useSignal(false);
+  const conflictNote = useSignal("");
+  const retryRegistrationEmail = $(async () => {
+    const email = conflictEmail.value.trim().toLowerCase();
+    if (!email.includes("@")) {
+      conflictNote.value = "Enter a valid email address.";
+      return;
+    }
+    conflictBusy.value = true;
+    conflictNote.value = "";
+    try {
+      await invoke("update_pending_registration_email", {
+        apiUrl: __API_URL__,
+        email,
+      });
+      conflictNote.value = "";
+      identity.value = await invoke<VaultIdentity>("get_identity");
+    } catch (e) {
+      conflictNote.value = String(e).includes("email_already_registered")
+        ? "That address is registered to another account too — try a different one."
+        : String(e);
+    } finally {
+      conflictBusy.value = false;
+    }
+  });
   // Plan fetch is retryable: it aborts fast while offline (fire-drill
   // finding) and re-runs when connectivity returns or the profile syncs.
   const fetchPlan = $(async () => {
@@ -431,10 +460,12 @@ export default component$(() => {
       {/* Offline-restore reconcile banner: identity is network-confirmed;
           only the account-layer conveniences are still detached. Clears
           itself when the reconcile task lands (profile-synced refetch). */}
-      {id?.pending_reconcile && (
+      {(id?.pending_reconcile || id?.pending_registration) && (
         <div class="mb-6 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4">
           <p class="mb-1 text-sm font-semibold text-sky-200">
-            Restored offline — your identity is active on the Flowsta network
+            {id?.pending_registration
+              ? "Created offline — your identity is active on the Flowsta network"
+              : "Restored offline — your identity is active on the Flowsta network"}
           </p>
           <p class="text-xs text-gray-400">
             {sigCount > 0
@@ -442,9 +473,42 @@ export default component$(() => {
               : sigsLoaded
                 ? "No public records yet for this identity — that's normal for identities that haven't signed anything."
                 : "Looking for your records on the community network…"}
-            {" "}Your @username, display name, and email reconnect
-            automatically when Flowsta is reachable.
+            {" "}
+            {id?.pending_registration
+              ? "Your Flowsta account (email verification, @username) attaches automatically when Flowsta is reachable."
+              : "Your @username, display name, and email reconnect automatically when Flowsta is reachable."}
           </p>
+          {id?.registration_conflict && (
+            <div class="mt-3 border-t border-sky-800/50 pt-3">
+              <p class="mb-2 text-xs text-amber-300">
+                That email already belongs to another Flowsta account. Use a
+                different address — or if that account is yours, restore it
+                with its recovery phrase instead.
+              </p>
+              <div class="flex gap-2">
+                <input
+                  type="email"
+                  value={conflictEmail.value}
+                  onInput$={(e) => {
+                    conflictEmail.value = (e.target as HTMLInputElement).value;
+                    conflictNote.value = "";
+                  }}
+                  placeholder="you@example.com"
+                  class="flex-1 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <PillButton
+                  accent="sky"
+                  disabled={conflictBusy.value || !conflictEmail.value.trim()}
+                  onClick$={retryRegistrationEmail}
+                >
+                  {conflictBusy.value ? "Attaching…" : "Use this email"}
+                </PillButton>
+              </div>
+              {conflictNote.value && (
+                <p class="mt-2 text-xs text-red-400">{conflictNote.value}</p>
+              )}
+            </div>
+          )}
         </div>
       )}
 

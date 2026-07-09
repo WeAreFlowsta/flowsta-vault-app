@@ -900,6 +900,7 @@ pub async fn migrate_custodial_account(
             me.profile_picture.clone(),
             Some("device-hosted".to_string()),
             false, // migration is online by construction — no reconcile needed
+            false, // ...and registration long predates it
             app_handle.clone(),
             &state,
         )?;

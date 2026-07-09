@@ -55,9 +55,10 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   // phrase-first sign-in decrypted the recovery email with it) — the
   // upgrade flow then skips the re-entry step.
   const phraseProven = useSignal(false);
-  // True when this vault was created via the offline path — the done
-  // screen explains the reconcile story.
+  // True when this vault was created/restored via the offline path — the
+  // done screen explains the reconcile story.
   const restoredOffline = useSignal(false);
+  const createdOffline = useSignal(false);
   const phraseVerified = useSignal(false);
   const error = useSignal("");
   const loading = useSignal(false);
@@ -540,6 +541,42 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       step.value = "done";
     } catch (e) {
       const msg = String(e);
+      if (msg.includes("api_unreachable")) {
+        // Flowsta unreachable — identity first, account later: create
+        // locally now; the deferred registration attaches automatically
+        // when Flowsta answers (using the email + name entered above).
+        try {
+          progressMessage.value =
+            "Flowsta unreachable — creating your identity on this device...";
+          const setupResult = await invoke<{ agent_pub_key: string; did: string }>(
+            "setup_vault",
+            {
+              mnemonic: newMnemonic.value,
+              password: createPassword.value,
+              webAgentPubKey: null,
+              webEmail: createEmail.value.trim(),
+              webUsername: null,
+              displayName: createDisplayName.value.trim() || null,
+              profilePicture: null,
+              hostingModel: "device-hosted",
+              pendingReconcile: true,
+              pendingRegistration: true,
+            }
+          );
+          webUser.email = createEmail.value.trim();
+          newMnemonic.value = "";
+          createPassword.value = "";
+          createPassword2.value = "";
+          result.agentPubKey = setupResult.agent_pub_key;
+          result.did = setupResult.did;
+          createdOffline.value = true;
+          step.value = "done";
+        } catch (e2) {
+          step.value = "create-phrase";
+          error.value = String(e2);
+        }
+        return;
+      }
       step.value = msg.includes("registration_failed") ? "create-form" : "create-phrase";
       if (msg.includes("email_already_registered")) {
         error.value = "An account already exists for this email. Sign in with your Flowsta account instead, or use a different email.";
@@ -1698,7 +1735,20 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               )}
             </div>
 
-            {restoredOffline.value && (
+            {createdOffline.value && (
+            <div class="mb-4 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4 text-left">
+              <p class="mb-1 text-sm font-semibold text-sky-200">
+                Created offline — your identity is already real
+              </p>
+              <p class="text-xs text-gray-400">
+                Your keys live on this device and work on the Flowsta network
+                right now. Your Flowsta account (email verification, @username)
+                attaches automatically when Flowsta is reachable — nothing
+                else to do.
+              </p>
+            </div>
+          )}
+          {restoredOffline.value && (
             <div class="mb-4 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4 text-left">
               <p class="mb-1 text-sm font-semibold text-sky-200">
                 Restored offline — the network confirms your identity

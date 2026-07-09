@@ -115,7 +115,10 @@ pub async fn register_device_identity(
     );
     let signature = hex::encode(sign_with_device_seed(&device_seed, canonical.as_bytes()));
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client build failed: {}", e))?;
     let url = format!(
         "{}/auth/register-device-identity",
         api_url.trim_end_matches('/')
@@ -132,7 +135,7 @@ pub async fn register_device_identity(
         }))
         .send()
         .await
-        .map_err(|e| format!("Registration request failed: {}", e))?;
+        .map_err(|e| format!("api_unreachable: registration request failed: {}", e))?;
 
     let status = resp.status();
     let body: ApiEnvelope = resp
@@ -331,19 +334,46 @@ pub(crate) async fn reconcile_account_layer(
 ) {
     use tauri::Emitter;
 
-    let (pending, seed_vec, agent_b64) = {
+    let (pending, pending_registration, seed_vec, agent_b64) = {
         let config = state.vault_config.lock().unwrap();
         match config.as_ref() {
             Some(c) => (
                 c.pending_reconcile,
+                c.pending_registration,
                 c.device_seed.clone(),
                 c.agent_pub_key_raw_b64.clone(),
             ),
-            None => (false, None, None),
+            None => (false, false, None, None),
         }
     };
-    if !pending {
+    if !pending && !pending_registration {
         return;
+    }
+
+    // Offline-created identities register FIRST (a grant can't succeed for
+    // an unregistered key). Idempotent: agent_key_already_registered counts
+    // as attached, so an interrupted run just repeats harmlessly.
+    let mut registration_attached = false;
+    if pending_registration {
+        match register_deferred(state, api_url).await {
+            Ok(()) => {
+                registration_attached = true;
+                *state.registration_conflict.lock().unwrap() = false;
+            }
+            Err(e) if e.contains("api_unreachable") => {
+                log::info!("[reconcile] API still unreachable — retrying on next unlock/online");
+                return;
+            }
+            Err(e) if e.contains("email_already_registered") => {
+                log::warn!("[reconcile] deferred registration: email already registered — asking for a different address");
+                *state.registration_conflict.lock().unwrap() = true;
+                return;
+            }
+            Err(e) => {
+                log::warn!("[reconcile] deferred registration failed: {}", e);
+                return;
+            }
+        }
     }
     let (Some(seed_vec), Some(agent_b64)) = (seed_vec, agent_b64) else {
         return;
@@ -386,6 +416,9 @@ pub(crate) async fn reconcile_account_layer(
                         cfg.web_agent_pub_key = legacy_web_key.clone();
                     }
                     cfg.pending_reconcile = false;
+                    if registration_attached {
+                        cfg.pending_registration = false;
+                    }
                     match crate::vault::encrypt_vault(cfg, &pw) {
                         Ok(mut encrypted) => {
                             encrypted.display_email =
@@ -422,6 +455,140 @@ pub(crate) async fn reconcile_account_layer(
         }
         Err(e) => log::warn!("[reconcile] grant failed: {}", e),
     }
+}
+
+/// Deferred A3 registration for an offline-CREATED identity. Everything
+/// the canonical registration message needs survives in the config:
+/// device_seed signs, agent_pub_key_raw_b64 + recovery_lookup_hash +
+/// web_email + display_name fill the payload (fresh timestamp — the
+/// server enforces a 5-minute staleness window, so signing happens at
+/// ATTACH time, not create time).
+///
+/// Returns Ok(()) when the account exists after the call (fresh
+/// registration OR agent_key_already_registered — idempotent), and the
+/// raw error code otherwise (email_already_registered is the one the
+/// UI acts on).
+async fn register_deferred(state: &Arc<AppState>, api_url: &str) -> Result<(), String> {
+    let (seed_vec, agent_b64, lookup_hash, email, display_name) = {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config.as_ref().ok_or("Vault is locked")?;
+        (
+            cfg.device_seed.clone().ok_or("No device seed")?,
+            cfg.agent_pub_key_raw_b64.clone().ok_or("No raw agent key")?,
+            cfg.recovery_lookup_hash.clone().ok_or("No lookup hash")?,
+            cfg.web_email.clone().ok_or("no_email_for_registration")?,
+            cfg.display_name.clone(),
+        )
+    };
+    if seed_vec.len() != 32 {
+        return Err("Invalid device seed length".into());
+    }
+    let mut device_seed = [0u8; 32];
+    device_seed.copy_from_slice(&seed_vec);
+
+    let email = email.trim().to_string();
+    let email_hash = hex::encode(Sha256::digest(email.to_lowercase().as_bytes()));
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    let lookup_hash = lookup_hash.to_lowercase();
+    let canonical = format!(
+        "flowsta-register-identity:v1:{}:{}:{}:{}",
+        agent_b64, lookup_hash, email_hash, ts
+    );
+    let signature = hex::encode(sign_with_device_seed(&device_seed, canonical.as_bytes()));
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client build failed: {}", e))?;
+    let resp = client
+        .post(format!(
+            "{}/auth/register-device-identity",
+            api_url.trim_end_matches('/')
+        ))
+        .json(&serde_json::json!({
+            "agent_pub_key": agent_b64,
+            "email": email,
+            "display_name": display_name,
+            "recovery_lookup_hash": lookup_hash,
+            "timestamp": ts,
+            "signature": signature,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("api_unreachable: registration request failed: {}", e))?;
+
+    let status = resp.status();
+    let body: ApiEnvelope = resp
+        .json()
+        .await
+        .map_err(|e| format!("Registration response parse failed: {}", e))?;
+
+    if status.is_success() {
+        // Seed the identicon the server just generated, matching the
+        // online create path — only if the user hasn't set a picture.
+        if let Some(pic) = body.user.and_then(|u| u.profile_picture) {
+            let mut config = state.vault_config.lock().unwrap();
+            if let Some(cfg) = config.as_mut() {
+                if cfg.profile_picture.is_none() {
+                    cfg.profile_picture = Some(pic);
+                }
+            }
+        }
+        log::info!("[reconcile] deferred registration landed — account attached");
+        return Ok(());
+    }
+    let code = body.error.as_deref().unwrap_or("registration_failed");
+    if code == "agent_key_already_registered" {
+        log::info!("[reconcile] deferred registration: key already registered — treating as attached");
+        return Ok(());
+    }
+    Err(code.to_string())
+}
+
+/// Change the email for a pending (offline-created) registration and
+/// retry the attach immediately — the Overview's email_already_registered
+/// banner calls this.
+#[tauri::command]
+pub async fn update_pending_registration_email(
+    api_url: String,
+    email: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let email = email.trim().to_lowercase();
+    if !email.contains('@') {
+        return Err("A valid email address is required".into());
+    }
+    // Persist the new address (set_web_email pattern).
+    {
+        let passphrase = {
+            let mut guard = state.unlock_passphrase.lock().unwrap();
+            guard
+                .as_mut()
+                .and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok())
+        };
+        let Some(pw) = passphrase else {
+            return Err("Vault is locked".into());
+        };
+        let vault_path = state.vault_path.lock().unwrap().clone();
+        let mut config = state.vault_config.lock().unwrap();
+        let cfg = config.as_mut().ok_or("Vault is locked")?;
+        cfg.web_email = Some(email);
+        if let Ok(mut encrypted) = crate::vault::encrypt_vault(cfg, &pw) {
+            encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
+            let _ = crate::vault::save_vault(&vault_path, &encrypted);
+        }
+    }
+    *state.registration_conflict.lock().unwrap() = false;
+    reconcile_account_layer(state.inner(), &api_url, &app_handle).await;
+    // Report the (possibly repeated) conflict so the UI can react in-line.
+    if *state.registration_conflict.lock().unwrap() {
+        return Err("email_already_registered".into());
+    }
+    Ok(())
 }
 
 /// Frontend-triggered reconcile attempt — invoked when the connectivity

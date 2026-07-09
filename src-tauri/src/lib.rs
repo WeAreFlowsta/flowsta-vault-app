@@ -343,6 +343,7 @@ pub fn run() {
             device_identity::vault_grant_login,
             device_identity::restore_device_identity,
             device_identity::attempt_account_reconcile,
+            device_identity::update_pending_registration_email,
             relay_login::relay_claim,
             relay_login::relay_approve,
             relay_login::relay_deny,
