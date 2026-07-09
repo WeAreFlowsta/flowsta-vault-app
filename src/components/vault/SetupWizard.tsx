@@ -164,6 +164,11 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   // the interruption-safety note only then.
   const migrating = useSignal(false);
 
+  // Which door the completed upgrade came through — the done screen's
+  // password copy differs (password door: the web password now unlocks the
+  // vault; phrase door: the password chosen on the restore screen does).
+  const usedPhraseDoor = useSignal(false);
+
   // Cohort-2 / lost-phrase: the server mints (or re-mints) the account's
   // phrase and binds its lookup hash; the user then does the write-down
   // ceremony with it and it becomes the seed of their device identity.
@@ -245,6 +250,13 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         jwt: jwt.value,
         password: loginPassword.value,
         mnemonic: mnemonic.value,
+        // Phrase-first entry: the account password is a throwaway the user
+        // never saw — the vault must use the password they chose on the
+        // restore screen. Password entry: null = the web password becomes
+        // the vault password (the copy on the done screen says so).
+        vaultPassword: phraseProven.value && restorePassword.value
+          ? restorePassword.value
+          : null,
       });
 
       migSummary.recordsMigrated = summary.records_migrated;
@@ -256,9 +268,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       result.did = summary.did;
       webUser.email = summary.email;
 
+      usedPhraseDoor.value = phraseProven.value;
       mnemonic.value = "";
       newMnemonic.value = "";
       loginPassword.value = "";
+      restorePassword.value = "";
+      restorePassword2.value = "";
       step.value = "migrate-done";
     } catch (e) {
       const msg = String(e);
@@ -598,6 +613,16 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   // standard upgrade continuation runs unchanged from here.
   const handlePhraseUpgrade = $(async () => {
     error.value = "";
+    // The vault created by the upgrade is encrypted with the password
+    // chosen on this screen — the account has no password in this flow.
+    if (restorePassword.value.length < 10) {
+      error.value = "Choose a vault password first (at least 10 characters) — it will unlock the upgraded vault.";
+      return;
+    }
+    if (restorePassword.value !== restorePassword2.value) {
+      error.value = "Vault passwords don't match.";
+      return;
+    }
     loading.value = true;
     const trimmed = mnemonic.value.trim().toLowerCase().replace(/\s+/g, " ");
     try {
@@ -1609,8 +1634,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             <h2 class="mb-2 text-xl font-bold text-white">This Vault Is Your Account Now</h2>
             <p class="mb-3 text-sm text-gray-400">
               Your identity, your data, and your sign-in all moved here.
-              Your old password now only unlocks this Vault — sign-ins
-              everywhere else are approved from it.
+              {usedPhraseDoor.value
+                ? " The vault password you chose unlocks this Vault — sign-ins everywhere else are approved from it."
+                : " Your old password now only unlocks this Vault — sign-ins everywhere else are approved from it."}
             </p>
             <p class="mb-6 text-xs text-amber-300">
               Your recovery phrase is now the one key to your account. No one

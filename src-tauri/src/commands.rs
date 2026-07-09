@@ -776,7 +776,7 @@ pub fn get_conductor_status(state: State<'_, Arc<AppState>>) -> ConductorStatus 
 /// Concurrent callers are serialised by `conductor_restart_lock`: the
 /// first to arrive does the restart, others wait and then observe the
 /// recovered handle on a re-check.
-async fn ensure_conductor_alive(
+pub(crate) async fn ensure_conductor_alive(
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
@@ -1391,6 +1391,111 @@ pub struct VaultIdentity {
 #[tauri::command]
 pub fn validate_recovery_phrase(mnemonic: String) -> bool {
     validate_mnemonic(&mnemonic)
+}
+
+/// True when the phrase re-derives THIS vault's device identity. The
+/// account-upgrade flow checks this before anything server-side runs —
+/// upgrading an existing vault only makes sense with the phrase that
+/// seeded it.
+#[tauri::command]
+pub fn phrase_matches_vault(
+    mnemonic: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    let mnemonic = crate::migration::normalize_mnemonic(&mnemonic);
+    if !validate_mnemonic(&mnemonic) {
+        return Ok(false);
+    }
+    let expected = {
+        let config = state.vault_config.lock().unwrap();
+        config
+            .as_ref()
+            .ok_or("Vault is locked")?
+            .agent_pub_key
+            .clone()
+    };
+    let signing_key =
+        derive_device_keypair(&mnemonic).map_err(|e| format!("Key derivation failed: {}", e))?;
+    Ok(construct_agent_pub_key_string(signing_key.verifying_key().as_bytes()) == expected)
+}
+
+/// Where does the ACCOUNT bound to this vault's phrase live right now?
+/// Resolves the recovery lookup hash and compares the registered agent key
+/// against this device's key.
+///   "device"  — the account's auth authority is this device (upgraded)
+///   "web"     — the account is still custodial (upgrade pending/needed)
+///   "unknown" — no binding resolved or the API is unreachable
+#[tauri::command]
+pub async fn check_account_hosting(
+    api_url: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    let (lookup_hash, device_core32) = {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config.as_ref().ok_or("Vault is locked")?;
+        let hash = match cfg.recovery_lookup_hash.clone() {
+            Some(h) => h.to_lowercase(),
+            None => return Ok("unknown".into()),
+        };
+        let core: Option<[u8; 32]> = cfg
+            .agent_pub_key_raw_b64
+            .as_deref()
+            .and_then(|b64| base64_standard_decode(b64).ok())
+            .filter(|b| b.len() == 39)
+            .map(|b| {
+                let mut k = [0u8; 32];
+                k.copy_from_slice(&b[3..35]);
+                k
+            });
+        match core {
+            Some(c) => (hash, c),
+            None => return Ok("unknown".into()),
+        }
+    };
+
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{}/auth/agent-key-by-lookup-hash?hash={}",
+            api_url.trim_end_matches('/'),
+            lookup_hash
+        ))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|_| "api_unreachable".to_string())?;
+    if !resp.status().is_success() {
+        return Ok("unknown".into());
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|_| "api_unreachable".to_string())?;
+    let key_b64 = match body.get("agent_pub_key").and_then(|v| v.as_str()) {
+        Some(k) => k,
+        None => return Ok("unknown".into()),
+    };
+    let bytes = match base64_standard_decode(key_b64) {
+        Ok(b) => b,
+        Err(_) => return Ok("unknown".into()),
+    };
+    let resolved_core: [u8; 32] = match bytes.len() {
+        32 => {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&bytes);
+            k
+        }
+        39 => {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&bytes[3..35]);
+            k
+        }
+        _ => return Ok("unknown".into()),
+    };
+    Ok(if resolved_core == device_core32 {
+        "device".into()
+    } else {
+        "web".into()
+    })
 }
 
 // ── Web Authentication Commands ─────────────────────────────────────

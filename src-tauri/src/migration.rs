@@ -692,6 +692,38 @@ struct MigrationProgress {
     message: String,
 }
 
+/// Restart the conductor stack so a config change (the backfilled private
+/// cell material) takes effect — cell installs are decided at conductor
+/// start. Waits out an in-flight start first: shutting the stack down
+/// mid-start races the startup task (the double-stack hazard), and the
+/// restart itself goes through the watchdog's serialized recovery path.
+async fn restart_conductor_for_upgrade(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        let starting = matches!(
+            *state.conductor_status.lock().unwrap(),
+            crate::conductor::ConductorStatus::Starting { .. }
+        );
+        if !starting {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(
+                "Your vault is still starting up — wait for it to finish, then retry the upgrade."
+                    .to_string(),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    if let Some(handle) = state.conductor_handle.lock().unwrap().take() {
+        handle.shutdown();
+    }
+    crate::commands::ensure_conductor_alive(state, app_handle).await
+}
+
 fn emit_progress(app: &tauri::AppHandle, stage: &'static str, message: &str) {
     let _ = app.emit(
         "migration-progress",
@@ -809,16 +841,29 @@ pub struct MigrationSummary {
     pub agent_pub_key: String,
 }
 
-/// Run the full account upgrade. The wizard calls this after the user has
-/// signed in with the web password, holds the verified phrase, and has
+/// Run the full account upgrade. Called after the user has signed in
+/// (password or phrase-first), holds the verified phrase, and has
 /// explicitly consented. Everything before the final flip call is
 /// non-destructive and retryable.
+///
+/// Runs in three vault situations:
+/// - no vault yet (wizard): creates one mid-flow;
+/// - a vault this flow created on an earlier, interrupted attempt: resumes;
+/// - an existing vault from the custodial-linked era, unlocked, upgrading
+///   in place: backfills the phrase-derived private-cell material and
+///   restarts the conductor so the encrypted cell installs, then proceeds
+///   like a resume. The vault file always keeps ITS OWN unlock password.
+///
+/// `password` is the ACCOUNT password (decrypts the export). The vault
+/// file's password is `vault_password` (fresh vaults; defaults to
+/// `password`) or the cached unlock passphrase (existing vaults).
 #[tauri::command]
 pub async fn migrate_custodial_account(
     api_url: String,
     jwt: String,
     password: String,
     mnemonic: String,
+    vault_password: Option<String>,
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<MigrationSummary, String> {
@@ -837,6 +882,42 @@ pub async fn migrate_custodial_account(
     let lookup_hash = derive_recovery_lookup_hash(&mnemonic)
         .map_err(|e| e.to_string())?
         .to_lowercase();
+
+    // Sort out the vault situation up front, before any server call:
+    // which password the vault file uses, and whether this is an existing
+    // custodial-era vault that needs its private-cell material backfilled.
+    let vault_is_set_up = {
+        let path = state.vault_path.lock().unwrap();
+        crate::vault::vault_exists(&path)
+    };
+    let vault_pw: String = if vault_is_set_up {
+        let mut guard = state.unlock_passphrase.lock().unwrap();
+        let arr = guard
+            .as_mut()
+            .ok_or("A vault already exists on this device — unlock it first, then retry the upgrade")?;
+        let bytes = arr.lock();
+        String::from_utf8(bytes.to_vec())
+            .map_err(|_| "Cached vault passphrase unavailable — lock and unlock, then retry".to_string())?
+    } else {
+        vault_password.unwrap_or_else(|| password.clone())
+    };
+    let legacy_backfill = if vault_is_set_up {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config
+            .as_ref()
+            .ok_or("A vault already exists on this device — unlock it first, then retry the upgrade")?;
+        // The phrase must re-derive THIS vault's identity — an upgraded
+        // vault and its account are the same keypair by construction.
+        if cfg.agent_pub_key != construct_agent_pub_key_string(&device_pub) {
+            return Err(
+                "vault_phrase_mismatch: this isn't the recovery phrase this Vault was created from"
+                    .to_string(),
+            );
+        }
+        cfg.hosting_model.as_deref() != Some("device-hosted")
+    } else {
+        false
+    };
 
     emit_progress(&app_handle, "account", "Checking your account…");
     let me = fetch_me(&api_url, &jwt).await?;
@@ -864,24 +945,55 @@ pub async fn migrate_custodial_account(
     emit_progress(&app_handle, "link", "Linking this device to your identity…");
     link_device_key(&api_url, &device_seed, &device_39, &web_39, &lookup_hash).await?;
 
-    // Create the vault (or resume into an existing one from a previous
-    // attempt — it must be unlocked and built from the SAME phrase).
-    let vault_is_set_up = {
-        let path = state.vault_path.lock().unwrap();
-        crate::vault::vault_exists(&path)
-    };
+    // Create the vault, resume into one this flow created earlier, or
+    // upgrade an existing custodial-era vault in place (phrase-vs-vault
+    // identity already verified up front).
     if vault_is_set_up {
-        let config = state.vault_config.lock().unwrap();
-        let cfg = config
-            .as_ref()
-            .ok_or("A vault already exists on this device — unlock it first, then retry the upgrade")?;
-        let expected = construct_agent_pub_key_string(&device_pub);
-        if cfg.agent_pub_key != expected {
-            return Err(
-                "A vault for a different identity already exists on this device".to_string(),
+        if legacy_backfill {
+            // This vault predates the encrypted private cell: give it the
+            // phrase-derived cell material and the device-hosted marker,
+            // then restart the conductor — cell selection is decided at
+            // conductor start. Everything here is re-derivable from the
+            // phrase; retries land in the resume path below.
+            emit_progress(&app_handle, "vault", "Preparing your vault's private cell…");
+            let data_key = crate::key_derivation::derive_data_encryption_key(&mnemonic)
+                .map_err(|e| format!("Data key derivation failed: {}", e))?;
+            let private_network_seed =
+                crate::key_derivation::derive_private_network_seed(&mnemonic)
+                    .map_err(|e| format!("Network seed derivation failed: {}", e))?;
+            {
+                let vault_path = state.vault_path.lock().unwrap().clone();
+                let mut config = state.vault_config.lock().unwrap();
+                let cfg = config.as_mut().ok_or("Vault locked mid-upgrade")?;
+                cfg.data_key = Some(data_key.to_vec());
+                cfg.private_network_seed = Some(private_network_seed);
+                cfg.hosting_model = Some("device-hosted".to_string());
+                cfg.web_email = Some(mapped.email.clone());
+                if cfg.web_username.is_none() {
+                    cfg.web_username = mapped.username.clone().or(me.username.clone());
+                }
+                if cfg.display_name.is_none() {
+                    cfg.display_name = mapped.display_name.clone().or(me.display_name.clone());
+                }
+                if cfg.profile_picture.is_none() {
+                    cfg.profile_picture = me.profile_picture.clone();
+                }
+                let mut encrypted = crate::vault::encrypt_vault(cfg, &vault_pw)
+                    .map_err(|e| format!("Vault save failed: {}", e))?;
+                encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
+                crate::vault::save_vault(&vault_path, &encrypted)
+                    .map_err(|e| format!("Vault save failed: {}", e))?;
+            }
+            emit_progress(
+                &app_handle,
+                "vault",
+                "Restarting your vault to add the private cell…",
             );
+            restart_conductor_for_upgrade(&state, &app_handle).await?;
+            log::info!("[migration] existing vault backfilled for device hosting");
+        } else {
+            log::info!("[migration] resuming with the existing vault");
         }
-        log::info!("[migration] resuming with the existing vault");
     } else {
         emit_progress(&app_handle, "vault", "Creating your vault…");
         let web_agent_str = {
@@ -892,7 +1004,7 @@ pub async fn migrate_custodial_account(
         };
         crate::commands::setup_vault_inner(
             mnemonic.clone(),
-            password.clone(),
+            vault_pw.clone(),
             Some(web_agent_str),
             Some(mapped.email.clone()),
             mapped.username.clone().or(me.username.clone()),
@@ -983,7 +1095,7 @@ pub async fn migrate_custodial_account(
             cfg.totp_backup_codes = Some(totp.backup_codes.clone());
             cfg.totp_enabled = Some(totp.enabled);
             cfg.web_email = Some(mapped.email.clone());
-            let mut encrypted = crate::vault::encrypt_vault(cfg, &password)
+            let mut encrypted = crate::vault::encrypt_vault(cfg, &vault_pw)
                 .map_err(|e| format!("Vault save failed: {}", e))?;
             encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
             crate::vault::save_vault(&vault_path, &encrypted)
@@ -1045,7 +1157,7 @@ pub async fn migrate_custodial_account(
         let mut config = state.vault_config.lock().unwrap();
         if let Some(cfg) = config.as_mut() {
             cfg.web_agent_pub_key = Some(export.web_agent_b64.clone());
-            match crate::vault::encrypt_vault(cfg, &password) {
+            match crate::vault::encrypt_vault(cfg, &vault_pw) {
                 Ok(mut encrypted) => {
                     encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
                     if let Err(e) = crate::vault::save_vault(&vault_path, &encrypted) {
@@ -1057,6 +1169,10 @@ pub async fn migrate_custodial_account(
         }
     }
     *state.linked_web_agent_key.lock().unwrap() = Some(export.web_agent_b64.clone());
+
+    // Views branch on the hosting model (quota key, signature reads,
+    // account cards) — tell them the world changed.
+    let _ = app_handle.emit("profile-updated", serde_json::json!({}));
 
     Ok(MigrationSummary {
         records_migrated: mapped.records.len(),

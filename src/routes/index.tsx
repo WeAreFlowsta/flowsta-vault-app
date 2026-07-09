@@ -8,6 +8,7 @@ import { CopyButton } from "~/components/ui/CopyButton";
 import { PillButton } from "~/components/ui/PillButton";
 import { GlassButton } from "~/components/common/GlassButton";
 import ImageCropper from "~/components/sign-it/ImageCropper";
+import { UpgradeAccountCard } from "~/components/vault/UpgradeAccountCard";
 import { connectionStatusContext, signaturesContext } from "~/lib/context";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 
@@ -457,6 +458,20 @@ export default component$(() => {
 
   return (
     <div>
+      {/* Account upgrade: a vault from the custodial-linked era (or an
+          upgrade interrupted before the account flipped) finishes moving
+          the account onto this device from here. The card verifies for
+          itself that there is an upgrade to run. */}
+      {id && !id.pending_reconcile && !id.pending_registration && (
+        <UpgradeAccountCard
+          hostingModel={id.hosting_model}
+          webEmail={id.web_email}
+          onUpgraded$={() => {
+            window.location.reload();
+          }}
+        />
+      )}
+
       {/* Offline-restore reconcile banner: identity is network-confirmed;
           only the account-layer conveniences are still detached. Clears
           itself when the reconcile task lands (profile-synced refetch). */}

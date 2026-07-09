@@ -360,6 +360,8 @@ pub fn run() {
             commands::reset_vault,
             commands::get_identity,
             commands::validate_recovery_phrase,
+            commands::phrase_matches_vault,
+            commands::check_account_hosting,
             commands::authenticate_web_account,
             commands::authenticate_2fa,
             commands::check_recovery_phrase_status,
