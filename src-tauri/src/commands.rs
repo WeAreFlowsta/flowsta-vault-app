@@ -4375,6 +4375,30 @@ pub(crate) async fn get_my_linked_signatures_inner(
     if cached_web_key.is_none() && !device_hosted {
         return Err("auto-link not yet complete (cached web agent key unset)".to_string());
     }
+
+    // A native device-hosted account (created here via A3, never migrated)
+    // has NO linked agents by construction: its DID is its own device key,
+    // and it was never linked to a web account. Skip the identity-link-graph
+    // walk entirely — otherwise a brand-new account sits on the signatures
+    // "warming up" spinner waiting out the cold production DHT, trying to
+    // prove an emptiness that is definitional. A migrated/restored account's
+    // DID embeds its original (different) key, so this stays false for them
+    // and the link-graph walk runs as before to surface pre-upgrade sigs.
+    let is_native = {
+        let config = state.vault_config.lock().unwrap();
+        config
+            .as_ref()
+            .map(|c| c.did == format!("did:flowsta:{}", c.agent_pub_key))
+            .unwrap_or(false)
+    };
+    if device_hosted && is_native && cached_web_key.is_none() {
+        log::info!("[get_my_linked_signatures] native account — no linked agents by construction");
+        return Ok(LinkedSignaturesResult {
+            signatures: Vec::new(),
+            has_linked_agents: false,
+        });
+    }
+
     let had_cache = cached_web_key.is_some();
     let (linked_keys, dht_settled) =
         fetch_linked_agent_keys(state, &admin_ws, app_port, &apps, cached_web_key).await;
