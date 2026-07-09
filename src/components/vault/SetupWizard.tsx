@@ -2,6 +2,8 @@ import { component$, useSignal, useStore, $, type QRL } from "@builder.io/qwik";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
 import { GlassButton } from "~/components/common/GlassButton";
+import { PasswordStrength } from "~/components/vault/PasswordStrength";
+import { checkVaultPassword } from "~/lib/password-strength";
 
 interface SetupWizardProps {
   onComplete$: QRL<() => void>;
@@ -482,8 +484,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       error.value = "Please enter a valid email address.";
       return;
     }
-    if (createPassword.value.length < 10) {
-      error.value = "Vault password must be at least 10 characters.";
+    const pwCheck = checkVaultPassword(createPassword.value);
+    if (!pwCheck.valid) {
+      error.value = pwCheck.hint || "Choose a stronger vault password.";
       return;
     }
     if (createPassword.value !== createPassword2.value) {
@@ -619,8 +622,11 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
     error.value = "";
     // The vault created by the upgrade is encrypted with the password
     // chosen on this screen — the account has no password in this flow.
-    if (restorePassword.value.length < 10) {
-      error.value = "Choose a vault password first (at least 10 characters) — it will unlock the upgraded vault.";
+    const upgPw = checkVaultPassword(restorePassword.value);
+    if (!upgPw.valid) {
+      error.value = restorePassword.value
+        ? (upgPw.hint || "Choose a stronger vault password.")
+        : "Choose a vault password first — it will unlock the upgraded vault.";
       return;
     }
     if (restorePassword.value !== restorePassword2.value) {
@@ -713,8 +719,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
     const trimmed = mnemonic.value.trim().toLowerCase().replace(/\s+/g, " ");
     mnemonic.value = trimmed;
     if (!trimmed) return;
-    if (restorePassword.value.length < 10) {
-      error.value = "Vault password must be at least 10 characters.";
+    const rPw = checkVaultPassword(restorePassword.value);
+    if (!rPw.valid) {
+      error.value = rPw.hint || "Choose a stronger vault password.";
       return;
     }
     if (restorePassword.value !== restorePassword2.value) {
@@ -903,11 +910,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 <label class="mb-1 block text-xs font-medium text-gray-400">Vault password</label>
                 <input
                   type="password"
-                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                  class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                   placeholder="At least 10 characters"
                   value={createPassword.value}
                   onInput$={(e) => { createPassword.value = (e.target as HTMLInputElement).value; error.value = ""; }}
                 />
+                <PasswordStrength password={createPassword.value} />
               </div>
 
               <div class="mb-4">
@@ -1067,11 +1075,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               <label class="mb-1 block text-xs font-medium text-gray-400">New vault password</label>
               <input
                 type="password"
-                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                 placeholder="At least 10 characters"
                 value={restorePassword.value}
                 onInput$={(e) => { restorePassword.value = (e.target as HTMLInputElement).value; error.value = ""; }}
               />
+              <PasswordStrength password={restorePassword.value} />
             </div>
             <div class="mb-4">
               <label class="mb-1 block text-xs font-medium text-gray-400">Confirm vault password</label>

@@ -458,6 +458,59 @@ pub struct SetupResult {
     pub did: String,
 }
 
+/// Vault-password policy — MUST mirror src/lib/password-strength.ts
+/// `checkVaultPassword`. Enforced server-side wherever the user CHOOSES a
+/// vault password (setup_vault, change_vault_password) so the rule can't be
+/// bypassed. NOT applied to migration's internal `setup_vault_inner`, which
+/// may reuse a legacy web-account password that predates this policy.
+pub(crate) fn validate_vault_password(pw: &str) -> Result<(), String> {
+    const MIN: usize = 10;
+    const PASSPHRASE: usize = 16;
+    let len = pw.chars().count();
+    if len < MIN {
+        return Err(format!("Vault password must be at least {} characters.", MIN));
+    }
+    let lower = pw.to_lowercase();
+    let is_all_same = pw.chars().next().is_some_and(|c0| pw.chars().all(|c| c == c0));
+    let (mut asc, mut desc) = (len >= 4, len >= 4);
+    let chars: Vec<char> = lower.chars().collect();
+    for w in chars.windows(2) {
+        let d = w[1] as i32 - w[0] as i32;
+        if d != 1 {
+            asc = false;
+        }
+        if d != -1 {
+            desc = false;
+        }
+    }
+    const COMMON: &[&str] = &[
+        "password", "passw0rd", "password1", "password12", "password123",
+        "1234567890", "12345678", "123456789", "qwertyuiop", "qwerty123",
+        "letmein", "welcome", "welcome1", "iloveyou", "admin123", "administrator",
+        "changeme", "trustno1", "monkey123", "dragon123", "flowsta", "flowstavault",
+        "flowsta123", "recoveryphrase", "vaultpassword", "0000000000", "1111111111",
+    ];
+    if is_all_same || asc || desc || COMMON.contains(&lower.as_str()) {
+        return Err("That's a common or predictable password — choose something unique.".into());
+    }
+    let classes = [
+        pw.chars().any(|c| c.is_ascii_lowercase()),
+        pw.chars().any(|c| c.is_ascii_uppercase()),
+        pw.chars().any(|c| c.is_ascii_digit()),
+        pw.chars().any(|c| !c.is_ascii_alphanumeric()),
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count();
+    if classes < 3 && len < PASSPHRASE {
+        return Err(
+            "Mix in upper- and lower-case, numbers, or symbols — or make it 16+ characters."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Set up a new vault from a recovery phrase and web account password.
 /// The web login password is used to encrypt the vault on disk.
 /// After setup, spawns the Holochain conductor in the background.
@@ -477,6 +530,7 @@ pub fn setup_vault(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SetupResult, String> {
+    validate_vault_password(&password)?;
     setup_vault_inner(
         mnemonic,
         password,
@@ -2051,9 +2105,7 @@ pub async fn change_vault_password(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    if new_password.len() < 10 {
-        return Err("New password must be at least 10 characters".into());
-    }
+    validate_vault_password(&new_password)?;
     if new_password == current_password {
         return Err("New password must be different from the current password".into());
     }
@@ -5642,4 +5694,44 @@ pub async fn update_local_profile(
     use tauri::Emitter;
     let _ = app.emit("profile-updated", serde_json::json!({}));
     Ok(())
+}
+
+#[cfg(test)]
+mod password_policy_tests {
+    use super::validate_vault_password;
+
+    #[test]
+    fn rejects_too_short() {
+        assert!(validate_vault_password("Ab1!xyz").is_err()); // 7 chars
+    }
+
+    #[test]
+    fn rejects_common_and_patterns() {
+        assert!(validate_vault_password("password123").is_err());
+        assert!(validate_vault_password("1234567890").is_err()); // sequential
+        assert!(validate_vault_password("aaaaaaaaaa").is_err()); // all same
+    }
+
+    #[test]
+    fn rejects_low_variety_short() {
+        // 12 lowercase-only letters: 1 class, under 16 → rejected.
+        assert!(validate_vault_password("abcdxefghmkq").is_err());
+    }
+
+    #[test]
+    fn accepts_three_classes_min_length() {
+        assert!(validate_vault_password("Tr4ilMix_ok").is_ok()); // upper+lower+digit+symbol, 11
+    }
+
+    #[test]
+    fn accepts_long_passphrase_without_symbols() {
+        // 3+ words, 16+ chars, only lower+space → space is a symbol class here,
+        // but even as low-variety the length gate carries it.
+        assert!(validate_vault_password("correcthorsebatterystaple").is_ok());
+    }
+
+    #[test]
+    fn rejects_two_class_under_sixteen() {
+        assert!(validate_vault_password("lowerUPPERlow").is_err()); // 2 classes, 13 chars
+    }
 }

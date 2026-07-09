@@ -5,6 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
 import { autoLockContext } from "~/lib/context";
 import { clearSignaturesCache } from "~/lib/signatures-cache";
+import { PasswordStrength } from "~/components/vault/PasswordStrength";
+import { checkVaultPassword } from "~/lib/password-strength";
 
 declare const __APP_VERSION__: string;
 
@@ -49,7 +51,7 @@ export default component$(() => {
     }
   });
 
-  const passwordValid = newPassword.value.length >= 10;
+  const passwordValid = checkVaultPassword(newPassword.value).valid;
   const passwordsMatch =
     newPassword.value.length > 0 &&
     newPassword.value === confirmPassword.value;
@@ -172,7 +174,7 @@ export default component$(() => {
                 </label>
                 <input
                   type="password"
-                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                  class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                   placeholder="At least 10 characters"
                   value={newPassword.value}
                   onInput$={(e) => {
@@ -180,11 +182,7 @@ export default component$(() => {
                     changeError.value = "";
                   }}
                 />
-                {newPassword.value.length > 0 && !passwordValid && (
-                  <p class="mt-1 text-xs text-gray-500">
-                    Must be at least 10 characters.
-                  </p>
-                )}
+                <PasswordStrength password={newPassword.value} />
                 {newPassword.value.length > 0 && !notSameAsOld && (
                   <p class="mt-1 text-xs text-gray-500">
                     Must be different from your current password.
