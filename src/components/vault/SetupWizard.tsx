@@ -17,6 +17,7 @@ type Step =
   | "no-phrase"
   | "phrase"
   | "upgrade-offer"
+  | "migrate-choose"
   | "migrate-phrase"
   | "migrate-ceremony"
   | "migrate-confirm"
@@ -1388,14 +1389,15 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   error.value = "";
                   if (phraseProven.value && mnemonic.value.trim()) {
                     // Phrase-first entry: the phrase already proved itself
-                    // against the account — no need to ask for it again.
-                    // migrate_custodial_account still verifies it once more.
+                    // against the account — straight to confirm.
                     step.value = "migrate-confirm";
-                  } else if (hasWebPhrase.value) {
-                    mnemonic.value = "";
-                    step.value = "migrate-phrase";
                   } else {
-                    startMigrationCeremony();
+                    // Password entry: let the user choose how to set up their
+                    // phrase — enter one they have, or create a fresh one.
+                    // The password already proved ownership; we never demand
+                    // the existing phrase.
+                    mnemonic.value = "";
+                    step.value = "migrate-choose";
                   }
                 }}
               >
@@ -1420,6 +1422,58 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           </div>
         )}
 
+        {/* ── Upgrade: choose how to set up the recovery phrase ── */}
+        {step.value === "migrate-choose" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="mb-2 text-2xl font-bold text-white">Set Up Your Recovery Phrase</h2>
+            <p class="mb-6 text-sm text-gray-400">
+              Your recovery phrase becomes the key to your account on this
+              device. {hasWebPhrase.value
+                ? "Enter the one you already have, or create a fresh one now — either way it becomes the only key to your account."
+                : "We'll create one for you to save — it becomes the only key to your account."}
+            </p>
+
+            {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
+
+            <div class="flex flex-col gap-3">
+              {hasWebPhrase.value && (
+                <GlassButton
+                  disabled={loading.value}
+                  onClick$={() => {
+                    error.value = "";
+                    mnemonic.value = "";
+                    step.value = "migrate-phrase";
+                  }}
+                >
+                  I have my recovery phrase
+                </GlassButton>
+              )}
+              <GlassButton
+                variant={hasWebPhrase.value ? "secondary" : "primary"}
+                disabled={loading.value}
+                onClick$={startMigrationCeremony}
+              >
+                {loading.value ? "Preparing..." : "Create a new recovery phrase"}
+              </GlassButton>
+              <button
+                type="button"
+                class="mt-1 text-xs text-gray-500 transition-colors hover:text-gray-300"
+                onClick$={() => { error.value = ""; step.value = "upgrade-offer"; }}
+              >
+                Back
+              </button>
+            </div>
+
+            {hasWebPhrase.value && (
+              <p class="mt-6 text-xs text-gray-500">
+                Creating a new one replaces the phrase on your account — the
+                old one stops working. Choose this if you don't have your
+                phrase saved.
+              </p>
+            )}
+          </div>
+        )}
+
         {/* ── Upgrade: enter the existing recovery phrase ── */}
         {step.value === "migrate-phrase" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
@@ -1429,12 +1483,6 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               identity. It stays on this device and is verified against your
               account before anything changes.
             </p>
-            <p class="mb-4 text-xs text-gray-500">
-              Started an upgrade before that didn't finish? The phrase it
-              showed you is the one on file — if you didn't save it, use
-              "I lost my recovery phrase" below to get a new one.
-            </p>
-
             <textarea
               class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-none"
               rows={4}
@@ -1460,7 +1508,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             <div class="flex justify-between">
               <GlassButton
                 variant="secondary"
-                onClick$={() => { mnemonic.value = ""; error.value = ""; step.value = "upgrade-offer"; }}
+                onClick$={() => { mnemonic.value = ""; error.value = ""; step.value = "migrate-choose"; }}
               >
                 Back
               </GlassButton>

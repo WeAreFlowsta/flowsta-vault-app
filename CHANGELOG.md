@@ -5,6 +5,15 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta2] — 2026-07-09
+
+### Upgrading your account
+- **Migrating with your email and password no longer asks for your recovery
+  phrase.** After you sign in, you choose how to set up your phrase — enter
+  one you already have, or create a fresh one on the spot. Your password
+  already proves the account is yours, so having your old phrase in hand is
+  never required to move your account onto this device.
+
 ## [1.0.0-beta1] — 2026-07-09
 
 Your account lives in your Vault now. Existing vaults upgrade in place — your
