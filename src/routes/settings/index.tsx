@@ -376,7 +376,7 @@ export default component$(() => {
             </div>
             <div class="flex justify-between">
               <span class="text-gray-400">Network</span>
-              <span class="text-white">Holochain 0.6.0</span>
+              <span class="text-white">Holochain 0.6.1</span>
             </div>
             <div class="flex justify-between">
               <span class="text-gray-400">Encryption</span>
@@ -390,20 +390,25 @@ export default component$(() => {
             </h4>
             <p class="text-sm leading-relaxed text-gray-300">
               Your <span class="text-white font-medium">recovery phrase</span> is
-              like a master key that can create other keys. During setup, your
-              Vault used it to generate a unique{" "}
-              <span class="text-white font-medium">device key</span> — a
-              cryptographic identity that only your device holds.
+              the root of your identity. During setup, your Vault used it to
+              derive your{" "}
+              <span class="text-white font-medium">device key</span> — the
+              cryptographic identity that signs as you — along with the keys
+              that encrypt your data. The same phrase always re-creates the
+              same identity, which is how it can restore you on another device.
             </p>
             <p class="text-sm leading-relaxed text-gray-300">
-              Once that device key was created, your recovery phrase was
-              discarded from memory. It is never saved to disk. Only the device
-              key remains, locked behind your password using strong encryption.
+              The phrase itself is never saved — not to disk, and not kept
+              after setup. Only the keys it derived stay on this device, locked
+              behind your password with strong encryption.
             </p>
             <p class="text-sm leading-relaxed text-gray-300">
-              This means even if someone accessed your computer, they would
-              need your password to unlock the key — and they would never find
-              your recovery phrase, because it simply isn't here.
+              So even if someone reached this computer, they would still need
+              your password to unlock anything — and they would never find your
+              recovery phrase, because it isn't here. That is also why the
+              phrase is yours to keep safe: it is the only way to recover your
+              identity, and no one, including Flowsta, can bring it back for
+              you.
             </p>
           </div>
         </div>
