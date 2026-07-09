@@ -12,6 +12,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
+// Release-only: the resource-dir arms in the conductor start/recovery paths
+// call `app_handle.path()`, which the Manager trait provides. cfg-guarded so
+// debug builds don't flag it unused and tempt another cleanup — removing it
+// breaks ONLY release builds (the trap that failed the first 1.0.0-beta1 CI).
+#[cfg(not(debug_assertions))]
+use tauri::Manager;
 
 /// AppWebsocket request timeout for the signature-fetch + sign / revoke /
 /// amend paths. The holochain_websocket default is **60 s** — fine for a
