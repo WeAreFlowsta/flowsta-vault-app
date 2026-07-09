@@ -3453,13 +3453,20 @@ async fn dev_sealed_handler(
     }))))
 }
 
-/// Dev-only: strip the device-hosting fields from the unlocked vault's
-/// config and persist it — manufactures a custodial-era vault so the
-/// in-place account-upgrade path can be exercised without installing a
-/// historical build. The conductor keeps whatever cells it has; the
-/// upgrade re-derives identical material from the phrase and reuses them.
-async fn dev_make_legacy_handler(
+#[derive(serde::Deserialize)]
+struct DevLegacyBody {
+    phrase: String,
+    password: String,
+}
+
+/// Dev-only: create a vault in the custodial-linked ("legacy") shape from
+/// a recovery phrase — hosting_model unset, no private-cell material, so
+/// the conductor starts WITHOUT the v2 encrypted cell, exactly like a vault
+/// from before device hosting. This is the true starting state for the
+/// in-place account-upgrade walkthrough; no historical build needed.
+async fn dev_setup_legacy_handler(
     State(state): State<Arc<IpcState>>,
+    Json(body): Json<DevLegacyBody>,
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     if !auto_approve_enabled() {
         return Err((
@@ -3467,46 +3474,110 @@ async fn dev_make_legacy_handler(
             Json(IpcError { error: "not_found".into(), description: None }),
         ));
     }
-    let passphrase = {
-        let mut guard = state.app_state.unlock_passphrase.lock().unwrap();
-        guard
-            .as_mut()
-            .and_then(|locked| String::from_utf8(locked.lock().to_vec()).ok())
-    };
-    let Some(passphrase) = passphrase else {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(IpcError { error: "vault_locked".into(), description: None }),
-        ));
-    };
-    let vault_path = state.app_state.vault_path.lock().unwrap().clone();
-    let mut config = state.app_state.vault_config.lock().unwrap();
-    let Some(cfg) = config.as_mut() else {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(IpcError { error: "vault_locked".into(), description: None }),
-        ));
-    };
-    cfg.hosting_model = None;
-    cfg.data_key = None;
-    cfg.private_network_seed = None;
-    let mut encrypted = crate::vault::encrypt_vault(cfg, &passphrase).map_err(|e| {
+    let app_state = state.app_state.clone();
+    // setup_vault_inner builds a device-hosted vault; immediately strip it
+    // back to the custodial-era shape (unset hosting model, no cell keys)
+    // and re-save under the same password, then restart so the conductor
+    // comes up WITHOUT the v2 cell.
+    crate::commands::setup_vault_inner(
+        body.phrase.clone(),
+        body.password.clone(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("device-hosted".to_string()),
+        false,
+        false,
+        state.app_handle.clone(),
+        &app_state,
+    )
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(IpcError { error: "save_failed".into(), description: Some(e.to_string()) }),
+            Json(IpcError { error: "setup_failed".into(), description: Some(e) }),
         )
     })?;
-    encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
-    crate::vault::save_vault(&vault_path, &encrypted).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(IpcError { error: "save_failed".into(), description: Some(e.to_string()) }),
-        )
-    })?;
-    log::warn!("DEV: vault config stripped to custodial-era shape via /dev/make-legacy");
+    {
+        let vault_path = app_state.vault_path.lock().unwrap().clone();
+        let mut config = app_state.vault_config.lock().unwrap();
+        if let Some(cfg) = config.as_mut() {
+            cfg.hosting_model = None;
+            cfg.data_key = None;
+            cfg.private_network_seed = None;
+            let mut encrypted = crate::vault::encrypt_vault(cfg, &body.password).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(IpcError { error: "save_failed".into(), description: Some(e.to_string()) }),
+                )
+            })?;
+            encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
+            crate::vault::save_vault(&vault_path, &encrypted).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(IpcError { error: "save_failed".into(), description: Some(e.to_string()) }),
+                )
+            })?;
+        }
+    }
+    log::warn!("DEV: manufactured a custodial-era vault via /dev/setup-legacy-vault");
     Ok(axum::response::IntoResponse::into_response(Json(
         serde_json::json!({ "success": true }),
     )))
+}
+
+/// Dev-only: run the phrase-first account upgrade end to end against the
+/// currently-unlocked legacy vault — the same path the Overview card's
+/// phrase door drives, but callable headlessly for the regression harness.
+async fn dev_run_upgrade_handler(
+    State(state): State<Arc<IpcState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError { error: "not_found".into(), description: None }),
+        ));
+    }
+    let phrase = body
+        .get("phrase")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let api_url = option_env!("FLOWSTA_API_URL")
+        .unwrap_or("https://auth-api.flowsta.com")
+        .to_string();
+    let login = crate::migration::phrase_migration_login(api_url.clone(), phrase.clone())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(IpcError { error: "phrase_login_failed".into(), description: Some(e) }),
+            )
+        })?;
+    let summary = crate::migration::migrate_custodial_account_inner(
+        api_url,
+        login.token,
+        login.password,
+        phrase,
+        None, // existing vault → uses the cached unlock passphrase
+        state.app_handle.clone(),
+        state.app_state.clone(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError { error: "upgrade_failed".into(), description: Some(e) }),
+        )
+    })?;
+    Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({
+        "records_migrated": summary.records_migrated,
+        "cells_disabled": summary.cells_disabled,
+        "did": summary.did,
+        "agent_pub_key": summary.agent_pub_key,
+    }))))
 }
 
 async fn dev_lock_handler(
@@ -3784,7 +3855,8 @@ pub async fn start_ipc_server(
         .route("/dev/sealed", get(dev_sealed_handler))
         .route("/dev/lock", post(dev_lock_handler))
         .route("/dev/unlock", post(dev_unlock_handler))
-        .route("/dev/make-legacy", post(dev_make_legacy_handler))
+        .route("/dev/setup-legacy-vault", post(dev_setup_legacy_handler))
+        .route("/dev/run-upgrade", post(dev_run_upgrade_handler))
         // Global body cap (8 MB) — generous for base64 images/thumbnails/sign
         // payloads, bounds loopback-DoS amplification. /backup opts into a
         // larger limit above. Was axum's implicit 2 MB default (which also

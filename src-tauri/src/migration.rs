@@ -867,7 +867,29 @@ pub async fn migrate_custodial_account(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<MigrationSummary, String> {
-    let state = state.inner().clone();
+    migrate_custodial_account_inner(
+        api_url,
+        jwt,
+        password,
+        mnemonic,
+        vault_password,
+        app_handle,
+        state.inner().clone(),
+    )
+    .await
+}
+
+/// Non-command core so the headless test harness can drive the upgrade
+/// (the Tauri command isn't reachable over the IPC bridge).
+pub(crate) async fn migrate_custodial_account_inner(
+    api_url: String,
+    jwt: String,
+    password: String,
+    mnemonic: String,
+    vault_password: Option<String>,
+    app_handle: tauri::AppHandle,
+    state: Arc<AppState>,
+) -> Result<MigrationSummary, String> {
     let mnemonic = normalize_mnemonic(&mnemonic);
     if !validate_mnemonic(&mnemonic) {
         return Err("Invalid recovery phrase".into());
