@@ -727,6 +727,11 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     // Session approvals don't outlive an unlock session.
     state.approved_apps.lock().unwrap().clear();
 
+    // The 120s post-link "ceremony window" that suppresses the /sign dialog
+    // must not survive a lock either — otherwise it keeps ticking against a
+    // now-locked vault and a re-unlock could land inside a no-dialog window.
+    state.recent_link_approvals.lock().unwrap().clear();
+
     // Cached cap-grant credentials don't either (a reset/re-create after
     // this lock would otherwise reuse grants from a dead chain).
     state.cell_credentials.lock().unwrap().clear();
@@ -833,8 +838,10 @@ async fn ensure_conductor_alive(
             .as_mut()
             .ok_or("[watchdog] cannot restart: vault is locked (no cached passphrase)")?;
         let bytes_locked = arr.lock();
+        // Do NOT include the FromUtf8Error in the message — its Display can
+        // echo the offending (passphrase) bytes into the log.
         String::from_utf8(bytes_locked.to_vec())
-            .map_err(|e| format!("[watchdog] passphrase utf8 error: {}", e))?
+            .map_err(|_| "[watchdog] cached passphrase is not valid UTF-8".to_string())?
     };
 
     // Pull device_seed out of vault_config.
@@ -2072,16 +2079,21 @@ pub async fn change_vault_password(
             .map_err(|e| format!("Failed to reset lair keystore: {}", e))?;
     }
 
-    // 6. Save the re-encrypted vault file.
-    save_vault(&vault_path, &new_encrypted).map_err(|e| format!("Save failed: {}", e))?;
-
-    // 7. Swap the cached unlock passphrase so the watchdog and background
-    // config writes (e.g. claim_web_username) use the new password.
+    // 6. Swap the cached unlock passphrase to NEW *before* writing the new
+    // vault file. Background config writers (set_web_email,
+    // persist_web_agent_pub_key, reconcile) re-encrypt the vault with the
+    // cached passphrase and do NOT take conductor_restart_lock — if one ran
+    // between the save and the swap it would rewrite the vault under the OLD
+    // password and lock the user out of their new one. Swapping first means
+    // any such writer uses NEW and stays consistent with the file we save next.
     *state.unlock_passphrase.lock().unwrap() = Some(
         lair_keystore_api::dependencies::sodoken::LockedArray::from(
             new_password.as_bytes().to_vec(),
         ),
     );
+
+    // 7. Save the re-encrypted vault file (under the new password).
+    save_vault(&vault_path, &new_encrypted).map_err(|e| format!("Save failed: {}", e))?;
 
     log::info!("Vault password changed — restarting conductor under the new passphrase.");
 

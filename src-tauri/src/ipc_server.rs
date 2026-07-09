@@ -25,7 +25,7 @@ use crate::key_derivation::{
     construct_agent_pub_key_string, decode_agent_pub_key_string, sign_with_device_seed,
 };
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, Method, StatusCode},
     response::Json,
     routing::{get, post},
@@ -781,6 +781,23 @@ async fn authenticate_handler(
             )
         })?;
 
+        // Reserved-prefix refusal (same as /sign and /sign-document): Flowsta's
+        // own auth protocols (vault-grant, relay-login) are raw-Ed25519 over
+        // `flowsta-…` canonical strings. Without this, an approved app could get
+        // a generic "sign in" dialog accepted and actually mint a real Flowsta
+        // session signature elsewhere (cross-protocol signing).
+        if challenge_bytes.starts_with(b"flowsta-") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(IpcError {
+                    error: "reserved_prefix".into(),
+                    description: Some(
+                        "Challenges with the reserved 'flowsta-' prefix cannot be signed via /authenticate.".into(),
+                    ),
+                }),
+            ));
+        }
+
         let mut seed_arr = [0u8; 32];
         seed_arr.copy_from_slice(device_seed);
         let sig = sign_with_device_seed(&seed_arr, &challenge_bytes);
@@ -1242,6 +1259,19 @@ async fn revoke_identity_handler(
 ) -> Result<Json<RevokeIdentityResponse>, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "revoke-identity");
+
+    // Unlinking is a first-party dashboard action. Without this gate ANY web
+    // page could unlink the user's apps (integrity/DoS + re-link phishing),
+    // since the handler otherwise takes the target key straight from the body.
+    if !is_flowsta_origin(origin.as_deref()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "forbidden".into(),
+                description: Some("revoke-identity is only available to Flowsta.".into()),
+            }),
+        ));
+    }
 
     // Capture client_id before removing the entry so we can purge its scopes.
     let client_id_to_remove = {
@@ -3682,7 +3712,12 @@ pub async fn start_ipc_server(
         .route("/connections", get(connections_handler))
         .route("/revoke-identity", post(revoke_identity_handler))
         .route("/link-status", get(link_status_handler))
-        .route("/backup", post(backup_handler))
+        // Backups can be up to MAX_BACKUP_SIZE (50 MB); override the global cap
+        // for this one route so large backups aren't silently rejected.
+        .route(
+            "/backup",
+            post(backup_handler).layer(DefaultBodyLimit::max(55 * 1024 * 1024)),
+        )
         .route("/backup/list", get(backup_list_handler))
         .route("/backup/retrieve", post(backup_retrieve_handler))
         .route("/backup/delete", post(backup_delete_handler))
@@ -3693,6 +3728,11 @@ pub async fn start_ipc_server(
         .route("/dev/sealed", get(dev_sealed_handler))
         .route("/dev/lock", post(dev_lock_handler))
         .route("/dev/unlock", post(dev_unlock_handler))
+        // Global body cap (8 MB) — generous for base64 images/thumbnails/sign
+        // payloads, bounds loopback-DoS amplification. /backup opts into a
+        // larger limit above. Was axum's implicit 2 MB default (which also
+        // silently broke large backups).
+        .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
         .layer(cors)
         .with_state(ipc_state);
 
