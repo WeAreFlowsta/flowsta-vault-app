@@ -241,12 +241,21 @@ export default component$(() => {
           {/* Reset Vault */}
           <div class="rounded-lg border border-red-900/50 bg-red-950/20 p-6">
             <h3 class="mb-2 text-lg font-semibold text-white">Reset Vault</h3>
-            <p class="mb-4 text-sm text-gray-400">
+            <p class="mb-3 text-sm text-gray-400">
               Erases everything stored on this device — your identity keys,
-              conductor data, and every connected app's links and saved
-              backups. Your identity and signatures come back when you set up
-              again with your recovery phrase. Your Flowsta account is not
-              affected.
+              conductor data, your private data, and every connected app's
+              links and saved backups. Your Flowsta account is not affected.
+            </p>
+            <p class="mb-4 text-sm text-gray-400">
+              Two things bring your account back afterward:
+              <span class="text-gray-200"> your recovery phrase</span> restores
+              your identity and signatures, and
+              <span class="text-gray-200"> a data export</span> restores your
+              private data and your apps' backups. Before you reset, make sure
+              you have your recovery phrase, and export your data from
+              <a href="/your-data/" class="text-amber-400 hover:text-amber-300"> Your Data → Export All Data</a>
+              (save the file somewhere outside this app). Without both, your
+              private data and app backups can't be recovered.
             </p>
 
             {!showResetConfirm.value ? (
@@ -261,9 +270,11 @@ export default component$(() => {
             ) : (
               <div>
                 <p class="mb-3 text-sm font-medium text-red-400">
-                  This permanently erases this device — including connected apps
-                  and their backups — and cannot be undone. Only your recovery
-                  phrase can restore your identity.
+                  This permanently erases this device — your private data,
+                  connected apps, and their backups — and cannot be undone.
+                  Your recovery phrase restores your identity and signatures;
+                  your private data and app backups come back only from a data
+                  export. Make sure you have both before you continue.
                 </p>
                 <div class="flex gap-3">
                   <GlassButton
