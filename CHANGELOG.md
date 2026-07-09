@@ -5,6 +5,15 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc1] — 2026-07-09
+
+Release candidate for 1.0. Everything from the 1.0.0 beta series — creating
+and upgrading your account on your own device, working even when Flowsta is
+unreachable, and Sign It from the web — brought together. Since the last
+beta: the Start at Login control is tidied up, and the About screen reports
+the correct network version and explains how your identity stays safe more
+clearly.
+
 ## [1.0.0-beta5] — 2026-07-09
 
 ### New in this release
