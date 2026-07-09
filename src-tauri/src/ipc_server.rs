@@ -3453,6 +3453,62 @@ async fn dev_sealed_handler(
     }))))
 }
 
+/// Dev-only: strip the device-hosting fields from the unlocked vault's
+/// config and persist it — manufactures a custodial-era vault so the
+/// in-place account-upgrade path can be exercised without installing a
+/// historical build. The conductor keeps whatever cells it has; the
+/// upgrade re-derives identical material from the phrase and reuses them.
+async fn dev_make_legacy_handler(
+    State(state): State<Arc<IpcState>>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError { error: "not_found".into(), description: None }),
+        ));
+    }
+    let passphrase = {
+        let mut guard = state.app_state.unlock_passphrase.lock().unwrap();
+        guard
+            .as_mut()
+            .and_then(|locked| String::from_utf8(locked.lock().to_vec()).ok())
+    };
+    let Some(passphrase) = passphrase else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError { error: "vault_locked".into(), description: None }),
+        ));
+    };
+    let vault_path = state.app_state.vault_path.lock().unwrap().clone();
+    let mut config = state.app_state.vault_config.lock().unwrap();
+    let Some(cfg) = config.as_mut() else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError { error: "vault_locked".into(), description: None }),
+        ));
+    };
+    cfg.hosting_model = None;
+    cfg.data_key = None;
+    cfg.private_network_seed = None;
+    let mut encrypted = crate::vault::encrypt_vault(cfg, &passphrase).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError { error: "save_failed".into(), description: Some(e.to_string()) }),
+        )
+    })?;
+    encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
+    crate::vault::save_vault(&vault_path, &encrypted).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError { error: "save_failed".into(), description: Some(e.to_string()) }),
+        )
+    })?;
+    log::warn!("DEV: vault config stripped to custodial-era shape via /dev/make-legacy");
+    Ok(axum::response::IntoResponse::into_response(Json(
+        serde_json::json!({ "success": true }),
+    )))
+}
+
 async fn dev_lock_handler(
     State(state): State<Arc<IpcState>>,
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
@@ -3728,6 +3784,7 @@ pub async fn start_ipc_server(
         .route("/dev/sealed", get(dev_sealed_handler))
         .route("/dev/lock", post(dev_lock_handler))
         .route("/dev/unlock", post(dev_unlock_handler))
+        .route("/dev/make-legacy", post(dev_make_legacy_handler))
         // Global body cap (8 MB) — generous for base64 images/thumbnails/sign
         // payloads, bounds loopback-DoS amplification. /backup opts into a
         // larger limit above. Was axum's implicit 2 MB default (which also
