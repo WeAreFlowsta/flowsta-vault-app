@@ -37,7 +37,7 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
 
   // Set once a sign-in door succeeded.
   const session = useStore({ jwt: "", accountPassword: "", email: "" });
-  const summary = useStore({ records: 0, email: "", did: "" });
+  const summary = useStore({ records: 0, email: "", did: "", totpSkipped: false });
 
   // Show the card only when there is genuinely an upgrade to run. The
   // probe resolves where the account bound to this vault's phrase lives:
@@ -167,6 +167,7 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
         records_migrated: number;
         email: string;
         did: string;
+        totp_skipped: boolean;
       }>("migrate_custodial_account", {
         apiUrl: __API_URL__,
         jwt: session.jwt,
@@ -178,6 +179,7 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
       summary.records = result.records_migrated;
       summary.email = result.email;
       summary.did = result.did;
+      summary.totpSkipped = result.totp_skipped;
       mnemonic.value = "";
       password.value = "";
       session.accountPassword = "";
@@ -395,6 +397,12 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
             everywhere are approved from this Vault; your password no longer
             signs you in anywhere.
           </p>
+          {summary.totpSkipped && (
+            <p class="mb-2 text-xs text-gray-400">
+              Your old 2FA settings couldn't be carried over — that's fine:
+              approving sign-ins from this Vault replaces 2FA.
+            </p>
+          )}
           <p class="mb-4 text-xs text-amber-300">
             Your recovery phrase is now the one key to your account — no one,
             including Flowsta, can recover it for you.

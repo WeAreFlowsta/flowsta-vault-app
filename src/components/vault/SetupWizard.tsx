@@ -109,6 +109,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const migSummary = useStore({
     recordsMigrated: 0,
     totpMoved: false,
+    totpSkipped: false,
     cellsDisabled: 0,
     email: "",
     did: "",
@@ -241,6 +242,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         records_migrated: number;
         sessions_skipped: number;
         totp_moved: boolean;
+        totp_skipped: boolean;
         cells_disabled: string[];
         backup_label: string;
         email: string;
@@ -262,6 +264,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
 
       migSummary.recordsMigrated = summary.records_migrated;
       migSummary.totpMoved = summary.totp_moved;
+      migSummary.totpSkipped = summary.totp_skipped;
       migSummary.cellsDisabled = summary.cells_disabled.length;
       migSummary.email = summary.email;
       migSummary.did = summary.did;
@@ -1706,6 +1709,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   {migSummary.totpMoved ? " · 2FA settings" : ""}
                   {" · encrypted local backup"}
                 </p>
+                {migSummary.totpSkipped && (
+                  <p class="mt-1 text-xs text-gray-400">
+                    Your old 2FA settings couldn't be carried over — that's
+                    fine: approving sign-ins from this Vault replaces 2FA.
+                  </p>
+                )}
               </div>
               <button
                 class="text-xs text-gray-500 hover:text-gray-400"

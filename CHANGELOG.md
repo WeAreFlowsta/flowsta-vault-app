@@ -5,6 +5,23 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta3] — 2026-07-09
+
+### Upgrading your account
+- **2FA settings no longer block the upgrade.** Accounts that changed or
+  reset their password after setting up two-factor auth held the old 2FA
+  secret under an earlier password, which stopped the upgrade with a
+  decryption error. The upgrade now completes and simply notes that the old
+  2FA settings didn't carry over — approving sign-ins from your Vault
+  replaces 2FA anyway.
+
+### Linux
+- **The "Sign It with Flowsta Vault" right-click entry no longer becomes the
+  default for your files.** It stays available under "Open With," but Vault
+  is no longer registered for the catch-all "unknown file" type or for
+  source/config files, so double-clicking your files opens the app you
+  expect. Updating clears the old association automatically.
+
 ## [1.0.0-beta2] — 2026-07-09
 
 ### Upgrading your account

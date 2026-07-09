@@ -9,4 +9,20 @@ Terminal=false
 Categories=Utility;Security;
 StartupWMClass=flowsta-vault
 NoDisplay=true
-MimeType=application/octet-stream;application/json;application/pdf;application/rtf;application/xml;application/zip;application/x-tar;application/gzip;application/x-7z-compressed;application/x-rar-compressed;application/msword;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.ms-excel;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.ms-powerpoint;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/vnd.oasis.opendocument.text;application/vnd.oasis.opendocument.spreadsheet;application/vnd.oasis.opendocument.presentation;text/plain;text/csv;text/html;text/markdown;text/xml;text/x-python;text/x-rust;text/x-go;text/javascript;image/png;image/jpeg;image/gif;image/bmp;image/tiff;image/webp;image/svg+xml;image/heic;image/heif;audio/mpeg;audio/mp4;audio/wav;audio/x-wav;audio/flac;audio/ogg;audio/webm;audio/x-m4a;video/mp4;video/x-matroska;video/quicktime;video/webm;video/x-msvideo;video/mpeg;video/x-flv;
+# MIME types this app offers to sign — this is what adds "Sign It with
+# Flowsta Vault" to the file manager's right-click "Open With" list.
+#
+# A .desktop MimeType entry does two things at once: it lists the app in
+# "Open With" AND makes it eligible to become the DEFAULT opener for a
+# type when it is the ONLY app registered for it (GNOME/Nautilus promote a
+# sole registrant to default). So we DELIBERATELY EXCLUDE:
+#   - application/octet-stream — the catch-all every unrecognized file
+#     falls back to; registering it made Vault the default handler for
+#     essentially every file on Linux.
+#   - structured-data + source types (json, xml, text/xml, text/markdown,
+#     text/x-python, text/x-rust, text/x-go, text/javascript) — a dev box
+#     often has no other registered handler, so Vault would silently
+#     become their default too.
+# Every type kept below has an established system handler, so Vault only
+# ever appears as a secondary "Open With" choice and never hijacks a default.
+MimeType=application/pdf;application/rtf;application/zip;application/x-tar;application/gzip;application/x-7z-compressed;application/x-rar-compressed;application/msword;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.ms-excel;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.ms-powerpoint;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/vnd.oasis.opendocument.text;application/vnd.oasis.opendocument.spreadsheet;application/vnd.oasis.opendocument.presentation;text/plain;text/csv;text/html;image/png;image/jpeg;image/gif;image/bmp;image/tiff;image/webp;image/svg+xml;image/heic;image/heif;audio/mpeg;audio/mp4;audio/wav;audio/x-wav;audio/flac;audio/ogg;audio/webm;audio/x-m4a;video/mp4;video/x-matroska;video/quicktime;video/webm;video/x-msvideo;video/mpeg;video/x-flv;

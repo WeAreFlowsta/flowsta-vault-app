@@ -188,6 +188,12 @@ pub struct MappedBundle {
     pub username: Option<String>,
     pub display_name: Option<String>,
     pub totp: Option<MigratedTotp>,
+    /// The account had 2FA configured but its secret would not decrypt
+    /// with the password in hand — the server's password-change/reset
+    /// sweeps never re-encrypted the 2FA record, so long-lived accounts
+    /// carry it under an older password. Best-effort by design: Vault
+    /// approval replaces 2FA after the upgrade, so this never blocks.
+    pub totp_skipped: bool,
     pub sessions_skipped: usize,
 }
 
@@ -334,33 +340,52 @@ pub fn map_bundle(
         });
     }
 
+    // 2FA carry-over is BEST-EFFORT. The server's password-change/reset
+    // sweeps never re-encrypted the TotpConfig record, so accounts that
+    // changed (or phrase-reset) their password after enabling 2FA hold it
+    // under an older password. Ownership is already proven by the profile
+    // decrypt above + the phrase-blob check — and Vault approval replaces
+    // 2FA after the upgrade — so an unreadable secret is skipped, never a
+    // reason to abort the account move.
+    let mut totp_skipped = false;
     let totp = match &wire.totp_config {
         Some(t) => {
-            let secret = decrypt_api_field(
+            let decrypted = decrypt_api_field(
                 &t.encrypted_secret,
                 &t.nonce,
                 &t.salt,
                 &t.tag,
                 password,
             )
-            .map_err(|e| format!("Could not decrypt the 2FA secret ({})", e))?;
-            let codes = decrypt_api_field(
-                &t.encrypted_backup_codes,
-                &t.backup_nonce,
-                &t.backup_salt,
-                &t.backup_tag,
-                password,
-            )
-            .map_err(|e| format!("Could not decrypt the 2FA backup codes ({})", e))?;
-            Some(MigratedTotp {
-                secret,
-                backup_codes: codes
-                    .split(',')
-                    .map(|c| c.trim().to_string())
-                    .filter(|c| !c.is_empty())
-                    .collect(),
-                enabled: t.enabled,
-            })
+            .and_then(|secret| {
+                decrypt_api_field(
+                    &t.encrypted_backup_codes,
+                    &t.backup_nonce,
+                    &t.backup_salt,
+                    &t.backup_tag,
+                    password,
+                )
+                .map(|codes| (secret, codes))
+            });
+            match decrypted {
+                Ok((secret, codes)) => Some(MigratedTotp {
+                    secret,
+                    backup_codes: codes
+                        .split(',')
+                        .map(|c| c.trim().to_string())
+                        .filter(|c| !c.is_empty())
+                        .collect(),
+                    enabled: t.enabled,
+                }),
+                Err(e) => {
+                    log::warn!(
+                        "[migration] 2FA settings not carried over (encrypted under an older password): {}",
+                        e
+                    );
+                    totp_skipped = true;
+                    None
+                }
+            }
         }
         None => None,
     };
@@ -371,6 +396,7 @@ pub fn map_bundle(
         username,
         display_name,
         totp,
+        totp_skipped,
         sessions_skipped: wire.sessions.len(),
     })
 }
@@ -834,6 +860,9 @@ pub struct MigrationSummary {
     pub records_migrated: usize,
     pub sessions_skipped: usize,
     pub totp_moved: bool,
+    /// 2FA existed but its secret was encrypted under an older password —
+    /// skipped by design (Vault approval replaces 2FA).
+    pub totp_skipped: bool,
     pub cells_disabled: Vec<String>,
     pub backup_label: String,
     pub email: String,
@@ -1200,6 +1229,7 @@ pub(crate) async fn migrate_custodial_account_inner(
         records_migrated: mapped.records.len(),
         sessions_skipped: mapped.sessions_skipped,
         totp_moved: mapped.totp.is_some(),
+        totp_skipped: mapped.totp_skipped,
         cells_disabled,
         backup_label,
         email: mapped.email,
@@ -1356,10 +1386,28 @@ mod tests {
         assert_eq!(profile.created_at_ms, 1751500000000);
 
         // TOTP decrypts to vault-local material.
+        assert!(!mapped.totp_skipped);
         let totp = mapped.totp.unwrap();
         assert_eq!(totp.secret, "JBSWY3DPEHPK3PXP");
         assert_eq!(totp.backup_codes, vec!["a1b2c3d4e5f60718", "90aabbccddeeff00"]);
         assert!(totp.enabled);
+    }
+
+    #[test]
+    fn test_map_bundle_totp_under_stale_password_is_skipped() {
+        // The server's password-change/reset sweeps never re-encrypted the
+        // 2FA record, so real accounts hold it under an older password.
+        // The move must complete anyway (Vault approval replaces 2FA) —
+        // TOTP is skipped and flagged, never fatal.
+        let mut bundle = fixture_bundle();
+        // Corrupt the auth tag → AES-GCM open fails, same as a stale password.
+        bundle["totp_config"]["tag"] = serde_json::json!("AAAAAAAAAAAAAAAAAAAAAA==");
+        let mapped = map_bundle(&bundle, TEST_PASSWORD, TEST_MNEMONIC).unwrap();
+        assert!(mapped.totp.is_none());
+        assert!(mapped.totp_skipped);
+        // Everything else still mapped in full.
+        assert_eq!(mapped.records.len(), 7);
+        assert_eq!(mapped.email, "migtest@example.com");
     }
 
     #[test]
