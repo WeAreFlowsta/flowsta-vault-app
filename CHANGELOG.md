@@ -5,6 +5,50 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-07-10
+
+**Your account lives in your Vault.** The 1.0 release brings the whole
+journey together: your identity is created on your own device, works
+everywhere, and keeps working even when the cloud doesn't.
+
+### Your account, on your device
+- **Create your free Flowsta account directly in Vault** — the
+  recovery-phrase ceremony seeds your identity on your device, with a
+  download-as-file option and a write-down check. No web signup, no
+  passwords anywhere.
+- **Upgrade an existing flowsta.com account** with your email and password
+  or your recovery phrase alone — you choose whether to keep your existing
+  phrase or create a fresh one. Your identity, username, and signatures
+  stay exactly as they are, and old 2FA settings never block the move.
+- **Existing Vaults upgrade in place** from a card on the Overview — your
+  vault password and history are untouched, and the upgrade can't be
+  interrupted by navigating away.
+
+### Works even without Flowsta
+- **Restore from your phrase with Flowsta's servers unreachable** — keys
+  re-derive locally and the community network returns your public records.
+- **Create a new identity offline**; your Flowsta account attaches when the
+  servers are reachable.
+- **Community rendezvous fallback** built in.
+
+### Everyday
+- **Starts at login** (toggle in Settings), living in the tray, locked,
+  ready the moment a site needs it.
+- **A live strength meter** guides every vault password, and weak or
+  predictable passwords are no longer accepted.
+- **Export everything, import it back** — one encrypted file restores your
+  private data and your apps' backups; the Reset screen now explains
+  exactly what the phrase restores and what the export restores.
+- **Sign It from the web dashboard** routes through your Vault with
+  per-signature approval — including while locked or still starting.
+  Sponsored signing shows exactly whose quota pays.
+- **One Connections page** — every app and site that can use your identity,
+  with plain-language permissions and revoke in one place.
+- **Your Data shows your @username beside your DID**, with a plain
+  explanation of how the two relate.
+- On Linux, the right-click "Sign It" entry no longer becomes the default
+  opener for your files.
+
 ## [1.0.0-rc1] — 2026-07-09
 
 Release candidate for 1.0. Everything from the 1.0.0 beta series — creating

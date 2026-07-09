@@ -3459,6 +3459,11 @@ async fn dev_sealed_handler(
 struct DevLegacyBody {
     phrase: String,
     password: String,
+    /// When true, keep the device-hosted shape (v2 cell installed) instead
+    /// of stripping to the custodial-era shape. Lets the bridge matrix stand
+    /// up an unlocked device-hosted vault headlessly.
+    #[serde(default)]
+    keep_device_hosted: bool,
 }
 
 /// Dev-only: create a vault in the custodial-linked ("legacy") shape from
@@ -3501,7 +3506,7 @@ async fn dev_setup_legacy_handler(
             Json(IpcError { error: "setup_failed".into(), description: Some(e) }),
         )
     })?;
-    {
+    if !body.keep_device_hosted {
         let vault_path = app_state.vault_path.lock().unwrap().clone();
         let mut config = app_state.vault_config.lock().unwrap();
         if let Some(cfg) = config.as_mut() {
@@ -3523,7 +3528,10 @@ async fn dev_setup_legacy_handler(
             })?;
         }
     }
-    log::warn!("DEV: manufactured a custodial-era vault via /dev/setup-legacy-vault");
+    log::warn!(
+        "DEV: manufactured a {} vault via /dev/setup-legacy-vault",
+        if body.keep_device_hosted { "device-hosted" } else { "custodial-era" }
+    );
     Ok(axum::response::IntoResponse::into_response(Json(
         serde_json::json!({ "success": true }),
     )))
