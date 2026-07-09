@@ -440,8 +440,8 @@ export default component$(() => {
         <p class="mb-4 text-sm text-gray-400">
           Your profile, activity, and app records — encrypted and stored only
           in this vault, on this device. Nothing here is on any server, which
-          is the point: no one in the middle. It also means only your export
-          file keeps these safe if this device is lost.
+          is the point: no one in control but you. It also means only your
+          export file keeps these safe if this device is lost.
         </p>
         {sealedStatus.value === "loading" ? (
           <div class="flex items-center gap-3 rounded-lg border border-gray-800 bg-black/30 p-4">
