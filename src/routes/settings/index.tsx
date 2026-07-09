@@ -280,7 +280,7 @@ export default component$(() => {
                 disabled={autostartBusy.value}
                 onClick$={toggleAutostart}
                 class={{
-                  "relative mt-1 h-6 w-11 flex-shrink-0 rounded-full transition-colors": true,
+                  "relative mt-1 inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full p-0 transition-colors": true,
                   "bg-amber-500": autostartEnabled.value,
                   "bg-gray-600": !autostartEnabled.value,
                   "opacity-60": autostartBusy.value,
@@ -288,9 +288,9 @@ export default component$(() => {
               >
                 <span
                   class={{
-                    "absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform": true,
-                    "translate-x-5": autostartEnabled.value,
-                    "translate-x-0.5": !autostartEnabled.value,
+                    "inline-block h-4 w-4 transform rounded-full bg-white transition-transform": true,
+                    "translate-x-6": autostartEnabled.value,
+                    "translate-x-1": !autostartEnabled.value,
                   }}
                 />
               </button>
