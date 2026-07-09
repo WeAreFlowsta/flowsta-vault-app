@@ -132,6 +132,15 @@ pub fn run() {
         // for "Sign in with your Vault"; the single-instance callback above
         // focuses the window on wake. macOS delivers via RunEvent::Opened.
         .plugin(tauri_plugin_deep_link::init())
+        // Start Flowsta Vault at login so its local bridge is always
+        // available to Flowsta pages and apps. When launched at login the
+        // plugin passes `--autostart-hidden`; the setup hook below starts
+        // the app in the tray (locked, conductor not yet running) instead
+        // of popping the unlock window on every boot.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart-hidden"]),
+        ))
         .setup(|app| {
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
@@ -324,6 +333,37 @@ pub fn run() {
             // are unresponsive on Linux Wayland when starting with visible:false).
             // The dark bg-gray-900 body style in global.css prevents white flash.
 
+            // Autostart is DEFAULT ON for new installs: enable it once, gated
+            // by a marker so a user who later turns it off in Settings stays
+            // off. Best-effort — a failure here never blocks startup. Release
+            // only: a debug build would register the dev binary / cargo runner
+            // into the user's login items, polluting a developer's machine.
+            #[cfg(not(debug_assertions))]
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let marker = app_state.data_dir.join("autostart-initialized");
+                if !marker.exists() {
+                    match app.autolaunch().enable() {
+                        Ok(_) => log::info!("Autostart enabled (default-on, first run)"),
+                        Err(e) => log::warn!("Could not enable autostart (non-fatal): {}", e),
+                    }
+                    let _ = std::fs::write(&marker, b"1");
+                }
+            }
+
+            // Launched at login (`--autostart-hidden`): stay in the tray
+            // rather than showing the unlock window. The window was created
+            // visible (the Wayland caveat above is about STARTING hidden, not
+            // hiding after creation), so hide it now. Anything that needs the
+            // user — a page asking to sign, a relay code — already raises the
+            // window through the existing bridge/deep-link paths.
+            if std::env::args().any(|a| a == "--autostart-hidden") {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.hide();
+                }
+                log::info!("Launched at login — starting hidden to the tray");
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -372,6 +412,8 @@ pub fn run() {
             commands::check_api_connectivity,
             commands::get_auto_lock_minutes,
             commands::set_auto_lock_minutes,
+            commands::get_autostart_enabled,
+            commands::set_autostart_enabled,
             commands::change_vault_password,
             commands::link_web_account,
             commands::get_linked_agents,

@@ -2229,6 +2229,25 @@ pub fn set_auto_lock_minutes(
     Ok(())
 }
 
+/// Whether Flowsta Vault is registered to start at login.
+#[tauri::command]
+pub fn get_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+/// Turn start-at-login on or off. Default-on for new installs (set once on
+/// first run); this is the user's override.
+#[tauri::command]
+pub fn set_autostart_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    let res = if enabled { mgr.enable() } else { mgr.disable() };
+    res.map_err(|e| e.to_string())?;
+    log::info!("Autostart {}", if enabled { "enabled" } else { "disabled" });
+    Ok(())
+}
+
 // ── Agent Linking Commands ──────────────────────────────────────────
 
 #[derive(Serialize)]

@@ -1,4 +1,4 @@
-import { component$, useSignal, useContext, $ } from "@builder.io/qwik";
+import { component$, useSignal, useContext, useVisibleTask$, $ } from "@builder.io/qwik";
 import Callout from "~/components/dashboard/Callout";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
@@ -23,6 +23,31 @@ export default component$(() => {
 
   const showResetConfirm = useSignal(false);
   const resetting = useSignal(false);
+
+  // Start-at-login (default on for new installs). Optimistic default while
+  // the real state loads.
+  const autostartEnabled = useSignal(true);
+  const autostartBusy = useSignal(false);
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(async () => {
+    try {
+      autostartEnabled.value = await invoke<boolean>("get_autostart_enabled");
+    } catch (err) {
+      console.error("Failed to read autostart state:", err);
+    }
+  });
+  const toggleAutostart = $(async () => {
+    autostartBusy.value = true;
+    const next = !autostartEnabled.value;
+    try {
+      await invoke("set_autostart_enabled", { enabled: next });
+      autostartEnabled.value = next;
+    } catch (err) {
+      console.error("Failed to change autostart:", err);
+    } finally {
+      autostartBusy.value = false;
+    }
+  });
 
   const passwordValid = newPassword.value.length >= 10;
   const passwordsMatch =
@@ -236,6 +261,42 @@ export default component$(() => {
               <option value="60" selected={autoLockMinutes.value === 60}>1 hour</option>
               <option value="0" selected={autoLockMinutes.value === 0}>Never</option>
             </select>
+          </div>
+
+          {/* Start at login */}
+          <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h3 class="mb-2 text-lg font-semibold text-white">Start at Login</h3>
+                <p class="text-sm text-gray-400">
+                  Open Flowsta Vault automatically when you sign in to this
+                  computer, so it's ready the moment a Flowsta app or website
+                  needs it. It starts in the background, locked — nothing
+                  unlocks until you enter your password.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autostartEnabled.value}
+                disabled={autostartBusy.value}
+                onClick$={toggleAutostart}
+                class={{
+                  "relative mt-1 h-6 w-11 flex-shrink-0 rounded-full transition-colors": true,
+                  "bg-amber-500": autostartEnabled.value,
+                  "bg-gray-600": !autostartEnabled.value,
+                  "opacity-60": autostartBusy.value,
+                }}
+              >
+                <span
+                  class={{
+                    "absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform": true,
+                    "translate-x-5": autostartEnabled.value,
+                    "translate-x-0.5": !autostartEnabled.value,
+                  }}
+                />
+              </button>
+            </div>
           </div>
 
           {/* Reset Vault */}
