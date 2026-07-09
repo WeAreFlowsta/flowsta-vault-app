@@ -367,6 +367,10 @@ pub(crate) async fn reconcile_account_layer(
             Err(e) if e.contains("email_already_registered") => {
                 log::warn!("[reconcile] deferred registration: email already registered — asking for a different address");
                 *state.registration_conflict.lock().unwrap() = true;
+                // The Overview learns about the conflict by refetching
+                // get_identity — which it only does on an event. Without
+                // this emit the collision UI never appeared (drill find).
+                let _ = app_handle.emit("profile-updated", ());
                 return;
             }
             Err(e) => {

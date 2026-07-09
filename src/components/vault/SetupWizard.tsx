@@ -1742,9 +1742,10 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               </p>
               <p class="text-xs text-gray-400">
                 Your keys live on this device and work on the Flowsta network
-                right now. Your Flowsta account (email verification, @username)
-                attaches automatically when Flowsta is reachable — nothing
-                else to do.
+                right now. Your Flowsta account attaches automatically when
+                Flowsta is reachable — that's also when your email is checked
+                and confirmed, so it isn't reserved until then. Nothing else
+                to do.
               </p>
             </div>
           )}

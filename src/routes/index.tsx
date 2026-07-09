@@ -475,7 +475,7 @@ export default component$(() => {
                 : "Looking for your records on the community network…"}
             {" "}
             {id?.pending_registration
-              ? "Your Flowsta account (email verification, @username) attaches automatically when Flowsta is reachable."
+              ? "Your Flowsta account attaches automatically when Flowsta is reachable — your email is checked and confirmed then (it isn't reserved until that moment)."
               : "Your @username, display name, and email reconnect automatically when Flowsta is reachable."}
           </p>
           {id?.registration_conflict && (
