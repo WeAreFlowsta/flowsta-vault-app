@@ -11,7 +11,7 @@ use crate::vault::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, State};
 
 /// AppWebsocket request timeout for the signature-fetch + sign / revoke /
 /// amend paths. The holochain_websocket default is **60 s** — fine for a
@@ -1793,32 +1793,6 @@ pub fn get_vault_display_info(
     })
 }
 
-/// Check if a password still works against the web API.
-/// Used after vault unlock to detect if the user changed their web password.
-#[tauri::command]
-pub async fn check_web_password(
-    api_url: String,
-    email: String,
-    password: String,
-) -> Result<bool, String> {
-    let client = reqwest::Client::new();
-    let url = format!("{}/auth/login", api_url.trim_end_matches('/'));
-
-    let resp = client
-        .post(&url)
-        .json(&serde_json::json!({
-            "emailOrUsername": email,
-            "password": password,
-        }))
-        .send()
-        .await;
-
-    match resp {
-        Ok(r) => Ok(r.status().is_success()),
-        Err(_) => Err("offline".into()),
-    }
-}
-
 /// Check if the Flowsta API is reachable.
 /// Returns true if any HTTP response is received (even an error), false if unreachable.
 #[tauri::command]
@@ -1836,26 +1810,6 @@ pub async fn check_api_connectivity(api_url: String) -> bool {
         .send()
         .await
         .is_ok()
-}
-
-/// Re-encrypt the vault with a new password (after web password change).
-/// Vault must be unlocked (decrypted config in memory).
-#[tauri::command]
-pub fn re_encrypt_vault(
-    new_password: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
-    let vault_path = state.vault_path.lock().unwrap();
-    let config = state.vault_config.lock().unwrap();
-    let config = config.as_ref().ok_or("Vault is locked")?;
-
-    let mut encrypted =
-        encrypt_vault(config, &new_password).map_err(|e| format!("Encryption failed: {}", e))?;
-    encrypted.display_email = config.web_email.clone().or(config.web_username.clone());
-    save_vault(&vault_path, &encrypted).map_err(|e| format!("Save failed: {}", e))?;
-
-    log::info!("Vault re-encrypted with new password.");
-    Ok(())
 }
 
 /// Re-wrap the conductor's SQLCipher key file (`databases/db.key`) under a
