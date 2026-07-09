@@ -5,6 +5,17 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta4] — 2026-07-09
+
+### Upgrading your account
+- **The upgrade can't be interrupted by navigating away.** While your
+  account is moving onto this device, Vault now shows a full-screen progress
+  view so you stay with it until it finishes — previously, switching pages
+  mid-upgrade could leave a confusing "sign in again" prompt afterwards
+  (the move itself always completed correctly). If that state is ever
+  reached, the message now says plainly that the account is already on this
+  device and to reopen Vault.
+
 ## [1.0.0-beta3] — 2026-07-09
 
 ### Upgrading your account

@@ -15,6 +15,19 @@ interface UpgradeAccountCardProps {
 
 type FlowStep = "card" | "phrase" | "password" | "twofa" | "confirm" | "progress" | "done";
 
+/** Turn a raw sign-in error into user copy. The one that matters here:
+ *  device_hosted_account means the account is ALREADY upgraded (e.g. an
+ *  earlier attempt finished in the background) — never a real failure. */
+function friendlyAuthError(msg: string): string {
+  if (msg.includes("device_hosted_account") || msg.includes("not a custodial")) {
+    return "This account is already on this device. Close and reopen Vault to finish — no need to sign in again.";
+  }
+  if (msg.includes("password_login_disabled")) {
+    return "This account has already been upgraded. Close and reopen Vault to finish.";
+  }
+  return msg;
+}
+
 /**
  * In-place account upgrade for a vault that predates device hosting, and
  * resume entry for an upgrade that was interrupted after the vault side
@@ -123,7 +136,7 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
       session.email = auth.email ?? email.value;
       step.value = "confirm";
     } catch (e) {
-      error.value = String(e);
+      error.value = friendlyAuthError(String(e));
     } finally {
       loading.value = false;
     }
@@ -142,7 +155,7 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
       session.email = auth.email ?? email.value;
       step.value = "confirm";
     } catch (e) {
-      error.value = String(e);
+      error.value = friendlyAuthError(String(e));
     } finally {
       loading.value = false;
     }
@@ -200,6 +213,28 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
   });
 
   if (!visible.value) return null;
+
+  // While the upgrade is actually running, take over the whole window. The
+  // backend migration completes regardless of the frontend, so navigating
+  // away mid-flip would orphan this card and then present a confusing
+  // re-sign-in that errors (the account is device-hosted by then). A
+  // full-screen, non-dismissable overlay keeps the user here until it's done.
+  if (step.value === "progress") {
+    return (
+      <div class="fixed inset-0 z-50 flex items-center justify-center bg-[#0b1220]/95 p-6">
+        <div class="w-full max-w-md rounded-lg border border-amber-500/30 bg-[#15203a] p-8 text-center">
+          <div class="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
+          <h3 class="mb-2 text-lg font-semibold text-white">Upgrading your account</h3>
+          <p class="mb-2 text-sm text-white">{progressMessage.value}</p>
+          <p class="text-xs text-gray-400">
+            This takes a few minutes and your Vault restarts once along the
+            way. Please keep Vault open and don't navigate away until it
+            finishes.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div class="mb-6 rounded-lg border border-amber-500/30 bg-amber-500/10 p-6">
@@ -376,17 +411,8 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
         </>
       )}
 
-      {/* ── Progress ── */}
-      {step.value === "progress" && (
-        <div class="py-2 text-center">
-          <div class="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
-          <p class="mb-2 text-sm text-white">{progressMessage.value}</p>
-          <p class="text-xs text-gray-400">
-            Nothing changes until the final step — if this is interrupted,
-            open this card again and retry with the same phrase.
-          </p>
-        </div>
-      )}
+      {/* Progress is rendered as a full-screen overlay above (before the
+          card return), so nothing for it here. */}
 
       {/* ── Done ── */}
       {step.value === "done" && (
