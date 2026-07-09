@@ -3420,6 +3420,8 @@ async fn dev_identity_handler(
         "web_username": cfg.web_username,
         "web_email": cfg.web_email,
         "profile_picture_len": cfg.profile_picture.as_ref().map(|p| p.len()).unwrap_or(0),
+        "hosting_model": cfg.hosting_model,
+        "has_private_cell_key": cfg.private_network_seed.is_some(),
     }))))
 }
 
@@ -3690,6 +3692,54 @@ async fn dev_unlock_handler(
     )))
 }
 
+/// Dev-only: unlock with a LITERAL password (not the stash) — the harness
+/// uses this after a full process restart to prove which password the
+/// vault file is actually encrypted with (the upgrade-lockout regression
+/// test). Success/failure is the whole point, so a bad password returns
+/// a clean 403 rather than a 500.
+async fn dev_unlock_pw_handler(
+    State(state): State<Arc<IpcState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError { error: "not_found".into(), description: None }),
+        ));
+    }
+    if state.app_state.vault_config.lock().unwrap().is_some() {
+        return Ok(axum::response::IntoResponse::into_response(Json(
+            serde_json::json!({ "success": true, "already_unlocked": true }),
+        )));
+    }
+    let password = body
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let app_handle = state.app_handle.clone();
+    let app_state = state.app_state.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::commands::unlock_vault_inner(password, app_handle, &app_state)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(IpcError { error: "internal_error".into(), description: Some(e.to_string()) }),
+        )
+    })?;
+    match result {
+        Ok(r) => Ok(axum::response::IntoResponse::into_response(Json(
+            serde_json::json!({ "success": true, "agent_pub_key": r.agent_pub_key }),
+        ))),
+        Err(e) => Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError { error: "wrong_password".into(), description: Some(e) }),
+        )),
+    }
+}
+
 // ── GET /connections — the registry, read-only, for Flowsta pages ─────────
 //
 // The Vault is the consent authority; the web dashboard is a WINDOW onto
@@ -3857,6 +3907,7 @@ pub async fn start_ipc_server(
         .route("/dev/unlock", post(dev_unlock_handler))
         .route("/dev/setup-legacy-vault", post(dev_setup_legacy_handler))
         .route("/dev/run-upgrade", post(dev_run_upgrade_handler))
+        .route("/dev/unlock-with-password", post(dev_unlock_pw_handler))
         // Global body cap (8 MB) — generous for base64 images/thumbnails/sign
         // payloads, bounds loopback-DoS amplification. /backup opts into a
         // larger limit above. Was axum's implicit 2 MB default (which also
