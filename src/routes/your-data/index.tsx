@@ -59,6 +59,7 @@ interface VaultIdentity {
   created_at: number;
   display_name: string | null;
   web_email: string | null;
+  web_username: string | null;
   web_agent_pub_key: string | null;
 }
 
@@ -391,6 +392,15 @@ export default component$(() => {
                 <span class="text-white">{id.web_email}</span>
               </div>
             )}
+            {id.web_username && (
+              <div class="flex items-center justify-between gap-4">
+                <span class="shrink-0 text-gray-400">Username</span>
+                <div class="flex items-center gap-2 min-w-0">
+                  <span class="truncate text-white">@{id.web_username}</span>
+                  <CopyButton text={id.web_username} />
+                </div>
+              </div>
+            )}
             <div class="flex items-center justify-between gap-4">
               <span class="shrink-0 text-gray-400">DID</span>
               <div class="flex items-center gap-2 min-w-0">
@@ -400,15 +410,11 @@ export default component$(() => {
                 <CopyButton text={id.did} />
               </div>
             </div>
-            <div class="flex items-center justify-between gap-4">
-              <span class="shrink-0 text-gray-400">Agent Key</span>
-              <div class="flex items-center gap-2 min-w-0">
-                <span class="truncate font-mono text-xs text-white">
-                  {id.agent_pub_key}
-                </span>
-                <CopyButton text={id.agent_pub_key} />
-              </div>
-            </div>
+            <p class="rounded-lg border border-gray-700/60 bg-black/20 px-3 py-2 text-xs leading-relaxed text-gray-400">
+              {id.web_username
+                ? "Your username and your DID are two ways people can find you. Your username is short and memorable; your DID is the longer, permanent identifier behind it — an open standard that stays the same even if your username changes."
+                : "Your DID is your permanent identifier — an open standard others can use to find and verify you. Claim a username on your Overview for a short, memorable address that points to the same identity."}
+            </p>
             <div class="flex items-center justify-between">
               <span class="text-gray-400">Vault Created</span>
               <span class="text-white">{formatDate(id.created_at)}</span>
