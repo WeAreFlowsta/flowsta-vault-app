@@ -27,10 +27,12 @@ for r in sorted(cfg['bundle']['resources']):
 # `e.g. ('private', '1.10') -> 'flowsta_private_v1_10_happ.happ'` comment
 # doesn't trigger a false positive. Allows digits in the middle so
 # version-suffixed constants like `BUNDLED_SIGNING_V1_3_HAPP_FILE` match.
-constants=$(grep -E '^const BUNDLED_[A-Z0-9_]+_HAPP_FILE: &str =' src-tauri/src/dna.rs \
+# The signing-coordinator hot-swap wasm ships alongside the happs and is
+# referenced by its own constant — hold it to the same agreement.
+constants=$(grep -E '^(pub )?const (BUNDLED_[A-Z0-9_]+_HAPP_FILE|SIGNING_COORDINATOR_WASM): &str =' src-tauri/src/dna.rs \
   | grep -oE '"[^"]+"' | tr -d '"' | sort -u)
 
-on_disk=$(ls src-tauri/resources/*.happ 2>/dev/null | xargs -n1 basename | sort -u)
+on_disk=$(ls src-tauri/resources/*.happ src-tauri/resources/*.wasm 2>/dev/null | xargs -n1 basename | sort -u)
 
 ok=1
 
@@ -42,7 +44,7 @@ done <<< "$constants"
 
 while IFS= read -r f; do
   [ -z "$f" ] && continue
-  echo "$constants" | grep -qx "$f" || { echo "DRIFT: $f bundled by tauri.conf.json but not referenced by any BUNDLED_*_HAPP_FILE constant in dna.rs"; ok=0; }
+  echo "$constants" | grep -qx "$f" || { echo "DRIFT: $f bundled by tauri.conf.json but not referenced by any bundle constant in dna.rs"; ok=0; }
 done <<< "$bundle"
 
 if [ "$ok" = "1" ]; then

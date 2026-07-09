@@ -5,6 +5,65 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta1] — 2026-07-09
+
+Your account lives in your Vault now. Existing vaults upgrade in place — your
+data, identity, and Sign It history carry over.
+
+### Your account, on your device
+- **Create your Flowsta account directly in Vault.** The recovery-phrase
+  ceremony seeds your identity on this device — with a download-as-file
+  option and a write-down check. No web signup.
+- **Upgrade an existing flowsta.com account** by signing in with your
+  password — or with your recovery phrase alone, no password needed. Your
+  personal data moves into an encrypted private space on this device, and
+  sign-ins everywhere switch from your password to Vault approval. Your
+  identity, username, and signatures stay exactly as they are.
+- **Existing Vault installs upgrade from the dashboard.** If your account
+  still lives on Flowsta's servers, an upgrade card appears on the Overview
+  and moves it into your Vault in place — your vault password and history
+  are untouched.
+
+### Works even without Flowsta
+- **Restore from your recovery phrase with Flowsta's servers unreachable.**
+  Your keys re-derive locally, the community network returns your public
+  records, and your account details reattach automatically when Flowsta is
+  reachable again.
+- **Create a new identity offline.** It joins the network and can act
+  immediately; your Flowsta account attaches when the servers are reachable.
+- **Community rendezvous fallback** is built in: if Flowsta's primary
+  network door is down, Vault finds the network through community nodes.
+
+### Your data
+- **Export everything, import it back.** A single encrypted export of your
+  records and backups; importing is safe to re-run and verifies itself.
+- **Vault is your profile editor**: display name, picture, and your
+  flowsta.com/username claim all live on the Overview's Public Profile card.
+- **Change your vault password** — fully local, and safe for the network
+  stack underneath.
+- **Email stays yours.** Apps only receive your email address if you
+  explicitly consent when connecting.
+
+### Sign It
+- **Everything works from flowsta.com too**: sign & publish, amend, revoke,
+  and thumbnails on the web dashboard all route through your Vault, each
+  with its own approval — including while the Vault is locked (it waits for
+  your unlock) or still starting.
+- **Sponsored signing**: when an app sponsors your signature from its
+  organization's pool, the approval dialog says exactly whose quota pays.
+- **Faster, steadier history views** — your own records paint immediately
+  and never disappear behind a temporary read failure.
+
+### Connections
+- **One Connections page** — every app and website that can use your
+  identity, with plain-language permissions and revoke in one place. The
+  web dashboard shows the same registry, read-only.
+
+### Under the hood
+- Hardened the local bridge and approval windows.
+- Signing credentials authorize once per session instead of on every call.
+- Release downloads keep the SHA256SUMS verification file.
+
 ## [0.7.0] — 2026-06-14
 
 A reliability and design release. Existing vaults upgrade in place — no migration.
