@@ -5,6 +5,24 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta5] — 2026-07-09
+
+### New in this release
+- **Start Flowsta Vault at login.** Vault now opens automatically in the
+  background when you sign in to your computer, so it's ready the moment a
+  Flowsta app or website needs it. It starts locked — nothing unlocks until
+  you enter your password — and you can turn it off in Settings.
+- **Stronger vault passwords.** When you create or change a vault password,
+  a live strength meter guides you, and very weak or predictable passwords
+  are no longer accepted.
+
+### Fixes
+- **A brand-new account shows its signatures list right away** instead of
+  sitting on a loading spinner while it looked for accounts it never had.
+- **Clearer Reset Vault warning** — it now explains that your recovery
+  phrase restores your identity, while a data export (from Your Data) is
+  what brings back your private data and your apps' backups.
+
 ## [1.0.0-beta4] — 2026-07-09
 
 ### Upgrading your account
