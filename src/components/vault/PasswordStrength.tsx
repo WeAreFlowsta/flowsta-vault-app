@@ -43,7 +43,7 @@ export const PasswordStrength = component$<Props>(({ password }) => {
       {check.label && (
         <p class={["text-xs", textColor]}>
           {check.label}
-          {check.hint ? <span class="text-gray-500"> — {check.hint}</span> : null}
+          {check.hint ? <span class="text-gray-500"> - {check.hint}</span> : null}
         </p>
       )}
     </div>

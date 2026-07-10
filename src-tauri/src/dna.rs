@@ -1,7 +1,7 @@
 //! DNA installation into the running Holochain conductor.
 //!
 //! After the conductor is ready, this module installs the Flowsta hApp bundles
-//! (identity + private DNAs) via the admin WebSocket. Idempotent — skips
+//! (identity + private DNAs) via the admin WebSocket. Idempotent - skips
 //! installation if the apps are already present.
 //!
 //! Version constants define what ships with this app build. The DNA updater
@@ -23,12 +23,12 @@ pub const BUNDLED_SIGNING_VERSION: &str = "1.4";
 
 /// The encrypted private DNA (opaque Sealed records, per-user network).
 /// Device-hosted vaults only; installed with a per-user network seed
-/// derived from the recovery phrase — never with the manifest's
+/// derived from the recovery phrase - never with the manifest's
 /// placeholder seed.
 pub const BUNDLED_PRIVATE_V2_VERSION: &str = "2.0";
 
 /// Bundle revision of the v2 happ. A rebuilt bundle changes the DNA hash,
-/// but the installed app id wouldn't change — the vault would keep serving
+/// but the installed app id wouldn't change - the vault would keep serving
 /// the stale (possibly broken) cell forever. Bump this whenever the bundled
 /// v2 happ file changes; installs of older revisions are replaced on the
 /// next unlock. Safe while the cell is single-user-network and re-derivable
@@ -59,12 +59,12 @@ const BUNDLED_SIGNING_HAPP_FILE: &str = "flowsta_signing_v1_4_happ.happ";
 // A Vault upgrading from an earlier build keeps any orphaned older cells in
 // its conductor; the new code path filters them out (see commands.rs).
 
-/// Result of DNA installation — app IDs for later use.
+/// Result of DNA installation - app IDs for later use.
 pub struct InstalledDnas {
     pub private_app_id: String,
     pub identity_app_id: String,
     pub signing_app_id: String,
-    /// The encrypted (v2, Sealed-record) private cell — device-hosted vaults
+    /// The encrypted (v2, Sealed-record) private cell - device-hosted vaults
     /// only, installed with the per-user network seed. None when the bundle
     /// is absent or the vault is custodial-linked.
     pub private_v2_app_id: Option<String>,
@@ -84,11 +84,11 @@ fn make_happ_filename(dna_type: &str, version: &str) -> String {
 
 /// Bundled signing-DNA coordinator revision. Coordinator-only changes keep
 /// the DNA hash, so an EXISTING cell never picks them up from the happ
-/// bundle — it must be hot-swapped via UpdateCoordinators. Bump this
+/// bundle - it must be hot-swapped via UpdateCoordinators. Bump this
 /// together with any coordinator rebuild copied into resources/.
 /// Rev 2: self-authored lookups (my signatures, thumbnails) read LOCAL
 /// instead of hanging on cold-network get_links.
-/// Rev 3: adds get_own_revocations_for_signature (LOCAL) — own-view
+/// Rev 3: adds get_own_revocations_for_signature (LOCAL) - own-view
 /// enrichment stops paying a network round-trip per record.
 pub const SIGNING_COORDINATOR_REV: u32 = 3;
 const SIGNING_COORDINATOR_WASM: &str = "signing_coordinator_v1_4.wasm";
@@ -132,7 +132,7 @@ pub async fn update_signing_coordinators_if_needed(
         .map_err(|e| format!("list_apps: {}", e))?;
     let signing_app_id = make_app_id("signing", BUNDLED_SIGNING_VERSION);
     let Some(app) = apps.iter().find(|a| a.installed_app_id == signing_app_id) else {
-        // No signing cell yet (nothing to swap) — leave the marker unset so
+        // No signing cell yet (nothing to swap) - leave the marker unset so
         // a later install+start pass gets the check again.
         return Ok(());
     };
@@ -256,14 +256,14 @@ where
     }
 
     log::warn!(
-        "[install] {} initial install_app failed — reconnecting and polling for status",
+        "[install] {} initial install_app failed - reconnecting and polling for status",
         app_id,
     );
 
     let started = std::time::Instant::now();
     // 30 s is plenty for a healthy conductor's slow WASM compile.
     // If the conductor has actually died (its WS server stops accepting
-    // connections — Windows error 10061) burning more time here is futile;
+    // connections - Windows error 10061) burning more time here is futile;
     // the outer `start_holochain` retry will restart the conductor entirely.
     let deadline = started + std::time::Duration::from_secs(30);
     let mut attempts: u32 = 0;
@@ -272,7 +272,7 @@ where
         attempts += 1;
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-        // Bail fast if the conductor process exited — no amount of WS
+        // Bail fast if the conductor process exited - no amount of WS
         // reconnecting will recover from that. The outer start_holochain
         // wrapper will spawn a fresh conductor that warm-starts against
         // the on-disk state populated so far.
@@ -305,7 +305,7 @@ where
                 return Ok(());
             }
             Ok(_) => {
-                // Not yet registered — try again on the fresh connection.
+                // Not yet registered - try again on the fresh connection.
                 // The first attempt's WASM compile is cached server-side
                 // even when the response was lost, so this retry is fast.
                 match admin_ws.install_app(make_payload()).await {
@@ -320,7 +320,7 @@ where
                     }
                     Err(e) => {
                         log::warn!(
-                            "[install] {} retry attempt {} failed: {} — continuing to poll",
+                            "[install] {} retry attempt {} failed: {} - continuing to poll",
                             app_id, attempts, e,
                         );
                     }
@@ -328,7 +328,7 @@ where
             }
             Err(e) => {
                 log::warn!(
-                    "[install] {} list_apps attempt {} failed: {} — continuing to poll",
+                    "[install] {} list_apps attempt {} failed: {} - continuing to poll",
                     app_id, attempts, e,
                 );
             }
@@ -349,7 +349,7 @@ where
 /// (identity DNA, ~3.9 MB) blocks long enough on WASM compilation that the
 /// conductor's WS server forcibly closes the long-running admin request
 /// (Windows error 10054 / `Websocket closed: ConnectionClosed`). The
-/// conductor process itself stays alive — only the WebSocket dies — and
+/// conductor process itself stays alive - only the WebSocket dies - and
 /// the work usually does complete server-side.
 ///
 /// This helper:
@@ -357,7 +357,7 @@ where
 /// 2. On error, reconnects the admin WS, polls `list_apps(Enabled)` until
 ///    the target app shows Enabled, and retries `enable_app` against the
 ///    fresh connection on each iteration. Total budget 120 s.
-/// 3. Treats already-Enabled (after the first call) as success — the
+/// 3. Treats already-Enabled (after the first call) as success - the
 ///    server-side enable completed even though the response was lost.
 ///
 /// `admin_ws` is replaced with a fresh connection on recovery so subsequent
@@ -373,14 +373,14 @@ async fn enable_app_resilient(
     }
 
     log::warn!(
-        "[enable] {} initial enable_app failed — reconnecting and polling for status",
+        "[enable] {} initial enable_app failed - reconnecting and polling for status",
         app_id,
     );
 
     let started = std::time::Instant::now();
     // 30 s is plenty for a healthy conductor's slow WASM compile.
     // If the conductor has actually died (its WS server stops accepting
-    // connections — Windows error 10061) burning more time here is futile;
+    // connections - Windows error 10061) burning more time here is futile;
     // the outer `start_holochain` retry will restart the conductor entirely.
     let deadline = started + std::time::Duration::from_secs(30);
     let mut attempts: u32 = 0;
@@ -389,7 +389,7 @@ async fn enable_app_resilient(
         attempts += 1;
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-        // Bail fast if the conductor process exited — no amount of WS
+        // Bail fast if the conductor process exited - no amount of WS
         // reconnecting will recover from that. The outer start_holochain
         // wrapper will spawn a fresh conductor that warm-starts against
         // the on-disk state populated so far.
@@ -433,7 +433,7 @@ async fn enable_app_resilient(
                     }
                     Err(e) => {
                         log::warn!(
-                            "[enable] {} retry attempt {} failed: {} — continuing to poll",
+                            "[enable] {} retry attempt {} failed: {} - continuing to poll",
                             app_id, attempts, e,
                         );
                     }
@@ -441,7 +441,7 @@ async fn enable_app_resilient(
             }
             Err(e) => {
                 log::warn!(
-                    "[enable] {} list_apps attempt {} failed: {} — continuing to poll",
+                    "[enable] {} list_apps attempt {} failed: {} - continuing to poll",
                     app_id, attempts, e,
                 );
             }
@@ -482,7 +482,7 @@ pub async fn install_dnas(
     let private_v2_app_id = private_v2_app_id();
     let private_v2_stale_prefix = make_app_id("private", BUNDLED_PRIVATE_V2_VERSION);
 
-    // Determine .happ filenames — use bundled names if version matches bundled,
+    // Determine .happ filenames - use bundled names if version matches bundled,
     // otherwise construct from version (downloaded by dna_updater).
     let private_happ_file = if private_version == BUNDLED_PRIVATE_VERSION {
         BUNDLED_PRIVATE_HAPP_FILE.to_string()
@@ -579,7 +579,7 @@ pub async fn install_dnas(
             }
         } else if app.installed_app_id.starts_with(&private_v2_stale_prefix) {
             // A v2 cell from an older bundle revision (different DNA hash
-            // under the same version) — replace it with the current bundle.
+            // under the same version) - replace it with the current bundle.
             log::warn!(
                 "Stale private v2 bundle revision installed ({}), replacing with {}",
                 app.installed_app_id,
@@ -598,7 +598,7 @@ pub async fn install_dnas(
     //      didn't complete (long WASM compile reset the WS, or the user
     //      locked the vault mid-enable). Without this pass, a partial
     //      install would be detected as "already installed" and skipped on
-    //      retry but the cell would never get enabled — DNA verification
+    //      retry but the cell would never get enabled - DNA verification
     //      then fails with `private=true, identity=false`.
     //
     //      Uses enable_app_resilient so a long compile that resets the WS
@@ -739,10 +739,10 @@ pub async fn install_dnas(
     if !signing_installed {
         let happ_path = resource_dir.join(&signing_happ_file);
         if !happ_path.exists() {
-            // Signing DNA is optional for backwards compatibility — log warning but don't fail.
+            // Signing DNA is optional for backwards compatibility - log warning but don't fail.
             // Vault can function without it; Sign It features will be unavailable.
             log::warn!(
-                "Signing hApp bundle not found at {:?} — Sign It features will be unavailable",
+                "Signing hApp bundle not found at {:?} - Sign It features will be unavailable",
                 happ_path
             );
         } else {
@@ -811,7 +811,7 @@ pub async fn install_dnas(
     }
 
     if !signing_ok {
-        log::warn!("Signing DNA not enabled — Sign It features will be unavailable");
+        log::warn!("Signing DNA not enabled - Sign It features will be unavailable");
     }
 
     log::info!(
@@ -820,7 +820,7 @@ pub async fn install_dnas(
         signing_ok,
     );
 
-    // 6. Install the encrypted private DNA v2 (device-hosted vaults only) —
+    // 6. Install the encrypted private DNA v2 (device-hosted vaults only) -
     //    ALWAYS with the per-user network seed override; the manifest seed is
     //    a placeholder. Non-fatal if the bundle is absent (older resource
     //    sets): sealed-record features are unavailable until it ships.
@@ -830,7 +830,7 @@ pub async fn install_dnas(
             let happ_path = resource_dir.join(BUNDLED_PRIVATE_V2_HAPP_FILE);
             if !happ_path.exists() {
                 log::warn!(
-                    "Private v2 hApp bundle not found at {:?} — encrypted private data unavailable",
+                    "Private v2 hApp bundle not found at {:?} - encrypted private data unavailable",
                     happ_path
                 );
             } else {
@@ -906,7 +906,7 @@ pub async fn setup_app_interface(admin_port: u16) -> Result<u16, String> {
 /// if there's any chance cells are disabled.
 ///
 /// The readiness probe authorizes signing credentials (the only reliable
-/// "cells truly ready" signal — the conductor lies about Enabled status),
+/// "cells truly ready" signal - the conductor lies about Enabled status),
 /// which COMMITS a cap grant. To keep that to one grant per conductor
 /// session the probe result is stored in the credentials cache and the
 /// whole probe is skipped while the cache holds an entry for the probe
@@ -936,7 +936,7 @@ pub async fn ensure_apps_enabled(
         }
     }
 
-    // Verify cells are actually ready — conductor can report Enabled status
+    // Verify cells are actually ready - conductor can report Enabled status
     // while cells are still initializing after a restart.
     // Pick the first signing app to test cell readiness.
     let test_app = apps.iter().find(|a| a.installed_app_id.starts_with("flowsta_signing_v"));
@@ -954,16 +954,16 @@ pub async fn ensure_apps_enabled(
             // writes with "chain head has moved").
             let _fill = state.credentials_fill_lock.lock().await;
             // Cache hit = cells were verified ready earlier this conductor
-            // session — skip the probe (and its chain write) entirely.
+            // session - skip the probe (and its chain write) entirely.
             if state.cell_credentials.lock().unwrap().contains_key(&cell_id) {
                 return;
             }
-            // Try to authorize credentials — this will fail with CellDisabled
+            // Try to authorize credentials - this will fail with CellDisabled
             // if cells aren't ready. Each retry sleeps 3 s; 15 attempts gives
             // the conductor up to ~45 s, headroom for the Windows unlock path
             // where cell readiness has been observed at ~21 s (a beta5 log
             // showed the old 6-attempt / 18 s budget timing out at 18 s with
-            // cells ready 3 s later — the next round then proceeded with
+            // cells ready 3 s later - the next round then proceeded with
             // every signing-DNA auth_creds returning CellDisabled, blanking
             // the result and overwriting the cache with 0 sigs).
             const MAX_ATTEMPTS: u32 = 15;
@@ -974,7 +974,7 @@ pub async fn ensure_apps_enabled(
                 }).await {
                     Ok(creds) => {
                         // The probe's grant becomes THE session grant for
-                        // this cell — store it so no caller re-authorizes.
+                        // this cell - store it so no caller re-authorizes.
                         state.cell_credentials.lock().unwrap().insert(
                             cell_id.clone(),
                             crate::commands::CachedCellCredentials::from_signing(&creds),

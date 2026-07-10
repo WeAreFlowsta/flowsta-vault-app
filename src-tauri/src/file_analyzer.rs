@@ -99,7 +99,7 @@ pub fn generate_perceptual_hash(data: &[u8]) -> Option<PerceptualHash> {
 fn generate_image_phash(data: &[u8]) -> Option<PerceptualHash> {
     let img = image::load_from_memory(data).ok()?;
 
-    // Resize to 9x8 using Triangle (bilinear) filter — matches browser canvas resize
+    // Resize to 9x8 using Triangle (bilinear) filter - matches browser canvas resize
     // Do NOT use Lanczos3 (image_hasher default) as it produces different results from browsers
     let resized = img.resize_exact(9, 8, image::imageops::FilterType::Triangle);
     let gray = resized.to_luma8();
@@ -189,7 +189,7 @@ fn generate_audio_fingerprint(data: &[u8], hash_type_name: &str) -> Option<Perce
         .make(&codec_params, &decoder_opts)
         .ok()?;
 
-    // Collect PCM samples (first 30 seconds max — enough for fingerprinting)
+    // Collect PCM samples (first 30 seconds max - enough for fingerprinting)
     let max_samples = sample_rate as usize * 30 * channels as usize;
     let mut all_samples: Vec<i16> = Vec::new();
 
@@ -301,7 +301,7 @@ pub fn generate_image_thumbnail(data: &[u8]) -> Option<String> {
 
     let jpeg_bytes = buf.into_inner();
     if jpeg_bytes.len() > 14_000 {
-        // Too large — skip (validation limit is 15KB)
+        // Too large - skip (validation limit is 15KB)
         return None;
     }
 
@@ -341,7 +341,7 @@ fn detect_file_type(data: &[u8]) -> FileType {
     } else if data.starts_with(b"OggS") {
         FileType::Ogg
     } else if data.len() >= 12 && &data[4..8] == b"ftyp" {
-        // MP4/M4A/MOV — ftyp box at offset 4
+        // MP4/M4A/MOV - ftyp box at offset 4
         FileType::Mp4
     } else if data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         // Matroska/WebM (EBML header)
@@ -823,7 +823,7 @@ fn check_entropy(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
         file_type,
         FileType::Jpeg | FileType::Png | FileType::Zip | FileType::Gif
     ) {
-        // These formats are already compressed — high entropy is expected.
+        // These formats are already compressed - high entropy is expected.
         // Only check the overall entropy as a sanity check.
         let overall = shannon_entropy(data);
         if overall > 7.99 {
@@ -839,7 +839,7 @@ fn check_entropy(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
     // For non-compressed files, check sliding windows for high-entropy regions
     let window_size = 4096;
     if data.len() < window_size * 2 {
-        // File too small for windowed analysis — just check overall
+        // File too small for windowed analysis - just check overall
         let overall = shannon_entropy(data);
         if overall > 7.5 {
             issues.push(IntegrityIssue {
@@ -945,11 +945,11 @@ fn check_appended_files(data: &[u8]) -> Vec<IntegrityIssue> {
         if count > 0 {
             let desc = match name {
                 "JPEG" => format!(
-                    "Contains {} embedded JPEG image{}. This is common — most image formats store thumbnails and previews as JPEG.",
+                    "Contains {} embedded JPEG image{}. This is common - most image formats store thumbnails and previews as JPEG.",
                     count, if count > 1 { "s" } else { "" }
                 ),
                 "GZIP" => format!(
-                    "Contains {} compressed (GZIP) data section{}. This is normal — many file formats use compression internally.",
+                    "Contains {} compressed (GZIP) data section{}. This is normal - many file formats use compression internally.",
                     count, if count > 1 { "s" } else { "" }
                 ),
                 "PNG" => format!(
@@ -1017,7 +1017,7 @@ mod tests {
 
     #[test]
     fn test_shannon_entropy_uniform() {
-        // All same byte — entropy should be 0
+        // All same byte - entropy should be 0
         let data = vec![0u8; 1000];
         assert!((shannon_entropy(&data) - 0.0).abs() < 0.001);
     }

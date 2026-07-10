@@ -10,8 +10,8 @@ import ImageCropper from "~/components/sign-it/ImageCropper";
  * (Amend, etc.) keeps the two surfaces in sync.
  *
  * Parent owns the `target` signal (which signature is being edited /
- * null when closed). Internal state — picked image, cropped canvas,
- * saving flag, error message — lives in the modal because it's
+ * null when closed). Internal state - picked image, cropped canvas,
+ * saving flag, error message - lives in the modal because it's
  * modal-scoped.
  *
  * On success, calls onSaved$(action_hash, thumbnail) so the parent can
@@ -43,7 +43,7 @@ export default component$<Props>(({ target, onSaved$ }) => {
 
   // A real <input type=file> behind a <label>: the picker opens natively on
   // the first click. (A programmatic input.click() fires only after the
-  // lazy-loaded handler arrives — outside the click's user-gesture window —
+  // lazy-loaded handler arrives - outside the click's user-gesture window -
   // so the webview swallowed the first attempt.)
   const handleFileChosen = $((_: Event, el: HTMLInputElement) => {
     const file = el.files?.[0];
@@ -72,7 +72,7 @@ export default component$<Props>(({ target, onSaved$ }) => {
         return;
       }
       const actionHash = target.value.action_hash;
-      // The save publishes to the signing network — on a fresh vault the
+      // The save publishes to the signing network - on a fresh vault the
       // network walk can take a minute or two. If the user closes the
       // modal meanwhile, the publish keeps going and the list updates
       // when it lands.
@@ -151,7 +151,7 @@ export default component$<Props>(({ target, onSaved$ }) => {
 
         {saving.value && (
           <p class="mt-3 text-xs text-gray-400">
-            Publishing to your signing network — on a fresh Vault this can
+            Publishing to your signing network - on a fresh Vault this can
             take a minute or two. You can close this window; the thumbnail
             appears when it lands.
           </p>
@@ -165,7 +165,7 @@ export default component$<Props>(({ target, onSaved$ }) => {
               ? $(() => { target.value = null; image.value = null; canvas.value = null; })
               : reset}
           >
-            {saving.value ? "Close — keep publishing" : "Cancel"}
+            {saving.value ? "Close - keep publishing" : "Cancel"}
           </GlassButton>
           {image.value && (
             <GlassButton

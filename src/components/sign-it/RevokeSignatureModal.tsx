@@ -8,7 +8,7 @@ import { GlassButton } from "~/components/common/GlassButton";
  * per-signature actions (Amend, etc.) keeps the two surfaces in sync.
  *
  * Parent owns the `target` signal (which signature is being revoked /
- * null when closed). Internal state — reason, in-flight flag, error —
+ * null when closed). Internal state - reason, in-flight flag, error -
  * lives in the modal because it's modal-scoped. On success, calls
  * onRevoked$ so the parent can update its local signature list.
  *

@@ -55,7 +55,7 @@ function formatRelativeTime(timestampMs: number): string {
 }
 
 export default component$(() => {
-  // Shared signatures store from layout — same fetch backs Overview, Sign It,
+  // Shared signatures store from layout - same fetch backs Overview, Sign It,
   // and this page so navigation between them is instant and re-using sigs
   // doesn't trigger another fetch.
   const sigStore = useContext(signaturesContext);
@@ -78,7 +78,7 @@ export default component$(() => {
     await sigStore.refresh();
   });
 
-  // No fetch task here — the layout's signaturesContext already owns the
+  // No fetch task here - the layout's signaturesContext already owns the
   // fetch. We just consume the shared signal.
 
   return (

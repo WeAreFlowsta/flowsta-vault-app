@@ -5,7 +5,7 @@
 //! stored in `data_dir/backups/<sanitized_client_id>/`. Apps can store multiple
 //! versioned snapshots or overwrite a single latest backup.
 //!
-//! Users own their data — they can view, export, or delete any app's backup
+//! Users own their data - they can view, export, or delete any app's backup
 //! from the Your Data page in the vault UI.
 
 use crate::commands::AppState;
@@ -332,7 +332,7 @@ pub fn save_backup(
     std::fs::write(&path, json).map_err(|e| format!("Backup write failed: {}", e))?;
 
     log::info!(
-        "Saved backup for {} ({}) — {} bytes, label: {}",
+        "Saved backup for {} ({}) - {} bytes, label: {}",
         app_name,
         client_id,
         data.len(),
@@ -592,7 +592,7 @@ pub fn is_canonical_backup(payload: &serde_json::Value) -> bool {
 pub fn canonicalize_for_export(payload: &serde_json::Value) -> serde_json::Value {
     let mut result = payload.clone();
 
-    // Only rewrite `cells[].records[]` — every other top-level key passes
+    // Only rewrite `cells[].records[]` - every other top-level key passes
     // through untouched.
     if let Some(cells) = result.get_mut("cells").and_then(|v| v.as_array_mut()) {
         for cell in cells.iter_mut() {
@@ -618,7 +618,7 @@ pub fn canonicalize_for_export(payload: &serde_json::Value) -> serde_json::Value
 
 /// Export all vault data (identity + keys + backups) as a single JSON blob.
 /// Includes cryptographic key material for CAL (Cryptographic Autonomy License)
-/// compliance — users must be able to independently recreate their identity
+/// compliance - users must be able to independently recreate their identity
 /// and use their data without depending on Flowsta.
 pub fn export_all_data(
     app_state: &AppState,
@@ -668,7 +668,7 @@ pub fn export_all_data(
                         "size_bytes": meta.data_size,
                         "content_type": meta.content_type,
                         "data": data_value,
-                        // Raw bytes (base64) for lossless re-import — the
+                        // Raw bytes (base64) for lossless re-import - the
                         // human-readable `data` above is for the user; this
                         // is what import_vault_export re-stores verbatim.
                         "restore_base64": base64_standard_encode(&data),
@@ -697,7 +697,7 @@ pub fn export_all_data(
     let export = serde_json::json!({
         "_readme": concat!(
             "This file contains your complete Flowsta Vault export. ",
-            "It includes your cryptographic keys and all app data — ",
+            "It includes your cryptographic keys and all app data - ",
             "everything you need to recreate your identity independently. ",
             "KEEP THIS FILE SAFE. Anyone with your device_seed can sign ",
             "as you on the Holochain network.",
@@ -780,7 +780,7 @@ pub fn export_all_data(
             "_readme": concat!(
                 "Decrypted data backups stored by connected Holochain apps. ",
                 "Each app can store multiple snapshots. The Cryptographic ",
-                "Autonomy License (§4.2.1 — \"No Withholding User Data\") ",
+                "Autonomy License (§4.2.1 - \"No Withholding User Data\") ",
                 "guarantees you full ownership of this data: you can take ",
                 "this export to any compatible Holochain app and use it ",
                 "independently of Flowsta or the app's original developer.",
@@ -809,12 +809,12 @@ pub fn export_all_data(
         // ── Sealed private records ──────────────────────────────────
         // The canonical private data post-R2 (profile, activity, app
         // records in the encrypted v2 cell). Body is the DECRYPTED JSON
-        // — CAL-readable AND what import_vault_export re-stores.
+        // - CAL-readable AND what import_vault_export re-stores.
         "sealed_records": {
             "_readme": concat!(
                 "Your private records, decrypted. These live only on your ",
                 "device (they do not gossip to Flowsta or anyone else), so ",
-                "this export — or a premium encrypted backup — is how they ",
+                "this export - or a premium encrypted backup - is how they ",
                 "survive losing this machine. Import restores them after a ",
                 "recovery-phrase reinstall.",
             ),

@@ -52,7 +52,7 @@ struct PriorWindowState {
 /// responded. Best-effort: no-ops if the main window can't be resolved.
 ///
 /// NOTE: on Wayland the compositor will NOT let a background app raise itself
-/// in response to a non-user-initiated request — it shows a "<app> is ready"
+/// in response to a non-user-initiated request - it shows a "<app> is ready"
 /// notification instead. There's no API workaround; this is by design.
 fn raise_window(app: &tauri::AppHandle) -> Option<PriorWindowState> {
     let win = app.get_webview_window("main")?;
@@ -64,7 +64,7 @@ fn raise_window(app: &tauri::AppHandle) -> Option<PriorWindowState> {
     let _ = win.show();
     // set_focus() alone does NOT raise the window on Linux/Wayland (and is
     // unreliable on macOS for a background app). Briefly toggling
-    // always-on-top forces it forward where the OS allows it — same trick the
+    // always-on-top forces it forward where the OS allows it - same trick the
     // tray "Open" handler uses.
     let _ = win.set_always_on_top(true);
     let _ = win.set_focus();
@@ -72,7 +72,7 @@ fn raise_window(app: &tauri::AppHandle) -> Option<PriorWindowState> {
     Some(prior)
 }
 
-/// Put Vault back the way it was before `raise_window` — so that approving (or
+/// Put Vault back the way it was before `raise_window` - so that approving (or
 /// denying) a request from another app returns focus to THAT app instead of
 /// leaving Vault parked in front. If Vault was already the focused app the user
 /// was using, we leave it. Otherwise we minimize (or re-hide) it; minimizing
@@ -179,7 +179,7 @@ fn unix_now() -> i64 {
 fn track_request(state: &AppState, origin: Option<&str>, action: &str) {
     let origin = match origin {
         Some(o) if !o.is_empty() => o,
-        _ => return, // No origin header — e.g. curl without -H Origin
+        _ => return, // No origin header - e.g. curl without -H Origin
     };
 
     let is_auth = action == "authenticate";
@@ -212,7 +212,7 @@ fn track_request(state: &AppState, origin: Option<&str>, action: &str) {
 struct StatusResponse {
     unlocked: bool,
     /// Whether a vault (an identity) exists on this device at all. A fresh
-    /// install answers on this port before setup — without this flag,
+    /// install answers on this port before setup - without this flag,
     /// "installed but no identity yet" is indistinguishable from "locked",
     /// and the login page would tell a brand-new user to unlock instead of
     /// walking them through creating their identity.
@@ -227,7 +227,7 @@ struct StatusResponse {
     /// Only populated when the requesting app has the "username" scope.
     web_username: Option<String>,
     /// Only populated for Flowsta first-party origins (https://*.flowsta.com)
-    /// — the OAuth consent page uses it to pre-fill the email the user may
+    /// - the OAuth consent page uses it to pre-fill the email the user may
     /// choose to share with an app. Never served to third-party origins:
     /// apps only ever receive the email through the server AFTER the user
     /// consents (and the server hash-verifies it).
@@ -320,7 +320,7 @@ async fn status_handler(
         display_name: scopes.contains(&"display_name".to_string()).then_some(display_name_raw).flatten(),
         profile_picture: scopes.contains(&"profile_picture".to_string()).then_some(profile_picture_raw).flatten(),
         web_username: scopes.contains(&"username".to_string()).then_some(web_username_raw).flatten(),
-        // First-party only (consent-page pre-fill) — see field doc.
+        // First-party only (consent-page pre-fill) - see field doc.
         web_email: is_flowsta_origin(origin.as_deref()).then_some(web_email_raw).flatten(),
     })
 }
@@ -390,7 +390,7 @@ async fn sign_handler(
     // Record MAU for linked third-party apps making sign requests
     crate::mau::record_mau_for_origin(&state.app_state, origin.as_deref());
 
-    // Get signing material in a scoped block — the config guard must not
+    // Get signing material in a scoped block - the config guard must not
     // live across the approval await below (non-Send).
     let (seed_arr, agent_pub_key, did) = {
         let config_guard = state.app_state.vault_config.lock().unwrap();
@@ -651,7 +651,7 @@ async fn authenticate_handler(
 
     let approved = if auto_approved {
         // Surface auto-approved authentications so they are visible, not
-        // silent — the user chose "remember" (or linked the app), but a
+        // silent - the user chose "remember" (or linked the app), but a
         // sign-in as them should never happen invisibly.
         let _ = state.app_handle.emit(
             "auth-auto-approved",
@@ -706,7 +706,7 @@ async fn authenticate_handler(
                 ));
             }
             Err(_) => {
-                // Timeout — clean up pending request
+                // Timeout - clean up pending request
                 let mut pending_auth = state.app_state.pending_auth.lock().unwrap();
                 *pending_auth = None;
                 return Err((
@@ -714,7 +714,7 @@ async fn authenticate_handler(
                     Json(IpcError {
                         error: "timeout".into(),
                         description: Some(
-                            "No response in Flowsta Vault — request timed out. Please try again.".into(),
+                            "No response in Flowsta Vault - request timed out. Please try again.".into(),
                         ),
                     }),
                 ));
@@ -732,10 +732,10 @@ async fn authenticate_handler(
         ));
     }
 
-    // User approved — build response
+    // User approved - build response
     // Extract identity + seed, then RELEASE the vault_config lock before
     // any further work. record_mau_event_if_needed (below) re-locks
-    // vault_config, and std::sync::Mutex is non-reentrant — holding the
+    // vault_config, and std::sync::Mutex is non-reentrant - holding the
     // guard across that call self-deadlocks the handler. This bit: an
     // /authenticate carrying a client_id hung forever (handler entered,
     // never returned, the request thread stuck on the second lock).
@@ -918,7 +918,7 @@ async fn link_identity_handler(
     let app_info = match api_result {
       Ok(api_resp) => {
         let api_resp = api_resp; // keep binding
-        // API reachable — parse and use fresh data
+        // API reachable - parse and use fresh data
 
         let body: serde_json::Value =
             api_resp.json().await.map_err(|_| {
@@ -1004,7 +1004,7 @@ async fn link_identity_handler(
         info
       }
       Err(e) => {
-        // API unreachable — fall back to local cache for offline re-linking
+        // API unreachable - fall back to local cache for offline re-linking
         log::debug!("API verification failed for {}: {}", req.client_id, e);
         let cache = state.app_state.verified_apps.lock().unwrap();
         match cache.get(&req.client_id).cloned() {
@@ -1087,7 +1087,7 @@ async fn link_identity_handler(
             ));
         }
         Err(_) => {
-            // Timeout — clean up pending request and tuck Vault back.
+            // Timeout - clean up pending request and tuck Vault back.
             restore_window(&state.app_handle, prior);
             let mut pending_link = state.app_state.pending_link_identity.lock().unwrap();
             *pending_link = None;
@@ -1101,7 +1101,7 @@ async fn link_identity_handler(
         }
     };
 
-    // User has responded (approve or deny) — return Vault to its prior state so
+    // User has responded (approve or deny) - return Vault to its prior state so
     // focus goes back to the calling app instead of leaving Vault in front.
     restore_window(&state.app_handle, prior);
 
@@ -1118,7 +1118,7 @@ async fn link_identity_handler(
     // Linking is the stronger consent: treat it as an authenticate
     // approval for this session too (same in-memory lifetime as the
     // dialog's "remember" option), so a link immediately followed by an
-    // /authenticate — the standard third-party sign-in sequence — shows
+    // /authenticate - the standard third-party sign-in sequence - shows
     // ONE dialog instead of two.
     if let Some(ref orig) = origin {
         let mut apps = state.app_state.approved_apps.lock().unwrap();
@@ -1138,7 +1138,7 @@ async fn link_identity_handler(
             .insert(orig.clone(), std::time::Instant::now());
     }
 
-    // User approved — extract signing material from vault config (scoped to drop lock)
+    // User approved - extract signing material from vault config (scoped to drop lock)
     let (seed_arr, vault_ed25519_pub, vault_agent_39) = {
         let config = state.app_state.vault_config.lock().unwrap();
         let config = config.as_ref().ok_or_else(|| {
@@ -1173,7 +1173,7 @@ async fn link_identity_handler(
         let agent_39 = construct_agent_pub_key_bytes(&pub_key);
 
         (arr, pub_key, agent_39)
-    }; // vault_config lock dropped here — safe to call MAU recording below
+    }; // vault_config lock dropped here - safe to call MAU recording below
 
     // Build the 78-byte sorted agent pair payload
     // This is the same payload the integrity zome's sorted_agent_pair_bytes() produces
@@ -1238,7 +1238,7 @@ async fn link_identity_handler(
 // ── POST /revoke-identity ──────────────────────────────────────────
 //
 // Called by third-party apps to notify Vault that an identity link was revoked.
-// No user approval needed — if the app says it revoked, we just clean up locally.
+// No user approval needed - if the app says it revoked, we just clean up locally.
 
 #[derive(Deserialize)]
 struct RevokeIdentityRequest {
@@ -1456,7 +1456,7 @@ struct BackupRequest {
     /// Optional label for named backups. If omitted, auto-generates a
     /// timestamped label so each call creates a new snapshot.
     label: Option<String>,
-    /// The data to back up (JSON value — will be serialized to bytes).
+    /// The data to back up (JSON value - will be serialized to bytes).
     data: serde_json::Value,
     /// MIME type hint (default: application/json).
     content_type: Option<String>,
@@ -1538,7 +1538,7 @@ async fn backup_handler(
         req.content_type.as_deref(),
     )
     .map_err(|e| {
-        // Surface the size limit as its own code — the SDK maps it to
+        // Surface the size limit as its own code - the SDK maps it to
         // BackupTooLargeError (also matches on HTTP 413).
         if e.starts_with("Backup too large") {
             (
@@ -1810,7 +1810,7 @@ async fn backup_delete_handler(
 
 // ── Server startup ──────────────────────────────────────────────────
 
-// ── POST /sign-document — Sign It document signing ──────────────────
+// ── POST /sign-document - Sign It document signing ──────────────────
 
 #[derive(Deserialize)]
 struct SignDocumentRequest {
@@ -1838,7 +1838,7 @@ struct SignDocumentRequest {
     #[serde(default)]
     comment: Option<String>,
     /// Perceptual hash (image/audio/video fingerprint) stored with a
-    /// published signature — enables fuzzy matching on the verify page.
+    /// published signature - enables fuzzy matching on the verify page.
     #[serde(default)]
     perceptual_hash: Option<serde_json::Value>,
     /// Small preview image (data:image/... URI) committed alongside a
@@ -1862,7 +1862,7 @@ struct SignDocumentRequest {
 /// Wait for the vault to be unlocked, up to `secs`. Used by Flowsta-page
 /// requests that arrive while locked: instead of failing immediately, the
 /// request rides through the unlock and its approval dialog appears the
-/// moment the user is in — no second attempt needed from the web page.
+/// moment the user is in - no second attempt needed from the web page.
 async fn wait_for_unlock(state: &Arc<AppState>, secs: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
@@ -1877,7 +1877,7 @@ async fn wait_for_unlock(state: &Arc<AppState>, secs: u64) -> bool {
 }
 
 /// Wait for the conductor to come up, up to `secs`. The conductor spawns
-/// on unlock and takes a while on a fresh start — a request that rode
+/// on unlock and takes a while on a fresh start - a request that rode
 /// through the unlock would otherwise approve and then fail to commit.
 async fn wait_for_conductor(state: &Arc<AppState>, secs: u64) -> Option<(u16, u16)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
@@ -1919,7 +1919,7 @@ struct SignDocumentResponse {
     agent_pub_key: String,
     signed_at: String,
     /// Set when the signature was published to the Sign It network
-    /// (`commit: true`) — hex of the committed record's action hash.
+    /// (`commit: true`) - hex of the committed record's action hash.
     action_hash: Option<String>,
 }
 
@@ -2002,7 +2002,7 @@ async fn sign_document_core(
 ) -> Result<serde_json::Value, (StatusCode, Json<IpcError>)> {
 
     // 1. Verify vault is unlocked. For Flowsta pages, surface the locked
-    // vault and WAIT through the unlock — the approval dialog then appears
+    // vault and WAIT through the unlock - the approval dialog then appears
     // immediately and the page's original click completes on its own.
     let locked = state.app_state.vault_config.lock().unwrap().is_none();
     if locked {
@@ -2123,17 +2123,17 @@ async fn sign_document_core(
     });
 
     // When publishing, make sure the sign is within quota and the conductor
-    // is up BEFORE asking for approval — an approval must always be able to
+    // is up BEFORE asking for approval - an approval must always be able to
     // commit. (The conductor spawns on unlock; right after a restart it can
     // need a minute.) The UI shows a visible "preparing" banner for the wait.
-    // Sponsorship (org pays for app-initiated signs) — resolved by the quota
+    // Sponsorship (org pays for app-initiated signs) - resolved by the quota
     // gate below; drives the approval dialog and the post-commit accounting.
     let mut sponsor_state: Option<crate::commands::SponsorState> = None;
 
     if req.commit {
         set_job_stage(&state, &job_id, "preparing");
 
-        // Quota gate — same rule as the in-app sign flow: refresh from the
+        // Quota gate - same rule as the in-app sign flow: refresh from the
         // server (fall back to the signed local cache offline) and refuse
         // when the period's signatures are used up. An amend counts like
         // any other published signature.
@@ -2186,7 +2186,7 @@ async fn sign_document_core(
                 Json(IpcError {
                     error: "conductor_not_ready".into(),
                     description: Some(
-                        "Your Vault is still starting up — try again in a moment.".into(),
+                        "Your Vault is still starting up - try again in a moment.".into(),
                     ),
                 }),
             ));
@@ -2222,7 +2222,7 @@ async fn sign_document_core(
         "origin": origin,
         "commit": req.commit,
         "amends": supersedes_bytes.is_some(),
-        // Whose quota this signature draws from — the dialog says so.
+        // Whose quota this signature draws from - the dialog says so.
         "sponsored_by": sponsor_state.as_ref().filter(|sp| !sp.exhausted).map(|sp| sp.app_name.clone()),
         "sponsor_exhausted": sponsor_state.as_ref().map(|sp| sp.exhausted).unwrap_or(false),
     });
@@ -2230,7 +2230,7 @@ async fn sign_document_core(
     raise_window(&state.app_handle);
     let _ = state.app_handle.emit("document-sign-request", event_payload);
 
-    // 7. Wait for user response (jobs can wait longer — nothing is held open)
+    // 7. Wait for user response (jobs can wait longer - nothing is held open)
     let approval_budget = if job_id.is_some() { 120 } else { 60 };
     let approved = if auto_approve_enabled() {
         let _ = state.app_state.pending_document_sign.lock().unwrap().take();
@@ -2252,7 +2252,7 @@ async fn sign_document_core(
             ));
         }
         Err(_) => {
-            // Timeout — clean up
+            // Timeout - clean up
             let mut pending_sign = state.app_state.pending_document_sign.lock().unwrap();
             *pending_sign = None;
             return Err((
@@ -2276,7 +2276,7 @@ async fn sign_document_core(
         ));
     }
 
-    // The approval just resolved — from here the Vault works on the user's
+    // The approval just resolved - from here the Vault works on the user's
     // behalf, and its own UI narrates that (the requesting app may not).
     let _ = state.app_handle.emit(
         "op-progress",
@@ -2339,7 +2339,7 @@ async fn sign_document_core(
         crate::mau::record_mau_event_if_needed(&state.app_state, client_id);
     }
 
-    // 10. Publish to the Sign It network when requested — same call the
+    // 10. Publish to the Sign It network when requested - same call the
     // in-app signing flow uses, against this device's signing cell. A
     // requested publish that cannot happen is an ERROR, not a silent
     // signature-only response: the calling page treats the action hash as
@@ -2358,7 +2358,7 @@ async fn sign_document_core(
                 Json(IpcError {
                     error: "conductor_not_ready".into(),
                     description: Some(
-                        "Your Vault is still starting up — try again in a moment.".into(),
+                        "Your Vault is still starting up - try again in a moment.".into(),
                     ),
                 }),
             ));
@@ -2388,7 +2388,7 @@ async fn sign_document_core(
                 let sponsored_active =
                     sponsor_state.as_ref().map(|sp| !sp.exhausted).unwrap_or(false);
                 if sponsored_active {
-                    // The org pool paid — the personal meter is untouched.
+                    // The org pool paid - the personal meter is untouched.
                 } else if let Err(e) = crate::quota_cache::increment_used(&state.app_state.data_dir) {
                     log::warn!("Quota cache increment failed (non-fatal): {}", e);
                 }
@@ -2409,7 +2409,7 @@ async fn sign_document_core(
                         log::warn!("Quota sync after published sign failed (non-fatal): {}", e);
                     }
                 });
-                // The record exists NOW — tell the Vault UI immediately so
+                // The record exists NOW - tell the Vault UI immediately so
                 // the signatures view and quota meter refresh live.
                 let _ = state.app_handle.emit(
                     "signature-published",
@@ -2418,7 +2418,7 @@ async fn sign_document_core(
                 // The thumbnail rides BEHIND the publish, in the background:
                 // its zome fn opens with a network get_links that can hang
                 // for minutes on a cold conductor, and neither the job nor
-                // the commit lock may wait on that. Best-effort — the
+                // the commit lock may wait on that. Best-effort - the
                 // signature stands without its preview, and the UI refreshes
                 // again when (if) it lands.
                 if let Some(thumb) = req.thumbnail.clone() {
@@ -2459,7 +2459,7 @@ async fn sign_document_core(
                     Json(IpcError {
                         error: "commit_failed".into(),
                         description: Some(
-                            "The signature was not published — nothing changed. Try again."
+                            "The signature was not published - nothing changed. Try again."
                                 .into(),
                         ),
                     }),
@@ -2490,7 +2490,7 @@ async fn sign_document_core(
     })
 }
 
-// ── POST /profile-update — web dashboard delegating a profile write ─────────
+// ── POST /profile-update - web dashboard delegating a profile write ─────────
 //
 // Device-hosted accounts keep their canonical profile in the encrypted
 // private cell on THIS device; the dashboard can't write it server-side.
@@ -2649,7 +2649,7 @@ async fn profile_update_core(
         ));
     }
 
-    // The write needs the conductor — make sure it's up BEFORE asking for
+    // The write needs the conductor - make sure it's up BEFORE asking for
     // approval so an approval can always land.
     set_job_stage(&state, &job_id, "preparing");
     let conductor_budget = if job_id.is_some() { 300 } else { 90 };
@@ -2662,13 +2662,13 @@ async fn profile_update_core(
             Json(IpcError {
                 error: "conductor_not_ready".into(),
                 description: Some(
-                    "Your Vault is still starting up — try again in a moment.".into(),
+                    "Your Vault is still starting up - try again in a moment.".into(),
                 ),
             }),
         ));
     }
 
-    // Per-action approval — no silent writes into the user's cell.
+    // Per-action approval - no silent writes into the user's cell.
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
     let request_id = format!("profile-{}", unix_now());
     {
@@ -2748,7 +2748,7 @@ async fn profile_update_core(
                 Json(IpcError {
                     error: "conductor_not_ready".into(),
                     description: Some(format!(
-                        "Your Vault is still starting up ({}) — try again in a moment.",
+                        "Your Vault is still starting up ({}) - try again in a moment.",
                         msg
                     )),
                 }),
@@ -2918,7 +2918,7 @@ async fn cell_op_gate(
         }
         set_job_stage(state, job_id, "preparing");
     }
-    // The operation commits to the signing cell — wait for the conductor
+    // The operation commits to the signing cell - wait for the conductor
     // before the approval dialog so an approval can always land.
     let conductor_budget = if job_id.is_some() { 300 } else { 90 };
     if wait_for_conductor(&state.app_state, conductor_budget)
@@ -2930,7 +2930,7 @@ async fn cell_op_gate(
             Json(IpcError {
                 error: "conductor_not_ready".into(),
                 description: Some(
-                    "Your Vault is still starting up — try again in a moment.".into(),
+                    "Your Vault is still starting up - try again in a moment.".into(),
                 ),
             }),
         ));
@@ -3157,7 +3157,7 @@ async fn set_thumbnail_core(
 // rides through unlock, conductor startup, the approval dialog, and the
 // commit. Nothing is held open, so there are no client timeout budgets, no
 // ghost failures (the client giving up changes nothing), and no duplicate
-// risk on retry — the page always learns the real outcome.
+// risk on retry - the page always learns the real outcome.
 
 use std::collections::HashMap;
 
@@ -3204,7 +3204,7 @@ impl OpJobs {
         inner.active.retain(|_, id| jobs.contains_key(id));
     }
 
-    /// Create a job — or, when an identical request is already in flight,
+    /// Create a job - or, when an identical request is already in flight,
     /// join it. Returns (job_id, joined).
     pub fn create_or_join(&self, op: &str, fingerprint: &str) -> (String, bool) {
         let mut inner = self.inner.lock().unwrap();
@@ -3291,7 +3291,7 @@ async fn op_status_handler(
     }
 }
 
-// ── GET /signatures — the dashboard reads from the Vault, not the network ──
+// ── GET /signatures - the dashboard reads from the Vault, not the network ──
 //
 // The Vault is the source of truth for the user's own records: this serves
 // exactly what the Vault UI shows (own chain, instantly consistent, plus
@@ -3316,7 +3316,7 @@ async fn signatures_handler(
         ));
     }
     if state.app_state.vault_config.lock().unwrap().is_none() {
-        // A background read must not pop the unlock screen — the page
+        // A background read must not pop the unlock screen - the page
         // just falls back to the network lookup.
         return Err((
             StatusCode::FORBIDDEN,
@@ -3336,7 +3336,7 @@ async fn signatures_handler(
         ));
     }
 
-    // Own signatures are the Vault's ground truth — a failed read (cells
+    // Own signatures are the Vault's ground truth - a failed read (cells
     // still enabling right after unlock) must be an ERROR the page can
     // fall back from, never a false-authoritative empty list.
     let own = crate::commands::get_my_own_signatures_inner(&state.app_state)
@@ -3373,13 +3373,13 @@ async fn signatures_handler(
     )))
 }
 
-// ── Dev-only lock/unlock — headless test harness support ───────────────────
+// ── Dev-only lock/unlock - headless test harness support ───────────────────
 //
 // The operation matrix needs to drive the locked and cold-start legs
 // without a human at the keyboard. Both endpoints are inert unless the
 // dev auto-approve flag is active (and compile-gated out of release via
 // auto_approve_enabled always returning false there). /dev/lock stashes
-// the in-memory passphrase so /dev/unlock can re-unlock — no secret is
+// the in-memory passphrase so /dev/unlock can re-unlock - no secret is
 // ever transmitted or logged.
 
 async fn dev_status_handler() -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
@@ -3397,7 +3397,7 @@ async fn dev_status_handler() -> Result<axum::response::Response, (StatusCode, J
 /// Dev-only read-back for the headless matrix: what identity does the
 /// vault currently hold? Lets sync tests assert that a bridge or in-app
 /// profile write actually landed (config mirror), not just that the job
-/// reported success. Returns the picture length only — tests must not
+/// reported success. Returns the picture length only - tests must not
 /// overwrite a real picture they cannot restore.
 async fn dev_identity_handler(
     State(state): State<Arc<IpcState>>,
@@ -3467,7 +3467,7 @@ struct DevLegacyBody {
 }
 
 /// Dev-only: create a vault in the custodial-linked ("legacy") shape from
-/// a recovery phrase — hosting_model unset, no private-cell material, so
+/// a recovery phrase - hosting_model unset, no private-cell material, so
 /// the conductor starts WITHOUT the v2 encrypted cell, exactly like a vault
 /// from before device hosting. This is the true starting state for the
 /// in-place account-upgrade walkthrough; no historical build needed.
@@ -3538,7 +3538,7 @@ async fn dev_setup_legacy_handler(
 }
 
 /// Dev-only: run the phrase-first account upgrade end to end against the
-/// currently-unlocked legacy vault — the same path the Overview card's
+/// currently-unlocked legacy vault - the same path the Overview card's
 /// phrase door drives, but callable headlessly for the regression harness.
 async fn dev_run_upgrade_handler(
     State(state): State<Arc<IpcState>>,
@@ -3670,7 +3670,7 @@ async fn dev_unlock_handler(
     })?;
     let app_handle = state.app_handle.clone();
     let app_state = state.app_state.clone();
-    // The vault KDF is deliberately slow — keep it off the async runtime.
+    // The vault KDF is deliberately slow - keep it off the async runtime.
     let result = tokio::task::spawn_blocking(move || {
         crate::commands::unlock_vault_inner(password, app_handle, &app_state)
     })
@@ -3700,7 +3700,7 @@ async fn dev_unlock_handler(
     )))
 }
 
-/// Dev-only: unlock with a LITERAL password (not the stash) — the harness
+/// Dev-only: unlock with a LITERAL password (not the stash) - the harness
 /// uses this after a full process restart to prove which password the
 /// vault file is actually encrypted with (the upgrade-lockout regression
 /// test). Success/failure is the whole point, so a bad password returns
@@ -3748,7 +3748,7 @@ async fn dev_unlock_pw_handler(
     }
 }
 
-// ── GET /connections — the registry, read-only, for Flowsta pages ─────────
+// ── GET /connections - the registry, read-only, for Flowsta pages ─────────
 //
 // The Vault is the consent authority; the web dashboard is a WINDOW onto
 // it (authority follows custody, visibility follows the user). Serves the
@@ -3802,7 +3802,7 @@ async fn connections_handler(
             })
             .collect()
     };
-    // `trusted` on the raw map is a display field computed at query time —
+    // `trusted` on the raw map is a display field computed at query time -
     // the live source of truth is the approved_apps list.
     let trusted_origins: Vec<serde_json::Value> = {
         let approved = state.app_state.approved_apps.lock().unwrap();
@@ -3916,7 +3916,7 @@ pub async fn start_ipc_server(
         .route("/dev/setup-legacy-vault", post(dev_setup_legacy_handler))
         .route("/dev/run-upgrade", post(dev_run_upgrade_handler))
         .route("/dev/unlock-with-password", post(dev_unlock_pw_handler))
-        // Global body cap (8 MB) — generous for base64 images/thumbnails/sign
+        // Global body cap (8 MB) - generous for base64 images/thumbnails/sign
         // payloads, bounds loopback-DoS amplification. /backup opts into a
         // larger limit above. Was axum's implicit 2 MB default (which also
         // silently broke large backups).

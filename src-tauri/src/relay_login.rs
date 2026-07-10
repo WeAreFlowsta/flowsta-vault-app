@@ -1,4 +1,4 @@
-//! Relay login — approve a sign-in happening on another
+//! Relay login - approve a sign-in happening on another
 //! device (a phone, or a Firefox/Safari desktop that can't reach the
 //! loopback IPC). The browser and this Vault meet at the auth-api:
 //!
@@ -10,11 +10,11 @@
 //! Server side: the auth API's /auth/relay/* routes.
 //!
 //! Security invariants (do not relax):
-//! - The approval screen is ALWAYS shown — no remember/auto-approve for
+//! - The approval screen is ALWAYS shown - no remember/auto-approve for
 //!   relay logins. Cross-device approval is the phishing surface ("read me
 //!   your code"); the screen is the defense.
 //! - The challenge is signed exactly as the server returned it (raw UTF-8
-//!   bytes) and is held Rust-side between claim and approve — the webview
+//!   bytes) and is held Rust-side between claim and approve - the webview
 //!   never supplies it back, so a compromised frontend can't substitute one.
 
 use crate::commands::AppState;
@@ -148,7 +148,7 @@ pub async fn relay_deny_core(api_url: &str, claim_token: &str) -> Result<(), Str
 // ── Tauri commands (thin wrappers holding the claim Rust-side) ──────────────
 
 /// Claim a typed/deep-linked code. Requires the vault unlocked (approval
-/// needs the device seed anyway — surface locked state before claiming so
+/// needs the device seed anyway - surface locked state before claiming so
 /// the code isn't burned on a vault that can't sign).
 #[tauri::command]
 pub async fn relay_claim(
@@ -170,7 +170,7 @@ pub async fn relay_claim(
     Ok(claim)
 }
 
-/// Approve the pending claim. Signs the RUST-HELD challenge — the frontend
+/// Approve the pending claim. Signs the RUST-HELD challenge - the frontend
 /// never passes it back.
 #[tauri::command]
 pub async fn relay_approve(
@@ -224,7 +224,7 @@ pub fn take_pending_relay_code(state: State<'_, Arc<AppState>>) -> Option<String
 // ── F3: flowsta:// deep-link routing ────────────────────────────────────────
 
 /// True if a launch/single-instance arg is a flowsta:// URL (vs a file path
-/// to sign). MUST be checked BEFORE sign-file path extraction — an auth link
+/// to sign). MUST be checked BEFORE sign-file path extraction - an auth link
 /// misread as a file path would silently do nothing (round-5 catch 7).
 pub fn is_flowsta_url(arg: &str) -> bool {
     arg.starts_with("flowsta://")
@@ -260,7 +260,7 @@ pub fn parse_relay_code(url_str: &str) -> Option<String> {
 }
 
 /// Handle an incoming flowsta:// URL: queue the relay code, surface the
-/// window, and notify the frontend. Works locked or unlocked — the frontend
+/// window, and notify the frontend. Works locked or unlocked - the frontend
 /// (or the unlock flow via take_pending_relay_code) picks it up.
 pub fn handle_flowsta_url(app: &tauri::AppHandle, url_str: &str) {
     let state = app.state::<Arc<AppState>>();
@@ -274,7 +274,7 @@ pub fn handle_flowsta_url(app: &tauri::AppHandle, url_str: &str) {
             let _ = app.emit("relay-code-received", code);
         }
         None => {
-            log::warn!("Unrecognized flowsta:// URL (action/version) — focusing window only");
+            log::warn!("Unrecognized flowsta:// URL (action/version) - focusing window only");
         }
     }
     if let Some(window) = app.get_webview_window("main") {

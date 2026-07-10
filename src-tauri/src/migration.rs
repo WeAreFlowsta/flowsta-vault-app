@@ -20,7 +20,7 @@
 //!
 //! Record mapping into the encrypted private cell (v2 Sealed records):
 //! - UserProfile        → "user_profile" with the email DECRYPTED into the
-//!                        body (the sealed cipher is the encryption now —
+//!                        body (the sealed cipher is the encryption now -
 //!                        keeping the password-locked blob would break
 //!                        phrase-only recovery once the web password dies)
 //! - EmailPermission    → "email_permission" (as stored, plaintext fields)
@@ -29,7 +29,7 @@
 //! - OAuthActivity      → "oauth_activity"
 //! - PrivacySettings    → "privacy_settings"
 //! - AppAnalyticsId     → "app_analytics_id" (app_id now lives inside the
-//!                        cipher — the v1.11 link-tag leak is gone by
+//!                        cipher - the v1.11 link-tag leak is gone by
 //!                        construction)
 //! - ProfilePicture     → "profile_picture"
 //! - TotpConfig         → NOT sealed: decrypted and kept vault-local
@@ -59,7 +59,7 @@ use tauri::{Emitter, State};
 // Must byte-match api/src/services/encryption.js encryptWithPassword:
 // key = scrypt(password, salt, N=16384, r=8, p=1, len=32)
 // AES-256-GCM, 12-byte nonce; entry fields carry ciphertext (tag split
-// off), nonce, salt, tag — each standard base64.
+// off), nonce, salt, tag - each standard base64.
 
 fn b64(field: &str, value: &str) -> Result<Vec<u8>, String> {
     base64_standard_decode(value).map_err(|_| format!("Invalid base64 in exported {}", field))
@@ -168,7 +168,7 @@ struct WireBundle {
 pub struct MappedRecord {
     pub entry_type: String,
     /// Original creation time normalized to milliseconds (goes inside the
-    /// sealed cipher; the DHT action timestamp will be "now" — that's the
+    /// sealed cipher; the DHT action timestamp will be "now" - that's the
     /// only timing a peer can see).
     pub created_at_ms: u64,
     pub body: serde_json::Value,
@@ -189,7 +189,7 @@ pub struct MappedBundle {
     pub display_name: Option<String>,
     pub totp: Option<MigratedTotp>,
     /// The account had 2FA configured but its secret would not decrypt
-    /// with the password in hand — the server's password-change/reset
+    /// with the password in hand - the server's password-change/reset
     /// sweeps never re-encrypted the 2FA record, so long-lived accounts
     /// carry it under an older password. Best-effort by design: Vault
     /// approval replaces 2FA after the upgrade, so this never blocks.
@@ -199,7 +199,7 @@ pub struct MappedBundle {
 
 /// Normalize a v1.11 timestamp to milliseconds. The API writes cell
 /// timestamps in microseconds (`Date.now() * 1000`), but a few older
-/// records carry plain milliseconds — disambiguate by magnitude.
+/// records carry plain milliseconds - disambiguate by magnitude.
 fn to_millis(ts: i64) -> u64 {
     if ts <= 0 {
         return 0;
@@ -231,7 +231,7 @@ pub fn normalize_mnemonic(phrase: &str) -> String {
 /// Decrypt and map an exported bundle into sealed-record inputs.
 ///
 /// Verifies the entered phrase against the account's stored (encrypted)
-/// recovery phrase — the strong ownership check: by export time every
+/// recovery phrase - the strong ownership check: by export time every
 /// migrating account has a phrase blob, and it must decrypt to exactly the
 /// phrase in hand, whether it was the user's existing phrase or one the
 /// server just minted for the ceremony.
@@ -344,8 +344,8 @@ pub fn map_bundle(
     // sweeps never re-encrypted the TotpConfig record, so accounts that
     // changed (or phrase-reset) their password after enabling 2FA hold it
     // under an older password. Ownership is already proven by the profile
-    // decrypt above + the phrase-blob check — and Vault approval replaces
-    // 2FA after the upgrade — so an unreadable secret is skipped, never a
+    // decrypt above + the phrase-blob check - and Vault approval replaces
+    // 2FA after the upgrade - so an unreadable secret is skipped, never a
     // reason to abort the account move.
     let mut totp_skipped = false;
     let totp = match &wire.totp_config {
@@ -499,7 +499,7 @@ async fn wait_until_account_ready(
             }
             if st.migration_status.as_deref() == Some("failed") {
                 return Err(
-                    "account_update_failed: the one-time account update did not complete — \
+                    "account_update_failed: the one-time account update did not complete - \
                      your account is unchanged. Run the upgrade again to retry."
                         .to_string(),
                 );
@@ -513,7 +513,7 @@ async fn wait_until_account_ready(
         if std::time::Instant::now() >= deadline {
             return Err(
                 "account_update_timeout: the one-time account update is taking longer than \
-                 expected. Your account is unchanged — try the upgrade again shortly."
+                 expected. Your account is unchanged - try the upgrade again shortly."
                     .to_string(),
             );
         }
@@ -521,7 +521,7 @@ async fn wait_until_account_ready(
             emit_progress(
                 app_handle,
                 "updating",
-                "Bringing your account up to date — a one-time update is running…",
+                "Bringing your account up to date - a one-time update is running…",
             );
             announced = true;
         }
@@ -584,7 +584,7 @@ pub async fn migration_new_phrase(
 }
 
 /// Confirm the phrase's lookup hash resolves to THIS account's web agent
-/// key before linking — refuses a phrase that belongs to a different
+/// key before linking - refuses a phrase that belongs to a different
 /// account (the link endpoint identifies the target account by the hash).
 pub(crate) async fn verify_lookup_binding(
     api_url: &str,
@@ -656,7 +656,7 @@ pub(crate) async fn link_device_key(
         .map_err(|e| format!("Failed to reach API: {}", e))?;
     let (status, body) = parse_json(resp).await?;
     if status >= 300 {
-        // A previous attempt may already have committed this link — that is
+        // A previous attempt may already have committed this link - that is
         // success for our purposes (the flow is retryable).
         let text = body.to_string().to_lowercase();
         if text.contains("already linked") || text.contains("already_linked") {
@@ -719,7 +719,7 @@ struct MigrationProgress {
 }
 
 /// Restart the conductor stack so a config change (the backfilled private
-/// cell material) takes effect — cell installs are decided at conductor
+/// cell material) takes effect - cell installs are decided at conductor
 /// start. Waits out an in-flight start first: shutting the stack down
 /// mid-start races the startup task (the double-stack hazard), and the
 /// restart itself goes through the watchdog's serialized recovery path.
@@ -738,7 +738,7 @@ async fn restart_conductor_for_upgrade(
         }
         if std::time::Instant::now() > deadline {
             return Err(
-                "Your vault is still starting up — wait for it to finish, then retry the upgrade."
+                "Your vault is still starting up - wait for it to finish, then retry the upgrade."
                     .to_string(),
             );
         }
@@ -764,7 +764,7 @@ fn emit_progress(app: &tauri::AppHandle, stage: &'static str, message: &str) {
 pub struct PhraseMigrationLogin {
     pub token: String,
     pub email: String,
-    /// Throwaway password minted during the phrase proof — feeds the
+    /// Throwaway password minted during the phrase proof - feeds the
     /// standard migration continuation, then dies with the custodial
     /// account at the flip.
     pub password: String,
@@ -772,14 +772,14 @@ pub struct PhraseMigrationLogin {
 }
 
 /// Phrase-first entry to the account upgrade: prove ownership of a
-/// flowsta.com account with the recovery phrase alone — no password.
+/// flowsta.com account with the recovery phrase alone - no password.
 ///
 /// Mechanics: the recovery-reset endpoint's proof is cryptographic (the
 /// phrase-derived key must decrypt the account's recovery-encrypted
 /// email), and the reset re-encrypts the account's data under the new
 /// password in the same step. We set that password to a random throwaway
 /// the user never sees, then hand the wizard the same (jwt, email,
-/// password) triple the password sign-in produces — the entire tested
+/// password) triple the password sign-in produces - the entire tested
 /// migration pipeline runs unchanged from there. 2FA never blocks this
 /// path: phrase recovery already outranks it, matching the web's old
 /// forgot-password semantics.
@@ -837,7 +837,7 @@ pub async fn phrase_migration_login(
     let email = user
         .get("emailPlain")
         .and_then(|v| v.as_str())
-        .ok_or("Reset succeeded but no email returned — is the API up to date?")?
+        .ok_or("Reset succeeded but no email returned - is the API up to date?")?
         .to_string();
     let agent_pub_key = user
         .get("agentPubKey")
@@ -860,7 +860,7 @@ pub struct MigrationSummary {
     pub records_migrated: usize,
     pub sessions_skipped: usize,
     pub totp_moved: bool,
-    /// 2FA existed but its secret was encrypted under an older password —
+    /// 2FA existed but its secret was encrypted under an older password -
     /// skipped by design (Vault approval replaces 2FA).
     pub totp_skipped: bool,
     pub cells_disabled: Vec<String>,
@@ -945,10 +945,10 @@ pub(crate) async fn migrate_custodial_account_inner(
         let mut guard = state.unlock_passphrase.lock().unwrap();
         let arr = guard
             .as_mut()
-            .ok_or("A vault already exists on this device — unlock it first, then retry the upgrade")?;
+            .ok_or("A vault already exists on this device - unlock it first, then retry the upgrade")?;
         let bytes = arr.lock();
         String::from_utf8(bytes.to_vec())
-            .map_err(|_| "Cached vault passphrase unavailable — lock and unlock, then retry".to_string())?
+            .map_err(|_| "Cached vault passphrase unavailable - lock and unlock, then retry".to_string())?
     } else {
         vault_password.unwrap_or_else(|| password.clone())
     };
@@ -956,8 +956,8 @@ pub(crate) async fn migrate_custodial_account_inner(
         let config = state.vault_config.lock().unwrap();
         let cfg = config
             .as_ref()
-            .ok_or("A vault already exists on this device — unlock it first, then retry the upgrade")?;
-        // The phrase must re-derive THIS vault's identity — an upgraded
+            .ok_or("A vault already exists on this device - unlock it first, then retry the upgrade")?;
+        // The phrase must re-derive THIS vault's identity - an upgraded
         // vault and its account are the same keypair by construction.
         if cfg.agent_pub_key != construct_agent_pub_key_string(&device_pub) {
             return Err(
@@ -1003,7 +1003,7 @@ pub(crate) async fn migrate_custodial_account_inner(
         if legacy_backfill {
             // This vault predates the encrypted private cell: give it the
             // phrase-derived cell material and the device-hosted marker,
-            // then restart the conductor — cell selection is decided at
+            // then restart the conductor - cell selection is decided at
             // conductor start. Everything here is re-derivable from the
             // phrase; retries land in the resume path below.
             emit_progress(&app_handle, "vault", "Preparing your vault's private cell…");
@@ -1062,7 +1062,7 @@ pub(crate) async fn migrate_custodial_account_inner(
             mapped.display_name.clone().or(me.display_name.clone()),
             me.profile_picture.clone(),
             Some("device-hosted".to_string()),
-            false, // migration is online by construction — no reconcile needed
+            false, // migration is online by construction - no reconcile needed
             false, // ...and registration long predates it
             app_handle.clone(),
             &state,
@@ -1070,7 +1070,7 @@ pub(crate) async fn migrate_custodial_account_inner(
     }
 
     // Wait for the conductor + encrypted private cell. First boot on a
-    // fresh vault initializes lair and installs DNAs — allow minutes, and
+    // fresh vault initializes lair and installs DNAs - allow minutes, and
     // probe by actually listing (the conductor can report ready before the
     // cell accepts calls).
     emit_progress(
@@ -1085,7 +1085,7 @@ pub(crate) async fn migrate_custodial_account_inner(
             Err(e) => {
                 if std::time::Instant::now() > deadline {
                     return Err(format!(
-                        "Your private cell did not come up in time ({}). Your account is unchanged — retry the upgrade.",
+                        "Your private cell did not come up in time ({}). Your account is unchanged - retry the upgrade.",
                         e
                     ));
                 }
@@ -1126,7 +1126,7 @@ pub(crate) async fn migrate_custodial_account_inner(
     for record in &mapped.records {
         if !have.contains(&(record.entry_type.clone(), record.created_at_ms)) {
             return Err(format!(
-                "Verification failed: {} record not readable on-device — account left unchanged",
+                "Verification failed: {} record not readable on-device - account left unchanged",
                 record.entry_type
             ));
         }
@@ -1185,7 +1185,7 @@ pub(crate) async fn migrate_custodial_account_inner(
         Some("application/json"),
     )?;
 
-    // The signed flip — after this, password login is dead and this device
+    // The signed flip - after this, password login is dead and this device
     // key is the account's auth authority. The original DID never changes.
     emit_progress(&app_handle, "flip", "Switching your account to this device…");
     let cells_disabled =
@@ -1199,7 +1199,7 @@ pub(crate) async fn migrate_custodial_account_inner(
     );
 
     // Remember the account's original web agent key. Signature reads use it
-    // to show pre-upgrade signatures immediately — the identity-DNA link
+    // to show pre-upgrade signatures immediately - the identity-DNA link
     // graph also carries this, but a fresh cell's network walk can exceed
     // the read budget for a long time after setup. Same role the auto-link
     // cache plays for custodial-linked vaults.
@@ -1222,7 +1222,7 @@ pub(crate) async fn migrate_custodial_account_inner(
     *state.linked_web_agent_key.lock().unwrap() = Some(export.web_agent_b64.clone());
 
     // Views branch on the hosting model (quota key, signature reads,
-    // account cards) — tell them the world changed.
+    // account cards) - tell them the world changed.
     let _ = app_handle.emit("profile-updated", serde_json::json!({}));
 
     Ok(MigrationSummary {
@@ -1248,7 +1248,7 @@ mod tests {
     const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 
     // Golden fixtures produced by api/src/services/encryption.js
-    // encryptWithPassword on 2026-07-04 — the cross-language contract.
+    // encryptWithPassword on 2026-07-04 - the cross-language contract.
     const EMAIL_FIXTURE: (&str, &str, &str, &str, &str) = (
         "QJpjqn/5LtgBjCfuaE1iK1kbkQ==",
         "XBkz84I+J8VgYpB8",
@@ -1376,7 +1376,7 @@ mod tests {
         assert!(!types.contains(&"totp_config"));
         assert!(!types.contains(&"session"));
 
-        // The profile body carries the DECRYPTED email — the password-locked
+        // The profile body carries the DECRYPTED email - the password-locked
         // blob must not survive migration.
         let profile = mapped.records.iter().find(|r| r.entry_type == "user_profile").unwrap();
         assert_eq!(profile.body["email"], "migtest@example.com");
@@ -1397,7 +1397,7 @@ mod tests {
     fn test_map_bundle_totp_under_stale_password_is_skipped() {
         // The server's password-change/reset sweeps never re-encrypted the
         // 2FA record, so real accounts hold it under an older password.
-        // The move must complete anyway (Vault approval replaces 2FA) —
+        // The move must complete anyway (Vault approval replaces 2FA) -
         // TOTP is skipped and flagged, never fatal.
         let mut bundle = fixture_bundle();
         // Corrupt the auth tag → AES-GCM open fails, same as a stale password.
@@ -1509,7 +1509,7 @@ mod tests {
 
     /// Link + flip using an already-fetched export as ground truth.
     /// (The export/flip/revert endpoints share one tight rate limiter on
-    /// staging — each test must spend exactly one export.)
+    /// staging - each test must spend exactly one export.)
     async fn link_and_flip(
         jwt: &str,
         user_id: &str,
@@ -1532,7 +1532,7 @@ mod tests {
         assert!(!cells.is_empty(), "cells disabled: {:?}", cells);
     }
 
-    /// RFC 4648 base32 decode (uppercase, padding ignored) — for the TOTP
+    /// RFC 4648 base32 decode (uppercase, padding ignored) - for the TOTP
     /// secret the two-factor setup endpoint returns.
     fn b32_decode(input: &str) -> Vec<u8> {
         const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -1611,7 +1611,7 @@ mod tests {
         let body: serde_json::Value = resp.json().await.unwrap();
         let jwt = body["token"].as_str().unwrap().to_string();
 
-        // 2. Server mints the phrase (the no-existing-phrase path — the same
+        // 2. Server mints the phrase (the no-existing-phrase path - the same
         //    endpoint the wizard's lost-phrase escape hatch uses).
         let phrase = migration_new_phrase(STAGING.into(), jwt.clone(), password.clone())
             .await
@@ -1725,7 +1725,7 @@ mod tests {
     /// Two-factor account variant: enable real TOTP on the account, sign in
     /// the way the wizard does (temp token + code), migrate, and confirm the
     /// 2FA material decrypts into vault-local form. Post-flip, the device
-    /// key is the auth factor — no TOTP challenge on Vault-grant.
+    /// key is the auth factor - no TOTP challenge on Vault-grant.
     #[tokio::test]
     #[ignore]
     async fn migration_2fa_user_against_staging() {
@@ -1832,7 +1832,7 @@ mod tests {
     }
 
     /// Lost-phrase variant: re-minting the phrase re-binds the account's
-    /// lookup hash — the old phrase stops resolving and is rejected by the
+    /// lookup hash - the old phrase stops resolving and is rejected by the
     /// stored-blob comparison; the new phrase migrates cleanly.
     #[tokio::test]
     #[ignore]
@@ -1892,7 +1892,7 @@ mod tests {
     /// username survives migration, and username+password login dies with
     /// the flip too.
     /// Username-entry variant. Claiming a username requires a VERIFIED
-    /// email (server gate), which a synthetic registration can't satisfy —
+    /// email (server gate), which a synthetic registration can't satisfy -
     /// so this test uses a durable pre-verified staging fixture account
     /// (username already claimed) provided via env, and REVERTS the flip at
     /// the end so the fixture stays custodial and reusable:
@@ -1914,7 +1914,7 @@ mod tests {
         let (password, username) = match fixture {
             (Ok(_email), Ok(pw), Ok(un)) => (pw, un),
             _ => {
-                // No fixture — prove the gate: fresh (unverified) accounts
+                // No fixture - prove the gate: fresh (unverified) accounts
                 // must be refused a username.
                 let suffix = unique_suffix();
                 let email = format!("migvaultuser-{}@example.com", suffix);
@@ -1930,7 +1930,7 @@ mod tests {
                 assert_eq!(resp.status().as_u16(), 403, "unverified email must be refused a username");
                 let body = resp.text().await.unwrap_or_default();
                 assert!(body.contains("email_not_verified"), "gate code present: {}", body);
-                eprintln!("(fixture env not set — verified-email gate asserted; full username flow skipped)");
+                eprintln!("(fixture env not set - verified-email gate asserted; full username flow skipped)");
                 return;
             }
         };
@@ -2005,7 +2005,7 @@ mod tests {
     }
 
     /// Existing-signatures variant: a signature made while custodial must
-    /// still verify — with the signer identity resolved — after the account
+    /// still verify - with the signer identity resolved - after the account
     /// flips to device-hosting (signatures live on the shared DHT and the
     /// old key stays attributable through the agent link graph).
     #[tokio::test]
@@ -2027,7 +2027,7 @@ mod tests {
         let did_before = me.did.clone();
 
         // Sign a document while custodial (the API signs through the
-        // account's hosted cell — exactly what existing users have done).
+        // account's hosted cell - exactly what existing users have done).
         // No `intent` field: the route's default maps to a valid zome enum
         // variant; arbitrary strings are rejected by the zome.
         let file_hash = hex::encode(Sha256::digest(format!("migration-sig-test-{}", suffix)));
@@ -2045,7 +2045,7 @@ mod tests {
             resp.text().await
         );
 
-        // Signer-identity resolution walks the identity DNA — a freshly
+        // Signer-identity resolution walks the identity DNA - a freshly
         // registered account's records need DHT warmup, so poll rather than
         // assert on the first read.
         let verify_resolved = |hash: String, deadline_secs: u64| {

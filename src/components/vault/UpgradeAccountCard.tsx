@@ -7,9 +7,9 @@ declare const __API_URL__: string;
 interface UpgradeAccountCardProps {
   /** Current vault hosting model (null/undefined = custodial-linked era). */
   hostingModel: string | null;
-  /** Account email if known — prefills the password fallback. */
+  /** Account email if known - prefills the password fallback. */
   webEmail: string | null;
-  /** Called after a completed upgrade (the world changed — refetch). */
+  /** Called after a completed upgrade (the world changed - refetch). */
   onUpgraded$: QRL<() => void>;
 }
 
@@ -17,10 +17,10 @@ type FlowStep = "card" | "phrase" | "password" | "twofa" | "confirm" | "progress
 
 /** Turn a raw sign-in error into user copy. The one that matters here:
  *  device_hosted_account means the account is ALREADY upgraded (e.g. an
- *  earlier attempt finished in the background) — never a real failure. */
+ *  earlier attempt finished in the background) - never a real failure. */
 function friendlyAuthError(msg: string): string {
   if (msg.includes("device_hosted_account") || msg.includes("not a custodial")) {
-    return "This account is already on this device. Close and reopen Vault to finish — no need to sign in again.";
+    return "This account is already on this device. Close and reopen Vault to finish - no need to sign in again.";
   }
   if (msg.includes("password_login_disabled")) {
     return "This account has already been upgraded. Close and reopen Vault to finish.";
@@ -56,7 +56,7 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
   // probe resolves where the account bound to this vault's phrase lives:
   // "web" → upgrade needed (custodial-era vault, or an upgrade interrupted
   // before the flip); "device" → already upgraded (possibly from another
-  // device — same phrase, same identity), nothing to do; "unknown" → only
+  // device - same phrase, same identity), nothing to do; "unknown" → only
   // a custodial-era vault still qualifies (its binding may predate the
   // lookup hash; the flow's password door covers it).
   useVisibleTask$(async () => {
@@ -65,7 +65,7 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
       const where = await invoke<string>("check_account_hosting", { apiUrl: __API_URL__ });
       visible.value = where === "web" || (where === "unknown" && isLegacy);
     } catch {
-      // API unreachable — the upgrade needs it anyway; a custodial-era
+      // API unreachable - the upgrade needs it anyway; a custodial-era
       // vault keeps its card so the doorway stays discoverable.
       visible.value = isLegacy;
     }
@@ -97,13 +97,13 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
       const msg = String(e);
       if (msg.includes("no_account_for_phrase")) {
         error.value =
-          "No account matched this phrase directly — sign in with your email and password instead.";
+          "No account matched this phrase directly - sign in with your email and password instead.";
         step.value = "password";
       } else if (msg.includes("Invalid recovery phrase")) {
         error.value = "Invalid recovery phrase. Please check your words.";
       } else {
         // Accounts whose phrase was saved before phrase sign-in existed
-        // land here — the password door covers them.
+        // land here - the password door covers them.
         error.value = "";
         step.value = "password";
       }
@@ -244,7 +244,7 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
           <h3 class="mb-1 text-lg font-semibold text-white">Upgrade your account to this Vault</h3>
           <p class="mb-4 text-sm text-gray-300">
             Your Flowsta account still lives on Flowsta's servers. Upgrading
-            moves it into this Vault — your data on this device, sign-ins
+            moves it into this Vault - your data on this device, sign-ins
             approved here, no password. Your identity, username, and
             signatures stay exactly as they are.
           </p>
@@ -387,7 +387,7 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
             <li>Your personal data moves into this Vault's encrypted private cell.</li>
             <li>Your identity, signatures, and username stay exactly as they are.</li>
             <li>Sign-in switches from your password to this Vault.</li>
-            <li>Your recovery phrase becomes the one key to your account — keep it safe.</li>
+            <li>Your recovery phrase becomes the one key to your account - keep it safe.</li>
           </ul>
           <p class="mb-4 text-xs text-gray-400">
             Nothing changes until the final step, and everything before it can
@@ -425,12 +425,12 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
           </p>
           {summary.totpSkipped && (
             <p class="mb-2 text-xs text-gray-400">
-              Your old 2FA settings couldn't be carried over — that's fine:
+              Your old 2FA settings couldn't be carried over - that's fine:
               approving sign-ins from this Vault replaces 2FA.
             </p>
           )}
           <p class="mb-4 text-xs text-amber-300">
-            Your recovery phrase is now the one key to your account — no one,
+            Your recovery phrase is now the one key to your account - no one,
             including Flowsta, can recover it for you.
           </p>
           <GlassButton onClick$={props.onUpgraded$}>Continue</GlassButton>

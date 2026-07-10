@@ -310,7 +310,7 @@ pub fn record_mau_event_if_needed(app_state: &AppState, client_id: &str) {
                 arr.copy_from_slice(seed);
                 arr
             }
-            _ => return, // Vault locked or no seed — skip silently
+            _ => return, // Vault locked or no seed - skip silently
         }
     };
 
@@ -329,12 +329,12 @@ pub fn record_mau_event_if_needed(app_state: &AppState, client_id: &str) {
         .iter_mut()
         .find(|e| e.client_id == client_id && e.month_year == month_year)
     {
-        // Already tracked this month — just update last_seen and activity count
+        // Already tracked this month - just update last_seen and activity count
         event.last_seen_at = now;
         event.activity_count += 1;
         // Don't re-sign; the HMAC covers immutable fields (first_seen_at)
     } else {
-        // First interaction this month — create new event
+        // First interaction this month - create new event
         let analytics_id = store
             .analytics_ids
             .entry(client_id.to_string())
@@ -359,7 +359,7 @@ pub fn record_mau_event_if_needed(app_state: &AppState, client_id: &str) {
         log::info!("MAU event recorded for client_id: {}", client_id);
     }
 
-    // Persist to disk (fire-and-forget — non-critical if it fails)
+    // Persist to disk (fire-and-forget - non-critical if it fails)
     if let Err(e) = save_mau_store(&app_state.data_dir, store, &device_seed) {
         log::warn!("Failed to persist MAU store: {}", e);
     }
@@ -539,7 +539,7 @@ pub fn spawn_mau_sync_task(app_state: std::sync::Arc<AppState>) {
                 Ok(count) if count > 0 => {
                     log::info!("MAU sync: {} events synced", count);
                 }
-                Ok(_) => {} // No pending events — silent
+                Ok(_) => {} // No pending events - silent
                 Err(e) => {
                     log::debug!("MAU sync failed (will retry): {}", e);
                 }

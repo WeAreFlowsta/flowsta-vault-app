@@ -92,7 +92,7 @@ export default component$(() => {
     resetting.value = true;
     try {
       // Wipe the localStorage signatures cache before deleting the vault.
-      // Reset Vault means "wipe everything" from the user's perspective —
+      // Reset Vault means "wipe everything" from the user's perspective -
       // and the next identity that unlocks must not see the previous
       // user's signatures (the per-agent cache key would catch this even
       // without the explicit clear, but reset is the right moment to be
@@ -148,7 +148,7 @@ export default component$(() => {
             </h3>
             <p class="mb-4 text-sm text-gray-400">
               Your password protects this vault on this device. Changing it
-              happens entirely locally — no server is involved — and your
+              happens entirely locally - no server is involved - and your
               Vault briefly restarts its network connection to apply it.
             </p>
 
@@ -226,7 +226,7 @@ export default component$(() => {
               </GlassButton>
 
               <p class="text-xs text-gray-500">
-                Your recovery phrase is unaffected — it can always restore
+                Your recovery phrase is unaffected - it can always restore
                 this identity, whatever the password.
               </p>
             </div>
@@ -269,7 +269,7 @@ export default component$(() => {
                 <p class="text-sm text-gray-400">
                   Open Flowsta Vault automatically when you sign in to this
                   computer, so it's ready the moment a Flowsta app or website
-                  needs it. It starts in the background, locked — nothing
+                  needs it. It starts in the background, locked - nothing
                   unlocks until you enter your password.
                 </p>
               </div>
@@ -301,7 +301,7 @@ export default component$(() => {
           <div class="rounded-lg border border-red-900/50 bg-red-950/20 p-6">
             <h3 class="mb-2 text-lg font-semibold text-white">Reset Vault</h3>
             <p class="mb-3 text-sm text-gray-400">
-              Erases everything stored on this device — your identity keys,
+              Erases everything stored on this device - your identity keys,
               conductor data, your private data, and every connected app's
               links and saved backups. Your Flowsta account is not affected.
             </p>
@@ -329,8 +329,8 @@ export default component$(() => {
             ) : (
               <div>
                 <p class="mb-3 text-sm font-medium text-red-400">
-                  This permanently erases this device — your private data,
-                  connected apps, and their backups — and cannot be undone.
+                  This permanently erases this device - your private data,
+                  connected apps, and their backups - and cannot be undone.
                   Your recovery phrase restores your identity and signatures;
                   your private data and app backups come back only from a data
                   export. Make sure you have both before you continue.
@@ -392,19 +392,19 @@ export default component$(() => {
               Your <span class="text-white font-medium">recovery phrase</span> is
               the root of your identity. During setup, your Vault used it to
               derive your{" "}
-              <span class="text-white font-medium">device key</span> — the
-              cryptographic identity that signs as you — along with the keys
+              <span class="text-white font-medium">device key</span> - the
+              cryptographic identity that signs as you - along with the keys
               that encrypt your data. The same phrase always re-creates the
               same identity, which is how it can restore you on another device.
             </p>
             <p class="text-sm leading-relaxed text-gray-300">
-              The phrase itself is never saved — not to disk, and not kept
+              The phrase itself is never saved - not to disk, and not kept
               after setup. Only the keys it derived stay on this device, locked
               behind your password with strong encryption.
             </p>
             <p class="text-sm leading-relaxed text-gray-300">
               So even if someone reached this computer, they would still need
-              your password to unlock anything — and they would never find your
+              your password to unlock anything - and they would never find your
               recovery phrase, because it isn't here. That is also why the
               phrase is yours to keep safe: it is the only way to recover your
               identity, and no one, including Flowsta, can bring it back for

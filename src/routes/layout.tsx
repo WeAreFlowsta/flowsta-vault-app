@@ -37,7 +37,7 @@ export default component$(() => {
   // Set when the API's dna-versions endpoint reports this build is below
   // min_vault_version (e.g. once the network moves to a new transport and
   // old clients can no longer gossip). Holds the required version string.
-  // The banner is advisory — the vault still opens so the user keeps local
+  // The banner is advisory - the vault still opens so the user keeps local
   // access ("warn but allow"). Never cleared within a session: once below
   // min, still below min until a newer build is installed.
   const appUpdateRequired = useSignal<string | null>(null);
@@ -54,7 +54,7 @@ export default component$(() => {
   // auto-link caches the linked agent key mid-fetch, so the next round will
   // pick up linked-agent sigs that the current call missed).
   const pendingRefresh = useSignal(false);
-  // A confident "no linked agents" answer holds for the whole app session —
+  // A confident "no linked agents" answer holds for the whole app session -
   // re-checking pays a fixed ~10s DHT timeout on EVERY refresh for
   // vault-native accounts that will never have linked history.
   const linkedConfirmedNone = useSignal(false);
@@ -67,13 +67,13 @@ export default component$(() => {
     try {
       // Own + linked are dispatched as two independent Tauri commands so
       // the cold-DHT linked path can't block the fast local own query.
-      // Own results paint IMMEDIATELY (additive merge — nothing is ever
+      // Own results paint IMMEDIATELY (additive merge - nothing is ever
       // evicted, so a not-yet-settled linked leg can't be misread as
       // records disappearing); the "loaded" badge still waits for linked
       // confidence, and a background interval re-fires until it arrives.
 
       // Own: local source-chain query, retry on Err. Returns null when all
-      // attempts failed — own truth UNKNOWN (cells can take ~20s+ to enable
+      // attempts failed - own truth UNKNOWN (cells can take ~20s+ to enable
       // after unlock, longer than this retry span). null must never be
       // treated as "zero new records": the caller keeps the cache AND keeps
       // the background retry alive until a real read succeeds.
@@ -97,7 +97,7 @@ export default component$(() => {
       //   - all 3 attempts returned ok-but-empty → genuine zero-sig user
       // `confident = false` means at least one attempt threw (DHT timeout
       // or unreachable), so the empty result could be a cold-DHT false
-      // negative — keep retrying via the background interval.
+      // negative - keep retrying via the background interval.
       const fetchLinked = async (): Promise<{ sigs: any[]; confident: boolean }> => {
         if (linkedConfirmedNone.value) return { sigs: [], confident: true };
         let lastRes: { signatures: any[]; has_linked_agents: boolean } | null = null;
@@ -126,7 +126,7 @@ export default component$(() => {
         return { sigs: lastRes?.signatures ?? [], confident: false };
       };
 
-      // Merge a round of results into the displayed list — ADDITIVE only.
+      // Merge a round of results into the displayed list - ADDITIVE only.
       // By action_hash: the new round wins for present hashes, anything
       // missing from this round is preserved from the existing signal so a
       // partial round can't clobber cached data.
@@ -135,7 +135,7 @@ export default component$(() => {
       // round's data overall, but preserve cached `thumbnail` and
       // `revoked*` when the new round returned null (Rust's per-sig
       // enrichment has a 15 s budget; on cold DHT it can return null even
-      // when gossip has the data — without this, thumbnails flicker).
+      // when gossip has the data - without this, thumbnails flicker).
       // `revoked` is one-way (revocations never retract) so cached `true`
       // always wins.
       const mergeRound = (round: any[]) => {
@@ -172,7 +172,7 @@ export default component$(() => {
       do {
         pendingRefresh.value = false;
 
-        // Own is local truth — paint it the MOMENT it arrives. The linked
+        // Own is local truth - paint it the MOMENT it arrives. The linked
         // leg is DHT-bound (can sit on a 10s timeout); it merges in
         // additively when it settles. This is the product rule: anything
         // the Vault knows shows instantly, the network only ever adds.
@@ -192,11 +192,11 @@ export default component$(() => {
             (s) => s.action_hash && !ownHashes.has(s.action_hash),
           ),
         );
-        // Empty rounds never overwrite the cache — keep whatever we had.
+        // Empty rounds never overwrite the cache - keep whatever we had.
 
         // Promote to "loaded" only when linked is confident AND the own
         // read actually succeeded. A failed own read (cells still
-        // enabling after unlock) must keep the background retry alive —
+        // enabling after unlock) must keep the background retry alive -
         // otherwise the view freezes on the stale cache with the user's
         // newest records missing.
         if (linkedRes.confident && ownOk) {
@@ -250,7 +250,7 @@ export default component$(() => {
         const q = await resp.json();
         planInfo.value = { tier: q.tier || "free", used: q.used ?? 0, limit: q.limit ?? 0 };
       }
-    } catch { /* offline — plan hidden */ }
+    } catch { /* offline - plan hidden */ }
   });
 
   // Auth approval dialog state
@@ -288,10 +288,10 @@ export default component$(() => {
     sponsor_exhausted?: boolean;
   } | null>(null);
 
-  // A Flowsta page's committing request is waiting for the conductor —
+  // A Flowsta page's committing request is waiting for the conductor -
   // show a visible preparing state instead of dead air before the dialog.
   // Bridge-operation activity: after an approval the Vault narrates what it
-  // is doing on the user's behalf — the requesting app may tell its own
+  // is doing on the user's behalf - the requesting app may tell its own
   // story, or none at all (third-party callers). Card = current/latest op;
   // list = recent history for "wait, what did I just approve?".
   const opActivity = useSignal<any | null>(null);
@@ -325,7 +325,7 @@ export default component$(() => {
   // Transient notice when a remembered app authenticated without a dialog.
   const autoApprovedNotice = useSignal<string | null>(null);
 
-  // Relay login — approve a sign-in happening on another device.
+  // Relay login - approve a sign-in happening on another device.
   // The approval screen is ALWAYS shown (no remember option): cross-device
   // approval is the phishing surface, the screen is the defense.
   const pendingRelayClaim = useSignal<{
@@ -335,14 +335,14 @@ export default component$(() => {
     expires_in: number;
   } | null>(null);
   // Set while a Flowsta page's request (sign / profile) is waiting behind
-  // the lock screen — its approval dialog appears the moment we unlock.
+  // the lock screen - its approval dialog appears the moment we unlock.
   const unlockAttention = useSignal<{ reason: string; origin: string | null } | null>(null);
   const relayCodeModal = useSignal(false);
   const relayCodeInput = useSignal("");
   const relayBusy = useSignal(false);
   const relayError = useSignal<string | null>(null);
   const relayApprovedFlash = useSignal(false);
-  // A flowsta:// code that arrived while locked — processed after unlock.
+  // A flowsta:// code that arrived while locked - processed after unlock.
   const queuedRelayCode = useSignal<string | null>(null);
 
   // Fetch profile from unlocked vault for header display + register
@@ -375,7 +375,7 @@ export default component$(() => {
       // identity sat in localStorage (Reset Vault → new identity, restore
       // from a different recovery phrase, multiple users on one machine)
       // this prevents the old data from being hydrated into the new
-      // session — hydrate returns [] when the cache key doesn't match.
+      // session - hydrate returns [] when the cache key doesn't match.
       setActiveSignatureAgent(identity.agent_pub_key);
       const cached = hydrateSignaturesCache<any>();
       if (cached.length > 0 && signaturesSig.value.length === 0) {
@@ -383,7 +383,7 @@ export default component$(() => {
         signaturesLoaded.value = true;
       }
     } catch {
-      // Non-critical — header just won't show profile info
+      // Non-critical - header just won't show profile info
     }
   });
 
@@ -556,7 +556,7 @@ export default component$(() => {
       pendingProfileUpdate.value = event.payload;
     });
     // A signature published through the localhost bridge (web-delegated
-    // signing) — refresh the signatures view so it appears immediately.
+    // signing) - refresh the signatures view so it appears immediately.
     const unlistenPublished = listen("signature-published", () => {
       refreshSignatures();
     });
@@ -572,7 +572,7 @@ export default component$(() => {
     const unlistenOpPending = listen<{ op: string; origin: string | null }>(
       "op-pending",
       (event) => {
-        // Pre-approval conductor wait — the first chapter of the same
+        // Pre-approval conductor wait - the first chapter of the same
         // bottom-right story the rest of the operation tells (this was a
         // separate top-of-page banner).
         opActivity.value = {
@@ -617,7 +617,7 @@ export default component$(() => {
       profile: "Profile updated",
     };
     // Pre-dialog refusals (validation, wrong origin) never showed the user
-    // anything — log them to the list but don't pop a card out of nowhere.
+    // anything - log them to the list but don't pop a card out of nowhere.
     const QUIET_ERRORS = [
       "tier_forbidden", "invalid_file_hash", "invalid_supersedes",
       "invalid_thumbnail", "invalid_comment", "invalid_action_hash",
@@ -643,10 +643,10 @@ export default component$(() => {
         ? p.op === "sign" && wasPublish
           ? "Signed & published"
           : p.op === "sign" && wasPublish === false
-            ? "Signed — returned to the app"
+            ? "Signed - returned to the app"
             : OP_DONE[p.op] || "Done"
         : denied
-          ? "You declined — nothing was changed"
+          ? "You declined - nothing was changed"
           : "Nothing was changed";
       const entry = {
         op: p.op, origin: p.origin, label: p.label,
@@ -748,7 +748,7 @@ export default component$(() => {
         await invoke("lock_vault");
         screen.value = "unlock";
       } catch {
-        // ignore — vault may already be locked
+        // ignore - vault may already be locked
       }
     });
 
@@ -763,7 +763,7 @@ export default component$(() => {
     const s = track(() => screen.value);
     if (s !== "dashboard") return;
 
-    // Poll until ready — the conductor-status event may fire before this
+    // Poll until ready - the conductor-status event may fire before this
     // listener is registered, so keep polling while status isn't "ready".
     const pollStatus = () => {
       invoke<{ status: string; message?: string }>("get_conductor_status")
@@ -789,18 +789,18 @@ export default component$(() => {
 
     // Listen for profile sync (profile picture/name updated from web account).
     // This event also signals that auto-link is complete, so the cached web
-    // agent key is now available — refresh signatures to pick up linked-agent
+    // agent key is now available - refresh signatures to pick up linked-agent
     // sigs that the first fetch may have missed.
     const unlistenProfilePromise = listen("profile-synced", () => {
       fetchProfile();
       // New linked-agent info just arrived (auto-link or the offline-restore
-      // reconcile) — an earlier "authoritative no-linked-agents" verdict is
+      // reconcile) - an earlier "authoritative no-linked-agents" verdict is
       // stale now. Without this reset the fire-drill's recovered signature
       // stayed hidden until the next unlock.
       linkedConfirmedNone.value = false;
       refreshSignatures();
     });
-    // In-app profile edits (Overview card) — refresh the header chip.
+    // In-app profile edits (Overview card) - refresh the header chip.
     const unlistenProfileEditPromise = listen("profile-updated", () => {
       fetchProfile();
     });
@@ -832,7 +832,7 @@ export default component$(() => {
 
   // Re-fetch signatures when the Vault window regains focus. Covers the
   // case where the user signs something on flowsta.com (or another
-  // device) while Vault is open in the background — without this, the
+  // device) while Vault is open in the background - without this, the
   // refresh only fires on conductor-ready / profile-synced / lock+unlock,
   // so a new linked-agent sig wouldn't appear until the next unlock
   // cycle. `refreshSignatures` is internally idempotent (coalesces via
@@ -855,7 +855,7 @@ export default component$(() => {
   // dna_updater emits `dna-update-status` with status `app_update_required`.
   // Surface it as a persistent banner: the vault still works (warn but
   // allow), but the user is told they won't sync with the network until
-  // they update. The other statuses (checking/done) are ignored — `done`
+  // they update. The other statuses (checking/done) are ignored - `done`
   // always fires afterwards, so clearing on it would hide the banner.
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ track, cleanup }) => {
@@ -878,7 +878,7 @@ export default component$(() => {
 
   // Note: hydration from localStorage moved into fetchProfile() so it
   // runs AFTER the active identity is known. On a fresh app launch the
-  // layout mounts before unlock — hydrating here unconditionally would
+  // layout mounts before unlock - hydrating here unconditionally would
   // pull whatever the previous user cached. Per-agent hydration in
   // fetchProfile is the correct ordering.
 
@@ -1005,14 +1005,14 @@ export default component$(() => {
     } catch (e: any) {
       const s = String(e);
       relayError.value = s.includes("code_not_found")
-        ? "That code wasn't found — it may have expired. Get a fresh code on your other device."
+        ? "That code wasn't found - it may have expired. Get a fresh code on your other device."
         : s.includes("already_claimed")
           ? "That code was already used. If that wasn't you, deny the request on your other device and get a fresh code."
           : s.includes("invalid_code")
             ? "Codes are 8 letters, shown as XXXX-XXXX."
             : s.includes("vault_locked")
               ? "Unlock your Vault first."
-              : "Couldn't check that code — are you online?";
+              : "Couldn't check that code - are you online?";
       // Surface the error in the code modal (also for the deep-link path).
       relayCodeModal.value = true;
     } finally {
@@ -1035,7 +1035,7 @@ export default component$(() => {
       console.error("Relay response failed:", e);
       if (wasApproving) {
         relayError.value =
-          "Approval failed — the request may have expired. Get a fresh code on your other device.";
+          "Approval failed - the request may have expired. Get a fresh code on your other device.";
         relayCodeModal.value = true;
       }
     }
@@ -1122,14 +1122,14 @@ export default component$(() => {
               {unlockAttention.value.reason === "profile"
                 ? " update your profile"
                 : " sign a file"}{" "}
-              — unlock your Vault to review and approve it.
+              - unlock your Vault to review and approve it.
             </p>
           </div>
         )}
         {queuedRelayCode.value && (
           <div class="fixed top-0 inset-x-0 z-50 bg-amber-500/15 border-b border-amber-500/40 px-4 py-3 text-center">
             <p class="text-sm text-amber-200">
-              A sign-in from another device is waiting — unlock your Vault to
+              A sign-in from another device is waiting - unlock your Vault to
               review it. The code expires about five minutes after it was
               requested.
             </p>
@@ -1139,7 +1139,7 @@ export default component$(() => {
           onUnlock$={handleUnlockPassword}
           onResetVault$={async () => {
             // Must WIPE on disk (vault.enc + lair keystore + conductor), not
-            // just navigate — otherwise the next create/restore inherits the
+            // just navigate - otherwise the next create/restore inherits the
             // old lair keystore under a mismatched passphrase and the conductor
             // crashes on connect (ConnectionReset → "Connection refused"). The
             // Settings reset already does this; the lock-screen path must too.
@@ -1155,7 +1155,7 @@ export default component$(() => {
     );
   }
 
-  // Prefer the display name; fall back to @username, then a neutral label —
+  // Prefer the display name; fall back to @username, then a neutral label -
   // never raw hashes, and never a VANISHED chip (offline restores have no
   // account-layer fields until reconcile).
   const displayName =
@@ -1226,7 +1226,7 @@ export default component$(() => {
                       <p class="mt-0.5 truncate text-xs text-gray-400">{userProfile.email}</p>
                     )}
                     <p class="mt-0.5 text-xs text-gray-500">
-                      {userProfile.username ? `@${userProfile.username}` : "No username yet — claim one on Overview"}
+                      {userProfile.username ? `@${userProfile.username}` : "No username yet - claim one on Overview"}
                     </p>
 
                     <div class="mt-3 rounded-lg bg-white/[0.06] px-3 py-2">
@@ -1262,7 +1262,7 @@ export default component$(() => {
         </div>
       </header>
 
-      {/* App-update banner — shown when the API reports this build is below
+      {/* App-update banner - shown when the API reports this build is below
           min_vault_version. Advisory only: the vault stays usable. */}
       {appUpdateRequired.value !== null && (
         <div class="flex items-center gap-3 border-b border-amber-500/40 bg-amber-500/10 px-6 py-2.5">
@@ -1282,7 +1282,7 @@ export default component$(() => {
           <p class="flex-1 text-xs text-amber-200">
             A new version of Flowsta Vault is available
             {appUpdateRequired.value ? ` (v${appUpdateRequired.value} or newer)` : ""}.
-            Until you update you won't sync with the network — your local data
+            Until you update you won't sync with the network - your local data
             stays safe and accessible.
           </p>
           <button
@@ -1518,7 +1518,7 @@ export default component$(() => {
       )}
 
       {/* Relay login: approval dialog. Deliberately NO remember
-          option — every cross-device sign-in is reviewed. */}
+          option - every cross-device sign-in is reviewed. */}
       {pendingRelayClaim.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
@@ -1568,7 +1568,7 @@ export default component$(() => {
 
             <p class="mb-4 text-xs text-amber-200/90">
               Only approve if YOU just requested this on your other device.
-              If someone asked you to enter a code for them, deny it — that is
+              If someone asked you to enter a code for them, deny it - that is
               a scam.
             </p>
 
@@ -1595,7 +1595,7 @@ export default component$(() => {
       {relayApprovedFlash.value && (
         <div class="fixed bottom-6 right-6 z-50 rounded-lg border border-green-500/40 bg-green-500/15 px-4 py-3 shadow-xl">
           <p class="text-sm text-green-200">
-            Approved — your other device is now signed in.
+            Approved - your other device is now signed in.
           </p>
         </div>
       )}
@@ -1670,7 +1670,7 @@ export default component$(() => {
                               : "text-gray-500"
                         }
                       >
-                        {r.stage === "ok" ? "✓" : r.stage === "failed" ? "✕" : "—"}
+                        {r.stage === "ok" ? "✓" : r.stage === "failed" ? "✕" : "-"}
                       </span>{" "}
                       {r.title}
                       {r.label ? ` · ${r.label}` : ""} ·{" "}
@@ -2001,21 +2001,21 @@ export default component$(() => {
 
             {pendingDocumentSign.value.commit && pendingDocumentSign.value.sponsored_by && (
               <p class="mb-2 text-xs text-emerald-400">
-                Sponsored by {pendingDocumentSign.value.sponsored_by} — this
+                Sponsored by {pendingDocumentSign.value.sponsored_by} - this
                 signature doesn't use your personal quota.
               </p>
             )}
             {pendingDocumentSign.value.commit && pendingDocumentSign.value.sponsor_exhausted && (
               <p class="mb-2 text-xs text-amber-400">
                 {pendingDocumentSign.value.app_name}'s signing pool is used up
-                for this period — this signature will use your personal quota.
+                for this period - this signature will use your personal quota.
               </p>
             )}
             <p class="mb-4 text-xs text-gray-400">
               {pendingDocumentSign.value.commit
                 ? pendingDocumentSign.value.amends
-                  ? 'This publishes an updated signature that replaces an earlier one you made — the original stays visible in its history.'
-                  : 'This will publish a signature from this device to the Sign It network — publicly verifiable, and it speaks as you.'
+                  ? 'This publishes an updated signature that replaces an earlier one you made - the original stays visible in its history.'
+                  : 'This will publish a signature from this device to the Sign It network - publicly verifiable, and it speaks as you.'
                 : 'This app wants you to cryptographically sign a file. Your signature will be publicly verifiable on the DHT.'}
             </p>
 

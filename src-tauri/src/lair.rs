@@ -39,7 +39,7 @@ pub async fn import_seed_to_lair(
             log::info!("Seed '{}' already exists in lair, reusing", tag);
             return Ok(seed_info);
         }
-        _ => {} // Not found or different entry type — proceed with import
+        _ => {} // Not found or different entry type - proceed with import
     }
 
     // 1. Create a helper seed in lair to get a recipient x25519 public key.
@@ -50,7 +50,7 @@ pub async fn import_seed_to_lair(
     {
         Ok(h) => h,
         Err(_) => {
-            // Helper may already exist from a previous run — fetch it instead
+            // Helper may already exist from a previous run - fetch it instead
             match client.get_entry("_import_helper".into()).await {
                 Ok(LairEntryInfo::Seed { seed_info, .. }) => seed_info,
                 _ => return Err(lair_keystore_api::dependencies::one_err::OneErr::new("Failed to create or fetch _import_helper seed")),
@@ -122,7 +122,7 @@ pub fn start_lair_process(
     log::info!("Using lair-keystore binary: {:?}", lair_bin);
 
     if is_first_run {
-        log::info!("[lair:init] first run — initializing lair-keystore");
+        log::info!("[lair:init] first run - initializing lair-keystore");
         let init_start = std::time::Instant::now();
         let mut child = Command::new(&lair_bin)
             .arg("init")
@@ -249,7 +249,7 @@ pub async fn connect_to_lair(
 
 /// Wait for the lair connection to be ready.
 /// On Unix, polls until the socket file exists.
-/// On Windows, lair uses named pipes — poll by attempting a TCP-like connect.
+/// On Windows, lair uses named pipes - poll by attempting a TCP-like connect.
 pub async fn wait_for_lair_socket(connection_url: &str, timeout_secs: u64) -> Result<(), String> {
     // On Windows, lair uses named pipes which don't have a socket file to poll.
     // Instead, just wait a fixed period for lair to initialize.

@@ -13,7 +13,7 @@ use crate::commands::AppState;
 use std::sync::Arc;
 
 /// Candidate admin WebSocket ports for the conductor.
-/// Tries each in order — allows staging and production vaults to coexist.
+/// Tries each in order - allows staging and production vaults to coexist.
 const ADMIN_WS_PORTS: &[u16] = &[4455, 4456, 4457];
 
 /// Handle to a running conductor + lair-keystore pair.
@@ -65,7 +65,7 @@ fn find_available_admin_port() -> Result<u16, String> {
     for &port in ADMIN_WS_PORTS {
         match std::net::TcpListener::bind(("127.0.0.1", port)) {
             Ok(_listener) => {
-                // Port is free — listener is dropped here, freeing the port for the conductor.
+                // Port is free - listener is dropped here, freeing the port for the conductor.
                 log::info!("Using admin WS port {}", port);
                 return Ok(port);
             }
@@ -83,7 +83,7 @@ fn find_available_admin_port() -> Result<u16, String> {
 /// A resolved network entry: where this conductor session will do peer
 /// discovery (bootstrap), SBD signaling, and Iroh relay. The primary is
 /// Flowsta's auth-gated server; fallbacks are OPEN community/backup
-/// bootstrap-srv instances (no auth material — the gate's hook dies with
+/// bootstrap-srv instances (no auth material - the gate's hook dies with
 /// the primary infrastructure, so fallbacks don't gate).
 #[derive(Debug, Clone, PartialEq)]
 pub struct BootstrapTarget {
@@ -110,7 +110,7 @@ impl BootstrapTarget {
 
     /// Comma-separated bootstrap URLs baked at build time
     /// (FLOWSTA_BOOTSTRAP_FALLBACKS). Signal derives from each URL's host;
-    /// no auth material — fallbacks are open by design.
+    /// no auth material - fallbacks are open by design.
     fn fallbacks() -> Vec<Self> {
         option_env!("FLOWSTA_BOOTSTRAP_FALLBACKS")
             .unwrap_or("")
@@ -118,13 +118,13 @@ impl BootstrapTarget {
             .map(str::trim)
             .filter(|u| !u.is_empty())
             // The conductor rejects plaintext relay URLs outright
-            // ("Disallowed plaintext relay URL") — a non-https fallback
+            // ("Disallowed plaintext relay URL") - a non-https fallback
             // could never work, so drop it loudly at parse time.
             .filter(|u| {
                 let ok = u.starts_with("https://");
                 if !ok {
                     log::error!(
-                        "[bootstrap] ignoring non-https fallback {} — the conductor forbids plaintext relays",
+                        "[bootstrap] ignoring non-https fallback {} - the conductor forbids plaintext relays",
                         u
                     );
                 }
@@ -146,7 +146,7 @@ impl BootstrapTarget {
 }
 
 /// Is a bootstrap server answering? kitsune2-bootstrap-srv serves
-/// GET /health directly (200, no auth) — verified against the live
+/// GET /health directly (200, no auth) - verified against the live
 /// fleet; community nodes run the same binary, so the probe is
 /// universal.
 async fn bootstrap_alive(url: &str) -> bool {
@@ -162,11 +162,11 @@ async fn bootstrap_alive(url: &str) -> bool {
 }
 
 /// Pick the network entry for this conductor session. With no fallbacks
-/// baked in, this returns the primary immediately — no probes, no added
+/// baked in, this returns the primary immediately - no probes, no added
 /// latency, byte-identical config to before. With fallbacks configured:
 /// probe the primary; if it's dark, take the first live fallback
 /// (rediscovery + relay re-home happen naturally on the new server).
-/// If EVERYTHING is dark (fully offline), still use the primary — the
+/// If EVERYTHING is dark (fully offline), still use the primary - the
 /// conductor works locally and reconnects when anything returns.
 pub async fn resolve_bootstrap_target() -> BootstrapTarget {
     let primary = BootstrapTarget::primary();
@@ -178,7 +178,7 @@ pub async fn resolve_bootstrap_target() -> BootstrapTarget {
         return primary;
     }
     log::warn!(
-        "[bootstrap] primary {} unreachable — probing {} fallback(s)",
+        "[bootstrap] primary {} unreachable - probing {} fallback(s)",
         primary.bootstrap_url,
         fallbacks.len()
     );
@@ -191,12 +191,12 @@ pub async fn resolve_bootstrap_target() -> BootstrapTarget {
             return fb;
         }
     }
-    log::warn!("[bootstrap] no rendezvous reachable — keeping primary (offline mode)");
+    log::warn!("[bootstrap] no rendezvous reachable - keeping primary (offline mode)");
     primary
 }
 
 /// Canonical relay URL for a bootstrap server. kitsune2/Iroh want the
-/// canonical FQDN form — trailing dot on the HOSTNAME, trailing slash:
+/// canonical FQDN form - trailing dot on the HOSTNAME, trailing slash:
 /// `https://bootstrap.flowsta.com./`. The dot belongs to the hostname,
 /// so with an explicit port it goes BEFORE the colon, and IP literals
 /// never get one (a dotted IP is invalid).
@@ -231,7 +231,7 @@ fn derive_relay_url(bootstrap_url: &str) -> String {
 ///
 /// Holochain 0.6.1 / Iroh config format. The config is regenerated from
 /// scratch on every unlock, so an existing 0.6.0 user upgrading to this
-/// build picks up the Iroh format automatically — no on-disk migration.
+/// build picks up the Iroh format automatically - no on-disk migration.
 /// Uses the lair connection URL for keystore integration.
 pub fn generate_conductor_config(
     conductor_dir: &Path,
@@ -243,13 +243,13 @@ pub fn generate_conductor_config(
         .map_err(|e| format!("Failed to create conductor directory: {}", e))?;
 
     // URLs and auth come pre-resolved (primary vs fallback) from
-    // resolve_bootstrap_target() — see BootstrapTarget above.
+    // resolve_bootstrap_target() - see BootstrapTarget above.
     let bootstrap_url = target.bootstrap_url.as_str();
     let signal_url = target.signal_url.as_str();
 
     // Iroh's relay is hosted by the same server as peer discovery + SBD,
     // so the relay_url is *derived* from the bootstrap URL rather than
-    // carried separately — a staging build can't point its relay at
+    // carried separately - a staging build can't point its relay at
     // production by accident, and fallbacks inherit their own relay.
     let relay_url = derive_relay_url(bootstrap_url);
 
@@ -262,7 +262,7 @@ pub fn generate_conductor_config(
     //
     // Encoding: base64::engine::general_purpose::STANDARD (standard
     // alphabet, REQUIRED `=` padding). The Holochain conductor docstring
-    // claims url-safe-no-pad but the actual decoder is STANDARD — see
+    // claims url-safe-no-pad but the actual decoder is STANDARD - see
     // BOOTSTRAP_AUTH_PLAN.md for the gory details.
     //
     // Empty / unset env var → field omitted from the YAML, conductor
@@ -276,7 +276,7 @@ pub fn generate_conductor_config(
         _ => String::new(),
     };
 
-    // Path values use SINGLE-quoted YAML strings — double-quoted YAML interprets
+    // Path values use SINGLE-quoted YAML strings - double-quoted YAML interprets
     // backslash escapes (e.g. "C:\Users\..." reads "\U" as the start of a Unicode
     // escape and bombs out at the first non-hex character). Single-quoted strings
     // pass backslashes through verbatim. The only character that needs escaping
@@ -352,7 +352,7 @@ pub fn start_conductor_process(
     // hiding caused the `0xc0000005` access violation we saw on first
     // install of signing DNA. The diagnostic logging added in beta1 and
     // the conductor exit-code captured in beta5 proved that crash
-    // happens *regardless* of window state — it's an upstream holochain
+    // happens *regardless* of window state - it's an upstream holochain
     // bug in the WASM compile path, not anything to do with the console.
     // Now that the start_holochain auto-restart catches that crash and
     // recovers transparently, the window can be hidden safely.
@@ -370,7 +370,7 @@ pub fn start_conductor_process(
 
     let pid = child.id();
     log::info!(
-        "[conductor:{pid}] spawned in {}ms — writing passphrase to stdin",
+        "[conductor:{pid}] spawned in {}ms - writing passphrase to stdin",
         spawn_start.elapsed().as_millis()
     );
 
@@ -382,7 +382,7 @@ pub fn start_conductor_process(
             .map_err(|e| format!("Failed to write passphrase to conductor: {}", e))?;
     }
 
-    log::info!("[conductor:{pid}] passphrase piped — sleeping 500ms before liveness check");
+    log::info!("[conductor:{pid}] passphrase piped - sleeping 500ms before liveness check");
 
     // Give the process a moment to fail on config errors, then check if it's still alive.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -423,7 +423,7 @@ fn read_conductor_logs(conductor_dir: &Path) -> String {
 }
 
 /// Wait for the conductor admin WebSocket to be ready.
-/// Also monitors the conductor process — if it exits during the wait,
+/// Also monitors the conductor process - if it exits during the wait,
 /// reads log files and returns immediately with the actual error.
 async fn wait_for_admin_ws(
     port: u16,
@@ -448,7 +448,7 @@ async fn wait_for_admin_ws(
                     output.trim()
                 ));
             }
-            Ok(None) => {} // Still running — continue waiting
+            Ok(None) => {} // Still running - continue waiting
             Err(e) => {
                 return Err(format!("Failed to check conductor process: {}", e));
             }
@@ -476,7 +476,7 @@ async fn wait_for_admin_ws(
         }
     }
 
-    // Timed out — grab whatever logs exist for diagnostics.
+    // Timed out - grab whatever logs exist for diagnostics.
     let output = read_conductor_logs(conductor_dir);
     if !output.trim().is_empty() {
         Err(format!(
@@ -498,7 +498,7 @@ async fn wait_for_admin_ws(
 /// This automates the manual lock+unlock recovery: on Windows, the first
 /// fresh-install of identity DNA can leave the conductor in a state where
 /// its WS server stops responding (the conductor process itself eventually
-/// exits). The fix is the same one users were doing by hand — restart the
+/// exits). The fix is the same one users were doing by hand - restart the
 /// conductor. Second attempt benefits from the WASM cache the first one
 /// populated on disk, so it's typically fast (<2 s of DNA work).
 pub async fn start_holochain(
@@ -508,7 +508,7 @@ pub async fn start_holochain(
     passphrase: String,
     device_seed: [u8; 32],
 ) -> Result<ConductorHandle, String> {
-    // A fresh conductor session gets fresh cap grants — drop any cached
+    // A fresh conductor session gets fresh cap grants - drop any cached
     // credentials so the readiness probe re-verifies (and re-fills) them.
     {
         let state = app_handle.state::<Arc<AppState>>();
@@ -526,7 +526,7 @@ pub async fn start_holochain(
         Ok(h) => return Ok(h),
         Err(e) => {
             log::warn!(
-                "[start_holochain] first attempt failed: {} — auto-restarting conductor",
+                "[start_holochain] first attempt failed: {} - auto-restarting conductor",
                 e,
             );
             let _ = app_handle.emit(
@@ -583,7 +583,7 @@ async fn start_holochain_attempt(
     // 3. Connect to lair. The socket FILE appears before lair is actually
     // accepting connections, so wait_for_lair_socket can pass while a connect
     // still races and gets ConnectionReset. Retry the connect (against the same
-    // healthy lair process) with a short backoff before giving up — this is the
+    // healthy lair process) with a short backoff before giving up - this is the
     // common cold-start failure on slower/dev machines.
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
         message: "Connecting to lair-keystore...".into(),
@@ -661,7 +661,7 @@ async fn start_holochain_attempt(
     };
 
     // 7. Wait for admin WebSocket to be ready (conductor takes 5-15s).
-    //    Also monitors the conductor process — returns immediately with log output if it dies.
+    //    Also monitors the conductor process - returns immediately with log output if it dies.
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
         message: "Waiting for conductor...".into(),
     });
@@ -671,7 +671,7 @@ async fn start_holochain_attempt(
         fail_with_lair_cleanup!(e);
     }
 
-    // 8. Install Flowsta DNAs (idempotent — skips if already installed).
+    // 8. Install Flowsta DNAs (idempotent - skips if already installed).
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
         message: "Installing DNAs...".into(),
     });

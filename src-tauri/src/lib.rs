@@ -99,11 +99,11 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         // ⚠️ ORDER MATTERS: single-instance MUST be registered before deep-link
-        // on Linux/Windows — deep-link forwards flowsta:// URLs through the
+        // on Linux/Windows - deep-link forwards flowsta:// URLs through the
         // single-instance callback. Registering deep-link first wedges startup.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // Another instance tried to launch. flowsta:// URLs MUST be
-            // routed before sign-file extraction — an auth deep link misread
+            // routed before sign-file extraction - an auth deep link misread
             // as a file path would silently do nothing.
             let (urls, rest): (Vec<&String>, Vec<&String>) = args
                 .iter()
@@ -127,7 +127,7 @@ pub fn run() {
                 }
             }
         }))
-        // flowsta:// scheme — registered AFTER single-instance so URL
+        // flowsta:// scheme - registered AFTER single-instance so URL
         // forwarding works. Lets a browser wake a closed-but-installed Vault
         // for "Sign in with your Vault"; the single-instance callback above
         // focuses the window on wake. macOS delivers via RunEvent::Opened.
@@ -181,7 +181,7 @@ pub fn run() {
             // If we were launched from a file-explorer "Sign with Flowsta
             // Vault" action, the OS passed the file path(s) as positional
             // CLI args. A flowsta:// deep link cold-launching a closed Vault
-            // ALSO arrives here — route those first (same rule as the
+            // ALSO arrives here - route those first (same rule as the
             // single-instance callback). The relay code is
             // queued in AppState and drained by the frontend after mount.
             let (startup_urls, startup_rest): (Vec<String>, Vec<String>) =
@@ -308,7 +308,7 @@ pub fn run() {
                         }
                     }
                     "lock" => {
-                        // Emit lock event to frontend — it handles the actual lock logic
+                        // Emit lock event to frontend - it handles the actual lock logic
                         let _ = app.emit("vault-lock-requested", ());
                     }
                     "quit" => {
@@ -329,13 +329,13 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Window starts visible (required for Tauri #11856 — decoration buttons
+            // Window starts visible (required for Tauri #11856 - decoration buttons
             // are unresponsive on Linux Wayland when starting with visible:false).
             // The dark bg-gray-900 body style in global.css prevents white flash.
 
             // Autostart is DEFAULT ON for new installs: enable it once, gated
             // by a marker so a user who later turns it off in Settings stays
-            // off. Best-effort — a failure here never blocks startup. Release
+            // off. Best-effort - a failure here never blocks startup. Release
             // only: a debug build would register the dev binary / cargo runner
             // into the user's login items, polluting a developer's machine.
             #[cfg(not(debug_assertions))]
@@ -355,13 +355,13 @@ pub fn run() {
             // rather than showing the unlock window. The window was created
             // visible (the Wayland caveat above is about STARTING hidden, not
             // hiding after creation), so hide it now. Anything that needs the
-            // user — a page asking to sign, a relay code — already raises the
+            // user - a page asking to sign, a relay code - already raises the
             // window through the existing bridge/deep-link paths.
             if std::env::args().any(|a| a == "--autostart-hidden") {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.hide();
                 }
-                log::info!("Launched at login — starting hidden to the tray");
+                log::info!("Launched at login - starting hidden to the tray");
             }
 
             Ok(())
@@ -478,7 +478,7 @@ pub fn run() {
                 // handled in the setup hook + single-instance callback.
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 tauri::RunEvent::Opened { urls } => {
-                    // flowsta:// first — see the single-instance
+                    // flowsta:// first - see the single-instance
                     // callback for why the order is load-bearing.
                     let (deep_links, rest): (Vec<String>, Vec<String>) = urls
                         .iter()

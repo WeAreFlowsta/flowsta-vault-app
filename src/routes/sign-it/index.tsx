@@ -23,7 +23,7 @@ import { pendingSignPathsContext, signaturesContext } from "~/lib/context";
 import { persistSignaturesCache } from "~/lib/signatures-cache";
 import { PillButton } from "~/components/ui/PillButton";
 
-// Build-time API URL — vite's `define` injects this as a compile-time
+// Build-time API URL - vite's `define` injects this as a compile-time
 // global (see vite.config.ts). It is NOT a property on `window`, so any
 // `(window as any).__API_URL__` read is always undefined.
 declare const __API_URL__: string;
@@ -78,7 +78,7 @@ interface SignResult {
   agent_pub_key: string;
   signed_at: number;
   action_hash: string | null;
-  // e.g. "flowsta_signing_v1_4" — needed so per-signature actions like
+  // e.g. "flowsta_signing_v1_4" - needed so per-signature actions like
   // Edit Thumbnail (gated on v1.3+) appear on freshly-signed entries.
   signing_app_id: string;
 }
@@ -157,11 +157,11 @@ export default component$(() => {
   const signResult = useSignal<SignResult | null>(null);
   const error = useSignal("");
   const isDragOver = useSignal(false);
-  // Hash progress state — driven by `hash-progress` Tauri events. Only
+  // Hash progress state - driven by `hash-progress` Tauri events. Only
   // surfaces in the UI for files large enough to warrant a progress bar.
   const hashing = useSignal(false);
   const hashProgress = useSignal(0); // 0..1
-  // Shared signatures store from layout — same fetch backs Overview, Sign It
+  // Shared signatures store from layout - same fetch backs Overview, Sign It
   // index, and View All so navigation between them is instant.
   const sigStore = useContext(signaturesContext);
   const recentSignatures = sigStore.signatures;
@@ -223,7 +223,7 @@ export default component$(() => {
           return;
         }
       }
-    } catch { /* offline — fall through to cache */ }
+    } catch { /* offline - fall through to cache */ }
 
     // Offline fallback: use HMAC-signed cache
     try {
@@ -270,7 +270,7 @@ export default component$(() => {
           if (paths.length === 1) {
             droppedFilePath.value = paths[0];
           } else {
-            // Multi-file drop — use batch flow
+            // Multi-file drop - use batch flow
             droppedFilePaths.value = paths;
           }
         }
@@ -284,7 +284,7 @@ export default component$(() => {
     });
   });
 
-  // React to dropped file path — inline the processFile logic
+  // React to dropped file path - inline the processFile logic
   // (QRL functions like processFile aren't available in useVisibleTask$)
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ track }) => {
@@ -371,7 +371,7 @@ export default component$(() => {
     }
   });
 
-  // React to multi-file drop — batch hash and analyze
+  // React to multi-file drop - batch hash and analyze
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ track }) => {
     const paths = track(() => droppedFilePaths.value);
@@ -471,14 +471,14 @@ export default component$(() => {
     });
   });
 
-  // Quota loads independently — needs to fire on page mount even if the
+  // Quota loads independently - needs to fire on page mount even if the
   // signatures store is already populated from cache.
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(() => {
     refreshQuota();
   });
 
-  // Metadata form — all empty by default (opt-in declarations)
+  // Metadata form - all empty by default (opt-in declarations)
   const metadata = useStore({
     intent: "authorship",
     aiGeneration: "",
@@ -532,7 +532,7 @@ export default component$(() => {
       try {
         report = await inv<IntegrityReport>("analyze_file", { path: filePath });
       } catch (e) {
-        // Non-fatal — proceed without integrity report
+        // Non-fatal - proceed without integrity report
         console.warn("analyze_file failed:", e);
       }
     }
@@ -560,7 +560,7 @@ export default component$(() => {
       fileHash.value = result.hash;
       integrityReport.value = result.report;
 
-      // Generate perceptual hash (for fuzzy matching) — skip for huge files,
+      // Generate perceptual hash (for fuzzy matching) - skip for huge files,
       // it'd OOM the same way analyze_file would.
       if (!result.analysisSkipped) {
         try {
@@ -570,7 +570,7 @@ export default component$(() => {
           perceptualHash.value = null;
         }
 
-        // Generate thumbnail (images only) — also a full-file read
+        // Generate thumbnail (images only) - also a full-file read
         try {
           const thumb = await invoke<string | null>("generate_thumbnail", { path: filePath });
           thumbnailData.value = thumb;
@@ -594,14 +594,14 @@ export default component$(() => {
           }
         }
       } catch {
-        // Offline or API unavailable — try local conductor
+        // Offline or API unavailable - try local conductor
         try {
           const localSigs = await invoke<any[]>("get_signatures_for_hash", { fileHash: result.hash });
           if (Array.isArray(localSigs) && localSigs.length > 0) {
             existingSignatures.value = localSigs;
           }
         } catch {
-          // No existing signatures check available — continue anyway
+          // No existing signatures check available - continue anyway
         }
       }
 
@@ -687,7 +687,7 @@ export default component$(() => {
           if (updatedCache) {
             quota.value = { ...(updatedCache as any), source: quota.value?.source || "cache" };
           }
-          // Sync to server in background — meter already updated from cache
+          // Sync to server in background - meter already updated from cache
           const apiUrl = __API_URL__;
           invoke("sync_quota_to_server", { apiUrl, count: 1 }).catch((err) => {
             console.warn("quota sync failed:", err);
@@ -698,7 +698,7 @@ export default component$(() => {
       }
 
       signResults.value = results;
-      // Optimistic prepend into the app-wide store — ADD, never truncate.
+      // Optimistic prepend into the app-wide store - ADD, never truncate.
       // This signal is shared by every view (the old slice-to-10 here was
       // silently shrinking the whole list until the next refresh).
       const successful = results.filter(r => r.success);
@@ -711,14 +711,14 @@ export default component$(() => {
       step.value = "done";
 
       // Store thumbnails on DHT (non-blocking, best-effort). Sequential,
-      // not parallel — concurrent commits race on the source chain head.
+      // not parallel - concurrent commits race on the source chain head.
       const withThumbs = successful.filter((r: any) => r.thumbnail && r.action_hash);
       (async () => {
         for (const r of withThumbs) {
           await invoke("set_thumbnail", {
             actionHashHex: r.action_hash,
             thumbnail: r.thumbnail,
-          }).catch(() => { /* non-blocking — thumbnail is cosmetic */ });
+          }).catch(() => { /* non-blocking - thumbnail is cosmetic */ });
         }
       })();
     } else if (fileHash.value) {
@@ -742,7 +742,7 @@ export default component$(() => {
         if (updatedCache) {
           quota.value = { ...(updatedCache as any), source: quota.value?.source || "cache" };
         }
-        // Sync to server in background — meter already updated from cache
+        // Sync to server in background - meter already updated from cache
         const apiUrl = __API_URL__;
         invoke("sync_quota_to_server", { apiUrl, count: 1 }).catch((err) => {
           console.warn("quota sync failed:", err);
@@ -762,7 +762,7 @@ export default component$(() => {
           invoke("set_thumbnail", {
             actionHashHex: result.action_hash,
             thumbnail: thumbnailData.value,
-          }).catch(() => { /* non-blocking — thumbnail is cosmetic */ });
+          }).catch(() => { /* non-blocking - thumbnail is cosmetic */ });
         }
       } catch (e) {
         error.value = `Signing failed: ${e}`;
@@ -784,7 +784,7 @@ export default component$(() => {
     error.value = "";
     thumbnailData.value = null;
     // Comment is file-specific; clear it between signings (other metadata
-    // stays sticky for the session — most users sign with the same license
+    // stays sticky for the session - most users sign with the same license
     // repeatedly).
     metadata.comment = "";
     // Batch state
@@ -803,7 +803,7 @@ export default component$(() => {
     persistSignaturesCache(recentSignatures.value);
   });
 
-  // After an amend, force a full conductor refresh — the new signature
+  // After an amend, force a full conductor refresh - the new signature
   // appears + `superseded_by` is computed from the full chain, so we
   // can't just append locally. Delegating to the shared refresh keeps
   // the "wait for own + linked to both settle before updating the UI"
@@ -824,7 +824,7 @@ export default component$(() => {
 
         {step.value === "idle" && (
           <div>
-            {/* Drag and drop zone — visual only, actual drop handled by Tauri events */}
+            {/* Drag and drop zone - visual only, actual drop handled by Tauri events */}
             <div
               class={[
                 "relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-8 transition-colors cursor-pointer",
@@ -935,7 +935,7 @@ export default component$(() => {
               </div>
             </div>
 
-            {/* Content Rights for batch — always visible. Was a collapsed
+            {/* Content Rights for batch - always visible. Was a collapsed
                 <details> until May 2026 user testing showed people walked
                 past it without expanding. */}
             <div class="mb-4">
@@ -945,7 +945,7 @@ export default component$(() => {
                 </h3>
                 <div class="space-y-3 px-4 pb-4 pt-2">
                   <Callout intent="info">
-                    <p>Add optional details about your work below — they're published as lasting public proof that you created it and how you allow it to be used.</p>
+                    <p>Add optional details about your work below - they're published as lasting public proof that you created it and how you allow it to be used.</p>
                     <p class="mt-2">Everything is stored permanently on Flowsta's tamper-proof network, built on Holochain. No one can change or delete it, not even us.</p>
                   </Callout>
                   <div>
@@ -1018,7 +1018,7 @@ export default component$(() => {
               </div>
             </div>
 
-            {/* Optional signer-declared note (applied to all batch files) —
+            {/* Optional signer-declared note (applied to all batch files) -
                 boxed like Content Rights, guidance pulled into a callout. */}
             <div class="mb-4">
               <div class="rounded-lg border border-gray-700 bg-white/[0.06]">
@@ -1135,7 +1135,7 @@ export default component$(() => {
                     </div>
                   )}
 
-                  {/* File contents (Info items — always shown) */}
+                  {/* File contents (Info items - always shown) */}
                   {info.length > 0 && (
                     <details class="mt-1">
                       <summary class="cursor-pointer text-xs text-gray-500 hover:text-gray-400">
@@ -1191,7 +1191,7 @@ export default component$(() => {
                       This file has been signed by {existingSignatures.value.length} other {existingSignatures.value.length === 1 ? "person" : "people"}
                     </p>
                     <p class="mt-1 text-xs text-gray-400">
-                      You can still sign it — this is normal for shared documents, contracts, and collaborations.
+                      You can still sign it - this is normal for shared documents, contracts, and collaborations.
                     </p>
                     <details class="mt-2">
                       <summary class="cursor-pointer text-xs text-amber-400/70 hover:text-amber-400">
@@ -1216,7 +1216,7 @@ export default component$(() => {
               </div>
             )}
 
-            {/* Content Rights (all metadata grouped together) — always visible.
+            {/* Content Rights (all metadata grouped together) - always visible.
                 Was a collapsed <details> until May 2026 user testing showed
                 people walked past it without expanding. */}
             <div class="mb-4">
@@ -1226,7 +1226,7 @@ export default component$(() => {
                 </h3>
                 <div class="space-y-3 px-4 pb-4 pt-2">
                   <Callout intent="info">
-                    <p>Add optional details about your work below — they're published as lasting public proof that you created it and how you allow it to be used.</p>
+                    <p>Add optional details about your work below - they're published as lasting public proof that you created it and how you allow it to be used.</p>
                     <p class="mt-2">Everything is stored permanently on Flowsta's tamper-proof network, built on Holochain. No one can change or delete it, not even us.</p>
                   </Callout>
                   <div>
@@ -1324,7 +1324,7 @@ export default component$(() => {
               </div>
             </div>
 
-            {/* Optional signer-declared note — boxed like Content Rights, with
+            {/* Optional signer-declared note - boxed like Content Rights, with
                 the guidance pulled up into a callout above the field. */}
             <div class="mb-4">
               <div class="rounded-lg border border-gray-700 bg-white/[0.06]">
@@ -1468,7 +1468,7 @@ export default component$(() => {
               {!signResult.value.action_hash && (
                 <div class="flex items-center gap-2">
                   <span class="h-2 w-2 rounded-full bg-yellow-400" />
-                  <span class="text-xs text-yellow-400">Signed locally — not yet committed to DHT</span>
+                  <span class="text-xs text-yellow-400">Signed locally - not yet committed to DHT</span>
                 </div>
               )}
             </div>
@@ -1486,7 +1486,7 @@ export default component$(() => {
         )}
       </div>
 
-      {/* Phase 8: Sign quota meter — below the sign box so users see action first */}
+      {/* Phase 8: Sign quota meter - below the sign box so users see action first */}
       <div class="mb-6">
         <SignQuotaMeter quota={quota.value} loading={quotaLoading.value} />
       </div>

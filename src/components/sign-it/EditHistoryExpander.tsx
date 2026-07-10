@@ -9,7 +9,7 @@ import { component$, useSignal } from "@builder.io/qwik";
  * backward through the chain via the `supersedes` pointers on each
  * record. Renders nothing when the chain is a single version.
  *
- * Walks the chain client-side — no extra fetch. All the data is already
+ * Walks the chain client-side - no extra fetch. All the data is already
  * loaded; the older versions are just hidden by the default filter.
  *
  * The diff summary compares consecutive versions field-by-field and
@@ -93,33 +93,33 @@ function diffSummary(prev: Sig, next: Sig): string[] {
 
   // AI generation
   if (prev.ai_generation !== next.ai_generation) {
-    out.push(`AI generation: ${prev.ai_generation || "—"} → ${next.ai_generation || "—"}`);
+    out.push(`AI generation: ${prev.ai_generation || "-"} → ${next.ai_generation || "-"}`);
   }
 
   // Commercial licensing
   const pc = prev.content_rights?.commercial_licensing;
   const nc = next.content_rights?.commercial_licensing;
   if (pc !== nc) {
-    out.push(`Commercial: ${pc || "—"} → ${nc || "—"}`);
+    out.push(`Commercial: ${pc || "-"} → ${nc || "-"}`);
   }
 
   // AI training
   const pt = prev.content_rights?.ai_training;
   const nt = next.content_rights?.ai_training;
   if (pt !== nt) {
-    out.push(`AI training: ${pt || "—"} → ${nt || "—"}`);
+    out.push(`AI training: ${pt || "-"} → ${nt || "-"}`);
   }
 
   // Contact preference
   const pcp = prev.content_rights?.contact_preference;
   const ncp = next.content_rights?.contact_preference;
   if (pcp !== ncp) {
-    out.push(`Contact: ${pcp || "—"} → ${ncp || "—"}`);
+    out.push(`Contact: ${pcp || "-"} → ${ncp || "-"}`);
   }
 
   // Intent
   if (prev.intent !== next.intent) {
-    out.push(`Intent: ${prev.intent || "—"} → ${next.intent || "—"}`);
+    out.push(`Intent: ${prev.intent || "-"} → ${next.intent || "-"}`);
   }
 
   return out;

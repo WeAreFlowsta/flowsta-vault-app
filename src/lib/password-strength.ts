@@ -1,8 +1,8 @@
-// Shared vault-password policy — used by every place the user CHOOSES a
+// Shared vault-password policy - used by every place the user CHOOSES a
 // vault password (create, restore, phrase-migration, change password) and
 // mirrored in Rust (commands.rs `validate_vault_password`) for enforcement.
 //
-// Policy (best-practice, NIST-800-63B-friendly — length can stand in for
+// Policy (best-practice, NIST-800-63B-friendly - length can stand in for
 // composition, no rigid "must have all four classes" rule):
 //   • at least 10 characters
 //   • AND either 3+ of the 4 character classes (lower/upper/digit/symbol)
@@ -50,7 +50,7 @@ function isTrivialPattern(pw: string): boolean {
 }
 
 export interface PasswordCheck {
-  /** Meets the minimum policy — gate submission on this. */
+  /** Meets the minimum policy - gate submission on this. */
   valid: boolean;
   /** 0 = unacceptable, 1 = fair, 2 = good, 3 = strong (for the meter). */
   strength: 0 | 1 | 2 | 3;
@@ -75,18 +75,18 @@ export function checkVaultPassword(pw: string): PasswordCheck {
   if (COMMON.has(pw.toLowerCase()) || isTrivialPattern(pw)) {
     return {
       valid: false, strength: 0, label: "Too easy to guess",
-      hint: "That's a common or predictable password — choose something unique.",
+      hint: "That's a common or predictable password - choose something unique.",
     };
   }
   const varietyOk = classes >= 3 || len >= PASSPHRASE_LENGTH;
   if (!varietyOk) {
     return {
       valid: false, strength: 0, label: "Too weak",
-      hint: "Mix in upper- and lower-case, numbers, or symbols — or make it 16+ characters.",
+      hint: "Mix in upper- and lower-case, numbers, or symbols - or make it 16+ characters.",
     };
   }
 
-  // Valid — grade it for the meter.
+  // Valid - grade it for the meter.
   const strong = len >= PASSPHRASE_LENGTH && classes >= 3;
   const good = len >= 12 || classes >= 4;
   if (strong) {
@@ -95,7 +95,7 @@ export function checkVaultPassword(pw: string): PasswordCheck {
   if (good) {
     return {
       valid: true, strength: 2, label: "Good",
-      hint: "Longer is stronger — 16+ characters is ideal.",
+      hint: "Longer is stronger - 16+ characters is ideal.",
     };
   }
   return {

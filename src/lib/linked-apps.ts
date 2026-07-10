@@ -2,7 +2,7 @@
  * Display-side de-duplication of linked third-party apps.
  *
  * A Holochain app (e.g. ProofPoll) generates a fresh conductor agent key on
- * every install/reinstall, and each one links to the Vault — so the raw list
+ * every install/reinstall, and each one links to the Vault - so the raw list
  * from `get_linked_third_party_apps` can hold many entries for ONE app (same
  * `client_id`, different `app_agent_pub_key`). The Connected Apps overview
  * should show the app once, not once per device/reinstall.
@@ -23,7 +23,7 @@ export interface DedupedLinkedApp {
   client_id: string | null;
   /** Most recent link time across all of this app's agents. */
   linked_at: number;
-  /** Every agent key linked for this app — used to revoke them all at once. */
+  /** Every agent key linked for this app - used to revoke them all at once. */
   agent_keys: string[];
 }
 

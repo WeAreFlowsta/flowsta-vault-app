@@ -9,7 +9,7 @@
 // missing or mismatched agent reads as a clean miss; the new agent's
 // signatures populate from the conductor on first refresh.
 //
-// Lock Vault deliberately does NOT clear the cache — same-user re-unlock
+// Lock Vault deliberately does NOT clear the cache - same-user re-unlock
 // is the most common path and benefits from the instant load. Reset
 // Vault DOES clear because the user expects "reset" to wipe state.
 
@@ -35,16 +35,16 @@ export function setActiveSignatureAgent(agentKey: string): void {
   try {
     localStorage.removeItem(LEGACY_KEY);
   } catch {
-    // localStorage disabled — fine, nothing else to clean up
+    // localStorage disabled - fine, nothing else to clean up
   }
 }
 
 export function persistSignaturesCache(sigs: unknown[]): void {
-  if (!activeAgent) return; // no identity registered — don't cache
+  if (!activeAgent) return; // no identity registered - don't cache
   try {
     localStorage.setItem(`${PREFIX}${activeAgent}`, JSON.stringify(sigs));
   } catch {
-    // localStorage may be full or disabled — non-fatal
+    // localStorage may be full or disabled - non-fatal
   }
 }
 

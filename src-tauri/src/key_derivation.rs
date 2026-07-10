@@ -4,13 +4,13 @@
 //! Same mnemonic + same constant = same agent key (cross-language deterministic).
 //!
 //! Derivation constants:
-//! - `flowsta-holochain-identity` — web agent key (existing, used by API)
-//! - `flowsta-device-1` — desktop agent key
-//! - `flowsta-sync-encryption` — cross-device sync encryption key (future)
-//! - `flowsta-sync-anchor` — DHT sync anchor lookup key (future)
-//! - `flowsta-recovery-lookup` — recovery phrase lookup hash (existing, used by API)
-//! - `flowsta-data-encryption-v1` — DNA v2 Sealed-record symmetric key
-//! - `flowsta-private-network-v2` — per-user private-DHT network seed
+//! - `flowsta-holochain-identity` - web agent key (existing, used by API)
+//! - `flowsta-device-1` - desktop agent key
+//! - `flowsta-sync-encryption` - cross-device sync encryption key (future)
+//! - `flowsta-sync-anchor` - DHT sync anchor lookup key (future)
+//! - `flowsta-recovery-lookup` - recovery phrase lookup hash (existing, used by API)
+//! - `flowsta-data-encryption-v1` - DNA v2 Sealed-record symmetric key
+//! - `flowsta-private-network-v2` - per-user private-DHT network seed
 
 use bip39::Mnemonic;
 use blake2::digest::{consts::U32, Digest};
@@ -34,7 +34,7 @@ pub const RECOVERY_LOOKUP_CONSTANT: &str = "flowsta-recovery-lookup";
 
 /// Symmetric data-encryption key for the encrypted private DNA v2
 /// ("Sealed" records, encrypt-before-gossip). Phrase-derived so every
-/// device computes the same key — multi-device gossip decrypts without key
+/// device computes the same key - multi-device gossip decrypts without key
 /// exchange (per-device AGENT keys differ by design; this key does not).
 /// JS reference: `recoveryPhrase.js` deriveDataEncryptionKey.
 pub const DATA_ENCRYPTION_CONSTANT: &str = "flowsta-data-encryption-v1";
@@ -128,9 +128,9 @@ pub fn validate_mnemonic(mnemonic_str: &str) -> bool {
 // ── Holochain AgentPubKey Construction ──────────────────────────────
 //
 // Holochain's AgentPubKey is 39 bytes:
-//   [0x84, 0x20, 0x24]  — 3-byte HoloHash type prefix (AgentPubKey)
-//   [... 32 bytes ...]   — Ed25519 public key
-//   [... 4 bytes ...]    — DHT location (blake2b-256 XOR-folded to 4 bytes)
+//   [0x84, 0x20, 0x24]  - 3-byte HoloHash type prefix (AgentPubKey)
+//   [... 32 bytes ...]   - Ed25519 public key
+//   [... 4 bytes ...]    - DHT location (blake2b-256 XOR-folded to 4 bytes)
 //
 // The DHT location is computed the same way as in the `holo_hash` crate:
 //   1. blake2b-256(32-byte ed25519 key) → 32 bytes
@@ -264,7 +264,7 @@ pub fn decode_agent_pub_key_string(key_string: &str) -> Option<[u8; 39]> {
 
 /// Decode an agent pubkey string in EITHER encoding seen in the wild:
 /// - Holochain canonical: `"u" + base64url_no_pad(39 bytes)` (uhCAk…, 53 chars)
-/// - API DID hybrid: literal `"uhCAk" + base58(39 bytes)` — what `users.did`
+/// - API DID hybrid: literal `"uhCAk" + base58(39 bytes)` - what `users.did`
 ///   stores on the server (`did:flowsta:uhCAk<base58>`; the uhCAk here is
 ///   decorative, the payload is base58 of the FULL 39 bytes)
 ///
@@ -452,7 +452,7 @@ mod tests {
     /// These hex values were verified by running both implementations on 2026-02-23.
     #[test]
     fn test_cross_language_matches_javascript() {
-        // flowsta-holochain-identity (web agent key — used by API)
+        // flowsta-holochain-identity (web agent key - used by API)
         let web_seed = derive_seed(TEST_MNEMONIC, WEB_IDENTITY_CONSTANT).unwrap();
         let web_pub = derive_signing_key(TEST_MNEMONIC, WEB_IDENTITY_CONSTANT).unwrap().verifying_key();
         assert_eq!(

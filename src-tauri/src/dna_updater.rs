@@ -2,10 +2,10 @@
 //!
 //! On each vault unlock, checks the Flowsta API for newer DNA versions.
 //! Handles three cases:
-//!   1. Up to date — no action needed.
-//!   2. Coordinator-only update — hot-swap via `admin.updateCoordinators()`.
-//!   3. Full DNA upgrade (new integrity/seed) — download new .happ, install,
-//!      uninstall old (except signing DNA — kept for signature history),
+//!   1. Up to date - no action needed.
+//!   2. Coordinator-only update - hot-swap via `admin.updateCoordinators()`.
+//!   3. Full DNA upgrade (new integrity/seed) - download new .happ, install,
+//!      uninstall old (except signing DNA - kept for signature history),
 //!      update VaultConfig.
 //!
 //! Future: when the vault starts writing data to DNAs (cross-device sync),
@@ -31,7 +31,7 @@ pub struct DnaVersionInfo {
     pub min_vault_version: String,
     pub min_conductor_version: String,
     /// SHA-256 (hex) of the .happ file the server serves. When present the
-    /// download is verified before install — a drifted or corrupted bundle
+    /// download is verified before install - a drifted or corrupted bundle
     /// fails loudly here instead of silently forking the DHT space.
     #[serde(default)]
     pub sha256: Option<String>,
@@ -43,7 +43,7 @@ pub struct ConductorInfo {
     pub min_supported: String,
 }
 
-/// Result of the update check — tells the caller what happened.
+/// Result of the update check - tells the caller what happened.
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum UpdateResult {
     /// Already on latest versions.
@@ -54,11 +54,11 @@ pub enum UpdateResult {
         identity_updated: Option<VersionChange>,
         signing_updated: Option<VersionChange>,
     },
-    /// Vault app version is too old for the latest DNA — user must update the app.
+    /// Vault app version is too old for the latest DNA - user must update the app.
     AppUpdateRequired {
         min_vault_version: String,
     },
-    /// Could not reach the API (offline mode) — continue with current DNAs.
+    /// Could not reach the API (offline mode) - continue with current DNAs.
     Offline,
     /// Update failed with an error.
     Failed {
@@ -126,7 +126,7 @@ pub async fn check_and_update_dnas(
             versions.private_dna.min_vault_version.clone()
         };
         log::warn!(
-            "Vault version {} is below minimum {} — app update required",
+            "Vault version {} is below minimum {} - app update required",
             vault_version,
             min
         );
@@ -177,7 +177,7 @@ pub async fn check_and_update_dnas(
                 });
             }
             Ok(false) => {
-                // Same DNA hash — no actual change, don't update VaultConfig version.
+                // Same DNA hash - no actual change, don't update VaultConfig version.
                 log::info!("Private DNA hash unchanged, keeping version {}", current_private_version);
             }
             Err(e) => {
@@ -254,7 +254,7 @@ pub async fn check_and_update_dnas(
                     log::info!("Signing DNA hash unchanged, keeping version {}", current_signing_version);
                 }
                 Err(e) => {
-                    // Non-fatal for signing DNA — don't block other updates
+                    // Non-fatal for signing DNA - don't block other updates
                     log::error!("Signing DNA update failed (non-fatal): {}", e);
                 }
             }
@@ -350,14 +350,14 @@ async fn download_happ_bundle(
         let actual = sha256_hex(&bytes);
         if !actual.eq_ignore_ascii_case(expected) {
             return Err(format!(
-                "Checksum mismatch for {} v{}: manifest {} vs downloaded {} — refusing to install",
+                "Checksum mismatch for {} v{}: manifest {} vs downloaded {} - refusing to install",
                 dna_type, version, expected, actual
             ));
         }
         log::info!("{} DNA v{} checksum verified ({})", dna_type, version, actual);
     } else {
         log::warn!(
-            "{} DNA v{}: no sha256 in manifest — installing unverified bundle",
+            "{} DNA v{}: no sha256 in manifest - installing unverified bundle",
             dna_type, version
         );
     }
@@ -386,7 +386,7 @@ async fn download_happ_bundle(
 /// Update a single DNA (private or identity).
 ///
 /// Returns Ok(true) if the DNA was actually updated (new cell installed),
-/// or Ok(false) if the DNA hash was unchanged (CellAlreadyExists — no-op).
+/// or Ok(false) if the DNA hash was unchanged (CellAlreadyExists - no-op).
 ///
 /// For now (vault doesn't author data on DNAs), this is a simple swap:
 ///   1. Download new .happ bundle
@@ -453,7 +453,7 @@ async fn update_single_dna(
 
             log::info!("{} installed and enabled", new_app_id);
 
-            // 6. Uninstall the old DNA — EXCEPT signing DNA.
+            // 6. Uninstall the old DNA - EXCEPT signing DNA.
             // Signing DNA holds user signatures that must remain queryable
             // across version upgrades. Old versions are kept installed as
             // read-only so get_my_signatures can combine results.
@@ -486,7 +486,7 @@ async fn update_single_dna(
                 // App was installed by a previous attempt that failed before completing.
                 // Just enable it and uninstall the old one.
                 log::info!(
-                    "AppAlreadyInstalled — {} already registered, enabling and cleaning up",
+                    "AppAlreadyInstalled - {} already registered, enabling and cleaning up",
                     new_app_id
                 );
                 admin_ws
@@ -517,13 +517,13 @@ async fn update_single_dna(
                     );
                 }
             } else if err_str.contains("CellAlreadyExists") {
-                // Same DNA hash — the new bundle has the same integrity zomes + network seed.
+                // Same DNA hash - the new bundle has the same integrity zomes + network seed.
                 // The cell is already running correctly under the old app ID.
                 // No install/uninstall possible; Holochain won't allow a duplicate cell.
                 // Return false so the caller does NOT update VaultConfig version
                 // (keeping app ID consistent with what's registered in the conductor).
                 log::info!(
-                    "CellAlreadyExists — {} DNA hash unchanged between v{} and v{}, skipping",
+                    "CellAlreadyExists - {} DNA hash unchanged between v{} and v{}, skipping",
                     dna_type,
                     current_version,
                     new_version

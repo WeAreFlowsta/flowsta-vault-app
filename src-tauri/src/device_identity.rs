@@ -7,7 +7,7 @@
 //!   `flowsta-register-identity:v1:{agentPubKeyB64}:{recoveryLookupHash}:{emailHashHex}:{unixSeconds}`
 //!   where emailHash = sha256(lowercase(trim(email))) hex.
 //! - Login: raw Ed25519 over the server-issued challenge string
-//!   `flowsta-auth-challenge:v1:{nonce}:{client_id}` — signed exactly as
+//!   `flowsta-auth-challenge:v1:{nonce}:{client_id}` - signed exactly as
 //!   received; the server rejects unprefixed challenges.
 
 use crate::commands::AppState;
@@ -24,7 +24,7 @@ use tauri::State;
 const VAULT_CLIENT_ID: &str = "flowsta-vault";
 
 /// Generate a fresh 24-word BIP39 mnemonic from OS entropy.
-/// Vault was restore-only before this — creation is net-new.
+/// Vault was restore-only before this - creation is net-new.
 #[tauri::command]
 pub fn generate_new_mnemonic() -> Result<String, String> {
     use rand::RngCore;
@@ -40,7 +40,7 @@ pub struct RegisterResult {
     pub user_id: String,
     pub did: String,
     pub agent_pub_key: String,
-    /// Server-generated identicon (from the DID) — the account's default
+    /// Server-generated identicon (from the DID) - the account's default
     /// picture until the user uploads one. The wizard stores it in the
     /// vault config so the identity has a face from the first unlock.
     pub profile_picture: Option<String>,
@@ -75,7 +75,7 @@ fn api_error(status: reqwest::StatusCode, body: &ApiEnvelope, context: &str) -> 
 }
 
 /// Register a Vault-created identity as a new Flowsta account.
-/// Creates NO cells anywhere — the API stores only the pubkey + credential.
+/// Creates NO cells anywhere - the API stores only the pubkey + credential.
 #[tauri::command]
 pub async fn register_device_identity(
     api_url: String,
@@ -108,7 +108,7 @@ pub async fn register_device_identity(
         .map_err(|e| e.to_string())?
         .as_secs();
 
-    // Canonical registration message — signed raw (no MessagePack).
+    // Canonical registration message - signed raw (no MessagePack).
     let canonical = format!(
         "flowsta-register-identity:v1:{}:{}:{}:{}",
         agent_b64, lookup_hash, email_hash, ts
@@ -171,7 +171,7 @@ pub struct VaultGrantResult {
     pub username: Option<String>,
     pub profile_picture: Option<String>,
     /// For migrated accounts only: the original (pre-upgrade) web agent
-    /// key, recovered from the DID, standard-base64 of the 39-byte form —
+    /// key, recovered from the DID, standard-base64 of the 39-byte form -
     /// the same shape migration stores in `VaultConfig.web_agent_pub_key`.
     /// None for born-device-hosted accounts. Only `restore_device_identity`
     /// fills this in.
@@ -187,7 +187,7 @@ async fn vault_grant(
 ) -> Result<VaultGrantResult, String> {
     // 10s timeout: without one, a HUNG (not refused) API held the restore
     // wizard's spinner forever. Send errors carry the `api_unreachable:`
-    // marker — the documented offline signal alongside `unknown_agent_key`
+    // marker - the documented offline signal alongside `unknown_agent_key`
     // and `not_device_hosted` in the error contract.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -242,7 +242,7 @@ async fn vault_grant(
         .await
         .map_err(|e| format!("Token response parse failed: {}", e))?;
     if !status.is_success() {
-        // Preserve the machine-readable code — the restore path branches on it.
+        // Preserve the machine-readable code - the restore path branches on it.
         return Err(api_error(status, &body, "vault_grant_failed"));
     }
 
@@ -258,7 +258,7 @@ async fn vault_grant(
     })
 }
 
-/// Vault-grant with explicit key material — used by the account-migration
+/// Vault-grant with explicit key material - used by the account-migration
 /// flow (and its staging test) where the seed is derived from the phrase
 /// in hand rather than read from an unlocked vault.
 pub(crate) async fn vault_grant_with_seed(
@@ -295,7 +295,7 @@ pub async fn vault_grant_login(
     let result = vault_grant(&api_url, &seed, &agent_b64).await?;
 
     // Self-heal for migrated vaults whose config lacks the original web
-    // agent key — the account DID still embeds it.
+    // agent key - the account DID still embeds it.
     let needs_web_key = {
         let config = state.vault_config.lock().unwrap();
         config
@@ -308,7 +308,7 @@ pub async fn vault_grant_login(
     };
     if needs_web_key {
         if let Some(key_b64) = derive_legacy_web_key(&result.did, &agent_b64) {
-            log::info!("Recovered legacy web agent key from account DID — persisting");
+            log::info!("Recovered legacy web agent key from account DID - persisting");
             crate::commands::persist_web_agent_pub_key(state.inner(), &key_b64);
         }
     }
@@ -321,11 +321,11 @@ pub async fn vault_grant_login(
 /// name, picture, legacy web key), then clears `pending_reconcile`.
 ///
 /// Cadence contract (API-audit): the challenge endpoint allows 20/15min
-/// per IP and every SUCCESSFUL grant writes an auth_events row — so this
+/// per IP and every SUCCESSFUL grant writes an auth_events row - so this
 /// is attempted once per conductor start plus once when the frontend
 /// sees the API come back online. Never a poll loop.
 ///
-/// Fill rule: only-None fields — offline in-app edits are never
+/// Fill rule: only-None fields - offline in-app edits are never
 /// clobbered.
 pub(crate) async fn reconcile_account_layer(
     state: &Arc<AppState>,
@@ -361,14 +361,14 @@ pub(crate) async fn reconcile_account_layer(
                 *state.registration_conflict.lock().unwrap() = false;
             }
             Err(e) if e.contains("api_unreachable") => {
-                log::info!("[reconcile] API still unreachable — retrying on next unlock/online");
+                log::info!("[reconcile] API still unreachable - retrying on next unlock/online");
                 return;
             }
             Err(e) if e.contains("email_already_registered") => {
-                log::warn!("[reconcile] deferred registration: email already registered — asking for a different address");
+                log::warn!("[reconcile] deferred registration: email already registered - asking for a different address");
                 *state.registration_conflict.lock().unwrap() = true;
                 // The Overview learns about the conflict by refetching
-                // get_identity — which it only does on an event. Without
+                // get_identity - which it only does on an event. Without
                 // this emit the collision UI never appeared (drill find).
                 let _ = app_handle.emit("profile-updated", ());
                 return;
@@ -440,20 +440,20 @@ pub(crate) async fn reconcile_account_layer(
             }
             // The frontend refetches profile + signatures on this event.
             let _ = app_handle.emit("profile-synced", ());
-            log::info!("[reconcile] account layer reattached — pending_reconcile cleared");
+            log::info!("[reconcile] account layer reattached - pending_reconcile cleared");
         }
         Err(e) if e.contains("api_unreachable") => {
-            log::info!("[reconcile] API still unreachable — retrying on next unlock/online");
+            log::info!("[reconcile] API still unreachable - retrying on next unlock/online");
         }
         Err(e) if e.contains("unknown_agent_key") => {
             // Offline-restored phrase with no registered account. Leave the
             // flag set: Build 2's deferred registration is the eventual
             // answer; retries are cheap (failed grants write nothing).
-            log::info!("[reconcile] no Flowsta account for this identity yet — leaving pending");
+            log::info!("[reconcile] no Flowsta account for this identity yet - leaving pending");
         }
         Err(e) if e.contains("not_device_hosted") => {
             log::warn!(
-                "[reconcile] this phrase belongs to a custodial flowsta.com account — \
+                "[reconcile] this phrase belongs to a custodial flowsta.com account - \
                  restore online (or sign in with the Flowsta account) to upgrade it"
             );
         }
@@ -464,12 +464,12 @@ pub(crate) async fn reconcile_account_layer(
 /// Deferred A3 registration for an offline-CREATED identity. Everything
 /// the canonical registration message needs survives in the config:
 /// device_seed signs, agent_pub_key_raw_b64 + recovery_lookup_hash +
-/// web_email + display_name fill the payload (fresh timestamp — the
+/// web_email + display_name fill the payload (fresh timestamp - the
 /// server enforces a 5-minute staleness window, so signing happens at
 /// ATTACH time, not create time).
 ///
 /// Returns Ok(()) when the account exists after the call (fresh
-/// registration OR agent_key_already_registered — idempotent), and the
+/// registration OR agent_key_already_registered - idempotent), and the
 /// raw error code otherwise (email_already_registered is the one the
 /// UI acts on).
 async fn register_deferred(state: &Arc<AppState>, api_url: &str) -> Result<(), String> {
@@ -532,7 +532,7 @@ async fn register_deferred(state: &Arc<AppState>, api_url: &str) -> Result<(), S
 
     if status.is_success() {
         // Seed the identicon the server just generated, matching the
-        // online create path — only if the user hasn't set a picture.
+        // online create path - only if the user hasn't set a picture.
         if let Some(pic) = body.user.and_then(|u| u.profile_picture) {
             let mut config = state.vault_config.lock().unwrap();
             if let Some(cfg) = config.as_mut() {
@@ -541,19 +541,19 @@ async fn register_deferred(state: &Arc<AppState>, api_url: &str) -> Result<(), S
                 }
             }
         }
-        log::info!("[reconcile] deferred registration landed — account attached");
+        log::info!("[reconcile] deferred registration landed - account attached");
         return Ok(());
     }
     let code = body.error.as_deref().unwrap_or("registration_failed");
     if code == "agent_key_already_registered" {
-        log::info!("[reconcile] deferred registration: key already registered — treating as attached");
+        log::info!("[reconcile] deferred registration: key already registered - treating as attached");
         return Ok(());
     }
     Err(code.to_string())
 }
 
 /// Change the email for a pending (offline-created) registration and
-/// retry the attach immediately — the Overview's email_already_registered
+/// retry the attach immediately - the Overview's email_already_registered
 /// banner calls this.
 #[tauri::command]
 pub async fn update_pending_registration_email(
@@ -595,7 +595,7 @@ pub async fn update_pending_registration_email(
     Ok(())
 }
 
-/// Frontend-triggered reconcile attempt — invoked when the connectivity
+/// Frontend-triggered reconcile attempt - invoked when the connectivity
 /// poll observes the API coming back online (and harmless any other
 /// time: no-ops instantly unless `pending_reconcile` is set).
 #[tauri::command]
@@ -657,10 +657,10 @@ pub(crate) async fn heal_web_agent_key_from_did(
     match vault_grant(api_url, &seed, &agent_b64).await {
         Ok(grant) => {
             if let Some(key_b64) = derive_legacy_web_key(&grant.did, &agent_b64) {
-                log::info!("Recovered legacy web agent key from account DID — persisting");
+                log::info!("Recovered legacy web agent key from account DID - persisting");
                 crate::commands::persist_web_agent_pub_key(state, &key_b64);
             } else {
-                log::info!("Web-key heal: DID matches device key (born device-hosted) — nothing to recover");
+                log::info!("Web-key heal: DID matches device key (born device-hosted) - nothing to recover");
             }
         }
         Err(e) => log::info!("Web-key heal grant skipped (offline?): {}", e),
@@ -675,7 +675,7 @@ pub(crate) async fn heal_web_agent_key_from_did(
 /// - contains `unknown_agent_key` -> no device-hosted account for this phrase
 /// - contains `not_device_hosted` -> phrase belongs to a custodial web account
 ///   (use the restore-from-web sign-in path instead)
-/// - contains `api_unreachable` -> Flowsta's API can't be reached — offer the
+/// - contains `api_unreachable` -> Flowsta's API can't be reached - offer the
 ///   OFFLINE restore (identity rebuilds locally; account layer reconciles
 ///   when the API returns)
 #[tauri::command]
@@ -698,7 +698,7 @@ pub async fn restore_device_identity(
 
     // A migrated account keeps the DID minted for its ORIGINAL web agent
     // key; a born-device-hosted account's DID embeds the device key. When
-    // the DID's key differs from ours, it is the legacy web agent — the
+    // the DID's key differs from ours, it is the legacy web agent - the
     // handle to the account's pre-upgrade signatures. Migration persists
     // it in the vault config; a phrase restore must recover it here or
     // linked-signature reads start from a cold DHT walk instead.
@@ -717,7 +717,7 @@ mod tests {
     const STAGING: &str = "https://auth-api-staging.flowsta.com";
 
     /// Full register + restore contract test against the live STAGING API using the real
-    /// derivation + signing code. Ignored by default — run explicitly:
+    /// derivation + signing code. Ignored by default - run explicitly:
     /// `cargo test --lib device_identity -- --ignored`
     #[tokio::test]
     #[ignore]
@@ -746,7 +746,7 @@ mod tests {
         assert!(reg.did.starts_with("did:flowsta:uhCAk"), "did: {}", reg.did);
         assert!(!reg.user_id.is_empty());
 
-        // Duplicate registration must be rejected (409 — restore is the re-entry path)
+        // Duplicate registration must be rejected (409 - restore is the re-entry path)
         let dup = register_device_identity(
             STAGING.into(),
             mnemonic.clone(),
@@ -779,7 +779,7 @@ mod tests {
 
         // C3: the web phrase-reset path must refuse this device-hosted account.
         // The server recomputes the lookup hash from the phrase, so this uses
-        // the real cross-language derivation — a faithful end-to-end check.
+        // the real cross-language derivation - a faithful end-to-end check.
         let reset = reqwest::Client::new()
             .post(format!("{}/auth/reset-password-with-phrase", STAGING))
             .json(&serde_json::json!({

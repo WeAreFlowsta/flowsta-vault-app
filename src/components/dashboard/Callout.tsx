@@ -1,5 +1,5 @@
 /**
- * Callout — the one notice surface for the Sign It / dashboard forms.
+ * Callout - the one notice surface for the Sign It / dashboard forms.
  *
  * Ported from the Website dashboard. Design rules:
  *   - Five intents, each ONE colour from the scheme (info + premium reuse the
@@ -28,7 +28,7 @@ interface CalloutProps {
   iconPath?: string;
   /** Top-of-page banner spacing (mb-6). Visual is otherwise identical. */
   banner?: boolean;
-  /** Primary CTA — rendered as an intent-matched GlassButton. */
+  /** Primary CTA - rendered as an intent-matched GlassButton. */
   actionLabel?: string;
   onAction$?: QRL<() => void>;
   /** Secondary "Later" / "Dismiss" text link. */
@@ -54,7 +54,7 @@ interface IntentCfg {
   path: string;
 }
 
-// Full static class strings per intent — Tailwind only emits classes it can see
+// Full static class strings per intent - Tailwind only emits classes it can see
 // literally, so these must NOT be built by interpolation.
 const INTENT: Record<CalloutIntent, IntentCfg> = {
   info: {

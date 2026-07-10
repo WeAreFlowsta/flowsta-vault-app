@@ -9,7 +9,7 @@
 //! - Installed hApp IDs
 //! - Created timestamp
 //!
-//! The seed phrase itself is NEVER stored — only the lair-encrypted derived key persists.
+//! The seed phrase itself is NEVER stored - only the lair-encrypted derived key persists.
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -34,7 +34,7 @@ pub struct VaultConfig {
 
     /// 32-byte HMAC-derived device seed (encrypted at rest).
     /// Used for Ed25519 signing during agent linking.
-    /// The mnemonic is never stored — only this derived seed persists.
+    /// The mnemonic is never stored - only this derived seed persists.
     #[serde(default)]
     pub device_seed: Option<Vec<u8>>,
 
@@ -72,7 +72,7 @@ pub struct VaultConfig {
 
     /// Currently installed private DNA version (e.g. "1.10").
     /// Used by the DNA updater to detect when the server has a newer version.
-    /// Defaults to None for vaults created before the update system existed —
+    /// Defaults to None for vaults created before the update system existed -
     /// the updater treats None as the version bundled with this app build.
     #[serde(default)]
     pub private_dna_version: Option<String>,
@@ -94,19 +94,19 @@ pub struct VaultConfig {
 
     /// 32-byte symmetric data-encryption key for private DNA v2 Sealed
     /// records (encrypted at rest like device_seed). Derived from the
-    /// mnemonic (`flowsta-data-encryption-v1`) — identical on every one of
+    /// mnemonic (`flowsta-data-encryption-v1`) - identical on every one of
     /// the user's devices, so gossiped records decrypt everywhere.
     #[serde(default)]
     pub data_key: Option<Vec<u8>>,
 
     /// Per-user private-DHT network seed (hex) for DNA v2 installs.
-    /// Derived from the mnemonic (`flowsta-private-network-v2`) — every
+    /// Derived from the mnemonic (`flowsta-private-network-v2`) - every
     /// device lands in the same per-user network with zero coordination.
     #[serde(default)]
     pub private_network_seed: Option<String>,
 
     /// TOTP secret carried over from a migrated web account (base32 string,
-    /// plaintext here — the whole vault file is encrypted at rest). Root
+    /// plaintext here - the whole vault file is encrypted at rest). Root
     /// secrets never go into gossiped records; they live vault-local only.
     #[serde(default)]
     pub totp_secret: Option<String>,
@@ -120,8 +120,8 @@ pub struct VaultConfig {
     pub totp_enabled: Option<bool>,
 
     /// True when this vault was restored OFFLINE (Flowsta's API unreachable):
-    /// the identity is fully functional — keys derived locally, network via
-    /// community bootstrap — but the account-layer fields (username, display
+    /// the identity is fully functional - keys derived locally, network via
+    /// community bootstrap - but the account-layer fields (username, display
     /// name, picture, legacy web key) haven't been fetched yet. The reconcile
     /// task clears this after one successful A4 grant. Missing on legacy
     /// vaults → false.
@@ -277,7 +277,7 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 // Simple base64 encode/decode without pulling in another crate.
-// We already have serde_json — using a manual implementation.
+// We already have serde_json - using a manual implementation.
 fn base64_writer(writer: &mut Vec<u8>) -> impl std::io::Write + '_ {
     struct B64Writer<'a>(&'a mut Vec<u8>);
     impl<'a> std::io::Write for B64Writer<'a> {

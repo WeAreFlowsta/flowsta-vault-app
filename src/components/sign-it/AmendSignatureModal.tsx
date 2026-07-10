@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
 
 /**
- * Amend a signature — creates a new signature with `supersedes` pointing
+ * Amend a signature - creates a new signature with `supersedes` pointing
  * back at the original, replacing it in the user's chain. Both versions
  * stay on the DHT forever (the chain IS the audit trail); the list
  * endpoints hide the old version from default views via the
@@ -121,7 +121,7 @@ export default component$<Props>(({ target, onAmended$ }) => {
             thumbnail: target.value.thumbnail,
           });
         } catch (e) {
-          // Non-blocking — the amend itself succeeded.
+          // Non-blocking - the amend itself succeeded.
           console.warn("Failed to carry thumbnail to amended signature:", e);
         }
       }
@@ -140,7 +140,7 @@ export default component$<Props>(({ target, onAmended$ }) => {
       <div class="mx-4 w-full max-w-md rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
         <h3 class="mb-2 text-base font-semibold text-white">Amend Signature</h3>
         <p class="mb-4 text-xs text-gray-400">
-          This creates a new signature replacing your previous one. The original stays permanently on the public DHT — amending doesn't delete history.
+          This creates a new signature replacing your previous one. The original stays permanently on the public DHT - amending doesn't delete history.
         </p>
         <div class="mb-4 rounded-lg border border-gray-700 bg-gray-900 p-3">
           <p class="truncate text-xs font-mono text-gray-400">

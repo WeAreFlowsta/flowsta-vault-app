@@ -7,7 +7,7 @@
 //! Threat model:
 //!   - Defeats casual tampering (clearing localStorage, hand-editing the JSON)
 //!   - A determined user with file system access + understanding of the format
-//!     can still tamper. That's accepted — they own the device.
+//!     can still tamper. That's accepted - they own the device.
 //!   - Future hardening: source chain query (signing DNA v1.5+) which is
 //!     append-only and cryptographically signed by the agent.
 //!
@@ -103,8 +103,8 @@ pub fn read(data_dir: &PathBuf) -> Result<Option<QuotaCache>, String> {
     let key = load_or_create_key(data_dir)?;
     let expected = compute_hmac(&key, &signed.payload)?;
     if expected != signed.hmac_hex {
-        // Tampered — treat as no cache. Caller falls back to API or refuses to sign.
-        log::warn!("⚠️ Quota cache HMAC mismatch — discarding (possible tampering)");
+        // Tampered - treat as no cache. Caller falls back to API or refuses to sign.
+        log::warn!("⚠️ Quota cache HMAC mismatch - discarding (possible tampering)");
         return Ok(None);
     }
 

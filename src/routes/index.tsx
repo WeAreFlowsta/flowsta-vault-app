@@ -91,10 +91,10 @@ export default component$(() => {
   const backupStats = useSignal<BackupStats | null>(null);
   const linkedApps = useSignal<LinkedApp[]>([]);
   // One entry per distinct app (collapses multiple installs/agents of the
-  // same app — see dedupeLinkedApps).
+  // same app - see dedupeLinkedApps).
   const connectedApps = useComputed$(() => dedupeLinkedApps(linkedApps.value));
   const loading = useSignal(true);
-  // Plan/quota status — public endpoint, keyed to the account the
+  // Plan/quota status - public endpoint, keyed to the account the
   // subscription is attached to. Upgrading is a web (Stripe) flow.
   const planInfo = useSignal<{ tier: string; used: number; limit: number } | null>(null);
   // Offline-create email collision: retry with a different address.
@@ -118,7 +118,7 @@ export default component$(() => {
       identity.value = await invoke<VaultIdentity>("get_identity");
     } catch (e) {
       conflictNote.value = String(e).includes("email_already_registered")
-        ? "That address is registered to another account too — try a different one."
+        ? "That address is registered to another account too - try a different one."
         : String(e);
     } finally {
       conflictBusy.value = false;
@@ -144,26 +144,26 @@ export default component$(() => {
         const q = await resp.json();
         planInfo.value = { tier: q.tier || "free", used: q.used ?? 0, limit: q.limit ?? 0 };
       }
-    } catch { /* offline — plan card shows a dash */ }
+    } catch { /* offline - plan card shows a dash */ }
   });
 
-  // Username claim/change — the registrar lives server-side (uniqueness,
+  // Username claim/change - the registrar lives server-side (uniqueness,
   // login lookup, the public URL, billing tiers); the command authenticates
   // with a vault-grant and mirrors the result on-device.
   const usernameEditing = useSignal(false);
   const usernameInput = useSignal("");
   const usernameBusy = useSignal(false);
   const usernameError = useSignal("");
-  // Set when a claim is refused for an unverified email — offers resend.
+  // Set when a claim is refused for an unverified email - offers resend.
   const usernameNeedsVerify = useSignal(false);
   const resendBusy = useSignal(false);
   const resendNote = useSignal("");
   // After a phrase restore the vault doesn't know the email (the server
-  // holds only a hash) — the user types it, the API verifies it against
+  // holds only a hash) - the user types it, the API verifies it against
   // the hash, and we remember it on success.
   const resendEmailInput = useSignal("");
 
-  // In-app profile edits — name inline, picture via the cropper modal.
+  // In-app profile edits - name inline, picture via the cropper modal.
   const nameEditing = useSignal(false);
   const nameInput = useSignal("");
   const nameBusy = useSignal(false);
@@ -190,7 +190,7 @@ export default component$(() => {
         },
         body: JSON.stringify(body),
       });
-    } catch { /* offline — cache refreshes on a later edit */ }
+    } catch { /* offline - cache refreshes on a later edit */ }
   });
 
   const saveDisplayName = $(async () => {
@@ -263,8 +263,8 @@ export default component$(() => {
       });
       const data = await resp.json().catch(() => null);
       if (resp.ok) {
-        resendNote.value = `Verification email sent to ${email} — click the link, then claim your username.`;
-        // The API accepted it (hash-verified) — remember it in the vault.
+        resendNote.value = `Verification email sent to ${email} - click the link, then claim your username.`;
+        // The API accepted it (hash-verified) - remember it in the vault.
         if (!identity.value?.web_email) {
           try {
             await invoke("set_web_email", { email });
@@ -312,7 +312,7 @@ export default component$(() => {
     }
   });
 
-  // Shared signatures store from layout — count + last-known list are
+  // Shared signatures store from layout - count + last-known list are
   // already populated from cache by the time the user reaches Overview.
   const sigStore = useContext(signaturesContext);
   const connectionStatus = useContext(connectionStatusContext);
@@ -338,7 +338,7 @@ export default component$(() => {
       identity.value = id;
       backupStats.value = stats;
       linkedApps.value = apps;
-      // Paint NOW — everything above is local. The plan fetch below is
+      // Paint NOW - everything above is local. The plan fetch below is
       // network-bound and must never hold the identity render hostage: on
       // a black-holed API (fire-drill finding) an untimed fetch hangs for
       // the OS TCP retry cycle and the page sat in its loading skeleton
@@ -351,7 +351,7 @@ export default component$(() => {
       loading.value = false;
     }
 
-    // Refresh identity when the profile changes — synced from the web
+    // Refresh identity when the profile changes - synced from the web
     // account, edited in-app, or written via an approved bridge request.
     const refreshIdentity = async () => {
       try {
@@ -415,7 +415,7 @@ export default component$(() => {
     | { kind: "backup"; timestamp: number; appName: string; summary?: BackupRecordSummary | null }
     | { kind: "link"; timestamp: number; appName: string };
   const recentActivities: Activity[] = [];
-  // Only surface sigs in the activity feed once linked has settled —
+  // Only surface sigs in the activity feed once linked has settled -
   // otherwise we'd leak the same partial count the Signatures tile is
   // hiding behind "Syncing from the network…".
   if (sigsLoaded) {
@@ -428,7 +428,7 @@ export default component$(() => {
             : "a file");
         // `signed_at` is committed by the signing DNA in milliseconds
         // (commands.rs uses `as_millis()`), but `timeAgo` + the other
-        // activity sources (backups, links) deal in seconds — convert
+        // activity sources (backups, links) deal in seconds - convert
         // so the merged feed sorts and renders correctly.
         recentActivities.push({
           kind: "signature",
@@ -479,25 +479,25 @@ export default component$(() => {
         <div class="mb-6 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4">
           <p class="mb-1 text-sm font-semibold text-sky-200">
             {id?.pending_registration
-              ? "Created offline — your identity is active on the Flowsta network"
-              : "Restored offline — your identity is active on the Flowsta network"}
+              ? "Created offline - your identity is active on the Flowsta network"
+              : "Restored offline - your identity is active on the Flowsta network"}
           </p>
           <p class="text-xs text-gray-400">
             {sigCount > 0
-              ? `✓ ${sigCount} record${sigCount === 1 ? "" : "s"} found via community nodes — the network itself confirms this identity.`
+              ? `✓ ${sigCount} record${sigCount === 1 ? "" : "s"} found via community nodes - the network itself confirms this identity.`
               : sigsLoaded
-                ? "No public records yet for this identity — that's normal for identities that haven't signed anything."
+                ? "No public records yet for this identity - that's normal for identities that haven't signed anything."
                 : "Looking for your records on the community network…"}
             {" "}
             {id?.pending_registration
-              ? "Your Flowsta account attaches automatically when Flowsta is reachable — your email is checked and confirmed then (it isn't reserved until that moment)."
+              ? "Your Flowsta account attaches automatically when Flowsta is reachable - your email is checked and confirmed then (it isn't reserved until that moment)."
               : "Your @username, display name, and email reconnect automatically when Flowsta is reachable."}
           </p>
           {id?.registration_conflict && (
             <div class="mt-3 border-t border-sky-800/50 pt-3">
               <p class="mb-2 text-xs text-amber-300">
                 That email already belongs to another Flowsta account. Use a
-                different address — or if that account is yours, restore it
+                different address - or if that account is yours, restore it
                 with its recovery phrase instead.
               </p>
               <div class="flex gap-2">
@@ -549,7 +549,7 @@ export default component$(() => {
           </p>
           <p class="mt-1 text-xs text-gray-500">
             {!sigsLoaded
-              ? "Syncing — first load takes a few minutes"
+              ? "Syncing - first load takes a few minutes"
               : sigCount === 0
                 ? "Sign your first file"
                 : [
@@ -625,7 +625,7 @@ export default component$(() => {
                 ? "Free"
                 : planInfo.value.tier.charAt(0).toUpperCase() +
                   planInfo.value.tier.slice(1).replace("_", " ")
-              : "—"}
+              : "-"}
           </p>
           <p class="mt-1 text-sm text-gray-400">
             {planInfo.value
@@ -640,7 +640,7 @@ export default component$(() => {
         </button>
       </div>
 
-      {/* Public profile — the identity hero: your link front and center,
+      {/* Public profile - the identity hero: your link front and center,
           Change lives on the link itself, DID shown in full as the quiet
           technical line (copy / document). */}
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
@@ -747,7 +747,7 @@ export default component$(() => {
         </div>
 
         {usernameEditing.value ? (
-          /* Claim / change form — Website input treatment. */
+          /* Claim / change form - Website input treatment. */
           <div>
             <div class="flex items-center gap-2">
               <span class="hidden shrink-0 font-mono text-sm text-gray-500 sm:inline">
@@ -833,7 +833,7 @@ export default component$(() => {
             </PillButton>
           </div>
         ) : (
-          /* No username yet — show what the link looks like today and why
+          /* No username yet - show what the link looks like today and why
              a name beats it. One emphasized action. */
           <div class="rounded-lg border border-sky-500/30 bg-sky-500/10 px-4 py-3.5 text-sm text-sky-100">
             <p class="mb-1">Your profile link right now:</p>
@@ -841,11 +841,11 @@ export default component$(() => {
               {`${__WEB_URL__.replace(/^https?:\/\//, "")}/${id.agent_pub_key}`}
             </p>
             <p class="mb-3">
-              Claim a username for a short, memorable profile —{" "}
+              Claim a username for a short, memorable profile - {" "}
               <span class="font-mono text-sky-300">
                 {`${__WEB_URL__.replace(/^https?:\/\//, "")}/yourname`}
               </span>{" "}
-              — and one identity people recognize everywhere. Change it anytime.
+              - and one identity people recognize everywhere. Change it anytime.
             </p>
             <GlassButton
               onClick$={() => {
@@ -859,7 +859,7 @@ export default component$(() => {
           </div>
         )}
 
-        {/* DID — the permanent identifier, shown in full. No collapse. */}
+        {/* DID - the permanent identifier, shown in full. No collapse. */}
         <div class="mt-3 flex items-start gap-2 px-1">
           <span class="mt-1.5 shrink-0 text-xs font-medium text-gray-500">DID</span>
           <code class="mt-1 min-w-0 flex-1 break-all font-mono text-[11px] leading-relaxed text-gray-400">
@@ -882,7 +882,7 @@ export default component$(() => {
 
       </div>
 
-      {/* Avatar cropper — opens when a picture is picked */}
+      {/* Avatar cropper - opens when a picture is picked */}
       {avatarImage.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-md rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
@@ -922,7 +922,7 @@ export default component$(() => {
         </div>
       )}
 
-      {/* Recent Activity — unified feed: signatures, backups, linked apps. */}
+      {/* Recent Activity - unified feed: signatures, backups, linked apps. */}
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
         <h3 class="mb-4 text-lg font-semibold text-white">
           Recent Activity
@@ -930,7 +930,7 @@ export default component$(() => {
 
         {recentActivitiesTop.length === 0 ? (
           <p class="py-4 text-center text-sm text-gray-500">
-            No activity yet — sign a file or connect an app to see it here.
+            No activity yet - sign a file or connect an app to see it here.
           </p>
         ) : (
           <div class="space-y-3">

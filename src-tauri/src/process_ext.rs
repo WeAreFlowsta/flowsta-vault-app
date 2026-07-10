@@ -8,7 +8,7 @@
 //! launch.
 //!
 //! Without `spawn_hidden`, on Windows every Vault launch flashes two terminal
-//! windows (lair-keystore.exe + holochain.exe) — visually unprofessional and
+//! windows (lair-keystore.exe + holochain.exe) - visually unprofessional and
 //! confusing for end users.
 //!
 //! Linux: `prctl(PR_SET_PDEATHSIG, SIGTERM)`.
@@ -21,7 +21,7 @@
 //! ## Why post-spawn hide instead of `CREATE_NO_WINDOW`
 //!
 //! v0.5.0 set `CREATE_NO_WINDOW` (0x08000000) on Windows to suppress the
-//! console windows. That flag does more than hide the window — it prevents
+//! console windows. That flag does more than hide the window - it prevents
 //! Windows from allocating a console handle at all. `holochain.exe` then
 //! crashed with `0xc0000005` access violation in `MSVCP140.dll` during
 //! signing-DNA WASM compilation, because LLVM/cranelift's stdio path
@@ -35,7 +35,7 @@
 //! for up to 2 seconds, so even if the window appears late we still catch
 //! it. To eliminate the flash entirely, a future change could spawn with
 //! `CREATE_SUSPENDED` via raw `CreateProcessW`, hide the window, then
-//! `ResumeThread` — much more invasive and not necessary for the MVP.
+//! `ResumeThread` - much more invasive and not necessary for the MVP.
 
 use std::io;
 use std::process::{Child, Command};
@@ -80,7 +80,7 @@ impl CommandExt for Command {
         let child = self.spawn()?;
         let pid = child.id();
         // Tie the sidecar to a kill-on-close Job Object so it dies when THIS
-        // app process exits — clean quit, crash, or force-kill. Windows has no
+        // app process exits - clean quit, crash, or force-kill. Windows has no
         // PR_SET_PDEATHSIG equivalent, so without this the conductor/lair
         // children orphan on app close, leaving their console windows open and
         // their admin ports + lair sockets locked. For the Vault this matters
@@ -108,8 +108,8 @@ mod win_job {
     //! `PR_SET_PDEATHSIG`. Every sidecar (`vault-holochain`,
     //! `vault-lair-keystore`) is assigned to one process-wide job that has
     //! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The app process owns the only
-    //! handle to that job, so when it exits — gracefully, by crash, or by
-    //! Task Manager — Windows closes the handle and terminates every process
+    //! handle to that job, so when it exits - gracefully, by crash, or by
+    //! Task Manager - Windows closes the handle and terminates every process
     //! still in the job. No more orphaned conductors holding ports/sockets and
     //! leaving console windows open.
     use std::os::windows::io::AsRawHandle;
@@ -130,7 +130,7 @@ mod win_job {
         let h = *JOB.get_or_init(|| unsafe {
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if job.is_null() {
-                log::error!("[job] CreateJobObjectW failed — sidecars won't auto-kill on exit");
+                log::error!("[job] CreateJobObjectW failed - sidecars won't auto-kill on exit");
                 return 0;
             }
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
@@ -176,7 +176,7 @@ mod windows_hide {
     //! The previous implementation exited early when it found a matching
     //! window that wasn't currently visible (`IsWindowVisible == 0`),
     //! reasoning the child was using a hidden IPC window we shouldn't
-    //! flap. That was wrong — Windows console hosts (conhost) create
+    //! flap. That was wrong - Windows console hosts (conhost) create
     //! their window with WS_VISIBLE off and toggle it on later, often
     //! after our few-poll budget had already elapsed. Result: terminal
     //! windows reliably appeared after we'd "given up".
@@ -204,12 +204,12 @@ mod windows_hide {
 
     /// Window classes used by Windows' console host.
     ///
-    /// - `ConsoleWindowClass`     — classic conhost window
-    /// - `OpenConsoleWindow`      — Windows Terminal's underlying conhost
-    /// - `PseudoConsoleWindow`    — ConPTY infrastructure window owned by the
+    /// - `ConsoleWindowClass`     - classic conhost window
+    /// - `OpenConsoleWindow`      - Windows Terminal's underlying conhost
+    /// - `PseudoConsoleWindow`    - ConPTY infrastructure window owned by the
     ///                              attached process (always invisible, but
     ///                              we still hide it for completeness)
-    /// - `CASCADIA_HOSTING_WINDOW_CLASS` — Windows Terminal hosting frame
+    /// - `CASCADIA_HOSTING_WINDOW_CLASS` - Windows Terminal hosting frame
     fn is_console_class(class: &str) -> bool {
         matches!(
             class,
@@ -278,7 +278,7 @@ mod windows_hide {
         }
     }
 
-    // ── Diagnostics (logging only — never hides or changes anything) ────────
+    // ── Diagnostics (logging only - never hides or changes anything) ────────
     //
     // A full, evidence-first dump of every console-related window: class,
     // title, visibility, owning process (name + pid) and that process's
@@ -381,7 +381,7 @@ mod windows_hide {
     /// On Windows 11 with Windows Terminal as the default terminal, our console
     /// sidecars are hosted by `WindowsTerminal.exe` in a visible
     /// `CASCADIA_HOSTING_WINDOW_CLASS` window whose title is the full path to
-    /// the sidecar binary — so the title (not the owning process) is how we
+    /// the sidecar binary - so the title (not the owning process) is how we
     /// find them. The classic `conhost` window titles the same way.
     const SIDECAR_TITLE_MARKERS: &[&str] = &["vault-holochain", "vault-lair-keystore"];
 
@@ -466,7 +466,7 @@ mod windows_hide {
 
         if direct || console_class {
             let was_visible = unsafe { IsWindowVisible(hwnd) } != 0;
-            // Capture the direct-match class lazily — we only need it for
+            // Capture the direct-match class lazily - we only need it for
             // the first one we see (for diagnostic logging).
             let class_str = if direct { get_window_class(hwnd) } else { class };
             state.candidates.push(Candidate {
@@ -476,7 +476,7 @@ mod windows_hide {
                 was_visible,
             });
         }
-        // Continue enumeration — multiple matches per process are possible.
+        // Continue enumeration - multiple matches per process are possible.
         1
     }
 

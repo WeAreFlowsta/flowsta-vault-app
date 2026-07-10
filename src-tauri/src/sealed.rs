@@ -1,14 +1,14 @@
-//! Sealed-record crypto — encrypt-before-gossip for the
+//! Sealed-record crypto - encrypt-before-gossip for the
 //! private DNA v2. Every gossiping record is an opaque `{cipher, nonce}`
 //! blob; entry type, timestamps, app ids, relationships all live INSIDE the
 //! ciphertext.
 //!
-//! Method (deliberately NOT crypto_box-by-agent-key — per-device agent
+//! Method (deliberately NOT crypto_box-by-agent-key - per-device agent
 //! keys differ, which would make records unreadable across devices):
 //! XSalsa20-Poly1305 secretbox with the per-user symmetric data key
 //!   data_key = HMAC-SHA256("flowsta-data-encryption-v1", bip39_seed)
 //! (see key_derivation::derive_data_encryption_key, golden-vector-verified).
-//! Every device derives the same key from the phrase — multi-device gossip
+//! Every device derives the same key from the phrase - multi-device gossip
 //! decrypts with zero key exchange, and recovery needs only the phrase.
 //!
 //! The zome never sees plaintext: seal before create_sealed, unseal after
@@ -18,7 +18,7 @@ use lair_keystore_api::dependencies::sodoken;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Version tag inside every sealed payload — bump on layout change so old
+/// Version tag inside every sealed payload - bump on layout change so old
 /// records stay decodable forever (records are immutable once gossiped).
 pub const SEALED_PAYLOAD_V1: u16 = 1;
 
@@ -50,22 +50,22 @@ pub struct SealedPayload {
     /// Which v1.11 entry type this wraps: "user_profile", "login_activity",
     /// "email_permission", "dashboard_activity", "oauth_activity",
     /// "privacy_settings", "app_analytics_id", "profile_picture".
-    /// (RecoveryPhrase + TotpConfig never become Sealed — root secrets are
+    /// (RecoveryPhrase + TotpConfig never become Sealed - root secrets are
     /// never gossiped.)
     pub entry_type: String,
-    /// Creation time in ms — inside the cipher; the DHT action timestamp is
+    /// Creation time in ms - inside the cipher; the DHT action timestamp is
     /// the only timing a peer sees.
     pub created_at: u64,
     /// The original entry struct, MessagePack-encoded by the caller.
     #[serde(with = "serde_bytes")]
     pub body: Vec<u8>,
-    /// Related record references (action hashes, base64) — inside the
+    /// Related record references (action hashes, base64) - inside the
     /// cipher so relationships don't leak as link structure.
     pub refs: Vec<String>,
 }
 
 /// Encrypt a payload with the per-user data key. Returns (cipher, nonce);
-/// the nonce is random per record (never reused — 24 random bytes).
+/// the nonce is random per record (never reused - 24 random bytes).
 pub fn seal(payload: &SealedPayload, data_key: &[u8; 32]) -> Result<(Vec<u8>, [u8; NONCE_BYTES]), SealedError> {
     let plain = rmp_serde::to_vec_named(payload).map_err(|e| SealedError::Encode(e.to_string()))?;
 
@@ -186,7 +186,7 @@ async fn connect_sealed_app_ws(
 /// failures: right after an unlock the enable/readiness race can fail the
 /// credential authorize, and the FIRST call to a freshly-installed cell
 /// compiles the WASM module, which can outrun a response timeout. A
-/// ModuleBuild failure (bad wasm) is permanent — no retry.
+/// ModuleBuild failure (bad wasm) is permanent - no retry.
 async fn sealed_zome_call(
     state: &Arc<AppState>,
     admin_port: u16,
@@ -216,7 +216,7 @@ async fn sealed_zome_call(
             Ok(r) => return Ok(r),
             Err(e) => {
                 last_err = e;
-                // Cached credentials can go stale if the chain was reset —
+                // Cached credentials can go stale if the chain was reset -
                 // drop them so the retry re-authorizes.
                 if last_err.contains("nauthorized") {
                     crate::commands::invalidate_cell_credentials(state);
@@ -249,7 +249,7 @@ fn vault_data_key(state: &AppState) -> Result<[u8; 32], String> {
     let config = state.vault_config.lock().unwrap();
     let cfg = config.as_ref().ok_or("vault_locked")?;
     let key_vec = cfg.data_key.clone().ok_or(
-        "No data key in this vault — restore from your recovery phrase to enable encrypted records",
+        "No data key in this vault - restore from your recovery phrase to enable encrypted records",
     )?;
     if key_vec.len() != 32 {
         return Err("Invalid data key length".into());
@@ -269,7 +269,7 @@ struct SealedInputWire {
 }
 
 /// Seal and store a record on the encrypted private cell.
-/// `body` is arbitrary JSON — wrapped, encrypted, and linked from the agent.
+/// `body` is arbitrary JSON - wrapped, encrypted, and linked from the agent.
 #[tauri::command]
 pub async fn sealed_store(
     entry_type: String,
@@ -284,7 +284,7 @@ pub async fn sealed_store(
     sealed_store_inner(&state, entry_type, body, refs.unwrap_or_default(), created_at).await
 }
 
-/// Store with an explicit creation timestamp — account migration preserves
+/// Store with an explicit creation timestamp - account migration preserves
 /// the original record times inside the cipher rather than stamping "now".
 pub(crate) async fn sealed_store_inner(
     state: &Arc<AppState>,
@@ -448,7 +448,7 @@ pub(crate) async fn sealed_list_inner(
             refs: payload.refs,
         });
     }
-    // Newest first — the natural reading order for activity-style data.
+    // Newest first - the natural reading order for activity-style data.
     items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(items)
 }
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn test_multi_device_same_phrase_decrypts() {
         // Device A and device B derive the key independently from the same
-        // phrase — B must decrypt what A sealed (the multi-device property).
+        // phrase - B must decrypt what A sealed (the multi-device property).
         let key_a = derive_data_encryption_key(TEST_MNEMONIC).unwrap();
         let key_b = derive_data_encryption_key(TEST_MNEMONIC).unwrap();
         let (cipher, nonce) = seal(&test_payload(), &key_a).unwrap();
@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn test_unknown_future_version_still_decodes() {
         // Forward-compat: a v2 payload with the same fields decodes (the
-        // version tag is data, not a gate) — callers branch on `v`.
+        // version tag is data, not a gate) - callers branch on `v`.
         let key = derive_data_encryption_key(TEST_MNEMONIC).unwrap();
         let mut payload = test_payload();
         payload.v = 2;

@@ -5,7 +5,7 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.1] — 2026-07-10
+## [1.0.1] - 2026-07-10
 
 ### Fixed
 - **Batch signing now stores image thumbnails.** Signing multiple files at
@@ -17,27 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Your Data: clearer wording on what your recovery phrase restores.
 
-## [1.0.0] — 2026-07-10
+## [1.0.0] - 2026-07-10
 
 **Your account lives in your Vault.** The 1.0 release brings the whole
 journey together: your identity is created on your own device, works
 everywhere, and keeps working even when the cloud doesn't.
 
 ### Your account, on your device
-- **Create your free Flowsta account directly in Vault** — the
+- **Create your free Flowsta account directly in Vault** - the
   recovery-phrase ceremony seeds your identity on your device, with a
   download-as-file option and a write-down check. No web signup, no
   passwords anywhere.
 - **Upgrade an existing flowsta.com account** with your email and password
-  or your recovery phrase alone — you choose whether to keep your existing
+  or your recovery phrase alone - you choose whether to keep your existing
   phrase or create a fresh one. Your identity, username, and signatures
   stay exactly as they are, and old 2FA settings never block the move.
-- **Existing Vaults upgrade in place** from a card on the Overview — your
+- **Existing Vaults upgrade in place** from a card on the Overview - your
   vault password and history are untouched, and the upgrade can't be
   interrupted by navigating away.
 
 ### Works even without Flowsta
-- **Restore from your phrase with Flowsta's servers unreachable** — keys
+- **Restore from your phrase with Flowsta's servers unreachable** - keys
   re-derive locally and the community network returns your public records.
 - **Create a new identity offline**; your Flowsta account attaches when the
   servers are reachable.
@@ -48,35 +48,35 @@ everywhere, and keeps working even when the cloud doesn't.
   ready the moment a site needs it.
 - **A live strength meter** guides every vault password, and weak or
   predictable passwords are no longer accepted.
-- **Export everything, import it back** — one encrypted file restores your
+- **Export everything, import it back** - one encrypted file restores your
   private data and your apps' backups; the Reset screen now explains
   exactly what the phrase restores and what the export restores.
 - **Sign It from the web dashboard** routes through your Vault with
-  per-signature approval — including while locked or still starting.
+  per-signature approval - including while locked or still starting.
   Sponsored signing shows exactly whose quota pays.
-- **One Connections page** — every app and site that can use your identity,
+- **One Connections page** - every app and site that can use your identity,
   with plain-language permissions and revoke in one place.
 - **Your Data shows your @username beside your DID**, with a plain
   explanation of how the two relate.
 - On Linux, the right-click "Sign It" entry no longer becomes the default
   opener for your files.
 
-## [1.0.0-rc1] — 2026-07-09
+## [1.0.0-rc1] - 2026-07-09
 
-Release candidate for 1.0. Everything from the 1.0.0 beta series — creating
+Release candidate for 1.0. Everything from the 1.0.0 beta series - creating
 and upgrading your account on your own device, working even when Flowsta is
-unreachable, and Sign It from the web — brought together. Since the last
+unreachable, and Sign It from the web - brought together. Since the last
 beta: the Start at Login control is tidied up, and the About screen reports
 the correct network version and explains how your identity stays safe more
 clearly.
 
-## [1.0.0-beta5] — 2026-07-09
+## [1.0.0-beta5] - 2026-07-09
 
 ### New in this release
 - **Start Flowsta Vault at login.** Vault now opens automatically in the
   background when you sign in to your computer, so it's ready the moment a
-  Flowsta app or website needs it. It starts locked — nothing unlocks until
-  you enter your password — and you can turn it off in Settings.
+  Flowsta app or website needs it. It starts locked - nothing unlocks until
+  you enter your password - and you can turn it off in Settings.
 - **Stronger vault passwords.** When you create or change a vault password,
   a live strength meter guides you, and very weak or predictable passwords
   are no longer accepted.
@@ -84,29 +84,29 @@ clearly.
 ### Fixes
 - **A brand-new account shows its signatures list right away** instead of
   sitting on a loading spinner while it looked for accounts it never had.
-- **Clearer Reset Vault warning** — it now explains that your recovery
+- **Clearer Reset Vault warning** - it now explains that your recovery
   phrase restores your identity, while a data export (from Your Data) is
   what brings back your private data and your apps' backups.
 
-## [1.0.0-beta4] — 2026-07-09
+## [1.0.0-beta4] - 2026-07-09
 
 ### Upgrading your account
 - **The upgrade can't be interrupted by navigating away.** While your
   account is moving onto this device, Vault now shows a full-screen progress
-  view so you stay with it until it finishes — previously, switching pages
+  view so you stay with it until it finishes - previously, switching pages
   mid-upgrade could leave a confusing "sign in again" prompt afterwards
   (the move itself always completed correctly). If that state is ever
   reached, the message now says plainly that the account is already on this
   device and to reopen Vault.
 
-## [1.0.0-beta3] — 2026-07-09
+## [1.0.0-beta3] - 2026-07-09
 
 ### Upgrading your account
 - **2FA settings no longer block the upgrade.** Accounts that changed or
   reset their password after setting up two-factor auth held the old 2FA
   secret under an earlier password, which stopped the upgrade with a
   decryption error. The upgrade now completes and simply notes that the old
-  2FA settings didn't carry over — approving sign-ins from your Vault
+  2FA settings didn't carry over - approving sign-ins from your Vault
   replaces 2FA anyway.
 
 ### Linux
@@ -116,32 +116,32 @@ clearly.
   source/config files, so double-clicking your files opens the app you
   expect. Updating clears the old association automatically.
 
-## [1.0.0-beta2] — 2026-07-09
+## [1.0.0-beta2] - 2026-07-09
 
 ### Upgrading your account
 - **Migrating with your email and password no longer asks for your recovery
-  phrase.** After you sign in, you choose how to set up your phrase — enter
+  phrase.** After you sign in, you choose how to set up your phrase - enter
   one you already have, or create a fresh one on the spot. Your password
   already proves the account is yours, so having your old phrase in hand is
   never required to move your account onto this device.
 
-## [1.0.0-beta1] — 2026-07-09
+## [1.0.0-beta1] - 2026-07-09
 
-Your account lives in your Vault now. Existing vaults upgrade in place — your
+Your account lives in your Vault now. Existing vaults upgrade in place - your
 data, identity, and Sign It history carry over.
 
 ### Your account, on your device
 - **Create your Flowsta account directly in Vault.** The recovery-phrase
-  ceremony seeds your identity on this device — with a download-as-file
+  ceremony seeds your identity on this device - with a download-as-file
   option and a write-down check. No web signup.
 - **Upgrade an existing flowsta.com account** by signing in with your
-  password — or with your recovery phrase alone, no password needed. Your
+  password - or with your recovery phrase alone, no password needed. Your
   personal data moves into an encrypted private space on this device, and
   sign-ins everywhere switch from your password to Vault approval. Your
   identity, username, and signatures stay exactly as they are.
 - **Existing Vault installs upgrade from the dashboard.** If your account
   still lives on Flowsta's servers, an upgrade card appears on the Overview
-  and moves it into your Vault in place — your vault password and history
+  and moves it into your Vault in place - your vault password and history
   are untouched.
 
 ### Works even without Flowsta
@@ -159,7 +159,7 @@ data, identity, and Sign It history carry over.
   records and backups; importing is safe to re-run and verifies itself.
 - **Vault is your profile editor**: display name, picture, and your
   flowsta.com/username claim all live on the Overview's Public Profile card.
-- **Change your vault password** — fully local, and safe for the network
+- **Change your vault password** - fully local, and safe for the network
   stack underneath.
 - **Email stays yours.** Apps only receive your email address if you
   explicitly consent when connecting.
@@ -167,15 +167,15 @@ data, identity, and Sign It history carry over.
 ### Sign It
 - **Everything works from flowsta.com too**: sign & publish, amend, revoke,
   and thumbnails on the web dashboard all route through your Vault, each
-  with its own approval — including while the Vault is locked (it waits for
+  with its own approval - including while the Vault is locked (it waits for
   your unlock) or still starting.
 - **Sponsored signing**: when an app sponsors your signature from its
   organization's pool, the approval dialog says exactly whose quota pays.
-- **Faster, steadier history views** — your own records paint immediately
+- **Faster, steadier history views** - your own records paint immediately
   and never disappear behind a temporary read failure.
 
 ### Connections
-- **One Connections page** — every app and website that can use your
+- **One Connections page** - every app and website that can use your
   identity, with plain-language permissions and revoke in one place. The
   web dashboard shows the same registry, read-only.
 
@@ -184,9 +184,9 @@ data, identity, and Sign It history carry over.
 - Signing credentials authorize once per session instead of on every call.
 - Release downloads keep the SHA256SUMS verification file.
 
-## [0.7.0] — 2026-06-14
+## [0.7.0] - 2026-06-14
 
-A reliability and design release. Existing vaults upgrade in place — no migration.
+A reliability and design release. Existing vaults upgrade in place - no migration.
 
 ### Apps & sign-in
 - **Signing in to Flowsta apps is far more reliable.** The local connection apps
@@ -218,14 +218,14 @@ A reliability and design release. Existing vaults upgrade in place — no migrat
 - **More consistent installers.** The build toolchain is now pinned, so the
   Windows installer behaves the same from one release to the next.
 
-## [0.6.1] — 2026-06-01
+## [0.6.1] - 2026-06-01
 
 A polish release focused on the cross-app sign-in experience and Windows.
-Existing vaults upgrade in place — no migration.
+Existing vaults upgrade in place - no migration.
 
 ### Sign-in & Connected Apps
 - The approval dialog **reliably comes to the front** when an app asks to
-  connect — on macOS and Linux as well as Windows (previously it could open
+  connect - on macOS and Linux as well as Windows (previously it could open
   behind the app you were in).
 - **Focus returns to the app you came from** after you approve or deny,
   instead of leaving you on the Vault window.
@@ -235,12 +235,12 @@ Existing vaults upgrade in place — no migration.
 
 ### Windows
 - **No more stray console windows** from the bundled Holochain/lair processes
-  — including when your default terminal is Windows Terminal.
+  - including when your default terminal is Windows Terminal.
 - **Background processes shut down with the app** instead of being left
   running after you quit.
 
 ### Privacy
-- **"Reset Vault" is now a true full erase** — it also clears connected-app
+- **"Reset Vault" is now a true full erase** - it also clears connected-app
   links, granted permissions, and saved app backups, so resetting a device is
   a genuine clean slate. The confirmation spells out exactly what's removed;
   your identity and signatures still come back with your recovery phrase.
@@ -252,12 +252,12 @@ Existing vaults upgrade in place — no migration.
 - **Data-export (CAL) support** for apps built on Vault, to help them meet
   Cryptographic Autonomy License obligations.
 
-## [0.6.0] — 2026-05-24
+## [0.6.0] - 2026-05-24
 
 The Holochain 0.6.1 / Iroh networking release. The peer-to-peer
 transport moves from WebRTC to Iroh (kitsune2 0.4.1), matching the
 upgraded Flowsta network. Existing vaults upgrade in place on first
-launch — no migration, your data is read as-is. Sign It is now
+launch - no migration, your data is read as-is. Sign It is now
 available on Windows. The bulk of the release polishes the cold-start
 experience: Vault now handles the multi-minute DHT warmup on a
 returning agent's new device cleanly, without flashing partial counts
@@ -272,7 +272,7 @@ or losing thumbnails between refreshes.
 - **Update banner.** If the Flowsta network reports your Vault is
   below the minimum supported version, Vault shows a banner with an
   update link. The vault stays fully usable and your local data is
-  always accessible — but you won't sync with the network until you
+  always accessible - but you won't sync with the network until you
   update.
 
 ### Sign It
@@ -284,34 +284,34 @@ or losing thumbnails between refreshes.
 - **Sign It quota meter on the Sign It page** now correctly hits the
   production API. Previously a wiring bug had all five Sign It API
   calls reading `(window as any).__API_URL__`, which is always
-  undefined — they fell back to a hard-coded staging URL, and the
+  undefined - they fell back to a hard-coded staging URL, and the
   quota widget vanished when staging didn't have the production
   account's record.
 - **Bundled signing-DNA is v1.4 only.** Vault no longer ships
-  v1.0–v1.3. Those versions hold no real signing data (the per-user
+  v1.0-v1.3. Those versions hold no real signing data (the per-user
   signing-cell architecture started at v1.4) and querying empty
   cells on cold start used to block the whole refresh round.
   Existing Vaults upgrading from earlier builds keep the four
   orphaned older cells in their conductor; the new code path
   ignores them.
 
-### Cold-start sync — handles the DHT warmup cleanly
+### Cold-start sync - handles the DHT warmup cleanly
 - **Two independent fetches for your signatures.** Your own
   signatures (local source-chain query) and your linked accounts'
   signatures (DHT-bound cross-agent query) run as separate calls
   in parallel, so the slower linked path never blocks the local one.
 - **Never display a partial count.** The signatures tile stays in
-  "Syncing — first load takes a few minutes" until both fetches
+  "Syncing - first load takes a few minutes" until both fetches
   authoritatively succeed (either with data or with a confirmed
   no-data answer). Previously a partial 4-of-6 could appear briefly
   while the second fetch was still in flight.
-- **First-install cold sync is ~ 4–5 minutes**, then instant from
+- **First-install cold sync is ~ 4-5 minutes**, then instant from
   cache on every subsequent unlock or app restart. Cache is keyed
   per agent and preserved across lock cycles, restarts, and even
   partial refreshes.
 - **Cache never downgrades.** A refresh round that returns fewer
   signatures than the cache (linked-agent timeout, mid-refresh
-  lock, cold-DHT cell readiness race) no longer wipes the cache —
+  lock, cold-DHT cell readiness race) no longer wipes the cache -
   sigs the round missed are preserved.
 - **Thumbnails and revocation status accumulate.** Per-sig
   enrichment is bounded at 15 s so the main sig query isn't blocked
@@ -326,11 +326,11 @@ or losing thumbnails between refreshes.
 ### Refresh on demand
 - **Window focus triggers a refresh.** Signing on flowsta.com or
   another linked device while Vault is open in the background now
-  appears as soon as you bring Vault back to the foreground —
+  appears as soon as you bring Vault back to the foreground -
   subject to kitsune2 gossip latency for the new entry to reach
   your peers.
 
-### Overview — Recent Activity feed
+### Overview - Recent Activity feed
 - **Unified Recent Activity** across signatures, backups, and
   linked apps, sorted in time order.
 - **Sig timestamps display correctly.** Signature `signed_at` is
@@ -338,7 +338,7 @@ or losing thumbnails between refreshes.
   timestamps are in seconds. The shared `timeAgo` helper assumes
   seconds, so every signature row was reading "just now". Fixed.
 
-### Reliability — Holochain integration
+### Reliability - Holochain integration
 - **Conductor request timeout 60 s → 240 s** in the generated
   conductor config. Cold-DHT zome calls (`get_links`, `get`)
   routinely exceed a minute on first run waiting for peers to
@@ -354,18 +354,18 @@ or losing thumbnails between refreshes.
   returned `CellDisabled` and the round blanked to zero.
 - **Auto-link race closed.** The linked-signatures fetch waits for
   the post-unlock auto-link to populate the cached web agent key
-  before returning an authoritative empty — previously the
+  before returning an authoritative empty - previously the
   conductor-ready event could fire the first refresh before
   auto-link finished, producing a false "no linked agents" reading.
 
-## [0.5.3] — 2026-05-20
+## [0.5.3] - 2026-05-20
 
 A Sign It feature release. Adds comments, amendments, edit history,
 and several display refinements. Also includes a sizable UX pass on
 the image cropper and a fix to Reset Vault that was preventing some
 users from setting up a second identity on the same machine.
 
-### Sign It — new metadata + edits
+### Sign It - new metadata + edits
 - **Comments on signatures.** Add a note (up to 280 characters) when
   signing. Visible inline on the signature card in Vault and on each
   signature's public page.
@@ -406,7 +406,7 @@ users from setting up a second identity on the same machine.
   the resize handles are visible. The previous default left a
   noticeable gap on every upload.
 - **Selection can't leave the image.** Dragging the crop rectangle
-  toward an edge stops at the image bounds — no more selections that
+  toward an edge stops at the image bounds - no more selections that
   include empty / transparent space.
 - **Zoom-out below fit is blocked**, eliminating the source of empty
   canvas corners. Zoom-in for precision crops still works.
@@ -428,7 +428,7 @@ users from setting up a second identity on the same machine.
   link completes, so the count goes straight from loading to the
   correct number.
 
-## [0.5.2] — 2026-05-11
+## [0.5.2] - 2026-05-11
 
 Stability and signing-history release. Adds reliability infrastructure
 for the Holochain conductor (auto-restart, runtime watchdog, resilient
@@ -452,10 +452,10 @@ placeholder pending upstream conductor fixes.
   bails fast when the conductor has actually exited.
 - **App / cell normalisation pass.** A previous interrupted unlock
   that left an app `Disabled(NeverStarted)` is auto-recovered on the
-  next unlock — no manual lock+unlock required.
+  next unlock - no manual lock+unlock required.
 
 ### Sign It history
-- **Bundles all five signing-DNA versions** (v1.0–v1.4) and
+- **Bundles all five signing-DNA versions** (v1.0-v1.4) and
   back-installs the older ones on first launch so the user's full
   signature history is visible end-to-end on a fresh install. Linux
   + macOS only in this release; gated on Windows (see below).
@@ -486,7 +486,7 @@ placeholder pending upstream conductor fixes.
 - Bundle-sync check (`scripts/check-bundle-sync.sh`) regex updated
   to allow digits in `BUNDLED_*_HAPP_FILE` constant names.
 
-## [0.5.1] — 2026-05-05
+## [0.5.1] - 2026-05-05
 
 ### Windows: fresh installs failed during signing DNA setup
 
@@ -509,13 +509,13 @@ Windows, but installs work reliably. A proper fix using `STARTUPINFO` with
 `STARTF_USESHOWWINDOW + SW_HIDE` (which hides the window without preventing
 console allocation) is scheduled for a future release.
 
-## [0.5.0] — 2026-05-05
+## [0.5.0] - 2026-05-05
 
 ### Sign with Flowsta Vault from your file manager
 - Right-click any file in your operating system's file manager and choose **"Sign with Flowsta Vault"** to send it straight to the Sign It page. Multi-select sends the whole batch at once. If Vault isn't open, it launches; if it's locked, the file is queued and signed after you unlock.
-- Linux: ships a `.desktop` entry with a broad MIME-type list — appears in Nautilus / Dolphin / Thunar's "Open With" menus.
+- Linux: ships a `.desktop` entry with a broad MIME-type list - appears in Nautilus / Dolphin / Thunar's "Open With" menus.
 - Windows: NSIS installer registers an HKCU registry entry, so the menu item appears for any file. Per-user install means no admin prompt. On Windows 11 the entry lives under "Show more options".
-- macOS: `Info.plist` declares Vault as an "Open With" handler for any file via `LSHandlerRank=Alternate` — never overrides your default opener for any file type.
+- macOS: `Info.plist` declares Vault as an "Open With" handler for any file via `LSHandlerRank=Alternate` - never overrides your default opener for any file type.
 
 ### Sign It UX overhaul
 - The Sign It signature list, Overview signature count, and All Signatures page are now backed by a single shared store. Navigating between the three pages no longer triggers fresh fetches, and the list survives lock/unlock so the app reopens instantly with your last-known signatures.
@@ -524,18 +524,18 @@ console allocation) is scheduled for a future release.
 
 ### Sign large files (up to 10 GB), with progress and cancel
 - Files up to 10 GB can now be signed. Anything over 50 MB shows a progress bar with a Cancel button while hashing.
-- Files larger than 500 MB skip the in-memory hidden-content scan with a clear explanation — the hash and signature are unaffected. Files over 10 GB are rejected with a clear message.
+- Files larger than 500 MB skip the in-memory hidden-content scan with a clear explanation - the hash and signature are unaffected. Files over 10 GB are rejected with a clear message.
 - Heavy file operations (hash, integrity analysis, perceptual hash, thumbnail) now run on a background thread so the UI stays responsive on low-resource systems. Previous versions could freeze the window on multi-GB hashes; the OS would mark the app "not responding".
 
 ### Faster signatures load on cold start
-- The signatures fetch now queries all installed signing DNA versions in parallel, with per-signature revocation + thumbnail lookups also running concurrently. On a cold conductor this drops the load from roughly 3 minutes to 30–60 seconds; on a warm conductor it's typically under 2 seconds.
+- The signatures fetch now queries all installed signing DNA versions in parallel, with per-signature revocation + thumbnail lookups also running concurrently. On a cold conductor this drops the load from roughly 3 minutes to 30-60 seconds; on a warm conductor it's typically under 2 seconds.
 - A pending-refresh dedup pattern collapses duplicate fetches: if a refresh is requested while one is already in flight, a single follow-up runs after the current one finishes, instead of two parallel calls each doing the full work.
 
 ### Hide background terminal windows on Windows
 - On Windows, the bundled `lair-keystore.exe` and `holochain.exe` no longer pop up console windows when Vault starts. The `tie_to_parent()` helper now applies `CREATE_NO_WINDOW` for sidecar process spawns.
 
 ### Linux: AppImage dropped from release artifacts
-- The AppImage hit two separate failure modes in the wild — a WebKit GTK input-rendering glitch on some setups, and a `lair-keystore` TLS handshake hang on a fresh setup that we reproduced locally. Both stem from AppImage's bundled-libs runtime environment differing from the system libs the `.deb` uses, and both would need multi-day work to fix properly.
+- The AppImage hit two separate failure modes in the wild - a WebKit GTK input-rendering glitch on some setups, and a `lair-keystore` TLS handshake hang on a fresh setup that we reproduced locally. Both stem from AppImage's bundled-libs runtime environment differing from the system libs the `.deb` uses, and both would need multi-day work to fix properly.
 - The `.deb` is now the only Linux release artifact. Most Debian and Ubuntu users can install it directly; users on other distros can convert with `alien` or wait for a future Flatpak / Snap target.
 
 ### Lair-keystore connect now fails fast instead of hanging
@@ -545,20 +545,20 @@ console allocation) is scheduled for a future release.
 - The sidebar Lock Vault button and status indicators are no longer hidden on long pages (Your Data, Settings). The dashboard wrapper now uses `h-screen` + `min-h-0` on the inner row so `<main>` scrolls internally instead of expanding the whole document.
 - `.env.staging` and other per-environment env files are now ignored by `.gitignore`. Only `.env.example` should be tracked.
 
-## [0.4.2] — 2026-04-24
+## [0.4.2] - 2026-04-24
 
 ### First-launch DNA installation
 - **Linux**: fresh installs of v0.4.0 / v0.4.1 hit `DNA installation failed: Identity hApp bundle not found at .../flowsta_identity_v1_4_happ.happ` because the bundled hApp resources were stuck on older versions (v1.3 identity / v1.10 private / v1.1 signing) while the code was looking for v1.4 / v1.11 / v1.4. The bundle now ships the matching files. Existing installs whose conductor managed to download the newer DNAs in the background were unaffected; clean installs were broken until now.
 - **Windows**: Holochain conductor failed on first launch with `did not find expected hexadecimal number at line 1 column 22, while parsing a quoted scalar`. The auto-generated `conductor-config.yaml` wrote `data_root_path` as a double-quoted YAML string, so the leading `\U` of `C:\Users\...` was interpreted as a Unicode escape. Switched to single-quoted YAML strings (which don't interpret escapes) for the path values.
 
-## [0.4.1] — 2026-04-23
+## [0.4.1] - 2026-04-23
 
 ### Child-process cleanup
-- On Linux, `lair-keystore` and the `holochain` conductor are now tied to the parent vault's lifetime via `PR_SET_PDEATHSIG`. They get `SIGTERM` automatically if the vault dies for any reason — crash, OOM kill, force-quit, `dpkg` upgrade, or `tauri dev` reload. This eliminates the "All Admin WS ports are unavailable" error on the next launch caused by stale child processes holding ports.
+- On Linux, `lair-keystore` and the `holochain` conductor are now tied to the parent vault's lifetime via `PR_SET_PDEATHSIG`. They get `SIGTERM` automatically if the vault dies for any reason - crash, OOM kill, force-quit, `dpkg` upgrade, or `tauri dev` reload. This eliminates the "All Admin WS ports are unavailable" error on the next launch caused by stale child processes holding ports.
 - `SIGTERM` and `SIGINT` (Ctrl+C, system shutdown) now route through `app.exit()` so the existing graceful-shutdown path runs instead of the kernel killing us mid-operation.
 - macOS and Windows still rely on the existing graceful-exit path; equivalent kernel-level guarantees are planned for a follow-up.
 
-## [0.4.0] — 2026-04-23
+## [0.4.0] - 2026-04-23
 
 ### Windows code signing
 - Windows installers (`.exe` and `.msi`) and bundled binaries are now signed with the FLOWSTA SSL.com OV code-signing certificate.
@@ -568,7 +568,7 @@ console allocation) is scheduled for a future release.
 ### Recovery phrase verification fix
 - Setting up a fresh vault from a recovery phrase no longer fails with **"This phrase doesn't match the account for ..."**. The check was comparing the agent key from `/auth/login` against the agent key from `/auth/agent-key-by-lookup-hash` as raw strings, but those endpoints return the same key in two different encodings. The vault now decodes both sides to bytes before comparing.
 
-## [0.3.0] — 2026-04-15
+## [0.3.0] - 2026-04-15
 
 ### Sign It is production-ready
 - Signing DNA v1.4 with cross-conductor thumbnail editing.
@@ -579,7 +579,7 @@ console allocation) is scheduled for a future release.
 ### Improved agent linking
 - Auto-link on unlock now uses the linked web agent key.
 - Fixed multi-version cross-cell `linked_agents` query and action hash deserialization.
-- Fixed `CellDisabled`-on-restart race — apps are always enabled at startup.
+- Fixed `CellDisabled`-on-restart race - apps are always enabled at startup.
 - Thumbnail editing UX improvements.
 
 ### DNA update reliability
@@ -598,10 +598,10 @@ console allocation) is scheduled for a future release.
 - **macOS** binaries are signed and notarized.
 - **Linux** `.AppImage` and `.deb` as usual.
 
-## [0.2.0] — 2026-03-30
+## [0.2.0] - 2026-03-30
 
 - Version bump and internal improvements.
 
-## [0.1.0] — 2026-03-29
+## [0.1.0] - 2026-03-29
 
 - Initial release.

@@ -1,5 +1,5 @@
 /**
- * SignQuotaMeter — Vault edition.
+ * SignQuotaMeter - Vault edition.
  *
  * Mirrors the Website component but links out to the web dashboard for upgrades
  * (Vault is local-first; subscription management lives on flowsta.com).
@@ -68,7 +68,7 @@ export const SignQuotaMeter = component$<Props>(({ quota, loading }) => {
       <div class="flex items-center justify-between mb-2">
         <div>
           <p class="text-sm text-gray-400">
-            Sign It quota — {tierLabel[quota.tier] || quota.tier}
+            Sign It quota - {tierLabel[quota.tier] || quota.tier}
             {quota.source === "cache" && (
               <span class="ml-2 text-xs text-gray-500">(offline cache)</span>
             )}

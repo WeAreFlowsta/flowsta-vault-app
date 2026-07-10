@@ -1,5 +1,5 @@
 /**
- * PillButton — the compact companion to GlassButton, canonicalized from
+ * PillButton - the compact companion to GlassButton, canonicalized from
  * the Sign It row actions (Edit thumbnail / Amend / Revoke). Use
  * GlassButton for full-size actions; PillButton for inline, row-level
  * ones. Same primary/secondary hierarchy as GlassButton: primary is the

@@ -158,7 +158,7 @@ export default component$(() => {
   // Single backup export
   const exportingLabel = useSignal<string | null>(null);
 
-  // Retries while the conductor finishes starting — right after unlock the
+  // Retries while the conductor finishes starting - right after unlock the
   // app websocket can lag the UI by many seconds.
   const loadSealed = $(async () => {
     sealedStatus.value = "loading";
@@ -206,7 +206,7 @@ export default component$(() => {
       loading.value = false;
     }
 
-    // Private records load separately — needs the conductor, and a failure
+    // Private records load separately - needs the conductor, and a failure
     // here shouldn't blank the rest of the page.
     await loadSealed();
   });
@@ -412,8 +412,8 @@ export default component$(() => {
             </div>
             <p class="rounded-lg border border-gray-700/60 bg-black/20 px-3 py-2 text-xs leading-relaxed text-gray-400">
               {id.web_username
-                ? "Your username and your DID are two ways people can find you. Your username is short and memorable; your DID is the longer, permanent identifier behind it — an open standard that stays the same even if your username changes."
-                : "Your DID is your permanent identifier — an open standard others can use to find and verify you. Claim a username on your Overview for a short, memorable address that points to the same identity."}
+                ? "Your username and your DID are two ways people can find you. Your username is short and memorable; your DID is the longer, permanent identifier behind it - an open standard that stays the same even if your username changes."
+                : "Your DID is your permanent identifier - an open standard others can use to find and verify you. Claim a username on your Overview for a short, memorable address that points to the same identity."}
             </p>
             <div class="flex items-center justify-between">
               <span class="text-gray-400">Vault Created</span>
@@ -438,7 +438,7 @@ export default component$(() => {
           )}
         </div>
         <p class="mb-4 text-sm text-gray-400">
-          Your profile, activity, and app records — encrypted and stored only
+          Your profile, activity, and app records - encrypted and stored only
           in this vault, on this device. Nothing here is on any server, which
           is the point: no one in control but you. It also means only your
           export file keeps these safe if this device is lost.
@@ -453,7 +453,7 @@ export default component$(() => {
         ) : sealedStatus.value === "error" ? (
           <div class="flex items-center justify-between rounded-lg border border-gray-800 bg-black/30 p-4">
             <p class="text-sm text-gray-400">
-              Couldn't reach your local node to read them — it may still be
+              Couldn't reach your local node to read them - it may still be
               starting.
             </p>
             <PillButton accent="amber" onClick$={loadSealed}>
@@ -517,7 +517,7 @@ export default component$(() => {
             {backupStats.value.apps.map((app) => {
               const isExpanded = expandedApp.value === app.client_id;
               // The vault's own migration snapshot lives in the same store
-              // as third-party app backups — present it as what it is, not
+              // as third-party app backups - present it as what it is, not
               // as an app that stopped backing up.
               const isMigrationSnapshot = app.client_id === "flowsta";
 
@@ -541,7 +541,7 @@ export default component$(() => {
                       <div class="min-w-0">
                         <p class="font-medium text-white">
                           {isMigrationSnapshot
-                            ? "Flowsta Account — migration snapshot"
+                            ? "Flowsta Account - migration snapshot"
                             : app.app_name}
                         </p>
                         <p class="mt-0.5 text-xs text-gray-400">
@@ -549,7 +549,7 @@ export default component$(() => {
                             <>
                               Your account exactly as it arrived on this
                               device &middot; {formatDate(app.last_backup_at)}{" "}
-                              &middot; doesn't update — your live data is in
+                              &middot; doesn't update - your live data is in
                               Private Records above
                             </>
                           ) : (
@@ -683,11 +683,11 @@ export default component$(() => {
       <div class="mb-6 rounded-xl border border-gray-700 bg-[#15203a] p-6">
         <h3 class="mb-2 text-lg font-semibold text-white">Export All Data</h3>
         <p class="mb-4 text-sm text-gray-400">
-          Download a complete copy of your vault — your identity keys, private
+          Download a complete copy of your vault - your identity keys, private
           records, connected apps, and your app data backups. Your recovery
           phrase can restore your <em>identity</em> anywhere; this file is how
           your <em>data</em> survives losing this device. Everything in it is
-          readable JSON you own outright — no Flowsta needed to use it.
+          readable JSON you own outright - no Flowsta needed to use it.
         </p>
 
         <div class="mb-4">
@@ -695,7 +695,7 @@ export default component$(() => {
             <p>
               Your export includes the cryptographic seed that proves your
               identity on the network. Store it somewhere safe and never share
-              it — anyone with this file could sign as you.
+              it - anyone with this file could sign as you.
             </p>
           </Callout>
         </div>
@@ -725,7 +725,7 @@ export default component$(() => {
           Reset your vault or moved to a new device? After restoring your
           identity with your recovery phrase, import an export file to bring
           your private records and app backups home. Only your own exports
-          work — the file must match this vault's identity. Safe to run more
+          work - the file must match this vault's identity. Safe to run more
           than once: records you already have are skipped, never duplicated.
         </p>
 
@@ -743,7 +743,7 @@ export default component$(() => {
               <p>
                 {importResult.value.sealed_restored === 0 &&
                 importResult.value.backups_restored === 0
-                  ? "Everything in that export is already here — nothing to restore."
+                  ? "Everything in that export is already here - nothing to restore."
                   : `Restored ${importResult.value.sealed_restored} private record${
                       importResult.value.sealed_restored !== 1 ? "s" : ""
                     } and ${importResult.value.backups_restored} app backup${

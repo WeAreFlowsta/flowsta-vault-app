@@ -68,14 +68,14 @@ export default component$(() => {
   const linkedApps = useSignal<
     { app_name: string; app_agent_pub_key: string; linked_at: number; client_id: string | null }[]
   >([]);
-  // One row per distinct app — collapses multiple installs/agents of the same
+  // One row per distinct app - collapses multiple installs/agents of the same
   // app (e.g. a reinstalled ProofPoll) into a single entry. Display-only; the
   // raw per-agent list above still backs scopes + per-agent revocation.
   const dedupedApps = useComputed$(() => dedupeLinkedApps(linkedApps.value));
   // Granted scopes per app, keyed by client_id
   const appScopes = useSignal<Record<string, string[]>>({});
 
-  // Connected sites (IPC origins). A row here is TRAFFIC, not consent —
+  // Connected sites (IPC origins). A row here is TRAFFIC, not consent -
   // only origins the user granted auto-approve to (trusted) appear in the
   // grants list; the rest live in the collapsed Bridge Activity log.
   const connectedSites = useSignal<ConnectedSite[]>([]);
@@ -83,7 +83,7 @@ export default component$(() => {
   const activitySites = useComputed$(() => connectedSites.value.filter((s) => !s.trusted));
   const activityOpen = useSignal(false);
 
-  // Web sign-ins (OAuth grants) — server-authoritative, fetched with a
+  // Web sign-ins (OAuth grants) - server-authoritative, fetched with a
   // vault-grant session so this page shows the COMPLETE picture. The web
   // dashboard keeps a thin editor for these rows; app connections live
   // only here.
@@ -106,7 +106,7 @@ export default component$(() => {
       webSites.value = data.sites || [];
       webSitesState.value = "ok";
     } catch {
-      // Offline, or a custodial-linked vault (no vault-grant) — the web
+      // Offline, or a custodial-linked vault (no vault-grant) - the web
       // dashboard remains the place to manage these.
       webSitesState.value = "unavailable";
     }
@@ -239,7 +239,7 @@ export default component$(() => {
   });
 
   // Revoke every agent linked for one app (the deduped row may cover several
-  // installs/devices — revoking the app should unlink all of them).
+  // installs/devices - revoking the app should unlink all of them).
   const handleRevokeLinkedApp = $(async (appAgentPubKeys: string[]) => {
     try {
       for (const appAgentPubKey of appAgentPubKeys) {
@@ -300,7 +300,7 @@ export default component$(() => {
       </p>
 
       {/* Sync-mode vaults companion a web account and need the link flow;
-          for everyone else the page needs no preamble — the list IS the page. */}
+          for everyone else the page needs no preamble - the list IS the page. */}
       {!deviceHosted.value && (
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
         <div class="mb-3 flex items-center gap-2">
@@ -446,7 +446,7 @@ export default component$(() => {
             })}
 
             {/* Auto-approve grants: origins the user explicitly trusted to
-                sign in without a dialog. This IS a grant — it lives with
+                sign in without a dialog. This IS a grant - it lives with
                 the other grants. Plain traffic is in Bridge Activity below. */}
             {trustedSites.value.map((site) => (
               <div
@@ -554,7 +554,7 @@ export default component$(() => {
               </div>
             ))}
 
-            {/* Web sign-ins (OAuth grants) — server-authoritative */}
+            {/* Web sign-ins (OAuth grants) - server-authoritative */}
             {webSites.value.map((site: any) => (
               <div
                 key={`web-${site.id}`}
@@ -599,13 +599,13 @@ export default component$(() => {
 
         {webSitesState.value === "unavailable" && (
           <p class="mt-3 text-xs text-gray-500">
-            Web sign-ins couldn't be loaded right now — manage them anytime at
+            Web sign-ins couldn't be loaded right now - manage them anytime at
             flowsta.com under Connected Sites.
           </p>
         )}
       </div>
 
-      {/* Bridge activity — traffic log, NOT grants. Origins that called
+      {/* Bridge activity - traffic log, NOT grants. Origins that called
           this device's bridge without holding any standing permission. */}
       {activitySites.value.length > 0 && (
         <div class="mt-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">

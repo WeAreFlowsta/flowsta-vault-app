@@ -34,7 +34,7 @@ body {
   font-family: var(--font-sans);
 }
 
-/* Gradient text effects — consistent with Website */
+/* Gradient text effects - consistent with Website */
 .gradient-text {
   background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 50%, #d97706 100%);
   -webkit-background-clip: text;
@@ -49,7 +49,7 @@ body {
   background-clip: text;
 }
 
-/* Glass card — consistent with Website */
+/* Glass card - consistent with Website */
 .glass-card {
   background: rgba(255, 255, 255, 0.03);
   backdrop-filter: blur(12px);
@@ -67,12 +67,12 @@ body {
   transform: translateY(-4px);
 }
 
-/* Loading spinner — amber accent (consistent with Website + login) */
+/* Loading spinner - amber accent (consistent with Website + login) */
 .spinner {
   @apply animate-spin rounded-full border-4 border-slate-600 border-t-amber-400;
 }
 
-/* Glow pulse — for status indicators */
+/* Glow pulse - for status indicators */
 .glow-ring {
   border: 1px solid rgba(251, 191, 36, 0.2);
   animation: glow-pulse 3s ease-in-out infinite;
@@ -90,7 +90,7 @@ body {
   }
 }
 
-/* Icon glow — for identity/connection status */
+/* Icon glow - for identity/connection status */
 .icon-pulse {
   animation: icon-glow 3s ease-in-out infinite alternate;
 }
@@ -104,7 +104,7 @@ body {
   }
 }
 
-/* Scroll reveal — staggered fade-in for dashboard content */
+/* Scroll reveal - staggered fade-in for dashboard content */
 .scroll-reveal {
   opacity: 0;
   transform: translateY(32px);

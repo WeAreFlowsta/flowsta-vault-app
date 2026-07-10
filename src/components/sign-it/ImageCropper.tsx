@@ -11,7 +11,7 @@ interface ImageCropperProps {
 }
 
 /**
- * ImageCropper Component — powered by cropperjs v2
+ * ImageCropper Component - powered by cropperjs v2
  *
  * Provides drag, zoom, pinch-zoom, and mouse wheel zoom.
  * Circle crop for profile pictures, square crop for thumbnails.
@@ -19,7 +19,7 @@ interface ImageCropperProps {
 export default component$<ImageCropperProps>((props) => {
   const containerRef = useSignal<HTMLDivElement>();
   const imgRef = useSignal<HTMLImageElement>();
-  // Aspect ratio of the source image (width / height) — drives the container
+  // Aspect ratio of the source image (width / height) - drives the container
   // size so there's no transparent letterbox space that the user could crop into.
   const imageAspect = useSignal<number>(1);
 
@@ -43,13 +43,13 @@ export default component$<ImageCropperProps>((props) => {
     const CropperModule = await import("cropperjs");
     const Cropper = CropperModule.default;
 
-    // cropperjs v2 uses shadow DOM — no external CSS needed
+    // cropperjs v2 uses shadow DOM - no external CSS needed
 
     const cropper = new Cropper(img, {
       container,
     });
 
-    // Configure after init — cropperjs v2 elements are custom elements
+    // Configure after init - cropperjs v2 elements are custom elements
     // that appear asynchronously in the DOM
     const configTimer = setInterval(() => {
       const selection = cropper.getCropperSelection();
@@ -89,7 +89,7 @@ export default component$<ImageCropperProps>((props) => {
           cropperCanvas.removeAttribute("background");
         }
 
-        // Set up change listener — whenever crop changes, export the result.
+        // Set up change listener - whenever crop changes, export the result.
         // Guard against non-square selections: cropperjs briefly emits them
         // during init before aspectRatio=1 takes effect; $toCanvas then
         // returns a canvas matching the selection's aspect (e.g. 300x51),
@@ -133,7 +133,7 @@ export default component$<ImageCropperProps>((props) => {
 
             // $toCanvas reads this.width/this.height synchronously in its
             // Promise executor. cropperjs's $change fires the event BEFORE
-            // writing those fields — so wait one microtask for state to
+            // writing those fields - so wait one microtask for state to
             // commit, otherwise $toCanvas uses stale (pre-change) dimensions.
             await Promise.resolve();
             const canvas = await selection.$toCanvas({
@@ -150,7 +150,7 @@ export default component$<ImageCropperProps>((props) => {
         // event our handler listens to).
         //
         // Why not $reset / $initSelection: both keep this.x/this.y from the
-        // mount-time init when the canvas hadn't laid out yet — producing a
+        // mount-time init when the canvas hadn't laid out yet - producing a
         // zoomed top-left crop. Explicit $change with fresh coords overrides.
         //
         // Why the retry: cropper-canvas is a custom element that gets its

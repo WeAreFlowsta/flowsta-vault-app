@@ -14,13 +14,13 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 // Release-only: the resource-dir arms in the conductor start/recovery paths
 // call `app_handle.path()`, which the Manager trait provides. cfg-guarded so
-// debug builds don't flag it unused and tempt another cleanup — removing it
+// debug builds don't flag it unused and tempt another cleanup - removing it
 // breaks ONLY release builds (the trap that failed the first 1.0.0-beta1 CI).
 #[cfg(not(debug_assertions))]
 use tauri::Manager;
 
 /// AppWebsocket request timeout for the signature-fetch + sign / revoke /
-/// amend paths. The holochain_websocket default is **60 s** — fine for a
+/// amend paths. The holochain_websocket default is **60 s** - fine for a
 /// warm conductor, but on first launch with a returning agent the DHT
 /// hasn't yet gossiped the agent's history in, and `get_links` / `get`
 /// calls inside the signing zome can easily exceed a minute waiting for
@@ -35,7 +35,7 @@ pub(crate) fn long_request_ws_config() -> Arc<holochain_client::WebsocketConfig>
 
 /// Short-fuse config for calls wrapped in a retry loop. set_thumbnail's
 /// zome fn opens with a network get_links that can hang for minutes on a
-/// cold conductor — better to fail an attempt fast and retry than to hold
+/// cold conductor - better to fail an attempt fast and retry than to hold
 /// the caller for the full 5-minute default.
 pub(crate) fn retryable_request_ws_config() -> Arc<holochain_client::WebsocketConfig> {
     let mut cfg = holochain_client::WebsocketConfig::CLIENT_DEFAULT;
@@ -113,7 +113,7 @@ pub struct PendingDocumentSignRequest {
     pub responder: tokio::sync::oneshot::Sender<bool>,
 }
 
-/// Pending profile-update approval — the web dashboard delegating a
+/// Pending profile-update approval - the web dashboard delegating a
 /// profile write into this Vault (device-hosted accounts).
 pub struct PendingProfileUpdateRequest {
     pub id: String,
@@ -198,7 +198,7 @@ pub struct AppState {
     /// Scopes granted to each linked app at link time (client_id → scopes).
     /// Persisted to linked-app-scopes.json. Used by /status for scope-filtered responses.
     pub linked_app_scopes: Mutex<HashMap<String, Vec<String>>>,
-    /// Derived backup encryption key — persists through vault lock so apps
+    /// Derived backup encryption key - persists through vault lock so apps
     /// can store backups while the vault is locked. Derived from device_seed
     /// via HMAC (cannot recover seed or sign).
     pub backup_key: Mutex<Option<[u8; 32]>>,
@@ -211,7 +211,7 @@ pub struct AppState {
     /// to handle them. Drained by `take_pending_sign_paths`.
     pub pending_sign_paths: Mutex<Vec<std::path::PathBuf>>,
     /// A relay-login code that arrived via flowsta:// while the vault was
-    /// locked or before the frontend mounted — drained by
+    /// locked or before the frontend mounted - drained by
     /// `take_pending_relay_code`.
     pub pending_relay_code: Mutex<Option<String>>,
     /// The claimed relay session between claim and approve/deny.
@@ -225,11 +225,11 @@ pub struct AppState {
     pub unlock_passphrase: Mutex<Option<lair_keystore_api::dependencies::sodoken::LockedArray>>,
     /// Serializes concurrent watchdog restart attempts. Two commands that
     /// fail simultaneously and call `ensure_conductor_alive` should not
-    /// both spawn a fresh conductor — the first one wins, the others
+    /// both spawn a fresh conductor - the first one wins, the others
     /// observe the recovered state.
     pub conductor_restart_lock: tokio::sync::Mutex<()>,
     /// Transient: the deferred (offline-create) registration failed with
-    /// email_already_registered — surfaced via get_identity so the
+    /// email_already_registered - surfaced via get_identity so the
     /// Overview can ask for a different address. Cleared on retry.
     pub registration_conflict: Mutex<bool>,
     /// Dev-only (headless test harness): passphrase stashed by the bridge's
@@ -239,12 +239,12 @@ pub struct AppState {
     pub dev_relock_passphrase: Mutex<Option<lair_keystore_api::dependencies::sodoken::LockedArray>>,
     /// Cap-grant signing credentials cached per cell for the conductor
     /// session. Every `authorize_signing_credentials` COMMITS a grant to
-    /// that cell's source chain — per-call authorization was bloating
+    /// that cell's source chain - per-call authorization was bloating
     /// chains (seq 500+ in a day) and colliding with real writes ("chain
     /// head has moved"). Cleared on lock and on conductor start; filled
     /// once per cell and reused everywhere.
     pub cell_credentials: Mutex<HashMap<holochain_types::prelude::CellId, CachedCellCredentials>>,
-    /// Committing operations write to the device's source chains — run them
+    /// Committing operations write to the device's source chains - run them
     /// one at a time (shared by the IPC bridge and in-app commands). Two
     /// concurrent publishes would fight over the chain head and one fails.
     pub commit_serial: tokio::sync::Mutex<()>,
@@ -317,7 +317,7 @@ pub(crate) async fn cell_credentials_cached(
     Ok(creds)
 }
 
-/// Drop all cached cell credentials — call when a zome call fails
+/// Drop all cached cell credentials - call when a zome call fails
 /// "unauthorized" (e.g. the chain was reset underneath a cached grant) so
 /// the next attempt re-authorizes.
 pub(crate) fn invalidate_cell_credentials(state: &Arc<AppState>) {
@@ -379,7 +379,7 @@ impl AppState {
     /// Persist the current linked apps list to disk.
     pub fn save_linked_apps(&self) {
         // Serialize under the lock, then RELEASE it before the blocking
-        // disk write — holding a std Mutex across std::fs::write makes
+        // disk write - holding a std Mutex across std::fs::write makes
         // concurrent readers (e.g. /status polling get_scopes_for_origin)
         // block worker threads, which under load can starve the IPC
         // accept loop. Clone-then-write keeps the critical section tiny.
@@ -458,7 +458,7 @@ pub struct SetupResult {
     pub did: String,
 }
 
-/// Vault-password policy — MUST mirror src/lib/password-strength.ts
+/// Vault-password policy - MUST mirror src/lib/password-strength.ts
 /// `checkVaultPassword`. Enforced server-side wherever the user CHOOSES a
 /// vault password (setup_vault, change_vault_password) so the rule can't be
 /// bypassed. NOT applied to migration's internal `setup_vault_inner`, which
@@ -491,7 +491,7 @@ pub(crate) fn validate_vault_password(pw: &str) -> Result<(), String> {
         "flowsta123", "recoveryphrase", "vaultpassword", "0000000000", "1111111111",
     ];
     if is_all_same || asc || desc || COMMON.contains(&lower.as_str()) {
-        return Err("That's a common or predictable password — choose something unique.".into());
+        return Err("That's a common or predictable password - choose something unique.".into());
     }
     let classes = [
         pw.chars().any(|c| c.is_ascii_lowercase()),
@@ -504,7 +504,7 @@ pub(crate) fn validate_vault_password(pw: &str) -> Result<(), String> {
     .count();
     if classes < 3 && len < PASSPHRASE {
         return Err(
-            "Mix in upper- and lower-case, numbers, or symbols — or make it 16+ characters."
+            "Mix in upper- and lower-case, numbers, or symbols - or make it 16+ characters."
                 .into(),
         );
     }
@@ -788,7 +788,7 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     state.approved_apps.lock().unwrap().clear();
 
     // The 120s post-link "ceremony window" that suppresses the /sign dialog
-    // must not survive a lock either — otherwise it keeps ticking against a
+    // must not survive a lock either - otherwise it keeps ticking against a
     // now-locked vault and a re-unlock could land inside a no-dialog window.
     state.recent_link_approvals.lock().unwrap().clear();
 
@@ -830,7 +830,7 @@ pub fn get_conductor_status(state: State<'_, Arc<AppState>>) -> ConductorStatus 
 /// On Windows specifically, holochain.exe occasionally crashes mid-session
 /// (`STATUS_ACCESS_VIOLATION` 0xc0000005) when admin calls touch the
 /// signing cell. The startup auto-restart in `conductor::start_holochain`
-/// only covers crashes during DNA install — runtime crashes are caught
+/// only covers crashes during DNA install - runtime crashes are caught
 /// here.
 ///
 /// Concurrent callers are serialised by `conductor_restart_lock`: the
@@ -852,14 +852,14 @@ pub(crate) async fn ensure_conductor_alive(
             Some(h) => match h.conductor_child.try_wait() {
                 Ok(Some(status)) => {
                     log::warn!(
-                        "[watchdog] conductor process exited (status: {}) — will restart",
+                        "[watchdog] conductor process exited (status: {}) - will restart",
                         status,
                     );
                     true
                 }
                 Ok(None) => false, // process still alive
                 Err(e) => {
-                    log::warn!("[watchdog] try_wait failed: {} — assuming dead", e);
+                    log::warn!("[watchdog] try_wait failed: {} - assuming dead", e);
                     true
                 }
             },
@@ -872,7 +872,7 @@ pub(crate) async fn ensure_conductor_alive(
         return Ok(());
     }
 
-    // Take the old (dead) handle and shut it down — this kills any
+    // Take the old (dead) handle and shut it down - this kills any
     // leftover lair-keystore process so the new conductor can take its
     // socket / port cleanly.
     if let Some(old) = state.conductor_handle.lock().unwrap().take() {
@@ -898,7 +898,7 @@ pub(crate) async fn ensure_conductor_alive(
             .as_mut()
             .ok_or("[watchdog] cannot restart: vault is locked (no cached passphrase)")?;
         let bytes_locked = arr.lock();
-        // Do NOT include the FromUtf8Error in the message — its Display can
+        // Do NOT include the FromUtf8Error in the message - its Display can
         // echo the offending (passphrase) bytes into the log.
         String::from_utf8(bytes_locked.to_vec())
             .map_err(|_| "[watchdog] cached passphrase is not valid UTF-8".to_string())?
@@ -1012,12 +1012,12 @@ fn spawn_conductor_startup(
                             admin_port: port,
                         };
                         *state.conductor_status.lock().unwrap() = ready_status.clone();
-                        // Emit ready event — conductor.rs also emits this, but the
+                        // Emit ready event - conductor.rs also emits this, but the
                         // frontend listener may not be registered yet if startup is fast.
                         let _ = app_handle_ref.emit("conductor-status", ready_status);
 
                         // Check for DNA updates from the server.
-                        // Non-fatal — if offline or update fails, continue with current DNAs.
+                        // Non-fatal - if offline or update fails, continue with current DNAs.
                         // Downloads go to data_dir (not resource_dir) to avoid triggering
                         // Tauri dev-mode hot-reload and to use a writable location in production.
                         let identity_was_updated = check_dna_updates(
@@ -1029,7 +1029,7 @@ fn spawn_conductor_startup(
                         ).await;
 
                         // Migrated (device-hosted) vaults skip auto-link but
-                        // carry the original web agent key from the migration —
+                        // carry the original web agent key from the migration -
                         // seed the cache so signature reads include pre-upgrade
                         // signatures immediately.
                         {
@@ -1078,7 +1078,7 @@ fn spawn_conductor_startup(
                             if let Some(cfg) = config.as_ref() {
                                 // Device-hosted identities have no separate web
                                 // agent to link to (the device key IS the account
-                                // key) — auto-link would resolve its own key and
+                                // key) - auto-link would resolve its own key and
                                 // try to link an agent to itself.
                                 cfg.hosting_model.as_deref() != Some("device-hosted")
                                     && cfg.recovery_lookup_hash.is_some()
@@ -1091,7 +1091,7 @@ fn spawn_conductor_startup(
 
                         if should_link {
                             if identity_was_updated {
-                                log::info!("Identity DNA was updated — re-establishing agent link on new network...");
+                                log::info!("Identity DNA was updated - re-establishing agent link on new network...");
                             } else {
                                 log::info!("Auto-linking desktop agent with web account...");
                             }
@@ -1112,7 +1112,7 @@ fn spawn_conductor_startup(
                                     let _ = app_handle_ref.emit("profile-synced", ());
                                 }
                                 Err(e) => {
-                                    // Non-fatal — user can retry manually from Identities page
+                                    // Non-fatal - user can retry manually from Identities page
                                     log::warn!("Auto-link failed (non-fatal): {}", e);
                                 }
                             }
@@ -1132,16 +1132,16 @@ fn spawn_conductor_startup(
                 }
             });
         } else {
-            log::warn!("Device seed is {} bytes, expected 32 — skipping conductor", seed_vec.len());
+            log::warn!("Device seed is {} bytes, expected 32 - skipping conductor", seed_vec.len());
         }
     } else {
-        log::info!("No device seed in vault — conductor not started");
+        log::info!("No device seed in vault - conductor not started");
     }
 }
 
 /// Check for DNA updates from the server and apply them.
 ///
-/// Called after conductor startup. Non-fatal — returns `false` on any error
+/// Called after conductor startup. Non-fatal - returns `false` on any error
 /// so the vault continues with its current DNAs.
 /// Returns `true` if the identity DNA was updated (caller should re-link).
 async fn check_dna_updates(
@@ -1164,7 +1164,7 @@ async fn check_dna_updates(
         let rlh = match &cfg.recovery_lookup_hash {
             Some(h) => h.clone(),
             None => {
-                log::info!("No recovery_lookup_hash — skipping DNA update check");
+                log::info!("No recovery_lookup_hash - skipping DNA update check");
                 return false;
             }
         };
@@ -1183,7 +1183,7 @@ async fn check_dna_updates(
     // Prefer the AgentPubKey that lair actually has for the device seed.
     // The config's stored agent_pub_key_raw_b64 can drift from lair's key if
     // the vault was set up on an older derivation, so we authoritatively use
-    // what lair reports — that's what the already-installed cells use, and
+    // what lair reports - that's what the already-installed cells use, and
     // what install_app needs to be able to sign genesis records.
     let lair_agent_key = {
         let handle_guard = state.conductor_handle.lock().unwrap();
@@ -1215,7 +1215,7 @@ async fn check_dna_updates(
                 }
             },
             None => {
-                log::info!("No agent_pub_key_raw_b64 — skipping DNA update check");
+                log::info!("No agent_pub_key_raw_b64 - skipping DNA update check");
                 return false;
             }
         }
@@ -1331,7 +1331,7 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
             .map_err(|e| format!("Failed to delete vault file: {}", e))?;
     }
 
-    // Delete lair keystore directory — otherwise the next vault create
+    // Delete lair keystore directory - otherwise the next vault create
     // reuses the old encrypted lair store with a mismatched passphrase,
     // producing "early eof" failures on lair IPC handshake. The same
     // device seed also gets reused, which silently breaks isolation
@@ -1342,7 +1342,7 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
             .map_err(|e| format!("Failed to delete lair dir: {}", e))?;
     }
 
-    // Delete conductor data — source chains, installed apps, DHT cache.
+    // Delete conductor data - source chains, installed apps, DHT cache.
     // Leaving these behind across a reset produces CellDisabled /
     // agent-key-mismatch errors on the next setup because the cells
     // are keyed to the prior identity.
@@ -1355,7 +1355,7 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     // Full erase: also remove the local app data so a reset is a true clean
     // slate, not just an identity reset. `backups/` holds OTHER apps' user data
     // (e.g. a linked app's exported records) and these JSON files list which
-    // apps are connected and what they can access — none of it should survive a
+    // apps are connected and what they can access - none of it should survive a
     // wipe the user intends as "erase everything from this device".
     for name in [
         "linked-apps.json",
@@ -1387,7 +1387,7 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.linked_app_scopes.lock().unwrap().clear();
     *state.linked_web_agent_key.lock().unwrap() = None;
 
-    log::info!("Vault fully erased — identity, keys, conductor data, app links, scopes, and backups cleared.");
+    log::info!("Vault fully erased - identity, keys, conductor data, app links, scopes, and backups cleared.");
     Ok(())
 }
 
@@ -1442,7 +1442,7 @@ pub struct VaultIdentity {
     /// True for an offline-CREATED identity until its deferred A3
     /// registration lands.
     pub pending_registration: bool,
-    /// Transient: the deferred registration hit email_already_registered —
+    /// Transient: the deferred registration hit email_already_registered -
     /// the Overview asks for a different address.
     pub registration_conflict: bool,
 }
@@ -1454,7 +1454,7 @@ pub fn validate_recovery_phrase(mnemonic: String) -> bool {
 }
 
 /// True when the phrase re-derives THIS vault's device identity. The
-/// account-upgrade flow checks this before anything server-side runs —
+/// account-upgrade flow checks this before anything server-side runs -
 /// upgrading an existing vault only makes sense with the phrase that
 /// seeded it.
 #[tauri::command]
@@ -1482,9 +1482,9 @@ pub fn phrase_matches_vault(
 /// Where does the ACCOUNT bound to this vault's phrase live right now?
 /// Resolves the recovery lookup hash and compares the registered agent key
 /// against this device's key.
-///   "device"  — the account's auth authority is this device (upgraded)
-///   "web"     — the account is still custodial (upgrade pending/needed)
-///   "unknown" — no binding resolved or the API is unreachable
+///   "device"  - the account's auth authority is this device (upgraded)
+///   "web"     - the account is still custodial (upgrade pending/needed)
+///   "unknown" - no binding resolved or the API is unreachable
 #[tauri::command]
 pub async fn check_account_hosting(
     api_url: String,
@@ -1853,7 +1853,7 @@ pub async fn fetch_web_profile(
 /// using the user's current password. Called silently after vault unlock so that
 /// changes made on the website are reflected without requiring a vault reset.
 ///
-/// Fails silently — any error is non-fatal.
+/// Fails silently - any error is non-fatal.
 #[tauri::command]
 pub async fn refresh_cached_profile(
     api_url: String,
@@ -1888,7 +1888,7 @@ pub async fn refresh_cached_profile(
         .await
         .map_err(|_| "offline")?;
 
-    // 2FA accounts return 200 with requires2FA — treat as non-fatal skip.
+    // 2FA accounts return 200 with requires2FA - treat as non-fatal skip.
     if !resp.status().is_success() {
         return Ok(());
     }
@@ -1978,8 +1978,8 @@ pub async fn check_api_connectivity(api_url: String) -> bool {
 }
 
 /// Re-wrap the conductor's SQLCipher key file (`databases/db.key`) under a
-/// new passphrase. The inner 32-byte database key is unchanged — only the
-/// passphrase wrapping rotates — so the databases themselves stay readable.
+/// new passphrase. The inner 32-byte database key is unchanged - only the
+/// passphrase wrapping rotates - so the databases themselves stay readable.
 ///
 /// File format (holochain_sqlite 0.6.1 `DbKey`):
 /// `base64url_no_pad( nonce[24] ‖ secretbox(key[32])[48] ‖ argon2_salt[16] )`
@@ -2049,7 +2049,7 @@ fn rekey_conductor_db_key(
         )
         .is_ok();
         if opens_with_new {
-            log::warn!("db.key already wrapped with the new password — skipping rewrap");
+            log::warn!("db.key already wrapped with the new password - skipping rewrap");
             return Ok(());
         }
         return Err("The conductor's database key doesn't open with the current password".into());
@@ -2058,7 +2058,7 @@ fn rekey_conductor_db_key(
     // Re-wrap under the new password with a fresh nonce. The salt MUST be
     // preserved: holochain also feeds it to SQLCipher as `PRAGMA cipher_salt`
     // (the databases use a plaintext header, so the salt exists only in this
-    // file) — rotating it would make every database unreadable.
+    // file) - rotating it would make every database unreadable.
     let mut new_nonce = [0u8; NONCE];
     sodoken::random::randombytes_buf(&mut new_nonce).map_err(|e| format!("RNG failed: {}", e))?;
 
@@ -2086,13 +2086,13 @@ fn rekey_conductor_db_key(
     Ok(())
 }
 
-/// Change the vault password — fully local, no server involved.
+/// Change the vault password - fully local, no server involved.
 ///
 /// The password protects three things on this device, all rotated in one
 /// step: the encrypted vault file, the conductor's database key file
 /// (`databases/db.key`), and the lair keystore. Lair has no rekey
 /// operation, so its store is deleted and re-initialized on the restart
-/// that follows — the device key is re-imported from the vault's seed on
+/// that follows - the device key is re-imported from the vault's seed on
 /// every conductor start, so no key material is lost.
 ///
 /// Interruption-safe: each step is idempotent or repairable, so re-running
@@ -2110,12 +2110,12 @@ pub async fn change_vault_password(
         return Err("New password must be different from the current password".into());
     }
 
-    // Don't run while a conductor start is in flight — lair and the
+    // Don't run while a conductor start is in flight - lair and the
     // database key file are being actively created underneath us.
     {
         let status = state.conductor_status.lock().unwrap().clone();
         if matches!(status, ConductorStatus::Starting { .. }) {
-            return Err("The vault is still starting up — try again in a moment.".into());
+            return Err("The vault is still starting up - try again in a moment.".into());
         }
     }
 
@@ -2154,9 +2154,9 @@ pub async fn change_vault_password(
             .await
             .map_err(|e| format!("Rekey task failed: {}", e))??;
     } else {
-        // No conductor databases yet — the key file will be generated
+        // No conductor databases yet - the key file will be generated
         // under the new (cached) passphrase on the next start.
-        log::info!("No db.key found — skipping database key rewrap");
+        log::info!("No db.key found - skipping database key rewrap");
     }
 
     // 3. Compute the re-encrypted vault file before stopping anything.
@@ -2187,7 +2187,7 @@ pub async fn change_vault_password(
         },
     );
 
-    // 5. Delete the lair keystore — it has no rekey operation. The next
+    // 5. Delete the lair keystore - it has no rekey operation. The next
     // start re-initializes it under the new passphrase and re-imports the
     // device seed (conductor startup does this on every launch).
     let lair_dir = state.data_dir.join("lair");
@@ -2199,7 +2199,7 @@ pub async fn change_vault_password(
     // 6. Swap the cached unlock passphrase to NEW *before* writing the new
     // vault file. Background config writers (set_web_email,
     // persist_web_agent_pub_key, reconcile) re-encrypt the vault with the
-    // cached passphrase and do NOT take conductor_restart_lock — if one ran
+    // cached passphrase and do NOT take conductor_restart_lock - if one ran
     // between the save and the swap it would rewrite the vault under the OLD
     // password and lock the user out of their new one. Swapping first means
     // any such writer uses NEW and stays consistent with the file we save next.
@@ -2212,9 +2212,9 @@ pub async fn change_vault_password(
     // 7. Save the re-encrypted vault file (under the new password).
     save_vault(&vault_path, &new_encrypted).map_err(|e| format!("Save failed: {}", e))?;
 
-    log::info!("Vault password changed — restarting conductor under the new passphrase.");
+    log::info!("Vault password changed - restarting conductor under the new passphrase.");
 
-    // 8. Restart the conductor stack under the new passphrase — via the
+    // 8. Restart the conductor stack under the new passphrase - via the
     // watchdog's recovery path, so it serialises on conductor_restart_lock
     // with any concurrent command that noticed the stopped conductor. A
     // parallel spawn here raced the watchdog and double-started the stack
@@ -2222,7 +2222,7 @@ pub async fn change_vault_password(
     // therefore returns only once the conductor is back up.
     drop(_restart_guard);
     if let Err(e) = ensure_conductor_alive(state.inner(), &app_handle).await {
-        // The password change itself is complete — report the conductor
+        // The password change itself is complete - report the conductor
         // problem through the status channel, not as a command failure.
         log::warn!("post-password-change conductor start: {}", e);
     }
@@ -2251,7 +2251,7 @@ pub fn get_auto_lock_minutes(state: State<'_, Arc<AppState>>) -> Result<u32, Str
 }
 
 /// Set the auto-lock timeout and persist to disk.
-/// Stored in a separate unencrypted file — no password needed.
+/// Stored in a separate unencrypted file - no password needed.
 #[tauri::command]
 pub fn set_auto_lock_minutes(
     minutes: u32,
@@ -2336,7 +2336,7 @@ struct LinkedAgentsResponse {
 }
 
 /// Auto-link desktop agent with web account after conductor startup.
-/// Called from spawn_conductor_startup — non-fatal on failure.
+/// Called from spawn_conductor_startup - non-fatal on failure.
 async fn auto_link_web_account(state: &Arc<AppState>, password: &str) -> Result<LinkResult, String> {
     let api_url = option_env!("FLOWSTA_API_URL")
         .unwrap_or("https://auth-api.flowsta.com");
@@ -2438,7 +2438,7 @@ async fn auto_link_web_account(state: &Arc<AppState>, password: &str) -> Result<
         .agent_pub_key
         .ok_or("API response missing agent_pub_key")?;
 
-    // Decode web agent key — API returns raw 32-byte key as base64.
+    // Decode web agent key - API returns raw 32-byte key as base64.
     // Construct the 39-byte AgentPubKey (3-byte header + 32-byte key + 4-byte DHT location).
     let web_agent_bytes = base64_standard_decode(&web_agent_key_b64)
         .map_err(|_| "Failed to decode web agent key")?;
@@ -2578,7 +2578,7 @@ pub async fn link_web_account(
         .agent_pub_key
         .ok_or("API response missing agent_pub_key")?;
 
-    // Step 2: Decode web agent key — API returns raw 32-byte key as base64.
+    // Step 2: Decode web agent key - API returns raw 32-byte key as base64.
     // Construct the 39-byte AgentPubKey if needed.
     let web_agent_bytes = base64_standard_decode(&web_agent_key_b64)
         .map_err(|_| "Failed to decode web agent key from base64")?;
@@ -2768,7 +2768,7 @@ pub fn respond_auth_request(
         }
     }
 
-    // Send the response — ignore error if receiver was dropped (timeout)
+    // Send the response - ignore error if receiver was dropped (timeout)
     let _ = req.responder.send(approved);
     Ok(())
 }
@@ -2803,7 +2803,7 @@ pub fn respond_link_identity_request(
     let mut pending = state.pending_link_identity.lock().unwrap();
     let req = pending.take().ok_or("No pending link-identity request")?;
 
-    // Send the response — ignore error if receiver was dropped (timeout)
+    // Send the response - ignore error if receiver was dropped (timeout)
     let _ = req.responder.send(approved);
     Ok(())
 }
@@ -2999,7 +2999,7 @@ pub async fn export_all_data(
     app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     // Fetch the user's Sign It signatures from the local signing DNAs.
-    // Non-fatal if it fails — export without signatures rather than blocking.
+    // Non-fatal if it fails - export without signatures rather than blocking.
     let signatures = match get_my_signatures(state.clone(), app_handle).await {
         Ok(sigs) => Some(sigs),
         Err(e) => {
@@ -3007,7 +3007,7 @@ pub async fn export_all_data(
             None
         }
     };
-    // Sealed private records — the canonical private data, decrypted for
+    // Sealed private records - the canonical private data, decrypted for
     // the export (they live only on this device). Non-fatal on failure.
     let sealed = match crate::sealed::sealed_list_inner(state.inner()).await {
         Ok(items) => Some(
@@ -3034,7 +3034,7 @@ pub async fn export_all_data(
 
 /// Import a previously-exported vault file after a recovery-phrase
 /// restore: re-store the sealed private records and app backups. Keys,
-/// identity, signatures and server mirrors are NOT imported — the phrase
+/// identity, signatures and server mirrors are NOT imported - the phrase
 /// owns identity, the DHT gossips signatures back, the server owns its
 /// mirrors. Idempotent: re-running skips records already present.
 #[tauri::command]
@@ -3047,7 +3047,7 @@ pub async fn import_vault_export(
     let export: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|_| "That file is not a valid Flowsta export".to_string())?;
 
-    // Identity gate — never import one person's data into another's vault.
+    // Identity gate - never import one person's data into another's vault.
     let my_agent = {
         let cfg = state.vault_config.lock().unwrap();
         cfg.as_ref().ok_or("Vault is locked")?.agent_pub_key.clone()
@@ -3117,7 +3117,7 @@ pub async fn import_vault_export(
 
     // ── App backups ─────────────────────────────────────────────────
     // Re-save each snapshot's raw bytes verbatim (re-encrypted under this
-    // device's backup key — identical, since the seed is re-derived from
+    // device's backup key - identical, since the seed is re-derived from
     // the same phrase). Apps then self-restore via their own flow.
     let mut backups_restored = 0usize;
     let mut backups_skipped = 0usize;
@@ -3132,7 +3132,7 @@ pub async fn import_vault_export(
             if client_id.is_empty() {
                 continue;
             }
-            // Labels already present stay untouched — same-label saves
+            // Labels already present stay untouched - same-label saves
             // overwrite, so without this a re-run reports phantom restores.
             let existing_labels: std::collections::HashSet<String> =
                 crate::backup::list_app_backups(&state.data_dir, client_id)
@@ -3144,7 +3144,7 @@ pub async fn import_vault_export(
                 for snap in snaps {
                     let raw_b64 = match snap.get("restore_base64").and_then(|v| v.as_str()) {
                         Some(b) => b,
-                        None => continue, // older export without restore bytes — skip
+                        None => continue, // older export without restore bytes - skip
                     };
                     let label = snap.get("label").and_then(|v| v.as_str());
                     if let Some(l) = label {
@@ -3200,7 +3200,7 @@ pub fn list_app_backup_details(
 }
 
 /// Export (decrypt) a single app's backup, packaged to help the user
-/// exercise their CAL §4.2.1 portability rights — **for any Holochain app
+/// exercise their CAL §4.2.1 portability rights - **for any Holochain app
 /// that backs up to Flowsta Vault**, not just Flowsta's own apps.
 ///
 /// The Cryptographic Autonomy License obligates every app shipping under it
@@ -3216,7 +3216,7 @@ pub fn list_app_backup_details(
 ///   - per-section `_readme` text + the CAL-1.0 citation.
 ///
 /// What this export does NOT include is any private key the third-party app
-/// generated outside Vault — e.g. an independent Holochain agent key that
+/// generated outside Vault - e.g. an independent Holochain agent key that
 /// authored the records but was never derived from the Flowsta seed. If an
 /// app needs to expose such keys to satisfy its own CAL §4.2.1 obligation
 /// it must include them in the canonical backup payload it sends to Vault;
@@ -3259,7 +3259,7 @@ pub fn export_single_backup(
             "This file is a single-app export of your data from Flowsta Vault. ",
             "It contains the cryptographic keys you need to use this data ",
             "on any other Holochain conductor, plus the data itself in ",
-            "plain-readable JSON. KEEP THIS FILE SAFE — anyone with the ",
+            "plain-readable JSON. KEEP THIS FILE SAFE - anyone with the ",
             "device_seed can sign as you on the Holochain network.",
         ),
         "format": {
@@ -3413,7 +3413,7 @@ where
 /// `hash-progress` events with `{ hashed, total }` (bytes) throttled to
 /// ~10 fps so UIs can show progress without IPC spam.
 ///
-/// Runs on the blocking thread pool — file I/O of multi-GB files would
+/// Runs on the blocking thread pool - file I/O of multi-GB files would
 /// otherwise freeze the main thread (OS marks the app "not responding").
 #[tauri::command]
 pub async fn hash_file(path: String, app: tauri::AppHandle) -> Result<String, String> {
@@ -3450,7 +3450,7 @@ pub async fn hash_file(path: String, app: tauri::AppHandle) -> Result<String, St
 }
 
 /// Run integrity checks on a file. Returns an IntegrityReport.
-/// Runs on the blocking thread pool — analyze_file reads the full file into
+/// Runs on the blocking thread pool - analyze_file reads the full file into
 /// RAM and runs CPU-bound steg checks.
 #[tauri::command]
 pub async fn analyze_file(path: String) -> Result<crate::file_analyzer::IntegrityReport, String> {
@@ -3463,7 +3463,7 @@ pub async fn analyze_file(path: String) -> Result<crate::file_analyzer::Integrit
 
 /// Generate a perceptual hash for a file (for fuzzy matching).
 /// Returns None for file types that don't support perceptual hashing.
-/// Runs on the blocking thread pool — full-file read + image/audio decode.
+/// Runs on the blocking thread pool - full-file read + image/audio decode.
 #[tauri::command]
 pub async fn generate_perceptual_hash(
     path: String,
@@ -3478,7 +3478,7 @@ pub async fn generate_perceptual_hash(
 
 /// Generate a thumbnail for an image file.
 /// Returns a base64 JPEG data URI for images, None for other file types.
-/// Runs on the blocking thread pool — full-file read + image decode + resize.
+/// Runs on the blocking thread pool - full-file read + image decode + resize.
 #[tauri::command]
 pub async fn generate_thumbnail(path: String) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
@@ -3589,7 +3589,7 @@ pub async fn sign_file(
             }
         }
     } else {
-        log::warn!("Conductor not running — signature created locally only");
+        log::warn!("Conductor not running - signature created locally only");
         None
     };
 
@@ -3600,7 +3600,7 @@ pub async fn sign_file(
         "agent_pub_key": agent_pub_key_str,
         "signed_at": now_ms,
         "action_hash": action_hash,
-        // The bundled signing-DNA app id (e.g. "flowsta_signing_v1_4") —
+        // The bundled signing-DNA app id (e.g. "flowsta_signing_v1_4") -
         // matches what `commit_signature_to_dht` writes to and what
         // `build_own_signature_json` returns from `get_my_signatures`. The
         // frontend uses this field to decide which per-signature actions to
@@ -3661,7 +3661,7 @@ async fn fetch_revocation_for_action(
     };
     // 15s timeout: enrichment is per-sig and DHT-bound. On cold start
     // every call would otherwise wait up to 240s (kitsune2 request
-    // timeout) before returning defaults — that's what made beta8 sit
+    // timeout) before returning defaults - that's what made beta8 sit
     // at "Syncing" for an extra 2 min after the primary records came
     // back (Vault(14) log on 2026-05-24). 15 s is well above warm-DHT
     // response time (~ms) and well below the cold-DHT wall. Defaults
@@ -3697,7 +3697,7 @@ async fn fetch_revocation_for_action(
 
 /// Best-effort thumbnail lookup. Returns None if missing, timed out, or
 /// any step fails. The 15 s timeout matches `fetch_revocation_for_action`
-/// — see that doc for the cold-DHT rationale.
+/// - see that doc for the cold-DHT rationale.
 async fn fetch_thumbnail_for_action(
     app_ws: &holochain_client::AppWebsocket,
     role_name: &str,
@@ -3731,7 +3731,7 @@ async fn fetch_thumbnail_for_action(
 
 /// Authorise + connect an AppWebsocket for the given signing app version.
 /// Returns `(app_ws, role_name)` on success, or None (with a logged warning)
-/// if any step fails — caller should skip this version.
+/// if any step fails - caller should skip this version.
 async fn connect_signing_app_ws(
     state: &Arc<AppState>,
     admin_ws: &holochain_client::AdminWebsocket,
@@ -3870,7 +3870,7 @@ async fn build_linked_signature_json(
 /// Query own signatures for one signing DNA version. Per-signature
 /// enrichment runs in parallel. Returns `Err` on a transient failure
 /// (zome call timeout, decode failure) so the caller can distinguish
-/// "no sigs" from "couldn't reach the cell" — that distinction matters
+/// "no sigs" from "couldn't reach the cell" - that distinction matters
 /// for the frontend's "don't show a partial count" rule.
 async fn query_own_sigs_for_version(
     state: &Arc<AppState>,
@@ -3925,7 +3925,7 @@ async fn query_own_sigs_for_version(
 /// Resolve the agents linked to this identity. Returns the keys plus a
 /// `dht_settled` flag: true only when the DHT walk actually completed
 /// (successful zome call, even if it returned nothing). A timeout or zome
-/// error with no cached key means "unknown", NOT "no linked agents" — the
+/// error with no cached key means "unknown", NOT "no linked agents" - the
 /// caller must not treat that empty result as authoritative.
 async fn fetch_linked_agent_keys(
     state: &Arc<AppState>,
@@ -3945,7 +3945,7 @@ async fn fetch_linked_agent_keys(
     let identity_app = match identity_apps.into_iter().next() {
         Some(a) => a,
         None => {
-            log::info!("No identity DNA with agent_linking found — skipping cross-agent lookup");
+            log::info!("No identity DNA with agent_linking found - skipping cross-agent lookup");
             return (Vec::new(), true);
         }
     };
@@ -3997,7 +3997,7 @@ async fn fetch_linked_agent_keys(
 
     // Seed with the cached web agent key immediately. The Vault(14) log
     // showed `get_linked_agents` waiting the full 240 s kitsune2 timeout
-    // before falling back to this same cache — wasted minutes when the
+    // before falling back to this same cache - wasted minutes when the
     // answer was already in memory. We still try the DHT below to catch
     // any additional linked agents (rare today; non-web links would only
     // come from future features), but with a short opportunistic budget.
@@ -4015,7 +4015,7 @@ async fn fetch_linked_agent_keys(
         }
     }
 
-    // Opportunistic DHT pass — 10 s budget. If gossip has already
+    // Opportunistic DHT pass - 10 s budget. If gossip has already
     // landed the link record, we pick up any extras; otherwise we
     // skip the wait and rely on the cached seed.
     let mut dht_settled = false;
@@ -4072,7 +4072,7 @@ async fn fetch_linked_agent_keys(
 
 /// Store a freshly discovered web agent key in the in-memory cache AND the
 /// encrypted vault config (same shape migration writes: standard base64 of
-/// the 39-byte key). Non-fatal on failure — the in-memory cache still
+/// the 39-byte key). Non-fatal on failure - the in-memory cache still
 /// covers the current session.
 pub(crate) fn persist_web_agent_pub_key(state: &Arc<AppState>, key_b64: &str) {
     *state.linked_web_agent_key.lock().unwrap() = Some(key_b64.to_string());
@@ -4108,7 +4108,7 @@ pub(crate) fn persist_web_agent_pub_key(state: &Arc<AppState>, key_b64: &str) {
 /// enrichment within a returned batch runs in parallel.
 ///
 /// Returns `Err` if any linked-agent query fails (DHT timeout, WS error)
-/// — the caller needs to distinguish "linked agent has no sigs" from
+/// - the caller needs to distinguish "linked agent has no sigs" from
 /// "we couldn't fetch them yet". A silent `Vec::new()` here was the
 /// root cause of beta7 showing 4/6 on cold-start Windows: when the
 /// cold-DHT `get_signatures_for_agent` timed out, the call returned []
@@ -4169,7 +4169,7 @@ async fn query_linked_sigs_for_version(
 }
 
 /// True if `err` is one of the messages we see when the conductor's
-/// admin WebSocket can't be reached — either the conductor closed the
+/// admin WebSocket can't be reached - either the conductor closed the
 /// connection (10054) or the process is gone entirely (10061).
 fn is_conductor_unreachable_error(err: &str) -> bool {
     err.contains("Websocket")
@@ -4246,7 +4246,7 @@ fn apply_superseded_by(signatures: &mut [serde_json::Value]) {
 /// frontend can run both in parallel with independent retry loops; the
 /// linked path is the cold-start bottleneck and shouldn't gate the local
 /// query that resolves in milliseconds. Returns `Err` on any version
-/// failure so the frontend can retry — silently masking failures as `[]`
+/// failure so the frontend can retry - silently masking failures as `[]`
 /// is what caused beta7 to display a 4/6 partial count on cold start.
 #[tauri::command]
 pub async fn get_my_own_signatures(
@@ -4258,7 +4258,7 @@ pub async fn get_my_own_signatures(
         Err(e) => {
             if !is_conductor_unreachable_error(&e) { return Err(e); }
             log::warn!(
-                "[get_my_own_signatures] conductor unreachable ({}) — running watchdog",
+                "[get_my_own_signatures] conductor unreachable ({}) - running watchdog",
                 e,
             );
             if let Err(re) = ensure_conductor_alive(state.inner(), &app_handle).await {
@@ -4298,10 +4298,10 @@ pub(crate) async fn get_my_own_signatures_inner(
 
 /// Wire-format result for `get_my_linked_signatures`. The `has_linked_agents`
 /// flag lets the frontend distinguish two zero-signature cases:
-///   - `has_linked_agents=false`: the agent has no linked accounts — the
+///   - `has_linked_agents=false`: the agent has no linked accounts - the
 ///     empty result is authoritative, frontend can promote to loaded.
 ///   - `has_linked_agents=true`: linked accounts exist but returned no
-///     sigs — could be legitimate, or cold-DHT-not-yet-gossiped, so the
+///     sigs - could be legitimate, or cold-DHT-not-yet-gossiped, so the
 ///     frontend should keep retrying.
 #[derive(serde::Serialize)]
 pub struct LinkedSignaturesResult {
@@ -4310,7 +4310,7 @@ pub struct LinkedSignaturesResult {
 }
 
 /// Returns signatures from linked agents only. Split from the own-sigs
-/// fetch — the cold-DHT `get_links` here can take minutes, so it must
+/// fetch - the cold-DHT `get_links` here can take minutes, so it must
 /// not gate the local own-sigs result. Returns `Err` on any sig query
 /// failure (per-version) so the frontend can retry without confusing
 /// "timed out" with "no sigs".
@@ -4324,7 +4324,7 @@ pub async fn get_my_linked_signatures(
         Err(e) => {
             if !is_conductor_unreachable_error(&e) { return Err(e); }
             log::warn!(
-                "[get_my_linked_signatures] conductor unreachable ({}) — running watchdog",
+                "[get_my_linked_signatures] conductor unreachable ({}) - running watchdog",
                 e,
             );
             if let Err(re) = ensure_conductor_alive(state.inner(), &app_handle).await {
@@ -4352,7 +4352,7 @@ pub(crate) async fn get_my_linked_signatures_inner(
 
     let cached_web_key = state.linked_web_agent_key.lock().unwrap().clone();
     // Auto-link races with the conductor-ready event that drives the
-    // first refresh — if conductor reports ready before auto-link
+    // first refresh - if conductor reports ready before auto-link
     // finishes populating `linked_web_agent_key`, an empty linked_keys
     // result is a false negative ("not yet ready" misread as
     // "no linked agents") and the frontend would promote to a 4/6
@@ -4361,7 +4361,7 @@ pub(crate) async fn get_my_linked_signatures_inner(
     // is done.
     //
     // Device-hosted vaults never auto-link (there is no web account to
-    // link against), so the race doesn't exist for them — waiting here
+    // link against), so the race doesn't exist for them - waiting here
     // would keep the signatures view on "loading" forever. They resolve
     // linked agents purely through the identity DNA's link graph (which
     // is how a migrated account still sees its pre-upgrade signatures).
@@ -4379,7 +4379,7 @@ pub(crate) async fn get_my_linked_signatures_inner(
     // A native device-hosted account (created here via A3, never migrated)
     // has NO linked agents by construction: its DID is its own device key,
     // and it was never linked to a web account. Skip the identity-link-graph
-    // walk entirely — otherwise a brand-new account sits on the signatures
+    // walk entirely - otherwise a brand-new account sits on the signatures
     // "warming up" spinner waiting out the cold production DHT, trying to
     // prove an emptiness that is definitional. A migrated/restored account's
     // DID embeds its original (different) key, so this stays false for them
@@ -4392,7 +4392,7 @@ pub(crate) async fn get_my_linked_signatures_inner(
             .unwrap_or(false)
     };
     if device_hosted && is_native && cached_web_key.is_none() {
-        log::info!("[get_my_linked_signatures] native account — no linked agents by construction");
+        log::info!("[get_my_linked_signatures] native account - no linked agents by construction");
         return Ok(LinkedSignaturesResult {
             signatures: Vec::new(),
             has_linked_agents: false,
@@ -4404,16 +4404,16 @@ pub(crate) async fn get_my_linked_signatures_inner(
         fetch_linked_agent_keys(state, &admin_ws, app_port, &apps, cached_web_key).await;
     if linked_keys.is_empty() {
         // Only a completed DHT walk (or a cached key) can prove "no linked
-        // agents". A cold-DHT timeout on a cacheless vault — e.g. freshly
-        // phrase-restored — is UNKNOWN: report Err so the frontend keeps
+        // agents". A cold-DHT timeout on a cacheless vault - e.g. freshly
+        // phrase-restored - is UNKNOWN: report Err so the frontend keeps
         // its background retry alive instead of freezing on a false
         // "authoritative empty" for the whole session.
         if !dht_settled && !had_cache {
             return Err(
-                "linked agents unresolved (cold DHT, no cached web agent key) — retry".to_string(),
+                "linked agents unresolved (cold DHT, no cached web agent key) - retry".to_string(),
             );
         }
-        log::info!("[get_my_linked_signatures] no linked agents — authoritative empty");
+        log::info!("[get_my_linked_signatures] no linked agents - authoritative empty");
         return Ok(LinkedSignaturesResult {
             signatures: Vec::new(),
             has_linked_agents: false,
@@ -4451,7 +4451,7 @@ pub async fn get_my_signatures(
         Err(e) => {
             if !is_conductor_unreachable_error(&e) { return Err(e); }
             log::warn!(
-                "[get_my_signatures] conductor unreachable ({}) — running watchdog",
+                "[get_my_signatures] conductor unreachable ({}) - running watchdog",
                 e,
             );
             if let Err(re) = ensure_conductor_alive(state.inner(), &app_handle).await {
@@ -4534,7 +4534,7 @@ pub async fn revoke_signature(
 /// Shared by the in-app flow and web-delegated management.
 ///
 /// Right after an unlock the conductor advertises readiness before the
-/// cells truly are — the first admin round-trip (authorize credentials)
+/// cells truly are - the first admin round-trip (authorize credentials)
 /// or zome call can fail with a transient internal error. Retry those,
 /// like set_thumbnail does.
 pub(crate) async fn revoke_signature_inner(
@@ -4623,7 +4623,7 @@ async fn revoke_signature_attempt(
         Some("flowsta-vault-revoke".into()),
     ).await.map_err(|e| format!("App WS: {}", e))?;
 
-    // Build the RevokeInput payload — must use ActionHash type (not raw bytes)
+    // Build the RevokeInput payload - must use ActionHash type (not raw bytes)
     #[derive(serde::Serialize)]
     struct RevokeInput {
         signature_action: holochain_types::prelude::ActionHash,
@@ -4748,7 +4748,7 @@ pub(crate) async fn set_thumbnail_inner(
     // channel dropped"). The first attempt warms the path, so retry the
     // transient network timeouts a couple of times before giving up.
     // (Durable fix is zome-side: that lookup only ever finds self-authored
-    // links and should read locally — rides the next signing-DNA rev.)
+    // links and should read locally - rides the next signing-DNA rev.)
     let mut last_err = String::new();
     for attempt in 1..=3u32 {
         let started = std::time::Instant::now();
@@ -4774,7 +4774,7 @@ pub(crate) async fn set_thumbnail_inner(
             Err(e) => {
                 last_err = format!("{}", e);
                 if last_err.contains("nauthorized") {
-                    // Stale cached grant — invalidate so the NEXT call (this
+                    // Stale cached grant - invalidate so the NEXT call (this
                     // connection's signer is already built) re-authorizes.
                     invalidate_cell_credentials(state);
                 }
@@ -4813,7 +4813,7 @@ pub(crate) async fn commit_signature_to_dht(
     perceptual_hash: Option<&serde_json::Value>,
     // v1.3+ optional fields. supersedes is the raw 39-byte action_hash
     // of the signature this one replaces (chain backpointer). Older DNA
-    // versions ignore unknown fields, so passing None on v1.0–v1.2 is safe.
+    // versions ignore unknown fields, so passing None on v1.0-v1.2 is safe.
     comment: Option<&str>,
     supersedes: Option<&[u8]>,
 ) -> Result<String, String> {
@@ -4831,7 +4831,7 @@ pub(crate) async fn commit_signature_to_dht(
     .await
     .map_err(|e| format!("Admin WS connect failed: {}", e))?;
 
-    // Ensure all apps are enabled — conductor may disable cells on restart
+    // Ensure all apps are enabled - conductor may disable cells on restart
     crate::dna::ensure_apps_enabled(&admin_ws, state).await;
 
     // Find the signing app and its provisioned cell
@@ -5064,8 +5064,8 @@ pub(crate) async fn commit_signature_to_dht(
 
     // Retry ONLY the definitively-not-committed failures: a "chain head
     // has moved" bundle was rejected outright (a concurrent write won the
-    // head — rebuild on the new head and try again), and CellDisabled never
-    // executed. Timeouts are deliberately NOT retried here — an ambiguous
+    // head - rebuild on the new head and try again), and CellDisabled never
+    // executed. Timeouts are deliberately NOT retried here - an ambiguous
     // commit retried blindly could publish the signature twice.
     let mut result = None;
     let mut last_err = String::new();
@@ -5100,7 +5100,7 @@ pub(crate) async fn commit_signature_to_dht(
     }
     let result = result.ok_or(last_err)?;
 
-    // Result is MessagePack-encoded ActionHash — deserialize to get raw 39 bytes
+    // Result is MessagePack-encoded ActionHash - deserialize to get raw 39 bytes
     let action_hash: holochain_types::prelude::ActionHash =
         rmp_serde::from_slice(result.as_bytes())
             .map_err(|e| format!("Failed to decode ActionHash from zome result: {}", e))?;
@@ -5115,15 +5115,15 @@ pub(crate) async fn commit_signature_to_dht(
 // ============================================
 
 /// Claim or change the account's username. The username registrar is
-/// Tier-3 territory — uniqueness, login lookup (hash), the public
-/// flowsta.com/<u> URL and billing tiers all live server-side — so this
+/// Tier-3 territory - uniqueness, login lookup (hash), the public
+/// flowsta.com/<u> URL and billing tiers all live server-side - so this
 /// authenticates with a vault-grant and calls the same endpoint the web
 /// dashboard uses. On success the plaintext is mirrored on-device:
 /// VaultConfig (instant UI) and the sealed user_profile record (the
 /// device-sovereign copy, same field migration preserves).
 /// Remember the account's email in the vault config. Used after a phrase
 /// restore, where the server can't supply it back (it stores only a hash)
-/// — the user re-enters it, the API verifies it against the hash on use,
+/// - the user re-enters it, the API verifies it against the hash on use,
 /// and from then on the vault knows it again.
 #[tauri::command]
 pub fn set_web_email(state: State<'_, Arc<AppState>>, email: String) -> Result<(), String> {
@@ -5230,7 +5230,7 @@ pub async fn claim_web_username(
         }
     }
 
-    // Sealed user_profile mirror — best-effort; the server registrar and
+    // Sealed user_profile mirror - best-effort; the server registrar and
     // the config copy above are what the UIs read.
     let sealed_state = state.inner().clone();
     let sealed_username = username.clone();
@@ -5392,7 +5392,7 @@ pub(crate) async fn sync_quota_to_server_inner(
 /// Best-known sign-quota state for gating a publish: refresh from the API
 /// (writing through to the HMAC-signed cache, exactly like the in-app
 /// meter), falling back to the local cache when offline. `None` means no
-/// quota state is knowable — the caller should allow the sign, since the
+/// quota state is knowable - the caller should allow the sign, since the
 /// server still meters via quota sync.
 /// Sponsorship state for an app-initiated sign: which app's org pool pays,
 /// or that the pool is dry and the personal quota pays instead.
@@ -5407,7 +5407,7 @@ pub(crate) async fn current_sign_quota(
     client_id: Option<&str>,
 ) -> Option<(crate::quota_cache::QuotaCache, Option<SponsorState>)> {
     // Prefer the linked web account's key (the one a subscription is
-    // attached to) over the local device key — same rule as the in-app UI.
+    // attached to) over the local device key - same rule as the in-app UI.
     let agent_key = {
         let config = state.vault_config.lock().unwrap();
         config.as_ref().and_then(|c| {
@@ -5472,7 +5472,7 @@ pub(crate) async fn current_sign_quota(
                 write_counter: 0,
             };
             if sponsored_active {
-                // Org-pool numbers — NOT the user's personal meter. Never
+                // Org-pool numbers - NOT the user's personal meter. Never
                 // write them into the personal quota cache.
                 return Some((cache, sponsor));
             }
@@ -5484,7 +5484,7 @@ pub(crate) async fn current_sign_quota(
     }
 
     // Offline / lookup failed: trust the HMAC-signed local cache. Sponsor
-    // state is unknowable offline — sync settles attribution later.
+    // state is unknowable offline - sync settles attribution later.
     crate::quota_cache::read(&state.data_dir)
         .ok()
         .flatten()
@@ -5520,7 +5520,7 @@ pub fn increment_quota_used(state: State<'_, Arc<AppState>>) -> Result<Option<cr
 // ── Shared profile write (sealed store + config mirror) ────────────────────
 
 pub(crate) enum ProfileWriteError {
-    /// Conductor not ready yet — retryable.
+    /// Conductor not ready yet - retryable.
     NotReady(String),
     /// The write itself failed.
     Failed(String),
@@ -5553,7 +5553,7 @@ pub(crate) async fn write_profile_records(
     let store_err = ProfileWriteError::Failed;
 
     if let Some(ref name) = display_name {
-        // Newest-first ordering from sealed_list — the first match is live.
+        // Newest-first ordering from sealed_list - the first match is live.
         let current = existing.iter().find(|r| r.entry_type == "user_profile");
         match current {
             Some(record) => {
@@ -5633,7 +5633,7 @@ pub(crate) async fn write_profile_records(
     }
 
     // Mirror into the vault config so the app's own UI shows the change
-    // immediately; persist with the cached unlock passphrase (best-effort —
+    // immediately; persist with the cached unlock passphrase (best-effort -
     // the sealed records above are the canonical store).
     {
         let passphrase = {
@@ -5671,7 +5671,7 @@ pub(crate) async fn write_profile_records(
 }
 
 /// In-app profile edit: display name and/or picture. Same writes as the
-/// web-delegated /profile-update bridge route, but no approval dialog —
+/// web-delegated /profile-update bridge route, but no approval dialog -
 /// the user is acting directly inside their own Vault. The frontend
 /// refreshes the server's public-profile cache afterwards (best-effort,
 /// via a vault-grant).
@@ -5711,7 +5711,7 @@ pub async fn update_local_profile(
         .await
         .map_err(|e| match e {
             ProfileWriteError::NotReady(m) => {
-                format!("Your Vault is still starting up ({}) — try again in a moment.", m)
+                format!("Your Vault is still starting up ({}) - try again in a moment.", m)
             }
             ProfileWriteError::Failed(m) => format!("Profile write failed: {}", m),
         })?;
