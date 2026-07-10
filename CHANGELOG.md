@@ -5,6 +5,18 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-07-10
+
+### Fixed
+- **Batch signing now stores image thumbnails.** Signing multiple files at
+  once skipped thumbnail generation entirely, so batch-signed images showed
+  a generic icon instead of a preview. Thumbnails are now generated during
+  batch analysis and published after signing completes. (Images batch-signed
+  on earlier versions can be given one via Edit thumbnail.)
+
+### Changed
+- Your Data: clearer wording on what your recovery phrase restores.
+
 ## [1.0.0] — 2026-07-10
 
 **Your account lives in your Vault.** The 1.0 release brings the whole

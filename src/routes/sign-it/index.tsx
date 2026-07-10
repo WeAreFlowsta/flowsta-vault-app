@@ -89,6 +89,7 @@ interface FileEntry {
   hash: string;
   integrityReport: IntegrityReport | null;
   perceptualHash: any | null;
+  thumbnail: string | null;
 }
 
 /** Get the default thumbnail SVG path based on available signature data. */
@@ -419,12 +420,14 @@ export default component$(() => {
 
         let report: IntegrityReport | null = null;
         let phash = null;
+        let thumb: string | null = null;
         if (!analysisSkipped) {
           try { report = await inv<IntegrityReport>("analyze_file", { path: filePath }); } catch {}
           try { phash = await inv<any>("generate_perceptual_hash", { path: filePath }); } catch {}
+          try { thumb = await inv<string | null>("generate_thumbnail", { path: filePath }); } catch {}
         }
 
-        entries.push({ path: filePath, name, hash, integrityReport: report, perceptualHash: phash });
+        entries.push({ path: filePath, name, hash, integrityReport: report, perceptualHash: phash, thumbnail: thumb });
       }
 
       fileEntries.value = entries;
@@ -678,7 +681,7 @@ export default component$(() => {
             comment: metadata.comment.trim() || null,
             supersedes: null,
           });
-          results.push({ ...result, fileName: entry.name, success: true });
+          results.push({ ...result, fileName: entry.name, thumbnail: entry.thumbnail, success: true });
           // Phase 8: increment local cache + update meter from cache (authoritative for display)
           const updatedCache = await invoke<SignQuotaState | null>("increment_quota_used").catch(() => null);
           if (updatedCache) {
@@ -706,6 +709,18 @@ export default component$(() => {
       ];
       persistSignaturesCache(recentSignatures.value);
       step.value = "done";
+
+      // Store thumbnails on DHT (non-blocking, best-effort). Sequential,
+      // not parallel — concurrent commits race on the source chain head.
+      const withThumbs = successful.filter((r: any) => r.thumbnail && r.action_hash);
+      (async () => {
+        for (const r of withThumbs) {
+          await invoke("set_thumbnail", {
+            actionHashHex: r.action_hash,
+            thumbnail: r.thumbnail,
+          }).catch(() => { /* non-blocking — thumbnail is cosmetic */ });
+        }
+      })();
     } else if (fileHash.value) {
       // Single file signing
       try {
