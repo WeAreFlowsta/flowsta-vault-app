@@ -268,9 +268,17 @@ export default component$(() => {
         clientId,
         label,
       });
-      const appName = (result.app_name as string || "app").toLowerCase().replace(/\s+/g, "-");
+      // The export is the CAL-sectioned shape: app name and timestamp live
+      // under `app.name` / `backup.saved_at`, not at the top level. Reading
+      // them flat made `new Date(undefined * 1000).toISOString()` throw
+      // before the save dialog line, so Export silently did nothing.
+      const appMeta = result.app as { name?: string } | undefined;
+      const backupMeta = result.backup as { saved_at?: number } | undefined;
+      const appName = (appMeta?.name || "app").toLowerCase().replace(/\s+/g, "-");
       const labelStr = (label || "latest").replace(/\s+/g, "-");
-      const date = new Date((result.created_at as number) * 1000).toISOString().split("T")[0];
+      const date = new Date(
+        backupMeta?.saved_at ? backupMeta.saved_at * 1000 : Date.now(),
+      ).toISOString().split("T")[0];
       const defaultName = `${appName}-${labelStr}-${date}.json`;
 
       const { save } = await import("@tauri-apps/plugin-dialog");
