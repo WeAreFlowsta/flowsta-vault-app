@@ -1854,7 +1854,8 @@ struct SignDocumentRequest {
     job: bool,
     /// Publish the signature to the Sign It network from THIS device's
     /// signing cell (web-delegated signing for upgraded accounts).
-    /// Restricted to Flowsta origins; the approval dialog says so.
+    /// Restricted to Flowsta origins and LINKED third-party apps; the
+    /// approval dialog says so, and every publish draws on the sign quota.
     #[serde(default)]
     commit: bool,
 }
@@ -1896,9 +1897,10 @@ async fn wait_for_conductor(state: &Arc<AppState>, secs: u64) -> Option<(u16, u1
     }
 }
 
-/// Publishing to the user's own signing cell is a Flowsta-surface
-/// capability: only pages on flowsta.com (or its subdomains) may request
-/// it. Signature-only requests stay available to every app, dialog-gated.
+/// Flowsta pages (flowsta.com or its subdomains) are one of the two
+/// trusted requesters for publishing to the user's own signing cell -
+/// the other is a linked third-party app (`origin_to_client_id`).
+/// Signature-only requests stay available to every app, dialog-gated.
 fn is_flowsta_origin(origin: Option<&str>) -> bool {
     let Some(origin) = origin else { return false };
     let Ok(url) = url::Url::parse(origin) else { return false };
@@ -2063,13 +2065,19 @@ async fn sign_document_core(
         ));
     }
 
-    if req.commit && !is_flowsta_origin(origin.as_deref()) {
+    // Publishing needs a trusted requester: a Flowsta page (web-delegated
+    // signing) or a LINKED third-party app - the same trust gate /sign uses.
+    // The user approved the link, and every publish still passes the
+    // per-action approval dialog and the quota gate below.
+    let linked_client_id = origin_to_client_id(&state.app_state, origin.as_deref());
+    if req.commit && !is_flowsta_origin(origin.as_deref()) && linked_client_id.is_none() {
         return Err((
             StatusCode::FORBIDDEN,
             Json(IpcError {
                 error: "tier_forbidden".into(),
                 description: Some(
-                    "Publishing a signature through Vault is available to Flowsta pages only."
+                    "Publishing a signature through Vault is available to Flowsta pages \
+                     and linked apps only."
                         .into(),
                 ),
             }),
@@ -2117,10 +2125,23 @@ async fn sign_document_core(
         }
     }
 
-    // 3. Resolve app name for the approval dialog
-    let app_name = req.app_name.clone().unwrap_or_else(|| {
-        origin.clone().unwrap_or_else(|| "Unknown app".to_string())
-    });
+    // 3. Resolve app name for the approval dialog. A linked app's registry
+    // name wins over its self-reported one - the dialog must show the name
+    // the user approved at link time, not whatever the caller claims.
+    let app_name = linked_client_id
+        .as_ref()
+        .and_then(|cid| {
+            let apps = state.app_state.linked_third_party_apps.lock().unwrap();
+            apps.iter()
+                .find(|a| a.client_id.as_deref() == Some(cid.as_str()))
+                .map(|a| a.app_name.clone())
+        })
+        .or_else(|| req.app_name.clone())
+        .unwrap_or_else(|| origin.clone().unwrap_or_else(|| "Unknown app".to_string()));
+
+    // Quota, sponsorship, and MAU attribute to the linked app's registered
+    // client_id when there is one; self-reported client_id otherwise.
+    let effective_client_id = linked_client_id.clone().or_else(|| req.client_id.clone());
 
     // When publishing, make sure the sign is within quota and the conductor
     // is up BEFORE asking for approval - an approval must always be able to
@@ -2129,6 +2150,9 @@ async fn sign_document_core(
     // Sponsorship (org pays for app-initiated signs) - resolved by the quota
     // gate below; drives the approval dialog and the post-commit accounting.
     let mut sponsor_state: Option<crate::commands::SponsorState> = None;
+    // Signatures left in the user's personal quota - shown in the approval
+    // dialog when the personal meter is what this publish will draw from.
+    let mut quota_remaining: Option<u32> = None;
 
     if req.commit {
         set_job_stage(&state, &job_id, "preparing");
@@ -2138,9 +2162,12 @@ async fn sign_document_core(
         // when the period's signatures are used up. An amend counts like
         // any other published signature.
         let api_url = option_env!("FLOWSTA_API_URL").unwrap_or("https://auth-api.flowsta.com");
-        let quota_state =
-            crate::commands::current_sign_quota(&state.app_state, api_url, req.client_id.as_deref())
-                .await;
+        let quota_state = crate::commands::current_sign_quota(
+            &state.app_state,
+            api_url,
+            effective_client_id.as_deref(),
+        )
+        .await;
         if let Some((q, sponsor)) = quota_state {
             sponsor_state = sponsor;
             let sponsor = &sponsor_state;
@@ -2168,6 +2195,9 @@ async fn sign_document_core(
                         description: Some(description),
                     }),
                 ));
+            }
+            if q.limit >= 1 {
+                quota_remaining = Some(q.limit.saturating_sub(q.used));
             }
         }
         let _ = state.app_handle.emit(
@@ -2225,6 +2255,13 @@ async fn sign_document_core(
         // Whose quota this signature draws from - the dialog says so.
         "sponsored_by": sponsor_state.as_ref().filter(|sp| !sp.exhausted).map(|sp| sp.app_name.clone()),
         "sponsor_exhausted": sponsor_state.as_ref().map(|sp| sp.exhausted).unwrap_or(false),
+        // Personal signatures left BEFORE this one - only when the personal
+        // meter pays (no active sponsor), so the dialog can say the cost.
+        "quota_remaining": if sponsor_state.as_ref().map(|sp| !sp.exhausted).unwrap_or(false) {
+            None
+        } else {
+            quota_remaining
+        },
     });
     set_job_stage(&state, &job_id, "awaiting_approval");
     raise_window(&state.app_handle);
@@ -2334,8 +2371,8 @@ async fn sign_document_core(
         format!("{}Z", chrono_lite(secs))
     };
 
-    // 9. Record MAU event if client_id provided
-    if let Some(ref client_id) = req.client_id {
+    // 9. Record MAU event if a client_id is known
+    if let Some(ref client_id) = effective_client_id {
         crate::mau::record_mau_event_if_needed(&state.app_state, client_id);
     }
 
@@ -2393,7 +2430,7 @@ async fn sign_document_core(
                     log::warn!("Quota cache increment failed (non-fatal): {}", e);
                 }
                 let sync_state = state.app_state.clone();
-                let sync_client_id = req.client_id.clone();
+                let sync_client_id = effective_client_id.clone();
                 let api_url = option_env!("FLOWSTA_API_URL")
                     .unwrap_or("https://auth-api.flowsta.com")
                     .to_string();

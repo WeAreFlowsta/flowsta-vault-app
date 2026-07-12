@@ -286,6 +286,7 @@ export default component$(() => {
     amends?: boolean;
     sponsored_by?: string | null;
     sponsor_exhausted?: boolean;
+    quota_remaining?: number | null;
   } | null>(null);
 
   // A Flowsta page's committing request is waiting for the conductor -
@@ -544,6 +545,7 @@ export default component$(() => {
       amends: boolean;
       sponsored_by?: string | null;
       sponsor_exhausted?: boolean;
+      quota_remaining?: number | null;
     }>("document-sign-request", (event) => {
       pendingDocumentSign.value = event.payload;
     });
@@ -2011,6 +2013,15 @@ export default component$(() => {
                 for this period - this signature will use your personal quota.
               </p>
             )}
+            {pendingDocumentSign.value.commit &&
+              !pendingDocumentSign.value.sponsored_by &&
+              typeof pendingDocumentSign.value.quota_remaining === 'number' && (
+                <p class="mb-2 text-xs text-gray-400">
+                  {pendingDocumentSign.value.quota_remaining <= 1
+                    ? 'This uses your last remaining signature for this period.'
+                    : `This uses 1 of your ${pendingDocumentSign.value.quota_remaining} remaining signatures for this period.`}
+                </p>
+              )}
             <p class="mb-4 text-xs text-gray-400">
               {pendingDocumentSign.value.commit
                 ? pendingDocumentSign.value.amends
