@@ -625,6 +625,18 @@ pub fn export_all_data(
     signatures: Option<Vec<serde_json::Value>>,
     sealed_records: Option<Vec<serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
+    export_all_data_with_progress(app_state, signatures, sealed_records, |_, _, _| {})
+}
+
+/// `export_all_data` with a per-app progress callback `(current, total,
+/// app_name)` - decrypting every app's snapshots is the slow part of a
+/// large export, and the Your Data page narrates it to the user.
+pub fn export_all_data_with_progress(
+    app_state: &AppState,
+    signatures: Option<Vec<serde_json::Value>>,
+    sealed_records: Option<Vec<serde_json::Value>>,
+    mut progress: impl FnMut(usize, usize, &str),
+) -> Result<serde_json::Value, String> {
     let config = {
         let config = app_state.vault_config.lock().unwrap();
         config.as_ref().ok_or("Vault is locked")?.clone()
@@ -633,8 +645,10 @@ pub fn export_all_data(
     let stats = get_backup_stats(&app_state.data_dir);
 
     // Collect decrypted backup data for each app
+    let total_apps = stats.apps.len();
     let mut app_data = Vec::new();
-    for app_summary in &stats.apps {
+    for (app_index, app_summary) in stats.apps.iter().enumerate() {
+        progress(app_index + 1, total_apps, &app_summary.app_name);
         let metas = list_app_backups(&app_state.data_dir, &app_summary.client_id)?;
         let mut snapshots = Vec::new();
 

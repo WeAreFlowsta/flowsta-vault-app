@@ -53,6 +53,48 @@ function formatSummary(s: BackupRecordSummary | null | undefined): string | null
   return parts.length > 0 ? parts.join(", ") : null;
 }
 
+/**
+ * Progress line for long Your Data operations: spinner + stage label, with
+ * a determinate bar when the stage has counts and a pulsing one when it
+ * doesn't (e.g. waiting on a network fetch). The label matters more than
+ * the bar - it says WHAT the wait is.
+ */
+function OperationProgress({
+  progress,
+  fallback,
+}: {
+  progress: ProgressPayload | null;
+  fallback: string;
+}) {
+  const stage = progress?.stage ?? fallback;
+  const hasCounts =
+    progress?.current != null && progress?.total != null && progress.total > 0;
+  const pct = hasCounts
+    ? Math.round((progress!.current! / progress!.total!) * 100)
+    : null;
+  return (
+    <div class="mt-4">
+      <div class="mb-2 flex items-center gap-2 text-xs text-gray-400">
+        <div class="h-3 w-3 shrink-0 animate-spin rounded-full border border-gray-600 border-t-amber-400"></div>
+        <span>
+          {stage}
+          {hasCounts ? ` (${progress!.current}/${progress!.total})` : ""}
+        </span>
+      </div>
+      <div class="h-1.5 overflow-hidden rounded-full bg-gray-700">
+        {pct !== null ? (
+          <div
+            class="h-full rounded-full bg-amber-400 transition-all"
+            style={{ width: `${pct}%` }}
+          ></div>
+        ) : (
+          <div class="h-full w-full animate-pulse rounded-full bg-amber-400/40"></div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface VaultIdentity {
   agent_pub_key: string;
   did: string;
@@ -69,6 +111,20 @@ interface SealedListItem {
   created_at: number;
   body: unknown;
   refs: string[];
+}
+
+/** `your-data-progress` Tauri event payload (see commands.rs). */
+interface ProgressPayload {
+  op: "export" | "import";
+  stage: string;
+  current: number | null;
+  total: number | null;
+}
+
+interface ExportToFileResult {
+  bytes: number;
+  signatures_included: boolean;
+  sealed_records: number;
 }
 
 interface ImportResult {
@@ -131,6 +187,10 @@ export default component$(() => {
   const loading = useSignal(true);
   const exporting = useSignal(false);
   const exportSuccess = useSignal(false);
+  const exportResult = useSignal<ExportToFileResult | null>(null);
+  const exportError = useSignal<string | null>(null);
+  const exportProgress = useSignal<ProgressPayload | null>(null);
+  const importProgress = useSignal<ProgressPayload | null>(null);
 
   // Sealed private records, aggregated to counts by entry type.
   // Status matters: "couldn't reach the conductor" must never render as
@@ -230,6 +290,11 @@ export default component$(() => {
     });
     if (!path || typeof path !== "string") return;
     importing.value = true;
+    importProgress.value = null;
+    const { listen } = await import("@tauri-apps/api/event");
+    const unlisten = await listen<ProgressPayload>("your-data-progress", (event) => {
+      if (event.payload.op === "import") importProgress.value = event.payload;
+    });
     try {
       const result = await invoke<ImportResult>("import_vault_export", { path });
       importResult.value = result;
@@ -237,7 +302,9 @@ export default component$(() => {
     } catch (e) {
       importError.value = String(e);
     } finally {
+      unlisten();
       importing.value = false;
+      importProgress.value = null;
     }
   });
 
@@ -260,40 +327,33 @@ export default component$(() => {
     }
   });
 
-  const handleExportSingle = $(async (clientId: string, label: string | null) => {
-    const key = `${clientId}:${label || "latest"}`;
+  // Dialog first: the row's metadata already names the file, so the user
+  // gets the save dialog instantly; the decrypt + write then happen
+  // entirely on the Rust side (the payload never crosses IPC).
+  const handleExportSingle = $(async (backup: BackupMeta) => {
+    const appName = (backup.app_name || "app").toLowerCase().replace(/\s+/g, "-");
+    const labelStr = (backup.label || "latest").replace(/\s+/g, "-");
+    const date = new Date(backup.created_at * 1000).toISOString().split("T")[0];
+    const defaultName = `${appName}-${labelStr}-${date}.json`;
+
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const path = await save({
+      defaultPath: defaultName,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!path) return;
+
+    const key = `${backup.client_id}:${backup.label || "latest"}`;
     exportingLabel.value = key;
     try {
-      const result = await invoke<Record<string, unknown>>("export_single_backup", {
-        clientId,
-        label,
+      await invoke("export_single_backup_to_file", {
+        clientId: backup.client_id,
+        label: backup.label,
+        path,
       });
-      // The export is the CAL-sectioned shape: app name and timestamp live
-      // under `app.name` / `backup.saved_at`, not at the top level. Reading
-      // them flat made `new Date(undefined * 1000).toISOString()` throw
-      // before the save dialog line, so Export silently did nothing.
-      const appMeta = result.app as { name?: string } | undefined;
-      const backupMeta = result.backup as { saved_at?: number } | undefined;
-      const appName = (appMeta?.name || "app").toLowerCase().replace(/\s+/g, "-");
-      const labelStr = (label || "latest").replace(/\s+/g, "-");
-      const date = new Date(
-        backupMeta?.saved_at ? backupMeta.saved_at * 1000 : Date.now(),
-      ).toISOString().split("T")[0];
-      const defaultName = `${appName}-${labelStr}-${date}.json`;
-
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const path = await save({
-        defaultPath: defaultName,
-        filters: [{ name: "JSON", extensions: ["json"] }],
-      });
-      if (path) {
-        await invoke("write_json_file", {
-          path,
-          content: JSON.stringify(result, null, 2),
-        });
-      }
     } catch (e) {
       console.error("Export failed:", e);
+      exportError.value = String(e);
     } finally {
       exportingLabel.value = null;
     }
@@ -322,33 +382,45 @@ export default component$(() => {
     }
   });
 
+  // Dialog first, then the whole gather + write runs on the Rust side,
+  // narrating progress over `your-data-progress` events. The old flow did
+  // all the slow work BEFORE the dialog with only a label swap for
+  // feedback - a long export looked broken.
   const handleExport = $(async () => {
+    const date = new Date().toISOString().split("T")[0];
+    const defaultName = `flowsta-vault-export-${date}.json`;
+
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const path = await save({
+      defaultPath: defaultName,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!path) return;
+
     exporting.value = true;
     exportSuccess.value = false;
-    try {
-      const data = await invoke<Record<string, unknown>>("export_all_data");
-      const date = new Date().toISOString().split("T")[0];
-      const defaultName = `flowsta-vault-export-${date}.json`;
+    exportResult.value = null;
+    exportError.value = null;
+    exportProgress.value = null;
 
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const path = await save({
-        defaultPath: defaultName,
-        filters: [{ name: "JSON", extensions: ["json"] }],
-      });
-      if (path) {
-        await invoke("write_json_file", {
-          path,
-          content: JSON.stringify(data, null, 2),
-        });
-        exportSuccess.value = true;
-        setTimeout(() => {
-          exportSuccess.value = false;
-        }, 5000);
-      }
+    const { listen } = await import("@tauri-apps/api/event");
+    const unlisten = await listen<ProgressPayload>("your-data-progress", (event) => {
+      if (event.payload.op === "export") exportProgress.value = event.payload;
+    });
+    try {
+      const result = await invoke<ExportToFileResult>("export_all_data_to_file", { path });
+      exportResult.value = result;
+      exportSuccess.value = true;
+      setTimeout(() => {
+        exportSuccess.value = false;
+      }, 10000);
     } catch (e) {
       console.error("Export failed:", e);
+      exportError.value = String(e);
     } finally {
+      unlisten();
       exporting.value = false;
+      exportProgress.value = null;
     }
   });
 
@@ -659,7 +731,7 @@ export default component$(() => {
                                   ) : (
                                     <>
                                       <PillButton accent="amber" disabled={isExporting}
-                                        onClick$={() => handleExportSingle(backup.client_id, backup.label)}
+                                        onClick$={() => handleExportSingle(backup)}
                                       >
                                         {isExporting ? "..." : "Export"}
                                       </PillButton>
@@ -711,7 +783,26 @@ export default component$(() => {
         {exportSuccess.value && (
           <div class="mb-4">
             <Callout intent="success">
-              <p>Export downloaded successfully. Keep it somewhere safe!</p>
+              <p>
+                Export saved
+                {exportResult.value ? ` (${formatBytes(exportResult.value.bytes)})` : ""}.
+                Keep it somewhere safe!
+                {exportResult.value && !exportResult.value.signatures_included && (
+                  <>
+                    {" "}Your signature history wasn't included this time - the
+                    network was still warming up. It re-syncs on its own; export
+                    again in a few minutes to include it.
+                  </>
+                )}
+              </p>
+            </Callout>
+          </div>
+        )}
+
+        {exportError.value && (
+          <div class="mb-4">
+            <Callout intent="warning" title="Export didn't complete">
+              <p>{exportError.value}</p>
             </Callout>
           </div>
         )}
@@ -722,6 +813,12 @@ export default component$(() => {
         >
           {exporting.value ? "Exporting..." : "Download Export"}
         </GlassButton>
+        {exporting.value && (
+          <OperationProgress
+            progress={exportProgress.value}
+            fallback="Preparing your export..."
+          />
+        )}
       </div>
 
       {/* Restore from export */}
@@ -774,6 +871,12 @@ export default component$(() => {
         <GlassButton onClick$={handleImport} disabled={importing.value}>
           {importing.value ? "Importing..." : "Choose Export File"}
         </GlassButton>
+        {importing.value && (
+          <OperationProgress
+            progress={importProgress.value}
+            fallback="Reading the export file..."
+          />
+        )}
       </div>
     </div>
   );

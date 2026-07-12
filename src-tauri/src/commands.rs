@@ -2990,6 +2990,149 @@ pub fn delete_app_backup(
     crate::backup::delete_app_backups(&state.data_dir, &client_id)
 }
 
+/// Progress event for the Your Data page's long operations (export/import).
+/// `current`/`total` are set when the stage has countable units; a stage
+/// without them renders as indeterminate.
+#[derive(Clone, serde::Serialize)]
+struct YourDataProgress {
+    op: &'static str, // "export" | "import"
+    stage: String,
+    current: Option<usize>,
+    total: Option<usize>,
+}
+
+fn emit_your_data_progress(
+    app_handle: &tauri::AppHandle,
+    op: &'static str,
+    stage: String,
+    current: Option<usize>,
+    total: Option<usize>,
+) {
+    let _ = app_handle.emit(
+        "your-data-progress",
+        YourDataProgress { op, stage, current, total },
+    );
+}
+
+/// How long the export waits for the live signature query before shipping
+/// without it. Signatures re-sync from the network on their own, and a cold
+/// conductor can take minutes to answer - an honest note beats a silent hang.
+const EXPORT_SIGNATURES_TIMEOUT_SECS: u64 = 30;
+
+/// Export all vault data straight to `path`, narrating progress via
+/// `your-data-progress` events. The payload never crosses IPC to the
+/// webview (a large export used to make the round trip TWICE and get
+/// pretty-printed on the UI thread before the save dialog even appeared).
+/// Returns small stats for the success message.
+#[tauri::command]
+pub async fn export_all_data_to_file(
+    state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    emit_your_data_progress(
+        &app_handle,
+        "export",
+        "Fetching your signatures from the network...".into(),
+        None,
+        None,
+    );
+    let signatures = match tokio::time::timeout(
+        std::time::Duration::from_secs(EXPORT_SIGNATURES_TIMEOUT_SECS),
+        get_my_signatures_inner(state.inner()),
+    )
+    .await
+    {
+        Ok(Ok(sigs)) => Some(sigs),
+        Ok(Err(e)) => {
+            log::warn!("export_all_data_to_file: signatures skipped: {}", e);
+            None
+        }
+        Err(_) => {
+            log::warn!(
+                "export_all_data_to_file: signature fetch exceeded {}s (network still warming up?) - exporting without them",
+                EXPORT_SIGNATURES_TIMEOUT_SECS
+            );
+            None
+        }
+    };
+    let signatures_included = signatures.is_some();
+
+    emit_your_data_progress(
+        &app_handle,
+        "export",
+        "Decrypting your private records...".into(),
+        None,
+        None,
+    );
+    let sealed = match crate::sealed::sealed_list_inner(state.inner()).await {
+        Ok(items) => Some(
+            items
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "entry_type": r.entry_type,
+                        "action_hash": r.action_hash,
+                        "created_at": r.created_at,
+                        "body": r.body,
+                        "refs": r.refs,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Err(e) => {
+            log::warn!("export_all_data_to_file: failed to list sealed records: {}", e);
+            None
+        }
+    };
+    let sealed_count = sealed.as_ref().map(|v| v.len()).unwrap_or(0);
+
+    let export = crate::backup::export_all_data_with_progress(
+        &state,
+        signatures,
+        sealed,
+        |current, total, app_name| {
+            emit_your_data_progress(
+                &app_handle,
+                "export",
+                format!("Packing {} backups...", app_name),
+                Some(current),
+                Some(total),
+            );
+        },
+    )?;
+
+    emit_your_data_progress(&app_handle, "export", "Writing file...".into(), None, None);
+    let content = serde_json::to_string_pretty(&export)
+        .map_err(|e| format!("Failed to serialize export: {}", e))?;
+    let bytes = content.len();
+    std::fs::write(&path, &content).map_err(|e| format!("Failed to write file: {}", e))?;
+
+    Ok(serde_json::json!({
+        "bytes": bytes,
+        "signatures_included": signatures_included,
+        "sealed_records": sealed_count,
+    }))
+}
+
+/// Export (decrypt) one app's backup straight to `path` - the file-writing
+/// sibling of `export_single_backup`, so the save dialog can come first and
+/// the payload never crosses IPC. Returns `{ bytes }`.
+#[tauri::command]
+pub fn export_single_backup_to_file(
+    client_id: String,
+    label: Option<String>,
+    path: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    let export = export_single_backup(client_id, label, state)?;
+    let content = serde_json::to_string_pretty(&export)
+        .map_err(|e| format!("Failed to serialize export: {}", e))?;
+    let bytes = content.len();
+    std::fs::write(&path, &content).map_err(|e| format!("Failed to write file: {}", e))?;
+    Ok(serde_json::json!({ "bytes": bytes }))
+}
+
 /// Export all vault data (identity + backups + signatures) as JSON.
 /// CAL-compliant export: everything needed to recreate the user's identity,
 /// data, and signature history independently.
@@ -3040,8 +3183,10 @@ pub async fn export_all_data(
 #[tauri::command]
 pub async fn import_vault_export(
     state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
     path: String,
 ) -> Result<serde_json::Value, String> {
+    emit_your_data_progress(&app_handle, "import", "Reading the export file...".into(), None, None);
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("Could not read the export file: {}", e))?;
     let export: serde_json::Value = serde_json::from_str(&raw)
@@ -3086,7 +3231,15 @@ pub async fn import_vault_export(
     let mut sealed_restored = 0usize;
     let mut sealed_skipped = 0usize;
     let _guard = state.commit_serial.lock().await;
-    for rec in &records {
+    let sealed_total = records.len();
+    for (rec_index, rec) in records.iter().enumerate() {
+        emit_your_data_progress(
+            &app_handle,
+            "import",
+            "Restoring private records...".into(),
+            Some(rec_index + 1),
+            Some(sealed_total),
+        );
         let entry_type = rec.get("entry_type").and_then(|v| v.as_str()).unwrap_or("");
         let created_at = rec.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
         let body = rec.get("body").cloned().unwrap_or(serde_json::Value::Null);
@@ -3126,9 +3279,17 @@ pub async fn import_vault_export(
         .and_then(|a| a.get("apps"))
         .and_then(|a| a.as_array())
     {
-        for app in apps {
+        let apps_total = apps.len();
+        for (app_index, app) in apps.iter().enumerate() {
             let client_id = app.get("client_id").and_then(|v| v.as_str()).unwrap_or("");
             let app_name = app.get("app_name").and_then(|v| v.as_str()).unwrap_or(client_id);
+            emit_your_data_progress(
+                &app_handle,
+                "import",
+                format!("Restoring {} backups...", app_name),
+                Some(app_index + 1),
+                Some(apps_total),
+            );
             if client_id.is_empty() {
                 continue;
             }
