@@ -278,19 +278,43 @@ pub fn save_backup(
                 .collect();
 
             while existing.len() >= MAX_BACKUPS_PER_APP {
-                // Find the oldest backup by reading metadata
-                let oldest = existing
+                // Rotation feeds on auto-timestamped snapshots ("backup-<ts>")
+                // FIRST. Named labels are app-managed state - "recovery" may
+                // hold the app's escrowed key, and age-based pruning would
+                // silently destroy it (named labels are rewritten rarely, so
+                // they're often the oldest file). A named label is pruned
+                // only when there are no auto snapshots left to rotate.
+                let candidates: Vec<(std::path::PathBuf, i64, bool)> = existing
                     .iter()
                     .filter_map(|entry| {
                         let json = std::fs::read_to_string(entry.path()).ok()?;
                         let enc: EncryptedBackup = serde_json::from_str(&json).ok()?;
-                        Some((entry.path(), enc.meta.created_at))
+                        let auto = enc
+                            .meta
+                            .label
+                            .as_deref()
+                            .map(|l| l.starts_with("backup-"))
+                            .unwrap_or(true);
+                        Some((entry.path(), enc.meta.created_at, auto))
                     })
-                    .min_by_key(|(_, ts)| *ts);
+                    .collect();
+                let oldest = candidates
+                    .iter()
+                    .filter(|(_, _, auto)| *auto)
+                    .min_by_key(|(_, ts, _)| *ts)
+                    .or_else(|| candidates.iter().min_by_key(|(_, ts, _)| *ts));
 
-                if let Some((oldest_path, _)) = oldest {
-                    log::info!("Auto-rotating: deleting oldest backup {:?}", oldest_path);
-                    let _ = std::fs::remove_file(&oldest_path);
+                if let Some((oldest_path, _, auto)) = oldest {
+                    if *auto {
+                        log::info!("Auto-rotating: deleting oldest snapshot {:?}", oldest_path);
+                    } else {
+                        log::warn!(
+                            "Auto-rotating: no auto snapshots left - deleting oldest NAMED backup {:?} (app is at the {}-backup cap)",
+                            oldest_path, MAX_BACKUPS_PER_APP
+                        );
+                    }
+                    let _ = std::fs::remove_file(oldest_path);
+                    let oldest_path = oldest_path.clone();
                     existing.retain(|e| e.path() != oldest_path);
                 } else {
                     break;
