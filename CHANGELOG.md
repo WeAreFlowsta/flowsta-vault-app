@@ -5,7 +5,7 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0-beta1] - 2026-07-12
+## [1.1.0] - 2026-07-12
 
 ### Added
 - **Single-app exports are restorable.** Per-app Export files now carry the
@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Per-app Export saved nothing.** The button silently failed for every
   app since the sectioned export shape shipped.
+- **Backup rotation can no longer silently delete a named backup** (such as
+  an app's escrowed recovery key) while auto-timestamped snapshots exist -
+  rotation now feeds on the timestamped ones first.
 - "OAuth activity" records are labeled with correct casing on Your Data.
 
 ## [1.0.1] - 2026-07-10
