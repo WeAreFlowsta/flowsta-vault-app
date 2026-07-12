@@ -134,9 +134,10 @@ interface ImportResult {
   backups_skipped: number;
 }
 
-/** "profile" -> "Profile", "app_record" -> "App record" */
+/** "profile" -> "Profile", "app_record" -> "App record",
+ *  "oauth_activity" -> "OAuth activity" (acronym casing). */
 function formatEntryType(t: string): string {
-  const words = t.replace(/[_-]/g, " ").trim();
+  const words = t.replace(/[_-]/g, " ").trim().replace(/\boauth\b/gi, "OAuth");
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 

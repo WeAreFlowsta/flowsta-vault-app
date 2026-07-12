@@ -30,6 +30,8 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "rpm", "dmg", "app", "nsis", "msi"],
+    "shortDescription": "The home of your Flowsta identity",
+    "longDescription": "Flowsta Vault holds your Flowsta identity, keys, and data on your own device - no one in control but you. Sign in to apps and websites, approve what each app can see, sign documents with Sign It, and keep encrypted backups plus a portable export of everything you author.",
     "externalBin": [
       "binaries/vault-holochain",
       "binaries/vault-lair-keystore"
