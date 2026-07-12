@@ -870,7 +870,7 @@ export default component$(() => {
         )}
 
         <GlassButton onClick$={handleImport} disabled={importing.value}>
-          {importing.value ? "Importing..." : "Choose Export File"}
+          {importing.value ? "Importing..." : "Import Export File"}
         </GlassButton>
         {importing.value && (
           <OperationProgress
