@@ -5,6 +5,37 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0-beta1] - 2026-07-12
+
+### Added
+- **Single-app exports are restorable.** Per-app Export files now carry the
+  raw backup bytes, and Restore from an Export recognizes them and restores
+  that one app's backup - idempotently. Importing one previously reported
+  "everything already here" without restoring anything.
+- **Export and import narrate their progress.** A stage label and progress
+  bar replace the bare "Exporting..." - including counts ("Restoring
+  private records (12/40)") and an honest reason when waiting on the
+  network.
+
+### Changed
+- **The save dialog opens instantly on export.** All gathering and writing
+  now happens after you pick a location, on the Rust side - large exports
+  no longer freeze the window or make the dialog take minutes to appear.
+- **Exports wait for your signature history by default.** After a cold
+  start the network can take a few minutes to warm up; the export now says
+  so and keeps trying, with a "Finish without signatures" button if you'd
+  rather not wait (they stay safe on the network either way).
+- The import button says "Import Export File"; export failures now show on
+  the page instead of only in the console; the export success message
+  includes the file size.
+- Installer metadata: the .deb/.rpm/MSI packages now carry a proper
+  description.
+
+### Fixed
+- **Per-app Export saved nothing.** The button silently failed for every
+  app since the sectioned export shape shipped.
+- "OAuth activity" records are labeled with correct casing on Your Data.
+
 ## [1.0.1] - 2026-07-10
 
 ### Fixed
