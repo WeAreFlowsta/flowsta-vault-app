@@ -829,9 +829,10 @@ export default component$(() => {
         <p class="mb-4 text-sm text-gray-400">
           Reset your vault or moved to a new device? After restoring your
           identity with your recovery phrase, import an export file to bring
-          your private records and app backups home. Only your own exports
-          work - the file must match this vault's identity. Safe to run more
-          than once: records you already have are skipped, never duplicated.
+          your private records and app backups home. Your full Vault export
+          and single-app exports both work. Only your own exports work - the
+          file must match this vault's identity. Safe to run more than once:
+          records you already have are skipped, never duplicated.
         </p>
 
         {importError.value && (

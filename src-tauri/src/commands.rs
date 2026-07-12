@@ -3210,6 +3210,67 @@ pub async fn import_vault_export(
         ));
     }
 
+    // ── Single-app export? ──────────────────────────────────────────
+    // A per-app Export (app + backup blocks, none of the full-export
+    // sections) restores just that app's backup. Without this branch the
+    // walk below found nothing and reported "everything already here" -
+    // untrue and misleading for this file type.
+    let is_single_app = export.get("app").is_some()
+        && export.get("backup").is_some()
+        && export.get("app_data").is_none()
+        && export.get("sealed_records").is_none();
+    if is_single_app {
+        emit_your_data_progress(
+            &app_handle,
+            "import",
+            "Restoring the app backup...".into(),
+            None,
+            None,
+        );
+        let client_id = export["app"]["client_id"]
+            .as_str()
+            .ok_or("This single-app export is missing its app.client_id")?;
+        let app_name = export["app"]["name"].as_str().unwrap_or(client_id);
+        let backup = &export["backup"];
+        let raw_b64 = backup
+            .get("restore_base64")
+            .and_then(|v| v.as_str())
+            .ok_or(
+                "This single-app export file is from an older Vault version and can't be \
+                 re-imported (it is still fully readable). To restore, use your full Vault \
+                 export (Download Export), or re-export this app on a current Vault.",
+            )?;
+        let bytes = base64_standard_decode(raw_b64)
+            .map_err(|_| "This export's restore data is corrupted".to_string())?;
+        let label = backup.get("label").and_then(|v| v.as_str());
+        let content_type = backup.get("content_type").and_then(|v| v.as_str());
+
+        let existing_labels: std::collections::HashSet<String> =
+            crate::backup::list_app_backups(&state.data_dir, client_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|m| m.label)
+                .collect();
+        let already_here = label.map(|l| existing_labels.contains(l)).unwrap_or(false);
+        let (backups_restored, backups_skipped) = if already_here {
+            (0, 1)
+        } else {
+            crate::backup::save_backup(state.inner(), client_id, app_name, label, &bytes, content_type)
+                .map_err(|e| format!("Could not restore the backup: {}", e))?;
+            (1, 0)
+        };
+        log::info!(
+            "[import] single-app export for {}: restored {} (skipped {})",
+            client_id, backups_restored, backups_skipped
+        );
+        return Ok(serde_json::json!({
+            "sealed_restored": 0,
+            "sealed_skipped": 0,
+            "backups_restored": backups_restored,
+            "backups_skipped": backups_skipped,
+        }));
+    }
+
     // ── Sealed records ──────────────────────────────────────────────
     // Dedupe on (entry_type, created_at) exactly like the migration
     // importer, so re-running is a no-op for records already present.
@@ -3456,6 +3517,9 @@ pub fn export_single_backup(
             "size_bytes": meta.data_size,
             "content_type": meta.content_type,
             "data": data_value,
+            // Raw bytes (base64) so this single-app file can be re-imported
+            // via Restore from an Export, same as the full export's snapshots.
+            "restore_base64": crate::key_derivation::base64_standard_encode(&data),
         },
     }))
 }
