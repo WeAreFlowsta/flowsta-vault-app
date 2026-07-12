@@ -2992,13 +2992,15 @@ pub fn delete_app_backup(
 
 /// Progress event for the Your Data page's long operations (export/import).
 /// `current`/`total` are set when the stage has countable units; a stage
-/// without them renders as indeterminate.
+/// without them renders as indeterminate. `can_skip` marks a stage the user
+/// may cut short (the signature wait - see `export_skip_signatures`).
 #[derive(Clone, serde::Serialize)]
 struct YourDataProgress {
     op: &'static str, // "export" | "import"
     stage: String,
     current: Option<usize>,
     total: Option<usize>,
+    can_skip: bool,
 }
 
 fn emit_your_data_progress(
@@ -3010,14 +3012,108 @@ fn emit_your_data_progress(
 ) {
     let _ = app_handle.emit(
         "your-data-progress",
-        YourDataProgress { op, stage, current, total },
+        YourDataProgress { op, stage, current, total, can_skip: false },
     );
 }
 
-/// How long the export waits for the live signature query before shipping
-/// without it. Signatures re-sync from the network on their own, and a cold
-/// conductor can take minutes to answer - an honest note beats a silent hang.
+/// Per-attempt bound on the live signature query - keeps the wait loop
+/// responsive so a hanging fetch can't block the user's skip for long.
 const EXPORT_SIGNATURES_TIMEOUT_SECS: u64 = 30;
+/// Outer cap on waiting for signatures. A complete export is the default -
+/// signatures are part of the user's data - but a cold conductor can take
+/// minutes to warm up, so the user gets a visible reason, a skip button,
+/// and this ceiling. Signatures re-sync from the network on their own.
+const EXPORT_SIGNATURES_MAX_WAIT_SECS: u64 = 600;
+/// Retry pause between signature attempts while waiting for warmup.
+const EXPORT_SIGNATURES_RETRY_SECS: u64 = 5;
+
+/// Skip signal for the export's signature wait ("Finish without signatures").
+static EXPORT_SKIP_SIGNATURES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+fn export_skip_notify() -> &'static tokio::sync::Notify {
+    static NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    NOTIFY.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Called by the "Finish without signatures" button while an export is
+/// waiting for the signature fetch.
+#[tauri::command]
+pub fn export_skip_signatures() {
+    EXPORT_SKIP_SIGNATURES.store(true, std::sync::atomic::Ordering::SeqCst);
+    export_skip_notify().notify_waiters();
+}
+
+/// Fetch signatures for the export: wait by default (complete export),
+/// skip by explicit user choice, hard ceiling as the backstop. Emits the
+/// waiting stage with `can_skip` so the UI can offer the button.
+async fn export_fetch_signatures_waiting(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+) -> Option<Vec<serde_json::Value>> {
+    use std::sync::atomic::Ordering;
+    EXPORT_SKIP_SIGNATURES.store(false, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let mut first_attempt = true;
+
+    loop {
+        if EXPORT_SKIP_SIGNATURES.load(Ordering::SeqCst) {
+            log::info!("export: user chose to finish without signatures");
+            return None;
+        }
+        if started.elapsed().as_secs() > EXPORT_SIGNATURES_MAX_WAIT_SECS {
+            log::warn!(
+                "export: signature fetch still failing after {}s - exporting without",
+                EXPORT_SIGNATURES_MAX_WAIT_SECS
+            );
+            return None;
+        }
+        let stage = if first_attempt {
+            "Gathering your signature history...".to_string()
+        } else {
+            "Waiting for your signature history - the network warms up for a few minutes after the Vault starts...".to_string()
+        };
+        let _ = app_handle.emit(
+            "your-data-progress",
+            YourDataProgress {
+                op: "export",
+                stage,
+                current: None,
+                total: None,
+                can_skip: !first_attempt,
+            },
+        );
+
+        let attempt = tokio::time::timeout(
+            std::time::Duration::from_secs(EXPORT_SIGNATURES_TIMEOUT_SECS),
+            get_my_signatures_inner(state),
+        );
+        tokio::select! {
+            result = attempt => match result {
+                Ok(Ok(sigs)) => return Some(sigs),
+                Ok(Err(e)) => {
+                    log::info!("export: signature fetch not ready yet ({}), retrying", e);
+                }
+                Err(_) => {
+                    log::info!("export: signature fetch attempt timed out, retrying");
+                }
+            },
+            _ = export_skip_notify().notified() => {
+                log::info!("export: user chose to finish without signatures");
+                return None;
+            }
+        }
+        first_attempt = false;
+
+        // Pause between attempts, still responsive to the skip button.
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(EXPORT_SIGNATURES_RETRY_SECS)) => {}
+            _ = export_skip_notify().notified() => {
+                log::info!("export: user chose to finish without signatures");
+                return None;
+            }
+        }
+    }
+}
 
 /// Export all vault data straight to `path`, narrating progress via
 /// `your-data-progress` events. The payload never crosses IPC to the
@@ -3030,32 +3126,7 @@ pub async fn export_all_data_to_file(
     app_handle: tauri::AppHandle,
     path: String,
 ) -> Result<serde_json::Value, String> {
-    emit_your_data_progress(
-        &app_handle,
-        "export",
-        "Fetching your signatures from the network...".into(),
-        None,
-        None,
-    );
-    let signatures = match tokio::time::timeout(
-        std::time::Duration::from_secs(EXPORT_SIGNATURES_TIMEOUT_SECS),
-        get_my_signatures_inner(state.inner()),
-    )
-    .await
-    {
-        Ok(Ok(sigs)) => Some(sigs),
-        Ok(Err(e)) => {
-            log::warn!("export_all_data_to_file: signatures skipped: {}", e);
-            None
-        }
-        Err(_) => {
-            log::warn!(
-                "export_all_data_to_file: signature fetch exceeded {}s (network still warming up?) - exporting without them",
-                EXPORT_SIGNATURES_TIMEOUT_SECS
-            );
-            None
-        }
-    };
+    let signatures = export_fetch_signatures_waiting(state.inner(), &app_handle).await;
     let signatures_included = signatures.is_some();
 
     emit_your_data_progress(

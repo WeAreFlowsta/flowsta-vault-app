@@ -119,6 +119,8 @@ interface ProgressPayload {
   stage: string;
   current: number | null;
   total: number | null;
+  /** The user may cut this stage short (the signature wait). */
+  can_skip: boolean;
 }
 
 interface ExportToFileResult {
@@ -790,9 +792,9 @@ export default component$(() => {
                 Keep it somewhere safe!
                 {exportResult.value && !exportResult.value.signatures_included && (
                   <>
-                    {" "}Your signature history wasn't included this time - the
-                    network was still warming up. It re-syncs on its own; export
-                    again in a few minutes to include it.
+                    {" "}Your signature history wasn't included this time. It
+                    stays safe on the network and re-syncs on its own; export
+                    again later for a copy that includes it.
                   </>
                 )}
               </p>
@@ -815,10 +817,20 @@ export default component$(() => {
           {exporting.value ? "Exporting..." : "Download Export"}
         </GlassButton>
         {exporting.value && (
-          <OperationProgress
-            progress={exportProgress.value}
-            fallback="Preparing your export..."
-          />
+          <>
+            <OperationProgress
+              progress={exportProgress.value}
+              fallback="Preparing your export..."
+            />
+            {exportProgress.value?.can_skip && (
+              <button
+                class="mt-2 text-xs text-gray-400 underline hover:text-gray-200"
+                onClick$={() => invoke("export_skip_signatures")}
+              >
+                Finish without signatures (they stay safe on the network)
+              </button>
+            )}
+          </>
         )}
       </div>
 

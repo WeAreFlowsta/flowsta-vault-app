@@ -455,6 +455,7 @@ pub fn run() {
             commands::delete_app_backup,
             commands::export_all_data,
             commands::export_all_data_to_file,
+            commands::export_skip_signatures,
             commands::import_vault_export,
             commands::list_app_backup_details,
             commands::export_single_backup,
