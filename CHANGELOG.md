@@ -5,6 +5,16 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-07-15
+
+### Added
+- **Connected apps can publish signatures to Sign It.** When an app you have
+  linked to your Vault signs a file (for example a chat transcript export),
+  the signing dialog can now also publish that signature to Sign It, so
+  anyone can verify the exact file at flowsta.com/sign-it. The dialog shows
+  what is being signed and how many free signatures you have left, and
+  nothing publishes without your approval.
+
 ## [1.1.0] - 2026-07-12
 
 ### Added
