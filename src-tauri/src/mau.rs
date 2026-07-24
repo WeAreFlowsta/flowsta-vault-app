@@ -1,11 +1,16 @@
-//! MAU (Monthly Active Users) tracking for third-party Holochain apps.
+//! Active-connections reporting for third-party Holochain apps
+//! (formerly "MAU tracking" - the billing metric is active connections).
 //!
 //! Records first IPC interaction per client_id per calendar month.
 //! Events are HMAC-signed and stored encrypted locally, then synced
 //! to the Flowsta API when connectivity is available.
 //!
-//! Privacy: Each app gets a random UUID analytics_id (same zero-knowledge
-//! pattern as OAuth MAU tracking). Developers see aggregate counts only.
+//! Privacy: the sync payload is client_id + month_year ONLY - which app,
+//! which month, nothing else. The server derives its own counting pseudonym;
+//! no analytics id, activity count, or timestamps leave the device. The
+//! richer local record (analytics_id/counts/timestamps in MauEvent) is
+//! retained purely for on-disk format stability and stays on-device.
+//! Developers see aggregate counts only.
 
 use crate::commands::AppState;
 use aes_gcm::{aead::Aead, Aes256Gcm, Nonce};
@@ -465,17 +470,17 @@ pub async fn sync_mau_to_api(app_state: &AppState) -> Result<usize, String> {
     let api_url = option_env!("FLOWSTA_API_URL")
         .unwrap_or("https://auth-api.flowsta.com");
 
-    // Build request payload
+    // Build request payload. Active-connections metric: the server derives
+    // the counted key itself, so the Vault reports only WHICH app and WHICH
+    // month - no analytics id, no activity counts, no timestamps leave the
+    // device. (The local store keeps its richer record purely on-device;
+    // its on-disk format and HMAC are unchanged.)
     let events_json: Vec<serde_json::Value> = pending
         .iter()
         .map(|e| {
             serde_json::json!({
                 "client_id": e.client_id,
-                "analytics_id": e.analytics_id,
                 "month_year": e.month_year,
-                "first_seen_at": e.first_seen_at,
-                "last_seen_at": e.last_seen_at,
-                "activity_count": e.activity_count,
             })
         })
         .collect();

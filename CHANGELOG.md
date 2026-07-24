@@ -5,6 +5,17 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-07-24
+
+### Changed
+- **The Vault now sends less data home.** The monthly usage record for
+  connected apps has been reduced to just two fields: which app and which
+  month. The per-app analytics identifier, activity counts, and first/last
+  seen timestamps no longer leave your device. This is enough for developer
+  billing (which counts active connections) and nothing more. The
+  "What the Vault Sends Home" page on docs.flowsta.com reflects the new
+  payload exactly.
+
 ## [1.1.1] - 2026-07-15
 
 ### Added
