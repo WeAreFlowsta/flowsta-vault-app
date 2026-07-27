@@ -576,7 +576,8 @@ export default component$(() => {
           <h3 class="text-lg font-semibold text-white">App Backups</h3>
           {backupStats.value.app_count > 0 && (
             <span class="text-sm text-gray-400">
-              {backupStats.value.total_backups} backup{backupStats.value.total_backups !== 1 ? "s" : ""} &middot;{" "}
+              {backupStats.value.app_count} app
+              {backupStats.value.app_count !== 1 ? "s" : ""} &middot;{" "}
               {formatBytes(backupStats.value.total_size)}
             </span>
           )}
