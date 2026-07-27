@@ -58,7 +58,7 @@ pub fn gunzip_backup(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// The decompressed-if-gzipped view of a payload, by content type.
-fn plain_view<'a>(data: &'a [u8], content_type: &str) -> std::borrow::Cow<'a, [u8]> {
+pub(crate) fn plain_view<'a>(data: &'a [u8], content_type: &str) -> std::borrow::Cow<'a, [u8]> {
     if content_type.contains("gzip") {
         match gunzip_backup(data) {
             Ok(v) => std::borrow::Cow::Owned(v),

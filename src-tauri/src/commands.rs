@@ -3534,8 +3534,14 @@ pub fn export_single_backup(
 
     // Parse the backup data + canonicalise the human-readable view if it
     // follows the SDK's canonical shape; otherwise pass through unchanged.
+    // Gzipped objects (per-conversation backups) decompress for the
+    // readable view; restore_base64 below stays the verbatim bytes.
     let parsed_data = if meta.content_type.contains("json") {
-        serde_json::from_slice::<serde_json::Value>(&data).ok()
+        serde_json::from_slice::<serde_json::Value>(&crate::backup::plain_view(
+            &data,
+            &meta.content_type,
+        ))
+        .ok()
     } else {
         None
     };
