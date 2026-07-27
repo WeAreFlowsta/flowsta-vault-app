@@ -179,6 +179,15 @@ pub struct AppBackupSummary {
     /// or None for legacy backups / when no backup metadata has a summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_summary: Option<BackupRecordSummary>,
+    /// True when the app stores per-object backups indexed by a "manifest"
+    /// label - the UI presents these as one summarized backup, not a pile
+    /// of snapshots.
+    #[serde(default)]
+    pub has_manifest: bool,
+    /// Distinct conversations among per-object backups ("conv-*" labels,
+    /// multi-part ".pN" objects counted once).
+    #[serde(default)]
+    pub conversation_count: usize,
 }
 
 /// Overall backup stats for the vault.
@@ -526,6 +535,10 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
             let mut app_name = dir_name.clone();
             let mut client_id = dir_name.clone();
             let mut latest_summary: Option<BackupRecordSummary> = None;
+            let mut has_manifest = false;
+            let mut manifest_summary: Option<BackupRecordSummary> = None;
+            let mut conv_bases: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
 
             if let Ok(files) = std::fs::read_dir(entry.path()) {
                 for file in files.filter_map(|f| f.ok()) {
@@ -537,11 +550,33 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
                         if let Ok(enc) = serde_json::from_str::<EncryptedBackup>(&json) {
                             app_backups += 1;
                             app_size += enc.meta.data_size;
+                            if let Some(label) = enc.meta.label.as_deref() {
+                                if label == "manifest" {
+                                    has_manifest = true;
+                                } else if let Some(rest) = label.strip_prefix("conv-") {
+                                    // Multi-part objects ("....pN") are one
+                                    // conversation.
+                                    let base = rest
+                                        .rsplit_once(".p")
+                                        .filter(|(_, n)| n.chars().all(|c| c.is_ascii_digit()))
+                                        .map(|(b, _)| b)
+                                        .unwrap_or(rest);
+                                    conv_bases.insert(base.to_string());
+                                }
+                            }
                             if enc.meta.created_at > last_at {
                                 last_at = enc.meta.created_at;
                                 app_name = enc.meta.app_name.clone();
                                 client_id = enc.meta.client_id.clone();
                                 latest_summary = enc.meta.summary.clone();
+                            }
+                            // The manifest's summary describes the WHOLE
+                            // per-object backup - it wins over whichever
+                            // object happens to be newest.
+                            if enc.meta.label.as_deref() == Some("manifest") {
+                                if enc.meta.summary.is_some() {
+                                    manifest_summary = enc.meta.summary.clone();
+                                }
                             }
                         }
                     }
@@ -557,7 +592,9 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
                     backup_count: app_backups,
                     total_size: app_size,
                     last_backup_at: last_at,
-                    latest_summary,
+                    latest_summary: manifest_summary.or(latest_summary),
+                    has_manifest,
+                    conversation_count: conv_bases.len(),
                 });
             }
         }
@@ -622,7 +659,11 @@ pub fn delete_backup(data_dir: &Path, client_id: &str, label: Option<&str>) -> R
 /// Returns None for non-JSON, non-canonical, or missing-summary cases.
 fn extract_summary_if_canonical(data: &[u8]) -> Option<BackupRecordSummary> {
     let payload: serde_json::Value = serde_json::from_slice(data).ok()?;
-    if !is_canonical_backup(&payload) {
+    // Canonical monoliths (v1 + cells) and per-object manifests (v2 +
+    // conversations index) both carry a top-level _summary.
+    let is_manifest = payload.get("version").and_then(|v| v.as_u64()) == Some(2)
+        && payload.get("conversations").and_then(|c| c.as_array()).is_some();
+    if !is_canonical_backup(&payload) && !is_manifest {
         return None;
     }
     let summary_obj = payload.get("_summary")?.as_object()?;

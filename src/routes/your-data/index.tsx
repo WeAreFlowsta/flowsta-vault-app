@@ -13,6 +13,12 @@ interface BackupAppSummary {
   backup_count: number;
   total_size: number;
   last_backup_at: number;
+  /** App stores per-object backups indexed by a manifest - present as one
+   *  summarized backup, not a pile of snapshots. */
+  has_manifest?: boolean;
+  /** Distinct conversations among the per-object backups. */
+  conversation_count?: number;
+  latest_summary?: BackupRecordSummary | null;
 }
 
 interface BackupStats {
@@ -209,6 +215,8 @@ export default component$(() => {
 
   // Expanded app -> its individual backups
   const expandedApp = useSignal<string | null>(null);
+  /** Conversations shown in an expanded per-object app (batched list). */
+  const convVisible = useSignal(25);
   const appBackups = useSignal<BackupMeta[]>([]);
   const loadingBackups = useSignal(false);
 
@@ -318,6 +326,7 @@ export default component$(() => {
       return;
     }
     expandedApp.value = clientId;
+    convVisible.value = 25;
     loadingBackups.value = true;
     try {
       const metas = await invoke<BackupMeta[]>("list_app_backup_details", { clientId });
@@ -635,6 +644,14 @@ export default component$(() => {
                               &middot; doesn't update - your live data is in
                               Private Records above
                             </>
+                          ) : app.has_manifest ? (
+                            <>
+                              {app.conversation_count} conversation
+                              {app.conversation_count !== 1 ? "s" : ""} &middot;{" "}
+                              {formatBytes(app.total_size)} &middot; backed up
+                              individually as they grow &middot; Last{" "}
+                              {timeAgo(app.last_backup_at)}
+                            </>
                           ) : (
                             <>
                               {app.backup_count} backup
@@ -684,12 +701,33 @@ export default component$(() => {
                       ) : appBackups.value.length === 0 ? (
                         <p class="px-4 py-3 text-xs text-gray-500">No backups found.</p>
                       ) : (
-                        <div class="divide-y divide-gray-800">
-                          {appBackups.value.map((backup) => {
+                        (() => {
+                          // Per-object apps: state objects (manifest, keys)
+                          // list first; the conversation pile renders as its
+                          // own batched section instead of an endless scroll.
+                          const isConv = (b: BackupMeta) =>
+                            !!b.label?.startsWith("conv-");
+                          const convs = appBackups.value
+                            .filter(isConv)
+                            .sort((a, b) => b.created_at - a.created_at);
+                          const others = appBackups.value.filter(
+                            (b) => !isConv(b),
+                          );
+                          const renderRow = (backup: BackupMeta) => {
                             const labelKey = `${backup.client_id}:${backup.label || "latest"}`;
                             const isExporting = exportingLabel.value === labelKey;
                             const isDeleteConfirm = deleteSingleConfirm.value === labelKey;
                             const summaryLabel = formatSummary(backup.summary);
+                            const convMatch = backup.label?.match(
+                              /^conv-([0-9a-f]+?)(?:\.p(\d+))?$/,
+                            );
+                            const rowTitle = backup.label?.startsWith("account-migration-")
+                              ? "Migration snapshot"
+                              : backup.label === "manifest"
+                                ? "Backup index (keys, AI configs, memory)"
+                                : convMatch
+                                  ? `Conversation ${convMatch[1].slice(0, 8)}${convMatch[2] !== undefined ? ` - part ${Number(convMatch[2]) + 1}` : ""}`
+                                  : backup.label || "latest";
 
                             return (
                               <div
@@ -697,11 +735,7 @@ export default component$(() => {
                                 class="flex items-center justify-between px-4 py-3 pl-11"
                               >
                                 <div class="min-w-0">
-                                  <p class="text-sm text-white">
-                                    {backup.label?.startsWith("account-migration-")
-                                      ? "Migration snapshot"
-                                      : backup.label || "latest"}
-                                  </p>
+                                  <p class="text-sm text-white">{rowTitle}</p>
                                   <p class="text-xs text-gray-500">
                                     {formatDateTime(backup.created_at)} &middot;{" "}
                                     {formatBytes(backup.data_size)}
@@ -750,8 +784,33 @@ export default component$(() => {
                                 </div>
                               </div>
                             );
-                          })}
-                        </div>
+                          };
+
+                          return (
+                            <div class="divide-y divide-gray-800">
+                              {others.map(renderRow)}
+                              {convs.length > 0 && (
+                                <p class="px-4 py-2 pl-11 text-[11px] uppercase tracking-wide text-gray-500">
+                                  Conversations ({convs.length}) &middot; newest
+                                  first &middot; each backed up as it grows
+                                </p>
+                              )}
+                              {convs.slice(0, convVisible.value).map(renderRow)}
+                              {convs.length > convVisible.value && (
+                                <button
+                                  type="button"
+                                  class="w-full px-4 py-3 pl-11 text-left text-xs text-amber-400 hover:text-amber-300"
+                                  onClick$={() => {
+                                    convVisible.value += 100;
+                                  }}
+                                >
+                                  Show more ({convs.length - convVisible.value}{" "}
+                                  remaining)
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })()
                       )}
                     </div>
                   )}
