@@ -20,11 +20,57 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const BACKUP_STORAGE_CONSTANT: &str = "flowsta-backup-storage";
 
-/// Maximum backup size per app: 50 MB.
-const MAX_BACKUP_SIZE: usize = 50 * 1024 * 1024;
+/// Maximum size of ONE backup object (transfer/memory guard, not a storage
+/// ceiling - apps store as many named objects as they need and split
+/// oversized payloads into parts). Advertised to apps via GET /backup/limits
+/// so they never hardcode a twin of this number.
+pub const MAX_BACKUP_SIZE: usize = 50 * 1024 * 1024;
 
-/// Maximum number of backups per app.
-const MAX_BACKUPS_PER_APP: usize = 10;
+/// Maximum number of AUTO-TIMESTAMPED snapshots per app ("backup-<ts>"
+/// labels only). Named labels are app-managed state and are never rotated.
+pub const MAX_BACKUPS_PER_APP: usize = 10;
+
+/// Decompression guard for gzipped backups: readable-export/summary
+/// decompression refuses to inflate past this (zip-bomb hygiene). The raw
+/// bytes themselves always round-trip verbatim regardless.
+const MAX_GUNZIP_BYTES: usize = 512 * 1024 * 1024;
+
+/// Gunzip a gzipped backup payload (for the readable export view and the
+/// Your Data summary). Fails soft - callers fall back to the raw bytes.
+pub fn gunzip_backup(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut decoder = flate2::read::GzDecoder::new(data);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = decoder
+            .read(&mut buf)
+            .map_err(|e| format!("gunzip failed: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        if out.len() + n > MAX_GUNZIP_BYTES {
+            return Err("gunzip refused: decompressed size over guard".into());
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    Ok(out)
+}
+
+/// The decompressed-if-gzipped view of a payload, by content type.
+fn plain_view<'a>(data: &'a [u8], content_type: &str) -> std::borrow::Cow<'a, [u8]> {
+    if content_type.contains("gzip") {
+        match gunzip_backup(data) {
+            Ok(v) => std::borrow::Cow::Owned(v),
+            Err(e) => {
+                log::warn!("Backup marked gzip but did not decompress: {}", e);
+                std::borrow::Cow::Borrowed(data)
+            }
+        }
+    } else {
+        std::borrow::Cow::Borrowed(data)
+    }
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -271,21 +317,20 @@ pub fn save_backup(
         let is_overwrite = target_path.exists();
 
         if !is_overwrite {
-            let mut existing: Vec<_> = std::fs::read_dir(&app_dir)
-                .map_err(|e| format!("Failed to read backup dir: {}", e))?
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("enc"))
-                .collect();
-
-            while existing.len() >= MAX_BACKUPS_PER_APP {
-                // Rotation feeds on auto-timestamped snapshots ("backup-<ts>")
-                // FIRST. Named labels are app-managed state - "recovery" may
-                // hold the app's escrowed key, and age-based pruning would
-                // silently destroy it (named labels are rewritten rarely, so
-                // they're often the oldest file). A named label is pruned
-                // only when there are no auto snapshots left to rotate.
-                let candidates: Vec<(std::path::PathBuf, i64, bool)> = existing
-                    .iter()
+            // Rotation applies ONLY to auto-timestamped snapshots
+            // ("backup-<ts>") - versioned copies of the same thing, where
+            // keeping the newest N is the point. Named labels are
+            // app-managed STATE, not snapshots: "recovery" holds an escrowed
+            // key, and apps store per-object data (e.g. one backup per
+            // conversation) under stable labels. Counting them toward a cap
+            // would make saving one object silently delete another - so
+            // named labels are never rotated, only overwritten or deleted
+            // by their app (or the user, from Your Data).
+            let mut auto_snapshots: Vec<(std::path::PathBuf, i64)> =
+                std::fs::read_dir(&app_dir)
+                    .map_err(|e| format!("Failed to read backup dir: {}", e))?
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("enc"))
                     .filter_map(|entry| {
                         let json = std::fs::read_to_string(entry.path()).ok()?;
                         let enc: EncryptedBackup = serde_json::from_str(&json).ok()?;
@@ -295,27 +340,21 @@ pub fn save_backup(
                             .as_deref()
                             .map(|l| l.starts_with("backup-"))
                             .unwrap_or(true);
-                        Some((entry.path(), enc.meta.created_at, auto))
+                        auto.then(|| (entry.path(), enc.meta.created_at))
                     })
                     .collect();
-                let oldest = candidates
-                    .iter()
-                    .filter(|(_, _, auto)| *auto)
-                    .min_by_key(|(_, ts, _)| *ts)
-                    .or_else(|| candidates.iter().min_by_key(|(_, ts, _)| *ts));
 
-                if let Some((oldest_path, _, auto)) = oldest {
-                    if *auto {
-                        log::info!("Auto-rotating: deleting oldest snapshot {:?}", oldest_path);
-                    } else {
-                        log::warn!(
-                            "Auto-rotating: no auto snapshots left - deleting oldest NAMED backup {:?} (app is at the {}-backup cap)",
-                            oldest_path, MAX_BACKUPS_PER_APP
-                        );
-                    }
+            let saving_auto = label_str.starts_with("backup-");
+            while saving_auto && auto_snapshots.len() >= MAX_BACKUPS_PER_APP {
+                if let Some(idx) = auto_snapshots
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, (_, ts))| *ts)
+                    .map(|(i, _)| i)
+                {
+                    let (oldest_path, _) = auto_snapshots.remove(idx);
+                    log::info!("Auto-rotating: deleting oldest snapshot {:?}", oldest_path);
                     let _ = std::fs::remove_file(oldest_path);
-                    let oldest_path = oldest_path.clone();
-                    existing.retain(|e| e.path() != oldest_path);
                 } else {
                     break;
                 }
@@ -327,8 +366,12 @@ pub fn save_backup(
     let (ciphertext, nonce_bytes) = encrypt_with_key(data, &backup_key)?;
 
     // Extract the canonical-shape summary if present, so the Your Data UI can
-    // render per-entry-type counts without decrypting the backup.
-    let summary = extract_summary_if_canonical(data);
+    // render per-entry-type counts without decrypting the backup. Gzipped
+    // payloads are inflated just for this read.
+    let summary = extract_summary_if_canonical(&plain_view(
+        data,
+        content_type.unwrap_or("application/json"),
+    ));
 
     let meta = BackupMeta {
         client_id: client_id.to_string(),
@@ -680,9 +723,16 @@ pub fn export_all_data_with_progress(
             let label = meta.label.as_deref().unwrap_or("latest");
             match retrieve_backup(app_state, &app_summary.client_id, Some(label)) {
                 Ok((data, backup_meta)) => {
-                    // Parse the payload to JSON, hex-fallback for non-JSON content.
+                    // Parse the payload to JSON for the readable view -
+                    // gunzipping first when the app stored it compressed.
+                    // Hex-fallback for non-JSON content. The verbatim bytes
+                    // ride in restore_base64 below either way.
                     let parsed_data = if backup_meta.content_type.contains("json") {
-                        serde_json::from_slice::<serde_json::Value>(&data).ok()
+                        serde_json::from_slice::<serde_json::Value>(&plain_view(
+                            &data,
+                            &backup_meta.content_type,
+                        ))
+                        .ok()
                     } else {
                         None
                     };
@@ -862,4 +912,101 @@ pub fn export_all_data_with_progress(
     });
 
     Ok(export)
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    use crate::commands::AppState;
+
+    fn state_with_key(dir: &Path) -> AppState {
+        let state = AppState::new(dir.to_path_buf());
+        *state.backup_key.lock().unwrap() = Some([7u8; 32]);
+        state
+    }
+
+    #[test]
+    fn named_labels_never_rotate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_with_key(tmp.path());
+        for i in 0..(MAX_BACKUPS_PER_APP + 5) {
+            save_backup(
+                &state,
+                "app.test",
+                "Test App",
+                Some(&format!("conv-{}", i)),
+                b"{\"v\":1}",
+                None,
+            )
+            .unwrap();
+        }
+        let metas = list_app_backups(tmp.path(), "app.test").unwrap();
+        assert_eq!(metas.len(), MAX_BACKUPS_PER_APP + 5);
+    }
+
+    #[test]
+    fn auto_snapshots_rotate_and_spare_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_with_key(tmp.path());
+        for i in 0..3 {
+            save_backup(
+                &state,
+                "app.test",
+                "Test App",
+                Some(&format!("conv-{}", i)),
+                b"{}",
+                None,
+            )
+            .unwrap();
+        }
+        // Auto labels carry a unix-second timestamp; make them distinct.
+        for i in 0..(MAX_BACKUPS_PER_APP + 4) {
+            save_backup(
+                &state,
+                "app.test",
+                "Test App",
+                Some(&format!("backup-{}", 1000 + i)),
+                b"{}",
+                None,
+            )
+            .unwrap();
+        }
+        let metas = list_app_backups(tmp.path(), "app.test").unwrap();
+        let named = metas
+            .iter()
+            .filter(|m| m.label.as_deref().map(|l| l.starts_with("conv-")).unwrap_or(false))
+            .count();
+        let autos = metas
+            .iter()
+            .filter(|m| m.label.as_deref().map(|l| l.starts_with("backup-")).unwrap_or(false))
+            .count();
+        assert_eq!(named, 3);
+        assert_eq!(autos, MAX_BACKUPS_PER_APP);
+    }
+
+    #[test]
+    fn gzip_summary_and_roundtrip() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_with_key(tmp.path());
+        let canonical = br#"{"version":1,"cells":[{"records":[]}],"_summary":{"countsByEntryType":{"Message":2},"totalRecords":2}}"#;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(canonical).unwrap();
+        let gz = enc.finish().unwrap();
+        let meta = save_backup(
+            &state,
+            "app.test",
+            "Test App",
+            Some("conv-a"),
+            &gz,
+            Some("application/json+gzip"),
+        )
+        .unwrap();
+        // Summary extracted through the gunzip path.
+        assert_eq!(meta.summary.as_ref().unwrap().total_records, 2);
+        // Raw bytes round-trip verbatim.
+        let (data, _) = retrieve_backup(&state, "app.test", Some("conv-a")).unwrap();
+        assert_eq!(data, gz);
+        assert_eq!(gunzip_backup(&data).unwrap(), canonical.to_vec());
+    }
 }

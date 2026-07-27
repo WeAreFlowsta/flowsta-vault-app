@@ -46,6 +46,7 @@ scrypt = { version = "0.11", default-features = false }
 
 # Encoding
 hex = "0.4"
+flate2 = "1"
 base64 = "0.22"
 bs58 = "0.5"
 percent-encoding = "2"
@@ -95,6 +96,7 @@ thiserror = "1.0"
 # TOTP computation in the staging migration tests (otplib-compatible
 # HMAC-SHA1 codes for the two-factor account variant)
 sha1 = "0.10"
+tempfile = "3"
 
 # Linux-only: PR_SET_PDEATHSIG so child processes (lair-keystore, holochain
 # conductor) get SIGTERM if the parent vault process dies for any reason.

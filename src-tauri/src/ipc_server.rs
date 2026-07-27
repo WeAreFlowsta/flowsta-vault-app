@@ -1571,6 +1571,29 @@ async fn backup_handler(
 
 // ── GET /backup/list ───────────────────────────────────────────────
 
+/// GET /backup/limits - the backup contract, advertised so apps size their
+/// objects against the vault they're actually talking to instead of
+/// hardcoding a twin constant that drifts. Non-sensitive; no origin gate.
+async fn backup_limits_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let origin = extract_origin(&headers);
+    track_request(&state.app_state, origin.as_deref(), "backup_limits");
+    Json(serde_json::json!({
+        // One backup OBJECT may be at most this many bytes (transfer/memory
+        // guard). Apps split larger payloads into named parts.
+        "max_object_bytes": crate::backup::MAX_BACKUP_SIZE,
+        // Only auto-timestamped snapshots ("backup-<ts>") rotate, keeping
+        // the newest N. Named labels are app-managed state - never rotated.
+        "auto_snapshot_keep": crate::backup::MAX_BACKUPS_PER_APP,
+        "named_labels_rotate": false,
+        // The server understands gzipped payloads (content_type containing
+        // "gzip"): readable exports decompress; raw bytes round-trip as-is.
+        "gzip_supported": true,
+    }))
+}
+
 async fn backup_list_handler(
     State(state): State<Arc<IpcState>>,
     headers: HeaderMap,
@@ -3940,6 +3963,7 @@ pub async fn start_ipc_server(
             "/backup",
             post(backup_handler).layer(DefaultBodyLimit::max(55 * 1024 * 1024)),
         )
+        .route("/backup/limits", get(backup_limits_handler))
         .route("/backup/list", get(backup_list_handler))
         .route("/backup/retrieve", post(backup_retrieve_handler))
         .route("/backup/delete", post(backup_delete_handler))
