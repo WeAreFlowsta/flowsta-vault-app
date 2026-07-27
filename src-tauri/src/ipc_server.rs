@@ -1457,7 +1457,11 @@ struct BackupRequest {
     /// timestamped label so each call creates a new snapshot.
     label: Option<String>,
     /// The data to back up (JSON value - will be serialized to bytes).
-    data: serde_json::Value,
+    /// Exactly one of `data` / `data_base64` must be present.
+    data: Option<serde_json::Value>,
+    /// Raw bytes, base64-encoded - for compressed or binary payloads
+    /// (e.g. gzipped JSON with a matching content_type). Stored verbatim.
+    data_base64: Option<String>,
     /// MIME type hint (default: application/json).
     content_type: Option<String>,
 }
@@ -1517,16 +1521,38 @@ async fn backup_handler(
         }
     }
 
-    // Serialize data to bytes
-    let data_bytes = serde_json::to_vec(&req.data).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(IpcError {
-                error: "invalid_data".into(),
-                description: Some(format!("Failed to serialize data: {}", e)),
-            }),
-        )
-    })?;
+    // Serialize data to bytes - JSON value, or verbatim base64 bytes.
+    let data_bytes = match (&req.data, &req.data_base64) {
+        (Some(json), None) => serde_json::to_vec(json).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(IpcError {
+                    error: "invalid_data".into(),
+                    description: Some(format!("Failed to serialize data: {}", e)),
+                }),
+            )
+        })?,
+        (None, Some(b64)) => base64_standard_decode(b64).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(IpcError {
+                    error: "invalid_data".into(),
+                    description: Some("data_base64 is not valid base64".into()),
+                }),
+            )
+        })?,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(IpcError {
+                    error: "invalid_data".into(),
+                    description: Some(
+                        "Provide exactly one of data (JSON) or data_base64 (bytes).".into(),
+                    ),
+                }),
+            ))
+        }
+    };
 
     // Save the backup
     let meta = crate::backup::save_backup(
@@ -1715,16 +1741,7 @@ async fn backup_retrieve_handler(
         )
     })?;
 
-    // Try to return as JSON, fall back to hex-encoded string
-    let data_value: serde_json::Value = if meta.content_type.contains("json") {
-        serde_json::from_slice(&data).unwrap_or_else(|_| {
-            serde_json::Value::String(hex::encode(&data))
-        })
-    } else {
-        serde_json::Value::String(hex::encode(&data))
-    };
-
-    let resp = serde_json::json!({
+    let mut resp = serde_json::json!({
         "success": true,
         "client_id": meta.client_id,
         "app_name": meta.app_name,
@@ -1732,8 +1749,21 @@ async fn backup_retrieve_handler(
         "created_at": meta.created_at,
         "data_size": meta.data_size,
         "content_type": meta.content_type,
-        "data": data_value,
     });
+
+    // Compressed/binary payloads return verbatim bytes as data_base64;
+    // plain JSON returns as `data` (hex-string fallback preserved for
+    // legacy non-JSON content saved without a gzip marker).
+    if meta.content_type.contains("gzip") {
+        resp["data_base64"] = serde_json::Value::String(
+            crate::key_derivation::base64_standard_encode(&data),
+        );
+    } else if meta.content_type.contains("json") {
+        resp["data"] = serde_json::from_slice(&data)
+            .unwrap_or_else(|_| serde_json::Value::String(hex::encode(&data)));
+    } else {
+        resp["data"] = serde_json::Value::String(hex::encode(&data));
+    }
 
     Ok(axum::response::IntoResponse::into_response(Json(resp)))
 }
