@@ -5,6 +5,24 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-07-28
+
+### Fixed
+- **The Vault now finds its bundled components even when the system can't
+  say where the app is installed.** On some Windows machines the installed
+  resources folder could not be resolved; the Vault then looked in the
+  wrong place and every start failed with "hApp bundle not found". It now
+  falls back to the folder next to the app itself, and the log states
+  plainly which path was used and why.
+
+### Changed
+- **App backups are easier to read and manage.** Your Data groups an app's
+  backups by what they are (for example, one entry per conversation)
+  instead of listing raw objects, the App Backups overview counts apps
+  rather than objects, and exporting a single backup gives you readable
+  content. Apps can save and retrieve backups under stable names with the
+  data passed through byte-for-byte.
+
 ## [1.1.2] - 2026-07-24
 
 ### Changed
