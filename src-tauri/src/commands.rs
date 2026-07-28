@@ -926,15 +926,7 @@ pub(crate) async fn ensure_conductor_alive(
     };
 
     let data_dir = state.data_dir.clone();
-    #[cfg(debug_assertions)]
-    let resource_dir =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
-    #[cfg(not(debug_assertions))]
-    let resource_dir = app_handle
-        .path()
-        .resource_dir()
-        .map(|d| d.join("resources"))
-        .unwrap_or_else(|_| data_dir.clone());
+    let resource_dir = resolve_resource_dir(app_handle, &data_dir);
 
     log::info!("[watchdog] running start_holochain to bring conductor back");
     let new_handle = crate::conductor::start_holochain(
@@ -961,6 +953,57 @@ pub(crate) async fn ensure_conductor_alive(
     Ok(())
 }
 
+/// Resolve the directory holding the bundled .happ files. Tauri's
+/// resource_dir() can fail outright on some machines (seen in the wild on
+/// Windows 2026-07: it errored and the old silent data-dir fallback made
+/// every conductor start die with "hApp bundle not found" at a path the
+/// bundles never live at). Fall back to the exe-relative resources dir,
+/// then to the data dir - loudly, so the log names the real problem.
+#[cfg(debug_assertions)]
+pub(crate) fn resolve_resource_dir(
+    _app_handle: &tauri::AppHandle,
+    _data_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    // Dev mode: Tauri doesn't copy resources to target/debug/, point at the
+    // source resources/ folder.
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources")
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn resolve_resource_dir(
+    app_handle: &tauri::AppHandle,
+    data_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    match app_handle.path().resource_dir() {
+        Ok(d) => return d.join("resources"),
+        Err(e) => log::warn!(
+            "[resources] resource_dir() failed: {} - trying exe-relative resources",
+            e
+        ),
+    }
+    match std::env::current_exe() {
+        Ok(exe) => {
+            if let Some(dir) = exe.parent() {
+                let candidate = dir.join("resources");
+                if candidate.is_dir() {
+                    log::warn!("[resources] using exe-relative resources at {:?}", candidate);
+                    return candidate;
+                }
+                log::warn!(
+                    "[resources] exe-relative resources missing at {:?}",
+                    candidate
+                );
+            }
+        }
+        Err(e) => log::warn!("[resources] current_exe() failed: {}", e),
+    }
+    log::warn!(
+        "[resources] falling back to data dir {:?} - bundled DNAs will only be found if copied there",
+        data_dir
+    );
+    data_dir.to_path_buf()
+}
+
 /// Spawn the conductor startup sequence in a background task.
 /// Called after vault unlock or setup.
 fn spawn_conductor_startup(
@@ -979,18 +1022,10 @@ fn spawn_conductor_startup(
                 message: "Initializing...".into(),
             };
 
-            // Resolve the resource directory where bundled .happ files live.
-            // In dev mode, Tauri doesn't copy resources to target/debug/, so we
-            // point directly at the source resources/ folder.
-            #[cfg(debug_assertions)]
-            let resource_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("resources");
-            #[cfg(not(debug_assertions))]
-            let resource_dir = app_handle
-                .path()
-                .resource_dir()
-                .map(|d| d.join("resources"))
-                .unwrap_or_else(|_| data_dir.clone());
+            // Resolve the resource directory where bundled .happ files live
+            // (resource_dir with exe-relative and data-dir fallbacks - see
+            // resolve_resource_dir).
+            let resource_dir = resolve_resource_dir(&app_handle, &data_dir);
 
             tauri::async_runtime::spawn(async move {
                 let app_handle_ref = app_handle.clone();
