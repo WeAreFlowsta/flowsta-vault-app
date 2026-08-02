@@ -215,6 +215,36 @@ async function guardLegs() {
     body: signBody(randomHash(), { supersedes: 'zz' }),
   });
   record('invalid supersedes refused', badSupersedes.status === 400);
+
+  // /authenticate reserved-prefix carve-out. This endpoint IS the web
+  // vault-grant login, so it must sign the `flowsta-auth-challenge:v1:`
+  // string - but ONLY for a first-party origin, and no other reserved
+  // prefix, ever. (A 2026-07-09 hardening blanket-refused all of them and
+  // silently broke Chromium desktop login until 2026-08-02.)
+  const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
+  const loginFromFlowsta = await api('/authenticate', {
+    method: 'POST', origin: ORIGIN,
+    body: { app_name: 'Flowsta', challenge: b64('flowsta-auth-challenge:v1:matrixnonce:flowsta'), reason: 'matrix login' },
+  });
+  record('login challenge signs from a Flowsta origin',
+    loginFromFlowsta.status === 200 && !!loginFromFlowsta.data?.signature,
+    `${loginFromFlowsta.status} ${loginFromFlowsta.data?.error || ''}`);
+
+  const loginFromEvil = await api('/authenticate', {
+    method: 'POST', origin: EVIL_ORIGIN,
+    body: { app_name: 'Evil', challenge: b64('flowsta-auth-challenge:v1:matrixnonce:flowsta'), reason: 'matrix login' },
+  });
+  record('login challenge refused from a non-Flowsta origin',
+    loginFromEvil.status === 400 && loginFromEvil.data?.error === 'reserved_prefix',
+    `${loginFromEvil.status} ${loginFromEvil.data?.error || ''}`);
+
+  const relayFromFlowsta = await api('/authenticate', {
+    method: 'POST', origin: ORIGIN,
+    body: { app_name: 'Flowsta', challenge: b64('flowsta-relay-login:v1:matrixnonce'), reason: 'matrix relay' },
+  });
+  record('other reserved prefixes refused even from Flowsta',
+    relayFromFlowsta.status === 400 && relayFromFlowsta.data?.error === 'reserved_prefix',
+    `${relayFromFlowsta.status} ${relayFromFlowsta.data?.error || ''}`);
 }
 
 async function quotaRefusalLeg(agentKey) {

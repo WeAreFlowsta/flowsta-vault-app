@@ -649,7 +649,17 @@ async fn authenticate_handler(
         false
     };
 
-    let approved = if auto_approved {
+    let approved = if auto_approve_enabled() {
+        // Headless dev runs resolve the dialog automatically, matching
+        // /sign, /sign-document and /link-identity - without this the
+        // login-challenge signing path can't be exercised by the matrix.
+        let deny = test_deny_requested(&headers);
+        log::warn!(
+            "AUTO-{} (dev): authenticate resolved headlessly",
+            if deny { "DENY" } else { "APPROVE" }
+        );
+        !deny
+    } else if auto_approved {
         // Surface auto-approved authentications so they are visible, not
         // silent - the user chose "remember" (or linked the app), but a
         // sign-in as them should never happen invisibly.
@@ -781,21 +791,34 @@ async fn authenticate_handler(
             )
         })?;
 
-        // Reserved-prefix refusal (same as /sign and /sign-document): Flowsta's
-        // own auth protocols (vault-grant, relay-login) are raw-Ed25519 over
-        // `flowsta-…` canonical strings. Without this, an approved app could get
-        // a generic "sign in" dialog accepted and actually mint a real Flowsta
-        // session signature elsewhere (cross-protocol signing).
+        // Reserved-prefix refusal: Flowsta's own auth protocols (relay login,
+        // migration, device registration) are raw-Ed25519 over `flowsta-…`
+        // canonical strings. Without this, an approved app could get a generic
+        // "sign in" dialog accepted and actually mint a real Flowsta session
+        // signature elsewhere (cross-protocol signing).
+        //
+        // ONE carve-out, and it is the reason this endpoint exists: the
+        // vault-grant WEB LOGIN challenge (`flowsta-auth-challenge:v1:…`,
+        // issued by auth-api) is signed HERE, and only for a first-party
+        // Flowsta origin. Refusing it outright broke desktop web sign-in
+        // entirely - the browser sends exactly this string. Third-party apps
+        // authenticate with their own non-reserved challenges (e.g. the Your
+        // Own AI proxy's random nonce), so they are unaffected by the
+        // carve-out and still cannot have a login challenge signed.
         if challenge_bytes.starts_with(b"flowsta-") {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(IpcError {
-                    error: "reserved_prefix".into(),
-                    description: Some(
-                        "Challenges with the reserved 'flowsta-' prefix cannot be signed via /authenticate.".into(),
-                    ),
-                }),
-            ));
+            let is_web_login_challenge =
+                challenge_bytes.starts_with(b"flowsta-auth-challenge:v1:");
+            if !(is_web_login_challenge && is_flowsta_origin(origin.as_deref())) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(IpcError {
+                        error: "reserved_prefix".into(),
+                        description: Some(
+                            "Challenges with the reserved 'flowsta-' prefix cannot be signed via /authenticate.".into(),
+                        ),
+                    }),
+                ));
+            }
         }
 
         let mut seed_arr = [0u8; 32];
