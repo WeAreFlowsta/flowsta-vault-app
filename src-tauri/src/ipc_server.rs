@@ -4090,6 +4090,134 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 
 /// Start the IPC server on localhost.
 /// Tries ports 27777, 27778, 27779 in order.
+// ── Identity contract on every call ────────────────────────────────────
+//
+// Every bridge response carries `x-flowsta-vault-identity` while the vault
+// is unlocked - the same disclosure /status already makes ungated, so a
+// client can notice an account switch from ANY response without a second
+// round trip. Locked responses carry no header (matching /status, which
+// reports null while locked).
+//
+// A POST body may carry `expected_identity` (an agent key string). The call
+// then proceeds ONLY when it provably matches this vault's active identity:
+// the unlocked key when available, else the plaintext active-identity
+// marker (backups deliberately keep working while locked, and the marker is
+// what locked-state identity checks compare against). Stateless per call.
+// A definite mismatch, an undecodable key, or no identity to compare
+// against all refuse - a caller that states an expectation wants certainty,
+// never best-effort.
+
+/// The identity this vault's on-disk state belongs to, readable locked or
+/// unlocked: the live key first, the active-identity marker as fallback.
+fn active_identity_for_gate(state: &IpcState) -> Option<String> {
+    if let Some(key) = state
+        .app_state
+        .vault_config
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.agent_pub_key.clone())
+    {
+        return Some(key);
+    }
+    let path = state
+        .app_state
+        .data_dir
+        .join(crate::commands::ACTIVE_IDENTITY_MARKER);
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Agent keys appear in two encodings (base64url and the API's base58
+/// hybrid) - compare through bytes; undecodable strings only match exactly.
+fn expected_identity_matches(expected: &str, active: &str) -> bool {
+    match (
+        crate::key_derivation::decode_agent_pub_key_flexible(expected),
+        crate::key_derivation::decode_agent_pub_key_flexible(active),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => expected == active,
+    }
+}
+
+fn check_expected_identity(
+    state: &IpcState,
+    expected: &str,
+) -> Result<(), (StatusCode, Json<IpcError>)> {
+    let Some(active) = active_identity_for_gate(state) else {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(IpcError {
+                error: "identity_unconfirmed".into(),
+                description: Some(
+                    "This Vault has no identity to check the request's expected_identity against."
+                        .into(),
+                ),
+            }),
+        ));
+    };
+    if !expected_identity_matches(expected, &active) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(IpcError {
+                error: "identity_mismatch".into(),
+                description: Some(
+                    "This Vault holds a different identity than the request's expected_identity."
+                        .into(),
+                ),
+            }),
+        ));
+    }
+    Ok(())
+}
+
+async fn identity_gate(
+    State(state): State<Arc<IpcState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    let req = if req.method() == Method::POST {
+        let (parts, body) = req.into_parts();
+        // Buffer within the largest route allowance (55 MB on /backup); the
+        // per-route DefaultBodyLimit still applies when the handler reads.
+        let bytes = axum::body::to_bytes(body, 56 * 1024 * 1024)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(IpcError { error: "body_too_large".into(), description: None }),
+                )
+            })?;
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Some(expected) = v.get("expected_identity").and_then(|x| x.as_str()) {
+                check_expected_identity(&state, expected)?;
+            }
+        }
+        axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
+    } else {
+        req
+    };
+
+    let mut resp = next.run(req).await;
+
+    // Read AFTER the handler so lock/unlock calls report their new state.
+    let identity = state
+        .app_state
+        .vault_config
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.agent_pub_key.clone());
+    if let Some(key) = identity {
+        if let Ok(val) = axum::http::HeaderValue::from_str(&key) {
+            resp.headers_mut().insert("x-flowsta-vault-identity", val);
+        }
+    }
+    Ok(resp)
+}
+
 pub async fn start_ipc_server(
     app_state: Arc<AppState>,
     app_handle: tauri::AppHandle,
@@ -4154,6 +4282,12 @@ pub async fn start_ipc_server(
         // silently broke large backups).
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
         .layer(cors)
+        // Outermost: identity header on every response + the
+        // expected_identity gate on every POST body that carries it.
+        .layer(axum::middleware::from_fn_with_state(
+            ipc_state.clone(),
+            identity_gate,
+        ))
         .with_state(ipc_state);
 
     // Try ports in sequence
@@ -4180,7 +4314,36 @@ pub async fn start_ipc_server(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_flowsta_origin, OpJobs};
+    use super::{expected_identity_matches, is_flowsta_origin, OpJobs};
+
+    #[test]
+    fn expected_identity_compares_through_bytes() {
+        // The same 39-byte key in both wild encodings.
+        let mut raw = [0u8; 39];
+        raw[0] = 0x84;
+        raw[1] = 0x20;
+        raw[2] = 0x24;
+        for (i, b) in raw.iter_mut().enumerate().skip(3) {
+            *b = i as u8;
+        }
+        let key32: [u8; 32] = raw[3..35].try_into().unwrap();
+        // construct_agent_pub_key_* derive the full key from the ed25519
+        // part, so build both encodings from the same 32 bytes instead.
+        let canonical = crate::key_derivation::construct_agent_pub_key_string(&key32);
+        let full = crate::key_derivation::construct_agent_pub_key_bytes(&key32);
+        let hybrid = format!("uhCAk{}", bs58::encode(&full).into_string());
+
+        assert!(expected_identity_matches(&canonical, &hybrid));
+        assert!(expected_identity_matches(&canonical, &canonical));
+
+        let other32 = [9u8; 32];
+        let other = crate::key_derivation::construct_agent_pub_key_string(&other32);
+        assert!(!expected_identity_matches(&canonical, &other));
+
+        // Undecodable strings only match exactly.
+        assert!(expected_identity_matches("garbage", "garbage"));
+        assert!(!expected_identity_matches("garbage", &canonical));
+    }
 
     #[test]
     fn test_job_coalescing() {

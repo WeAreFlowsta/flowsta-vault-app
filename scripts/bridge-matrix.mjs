@@ -599,6 +599,74 @@ async function backupLegs() {
   });
   record('deleting an absent label -> 404', delAgain.status === 404 && delAgain.data?.error === 'backup_not_found');
 
+  // ── Identity contract: header on every response, expected_identity gate ──
+  const vaultKey = link.data?.vault_agent_pub_key;
+  const hdrResp = await fetch(`http://127.0.0.1:${PORT}/backup/limits`, {
+    headers: { origin: APP_ORIGIN },
+  });
+  record('responses state the vault identity in a header',
+    hdrResp.headers.get('x-flowsta-vault-identity') === vaultKey,
+    `got ${hdrResp.headers.get('x-flowsta-vault-identity')}`);
+
+  const expOk = await api('/backup/retrieve', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, label: 'matrix-exp-absent', expected_identity: vaultKey },
+  });
+  record('matching expected_identity passes the gate',
+    expOk.status === 404 && expOk.data?.error === 'backup_not_found',
+    `${expOk.status} ${expOk.data?.error}`);
+
+  const expWrong = await api('/backup/retrieve', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, label: 'matrix-exp-absent', expected_identity: linkKey },
+  });
+  record('foreign expected_identity refused 409',
+    expWrong.status === 409 && expWrong.data?.error === 'identity_mismatch',
+    `${expWrong.status} ${expWrong.data?.error}`);
+
+  const expWrite = await api('/backup', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: {
+      client_id: APP_CLIENT_ID, app_name: 'Matrix Backup Fixture',
+      label: 'matrix-exp-write', data: canonicalPayload(1), expected_identity: linkKey,
+    },
+  });
+  const expWriteProbe = await api('/backup/retrieve', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, label: 'matrix-exp-write' },
+  });
+  record('write with foreign expected_identity refused and nothing written',
+    expWrite.status === 409 && expWriteProbe.status === 404,
+    `write ${expWrite.status}, probe ${expWriteProbe.status}`);
+
+  const expGarbage = await api('/backup/retrieve', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, label: 'matrix-exp-absent', expected_identity: 'not-a-key' },
+  });
+  record('undecodable expected_identity refused',
+    expGarbage.status === 409, `${expGarbage.status} ${expGarbage.data?.error}`);
+
+  // Locked vault: the gate answers from the active-identity marker (backups
+  // deliberately keep working while locked).
+  const lockForGate = await api('/dev/lock', { method: 'POST', body: {} });
+  record('lock for identity-gate leg', lockForGate.status === 200);
+  const lockedOk = await api('/backup/retrieve', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, label: 'matrix-exp-absent', expected_identity: vaultKey },
+  });
+  record('locked: matching expected_identity passes via the marker',
+    lockedOk.status === 404 && lockedOk.data?.error === 'backup_not_found',
+    `${lockedOk.status} ${lockedOk.data?.error}`);
+  const lockedWrong = await api('/backup/retrieve', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, label: 'matrix-exp-absent', expected_identity: linkKey },
+  });
+  record('locked: foreign expected_identity still refused',
+    lockedWrong.status === 409 && lockedWrong.data?.error === 'identity_mismatch',
+    `${lockedWrong.status} ${lockedWrong.data?.error}`);
+  const unlockAfterGate = await api('/dev/unlock', { method: 'POST', body: {} });
+  record('unlock after identity-gate leg', unlockAfterGate.status === 200);
+
   // An app may revoke ITS OWN link (and only from its own origin).
   const evilRevoke = await api('/revoke-identity', {
     method: 'POST', origin: EVIL_ORIGIN,
