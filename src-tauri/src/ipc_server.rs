@@ -1260,17 +1260,38 @@ async fn revoke_identity_handler(
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "revoke-identity");
 
-    // Unlinking is a first-party dashboard action. Without this gate ANY web
+    // Two legitimate callers, gated differently. Without a gate ANY web
     // page could unlink the user's apps (integrity/DoS + re-link phishing),
-    // since the handler otherwise takes the target key straight from the body.
+    // since the handler otherwise takes the target key straight from the body:
+    //   1. Flowsta first-party surfaces may revoke any app (dashboard action).
+    //   2. A linked app may revoke ITS OWN link - its origin must resolve to
+    //      a linked client_id AND the key it targets must belong to that same
+    //      client's link record. (Until this second arm existed, an app's
+    //      "disconnect" never reached the Vault: its notification was 403'd
+    //      and swallowed, leaving the Vault listing the app forever.)
     if !is_flowsta_origin(origin.as_deref()) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(IpcError {
-                error: "forbidden".into(),
-                description: Some("revoke-identity is only available to Flowsta.".into()),
-            }),
-        ));
+        let own_link = origin_to_client_id(&state.app_state, origin.as_deref())
+            .map(|caller_cid| {
+                let apps = state.app_state.linked_third_party_apps.lock().unwrap();
+                apps.iter().any(|a| {
+                    a.app_agent_pub_key == req.app_agent_pub_key
+                        && a.client_id.as_deref() == Some(caller_cid.as_str())
+                })
+            })
+            .unwrap_or(false);
+        if !own_link {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError {
+                    error: "forbidden".into(),
+                    description: Some(
+                        "revoke-identity is only available to Flowsta, or to a linked \
+                         app revoking its own link."
+                            .into(),
+                    ),
+                }),
+            ));
+        }
     }
 
     // Capture client_id before removing the entry so we can purge its scopes.
