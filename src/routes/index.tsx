@@ -97,6 +97,19 @@ export default component$(() => {
   // Plan/quota status - public endpoint, keyed to the account the
   // subscription is attached to. Upgrading is a web (Stripe) flow.
   const planInfo = useSignal<{ tier: string; used: number; limit: number } | null>(null);
+  // Restore-or-fresh question after an identity restore: while pending,
+  // the bridge refuses third-party backup writes.
+  const restoreChoicePending = useSignal(false);
+  const resolvingChoice = useSignal(false);
+  const startFresh = $(async () => {
+    resolvingChoice.value = true;
+    try {
+      await invoke("resolve_restore_choice");
+      restoreChoicePending.value = false;
+    } finally {
+      resolvingChoice.value = false;
+    }
+  });
   // Offline-create email collision: retry with a different address.
   const conflictEmail = useSignal("");
   const conflictBusy = useSignal(false);
@@ -330,14 +343,16 @@ export default component$(() => {
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ cleanup }) => {
     try {
-      const [id, stats, apps] = await Promise.all([
+      const [id, stats, apps, choicePending] = await Promise.all([
         invoke<VaultIdentity>("get_identity"),
         invoke<BackupStats>("get_backup_stats"),
         invoke<LinkedApp[]>("get_linked_third_party_apps"),
+        invoke<boolean>("restore_choice_pending").catch(() => false),
       ]);
       identity.value = id;
       backupStats.value = stats;
       linkedApps.value = apps;
+      restoreChoicePending.value = choicePending;
       // Paint NOW - everything above is local. The plan fetch below is
       // network-bound and must never hold the identity render hostage: on
       // a black-holed API (fire-drill finding) an untimed fetch hangs for
@@ -458,6 +473,39 @@ export default component$(() => {
 
   return (
     <div>
+      {/* The restore-or-fresh question - the one instruction the product
+          never used to give: import your export BEFORE you open your
+          apps. While unanswered, the bridge refuses third-party backup
+          writes so an app launched too early can't claim an empty slot
+          the export was about to fill. */}
+      {restoreChoicePending.value && (
+        <div class="mb-6 rounded-lg border border-amber-700/60 bg-amber-950/30 p-5">
+          <p class="mb-1 text-sm font-semibold text-amber-200">
+            Restore your app backups, or start fresh?
+          </p>
+          <p class="mb-4 text-sm text-gray-300">
+            This Vault was just restored from your identity. If you kept a
+            Vault export file from your previous device, import it now -
+            BEFORE opening apps like Your Own AI - so their backups are
+            here when they reconnect. Until you choose, apps can read but
+            not write backups, so nothing gets overwritten by mistake.
+            Importing your export finishes this automatically.
+          </p>
+          <div class="flex flex-col-reverse gap-2 sm:flex-row sm:items-center">
+            <button
+              class="rounded-full border border-gray-600 px-5 py-2 text-sm text-gray-300 hover:border-gray-400 hover:text-white disabled:opacity-50"
+              disabled={resolvingChoice.value}
+              onClick$={startFresh}
+            >
+              Start fresh (no export to import)
+            </button>
+            <GlassButton onClick$={() => (window.location.href = "/your-data/")}>
+              Import my export
+            </GlassButton>
+          </div>
+        </div>
+      )}
+
       {/* Account upgrade: a vault from the custodial-linked era (or an
           upgrade interrupted before the account flipped) finishes moving
           the account onto this device from here. The card verifies for

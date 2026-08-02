@@ -527,11 +527,12 @@ pub fn setup_vault(
     hosting_model: Option<String>,
     pending_reconcile: Option<bool>,
     pending_registration: Option<bool>,
+    is_restore: Option<bool>,
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SetupResult, String> {
     validate_vault_password(&password)?;
-    setup_vault_inner(
+    let result = setup_vault_inner(
         mnemonic,
         password,
         web_agent_pub_key,
@@ -544,7 +545,17 @@ pub fn setup_vault(
         pending_registration.unwrap_or(false),
         app_handle,
         &state,
-    )
+    )?;
+    // Restores hold third-party backup writes until the user answers the
+    // restore-or-fresh question (see RESTORE_CHOICE_MARKER). Deliberately
+    // NOT in setup_vault_inner: the migration orchestrator calls that
+    // directly and must keep writing.
+    if is_restore.unwrap_or(false) {
+        if let Err(e) = std::fs::write(restore_choice_pending_path(&state.data_dir), b"") {
+            log::warn!("could not write the restore-choice marker: {}", e);
+        }
+    }
+    Ok(result)
 }
 
 /// Vault creation shared by the wizard command and the account-migration
@@ -772,6 +783,41 @@ pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 
 /// Filename of the plaintext active-identity marker in the data dir.
 pub(crate) const ACTIVE_IDENTITY_MARKER: &str = "active-identity";
+
+/// Marker set when a vault is created by RESTORING an existing identity
+/// (phrase restore, offline restore, or web-account sign-in) - the moment
+/// the product owes the user its one missing instruction: import your
+/// export BEFORE you open your apps. While it exists, third-party
+/// `/backup` WRITES are refused (403 restore_choice_pending) so an app
+/// launched too early can't fill an empty slot the user's export was
+/// about to fill. Cleared by an explicit "start fresh", by a completed
+/// import, and by the full erase. NEVER set by the account-migration
+/// flow - the migration orchestrator is itself a restore and must write.
+pub(crate) const RESTORE_CHOICE_MARKER: &str = "restore-choice-pending";
+
+pub(crate) fn restore_choice_pending_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join(RESTORE_CHOICE_MARKER)
+}
+
+pub(crate) fn clear_restore_choice(data_dir: &std::path::Path) {
+    let p = restore_choice_pending_path(data_dir);
+    if p.exists() {
+        let _ = std::fs::remove_file(&p);
+        log::info!("restore choice resolved - third-party backup writes resume");
+    }
+}
+
+/// Whether the restore-or-fresh question is still unanswered.
+#[tauri::command]
+pub fn restore_choice_pending(state: State<'_, Arc<AppState>>) -> bool {
+    restore_choice_pending_path(&state.data_dir).exists()
+}
+
+/// The user chose "start fresh" (or finished importing) - resume backups.
+#[tauri::command]
+pub fn resolve_restore_choice(state: State<'_, Arc<AppState>>) {
+    clear_restore_choice(&state.data_dir);
+}
 
 /// Record which identity this vault's on-disk state belongs to, readable
 /// WITHOUT unlocking. The agent public key is public material (served
@@ -1426,6 +1472,7 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
         "quota_cache.json",
         ".quota.key",
         ACTIVE_IDENTITY_MARKER,
+        RESTORE_CHOICE_MARKER,
     ] {
         let p = state.data_dir.join(name);
         if p.exists() {
@@ -3598,6 +3645,13 @@ pub async fn import_vault_export(
         backups_failed,
         backups_unsupported
     );
+    // A completed import answers the restore-or-fresh question (only when
+    // it actually restored or confirmed everything present - a total
+    // failure must keep holding app writes).
+    if backups_failed == 0 {
+        clear_restore_choice(&state.data_dir);
+    }
+
     Ok(serde_json::json!({
         "sealed_restored": sealed_restored,
         "sealed_skipped": sealed_skipped,

@@ -457,6 +457,8 @@ pub fn run() {
             commands::export_all_data_to_file,
             commands::export_skip_signatures,
             commands::import_vault_export,
+            commands::restore_choice_pending,
+            commands::resolve_restore_choice,
             commands::list_app_backup_details,
             commands::export_single_backup,
             commands::export_single_backup_to_file,

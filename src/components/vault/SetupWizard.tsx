@@ -458,6 +458,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           webUsername: webUser.username || null,
           displayName: webUser.displayName || null,
           profilePicture: webUser.profilePicture || null,
+          isRestore: true,
         }
       );
 
@@ -694,6 +695,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           profilePicture: null,
           hostingModel: "device-hosted",
           pendingReconcile: true,
+          isRestore: true,
         }
       );
       mnemonic.value = "";
@@ -763,6 +765,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           displayName: account.display_name,
           profilePicture: account.profile_picture,
           hostingModel: "device-hosted",
+          isRestore: true,
         }
       );
 

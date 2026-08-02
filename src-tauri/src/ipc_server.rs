@@ -1528,6 +1528,26 @@ async fn backup_handler(
         ));
     }
 
+    // Restore-or-fresh still unanswered: this vault was just rebuilt from a
+    // restored identity, and the user's export may be about to fill these
+    // slots. Refuse writes (reads stay open) so an app launched too early
+    // can't claim an empty slot first - the exact ordering mistake that
+    // used to destroy backups. Cleared by "start fresh" or a completed
+    // import on the Vault's own dashboard.
+    if crate::commands::restore_choice_pending_path(&state.app_state.data_dir).exists() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "restore_choice_pending".into(),
+                description: Some(
+                    "The Vault was just restored and is waiting for its owner to import \
+                     their export or choose to start fresh. Backups resume after that."
+                        .into(),
+                ),
+            }),
+        ));
+    }
+
     // Backup key must be available (set on first unlock, persists through lock)
     {
         let bk = state.app_state.backup_key.lock().unwrap();
@@ -1878,6 +1898,21 @@ async fn backup_delete_handler(
                 }),
             ));
         }
+    }
+
+    // Same hold as /backup writes: deleting is destructive too.
+    if crate::commands::restore_choice_pending_path(&state.app_state.data_dir).exists() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "restore_choice_pending".into(),
+                description: Some(
+                    "The Vault was just restored and is waiting for its owner to import \
+                     their export or choose to start fresh."
+                        .into(),
+                ),
+            }),
+        ));
     }
 
     if req.delete_all {
