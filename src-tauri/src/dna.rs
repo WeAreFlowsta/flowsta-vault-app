@@ -94,10 +94,18 @@ pub const SIGNING_COORDINATOR_REV: u32 = 3;
 const SIGNING_COORDINATOR_WASM: &str = "signing_coordinator_v1_4.wasm";
 
 /// Hot-swap the signing cell's coordinator zome to the bundled revision.
-/// Idempotent via a marker file; failures are non-fatal (retried on the
-/// next conductor start). Fresh installs already carry the new coordinator
-/// inside the happ, so the swap is a no-op for them beyond marker setting.
-pub async fn update_signing_coordinators_if_needed(
+/// Runs on EVERY conductor start: the conductor's coordinator store lives
+/// in the conductor dir, and the bundled happ carries the ORIGINAL (rev 1)
+/// coordinator (the canonical bundle is never rebuilt), so anything that
+/// reinstalls the app from the bundle - reset, restore, a wiped conductor
+/// dir - silently reverts the cell to rev 1. A marker file used to gate
+/// this call; a reset wiped the store but left the marker behind, and the
+/// cell then stayed on rev 1 forever while revocation enrichment quietly
+/// reported every record as not revoked (found by the bridge matrix,
+/// 2026-08-02). The admin call is cheap and idempotent: apply
+/// unconditionally and trust the conductor, never a marker. Failures are
+/// non-fatal (retried on the next start).
+pub async fn ensure_signing_coordinators(
     admin_port: u16,
     resource_dir: &std::path::Path,
     data_dir: &std::path::Path,
@@ -107,14 +115,8 @@ pub async fn update_signing_coordinators_if_needed(
         ZomeDependency, ZomeManifest,
     };
 
-    let marker = data_dir.join("signing-coordinator-rev");
-    let applied: u32 = std::fs::read_to_string(&marker)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(1);
-    if applied >= SIGNING_COORDINATOR_REV {
-        return Ok(());
-    }
+    // Remove the retired gate marker so nothing ever reads it as truth again.
+    let _ = std::fs::remove_file(data_dir.join("signing-coordinator-rev"));
 
     let wasm = std::fs::read(resource_dir.join(SIGNING_COORDINATOR_WASM))
         .map_err(|e| format!("read {}: {}", SIGNING_COORDINATOR_WASM, e))?;
@@ -132,8 +134,8 @@ pub async fn update_signing_coordinators_if_needed(
         .map_err(|e| format!("list_apps: {}", e))?;
     let signing_app_id = make_app_id("signing", BUNDLED_SIGNING_VERSION);
     let Some(app) = apps.iter().find(|a| a.installed_app_id == signing_app_id) else {
-        // No signing cell yet (nothing to swap) - leave the marker unset so
-        // a later install+start pass gets the check again.
+        // No signing cell yet (nothing to swap) - the next start after the
+        // install applies it.
         return Ok(());
     };
     let cell_id = app
@@ -167,10 +169,8 @@ pub async fn update_signing_coordinators_if_needed(
         .await
         .map_err(|e| format!("update_coordinators: {}", e))?;
 
-    std::fs::write(&marker, SIGNING_COORDINATOR_REV.to_string())
-        .map_err(|e| format!("write marker: {}", e))?;
     log::info!(
-        "Signing coordinator hot-swapped to rev {} on {}",
+        "Signing coordinator ensured at rev {} on {}",
         SIGNING_COORDINATOR_REV,
         signing_app_id,
     );

@@ -747,11 +747,10 @@ async fn start_holochain_attempt(
     }
 
     // Coordinator-only fixes don't change the DNA hash, so an existing
-    // signing cell keeps running the old zome code until hot-swapped.
-    // Non-fatal: retried on the next start.
-    if let Err(e) =
-        dna::update_signing_coordinators_if_needed(admin_port, &resource_dir, &data_dir).await
-    {
+    // signing cell keeps running the old zome code until hot-swapped -
+    // and a reset/restore reinstall reverts it to the bundle's original.
+    // Applied every start; non-fatal, retried on the next one.
+    if let Err(e) = dna::ensure_signing_coordinators(admin_port, &resource_dir, &data_dir).await {
         log::warn!("Signing coordinator hot-swap failed (non-fatal): {}", e);
     }
 

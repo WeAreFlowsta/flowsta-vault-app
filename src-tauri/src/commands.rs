@@ -4157,11 +4157,24 @@ async fn fetch_revocation_for_action(
     );
     let result = match tokio::time::timeout(std::time::Duration::from_secs(15), call).await {
         Ok(Ok(r)) => r,
-        _ => return (false, None, None),
+        Ok(Err(e)) => {
+            // A call ERROR is not "not revoked" - swallowing it renders a
+            // revoked record as clean. Seen live: a reinstall-regressed
+            // coordinator made this fn vanish and every revocation
+            // disappeared from the view with zero log evidence.
+            log::warn!("revocation lookup failed for {}: {}", action_hash, e);
+            return (false, None, None);
+        }
+        // Cold-DHT timeout: defaults fill in on the next refresh (see the
+        // timeout rationale above); quiet by design.
+        Err(_) => return (false, None, None),
     };
     let records: Vec<Record> = match rmp_serde::from_slice(result.as_bytes()) {
         Ok(r) => r,
-        Err(_) => return (false, None, None),
+        Err(e) => {
+            log::warn!("revocation records decode failed for {}: {}", action_hash, e);
+            return (false, None, None);
+        }
     };
     let first = match records.first() {
         Some(f) => f,
@@ -4195,10 +4208,16 @@ async fn fetch_thumbnail_for_action(
         "get_thumbnail".into(),
         ExternIO::from(payload),
     );
-    let result = tokio::time::timeout(std::time::Duration::from_secs(15), call)
-        .await
-        .ok()?
-        .ok()?;
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(15), call).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            // Same visibility rule as revocations: a call error must not
+            // silently render as "no thumbnail".
+            log::warn!("thumbnail lookup failed for {}: {}", action_hash, e);
+            return None;
+        }
+        Err(_) => return None, // cold-DHT timeout, quiet by design
+    };
     let thumb_record: Option<Record> = rmp_serde::from_slice(result.as_bytes()).ok()?;
     let record = thumb_record?;
     if let Some(Entry::App(thumb_entry)) = record.entry().as_option() {
