@@ -67,7 +67,12 @@ async function api(path, { method = 'GET', body, origin = ORIGIN, deny = false }
 }
 
 async function findPort() {
-  for (const p of [27777, 27778, 27779]) {
+  // VAULT_MATRIX_PORT pins the target - the scan takes the FIRST responding
+  // port, which is wrong when an installed vault (27777) and a dev vault
+  // (27778) are both running.
+  const pinned = Number(process.env.VAULT_MATRIX_PORT || 0);
+  const ports = pinned ? [pinned] : [27777, 27778, 27779];
+  for (const p of ports) {
     try {
       const resp = await fetch(`http://127.0.0.1:${p}/status`, {
         signal: AbortSignal.timeout(2000),
@@ -482,8 +487,14 @@ async function backupLegs() {
     return;
   }
 
-  // Fixture: link a synthetic app install under our own origin.
-  const linkKey = `u${crypto.randomBytes(39).toString('base64url')}`;
+  // Fixture: link a synthetic app install under our own origin. The link
+  // key must be agent-key-SHAPED (39 bytes with the 0x84 0x20 0x24 prefix,
+  // "uhCAk…" once encoded) - the Vault validates the format.
+  const linkKeyRaw = crypto.randomBytes(39);
+  linkKeyRaw[0] = 0x84;
+  linkKeyRaw[1] = 0x20;
+  linkKeyRaw[2] = 0x24;
+  const linkKey = `u${linkKeyRaw.toString('base64url')}`;
   const link = await api('/link-identity', {
     method: 'POST',
     origin: APP_ORIGIN,

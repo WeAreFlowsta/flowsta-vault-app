@@ -1070,40 +1070,56 @@ async fn link_identity_handler(
         "replacing_existing": replacing_existing,
     });
 
-    let prior = raise_window(&state.app_handle);
-    let _ = state.app_handle.emit("link-identity-request", event_payload);
+    // Headless dev runs resolve the dialog automatically, exactly as
+    // /sign, /authenticate and /sign-document already do. Without this the
+    // linked-app surface (every /backup endpoint gates on a link) could
+    // not be exercised by the matrix at all.
+    let approved = if auto_approve_enabled() {
+        let _ = state.app_state.pending_link_identity.lock().unwrap().take();
+        let deny = test_deny_requested(&headers);
+        log::warn!(
+            "AUTO-{} (dev): link-identity resolved headlessly",
+            if deny { "DENY" } else { "APPROVE" }
+        );
+        !deny
+    } else {
+        let prior = raise_window(&state.app_handle);
+        let _ = state.app_handle.emit("link-identity-request", event_payload);
 
-    // Wait for user response with 60s timeout
-    let approved = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(_)) => {
-            restore_window(&state.app_handle, prior);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(IpcError {
-                    error: "internal_error".into(),
-                    description: Some("Approval channel closed unexpectedly.".into()),
-                }),
-            ));
-        }
-        Err(_) => {
-            // Timeout - clean up pending request and tuck Vault back.
-            restore_window(&state.app_handle, prior);
-            let mut pending_link = state.app_state.pending_link_identity.lock().unwrap();
-            *pending_link = None;
-            return Err((
-                StatusCode::REQUEST_TIMEOUT,
-                Json(IpcError {
-                    error: "timeout".into(),
-                    description: Some("User did not respond within 60 seconds.".into()),
-                }),
-            ));
+        // Wait for user response with 60s timeout
+        match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+            Ok(Ok(result)) => {
+                restore_window(&state.app_handle, prior);
+                result
+            }
+            Ok(Err(_)) => {
+                restore_window(&state.app_handle, prior);
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(IpcError {
+                        error: "internal_error".into(),
+                        description: Some("Approval channel closed unexpectedly.".into()),
+                    }),
+                ));
+            }
+            Err(_) => {
+                // Timeout - clean up pending request and tuck Vault back.
+                restore_window(&state.app_handle, prior);
+                let mut pending_link = state.app_state.pending_link_identity.lock().unwrap();
+                *pending_link = None;
+                return Err((
+                    StatusCode::REQUEST_TIMEOUT,
+                    Json(IpcError {
+                        error: "timeout".into(),
+                        description: Some("User did not respond within 60 seconds.".into()),
+                    }),
+                ));
+            }
         }
     };
 
-    // User has responded (approve or deny) - return Vault to its prior state so
-    // focus goes back to the calling app instead of leaving Vault in front.
-    restore_window(&state.app_handle, prior);
+    // Window restore happens in the interactive branch above, next to the
+    // raise that paired with it.
 
     if !approved {
         return Err((
