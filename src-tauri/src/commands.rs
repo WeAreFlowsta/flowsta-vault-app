@@ -659,6 +659,7 @@ pub(crate) fn setup_vault_inner(
         let mut bk = state.backup_key.lock().unwrap();
         *bk = Some(crate::backup::derive_backup_key_from_seed(&device_seed));
     }
+    write_active_identity_marker(&state.data_dir, &agent_pub_key);
 
     log::info!("Vault created and unlocked. Agent: {}", &agent_pub_key);
 
@@ -725,12 +726,14 @@ pub(crate) fn unlock_vault_inner(
     let device_seed = config.device_seed.clone();
     let data_dir = state.data_dir.clone();
     let passphrase = password.clone();
+    let agent_key_for_marker = config.agent_pub_key.clone();
 
     // Store decrypted config in app state
     {
         let mut state_config = state.vault_config.lock().unwrap();
         *state_config = Some(config);
     }
+    write_active_identity_marker(&state.data_dir, &agent_key_for_marker);
 
     // Derive and cache backup encryption key (persists through lock)
     if let Some(ref seed_vec) = device_seed {
@@ -765,6 +768,29 @@ pub(crate) fn unlock_vault_inner(
 #[tauri::command]
 pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     lock_vault_inner(state.inner())
+}
+
+/// Filename of the plaintext active-identity marker in the data dir.
+pub(crate) const ACTIVE_IDENTITY_MARKER: &str = "active-identity";
+
+/// Record which identity this vault's on-disk state belongs to, readable
+/// WITHOUT unlocking. The agent public key is public material (served
+/// ungated by /status while unlocked; the DID is public), so a plaintext
+/// sidecar leaks nothing new. It exists because backups deliberately keep
+/// working while the vault is locked, and locked-state identity checks
+/// have nothing else to compare against - the encrypted config is gone.
+/// Written at create and unlock; removed only by the full erase.
+pub(crate) fn write_active_identity_marker(data_dir: &std::path::Path, agent_pub_key: &str) {
+    let path = data_dir.join(ACTIVE_IDENTITY_MARKER);
+    if std::fs::read_to_string(&path)
+        .map(|s| s.trim() == agent_pub_key)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, agent_pub_key) {
+        log::warn!("could not write the active-identity marker: {}", e);
+    }
 }
 
 pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
@@ -1399,6 +1425,7 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
         "mau-events.enc",
         "quota_cache.json",
         ".quota.key",
+        ACTIVE_IDENTITY_MARKER,
     ] {
         let p = state.data_dir.join(name);
         if p.exists() {
@@ -2380,6 +2407,12 @@ async fn auto_link_web_account(state: &Arc<AppState>, password: &str) -> Result<
         let config = state.vault_config.lock().unwrap();
         let config = config.as_ref().ok_or("Vault is locked")?;
 
+        // Same hard guard as link_web_account - the unlock-time caller
+        // checks hosting_model too, but this must hold on its own.
+        if config.hosting_model.as_deref() == Some("device-hosted") {
+            return Err("Device-hosted identity has no web account to link".into());
+        }
+
         let seed = config
             .device_seed
             .as_ref()
@@ -2560,6 +2593,17 @@ pub async fn link_web_account(
     let (device_seed, recovery_lookup_hash, agent_pub_key_raw_b64) = {
         let config = state.vault_config.lock().unwrap();
         let config = config.as_ref().ok_or("Vault is locked")?;
+
+        // Hard guard, not just UI hiding: for a device-hosted identity the
+        // device key IS the account key - the lookup below would resolve to
+        // this vault's own key and try to link an agent to itself.
+        if config.hosting_model.as_deref() == Some("device-hosted") {
+            return Err(
+                "This identity was created in the Vault - it has no separate web \
+                 account to link."
+                    .into(),
+            );
+        }
 
         let seed = config
             .device_seed
@@ -3291,7 +3335,9 @@ pub async fn import_vault_export(
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
     path: String,
+    overwrite: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    let overwrite = overwrite.unwrap_or(false);
     emit_your_data_progress(&app_handle, "import", "Reading the export file...".into(), None, None);
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("Could not read the export file: {}", e))?;
@@ -3357,12 +3403,24 @@ pub async fn import_vault_export(
                 .into_iter()
                 .filter_map(|m| m.label)
                 .collect();
-        let already_here = label.map(|l| existing_labels.contains(l)).unwrap_or(false);
+        // The skip is a pure label-name comparison (no content check), so a
+        // small stub under the same label shadows the real object forever -
+        // `overwrite` is the explicit way out.
+        let already_here =
+            !overwrite && label.map(|l| existing_labels.contains(l)).unwrap_or(false);
         let (backups_restored, backups_skipped) = if already_here {
             (0, 1)
         } else {
-            crate::backup::save_backup(state.inner(), client_id, app_name, label, &bytes, content_type)
-                .map_err(|e| format!("Could not restore the backup: {}", e))?;
+            crate::backup::save_backup_with_time(
+                state.inner(),
+                client_id,
+                app_name,
+                label,
+                &bytes,
+                content_type,
+                backup.get("saved_at").and_then(|v| v.as_i64()),
+            )
+            .map_err(|e| format!("Could not restore the backup: {}", e))?;
             (1, 0)
         };
         log::info!(
@@ -3374,6 +3432,8 @@ pub async fn import_vault_export(
             "sealed_skipped": 0,
             "backups_restored": backups_restored,
             "backups_skipped": backups_skipped,
+            "backups_failed": 0,
+            "backups_unsupported": 0,
         }));
     }
 
@@ -3441,6 +3501,12 @@ pub async fn import_vault_export(
     // the same phrase). Apps then self-restore via their own flow.
     let mut backups_restored = 0usize;
     let mut backups_skipped = 0usize;
+    // Failures are counted and reported, never silently dropped: an import
+    // where every snapshot fails (disk full, oversized objects) used to
+    // report the same numbers as "everything already here".
+    let mut backups_failed = 0usize;
+    let mut backups_unsupported = 0usize; // older exports without restore bytes
+    let mut first_failure: Option<String> = None;
     if let Some(apps) = export
         .get("app_data")
         .and_then(|a| a.get("apps"))
@@ -3462,6 +3528,8 @@ pub async fn import_vault_export(
             }
             // Labels already present stay untouched - same-label saves
             // overwrite, so without this a re-run reports phantom restores.
+            // Name-only comparison: a stub under a real label shadows the
+            // export's copy, so `overwrite` explicitly replaces collisions.
             let existing_labels: std::collections::HashSet<String> =
                 crate::backup::list_app_backups(&state.data_dir, client_id)
                     .unwrap_or_default()
@@ -3472,31 +3540,49 @@ pub async fn import_vault_export(
                 for snap in snaps {
                     let raw_b64 = match snap.get("restore_base64").and_then(|v| v.as_str()) {
                         Some(b) => b,
-                        None => continue, // older export without restore bytes - skip
+                        None => {
+                            backups_unsupported += 1;
+                            continue;
+                        }
                     };
                     let label = snap.get("label").and_then(|v| v.as_str());
-                    if let Some(l) = label {
-                        if existing_labels.contains(l) {
-                            backups_skipped += 1;
-                            continue;
+                    if !overwrite {
+                        if let Some(l) = label {
+                            if existing_labels.contains(l) {
+                                backups_skipped += 1;
+                                continue;
+                            }
                         }
                     }
                     let bytes = match base64_standard_decode(raw_b64) {
                         Ok(b) => b,
-                        Err(_) => continue,
+                        Err(_) => {
+                            backups_failed += 1;
+                            first_failure.get_or_insert_with(|| {
+                                format!(
+                                    "{}: snapshot data is corrupted (bad base64)",
+                                    app_name
+                                )
+                            });
+                            continue;
+                        }
                     };
                     let content_type = snap.get("content_type").and_then(|v| v.as_str());
-                    if crate::backup::save_backup(
+                    match crate::backup::save_backup_with_time(
                         state.inner(),
                         client_id,
                         app_name,
                         label,
                         &bytes,
                         content_type,
-                    )
-                    .is_ok()
-                    {
-                        backups_restored += 1;
+                        snap.get("saved_at").and_then(|v| v.as_i64()),
+                    ) {
+                        Ok(_) => backups_restored += 1,
+                        Err(e) => {
+                            backups_failed += 1;
+                            first_failure
+                                .get_or_insert_with(|| format!("{}: {}", app_name, e));
+                        }
                     }
                 }
             }
@@ -3504,17 +3590,22 @@ pub async fn import_vault_export(
     }
 
     log::info!(
-        "[import] sealed restored {} (skipped {}), backups restored {} (skipped {})",
+        "[import] sealed restored {} (skipped {}), backups restored {} (skipped {}, failed {}, unsupported {})",
         sealed_restored,
         sealed_skipped,
         backups_restored,
-        backups_skipped
+        backups_skipped,
+        backups_failed,
+        backups_unsupported
     );
     Ok(serde_json::json!({
         "sealed_restored": sealed_restored,
         "sealed_skipped": sealed_skipped,
         "backups_restored": backups_restored,
         "backups_skipped": backups_skipped,
+        "backups_failed": backups_failed,
+        "backups_unsupported": backups_unsupported,
+        "first_failure": first_failure,
     }))
 }
 

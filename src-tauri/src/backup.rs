@@ -288,6 +288,22 @@ pub fn save_backup(
     data: &[u8],
     content_type: Option<&str>,
 ) -> Result<BackupMeta, String> {
+    save_backup_with_time(app_state, client_id, app_name, label, data, content_type, None)
+}
+
+/// `save_backup` with an explicit original timestamp - for the import path,
+/// which restores snapshots that already have a `saved_at`. Stamping import
+/// time instead would give every restored snapshot the same "age", making
+/// rotation's delete-the-oldest pick effectively arbitrary.
+pub fn save_backup_with_time(
+    app_state: &AppState,
+    client_id: &str,
+    app_name: &str,
+    label: Option<&str>,
+    data: &[u8],
+    content_type: Option<&str>,
+    created_at: Option<i64>,
+) -> Result<BackupMeta, String> {
     if data.len() > MAX_BACKUP_SIZE {
         return Err(format!(
             "Backup too large: {} bytes (max {} bytes)",
@@ -386,7 +402,7 @@ pub fn save_backup(
         client_id: client_id.to_string(),
         app_name: app_name.to_string(),
         label: Some(label_str.to_string()),
-        created_at: unix_now(),
+        created_at: created_at.unwrap_or_else(unix_now),
         data_size: data.len(),
         content_type: content_type.unwrap_or("application/json").to_string(),
         summary,

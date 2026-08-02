@@ -1726,19 +1726,53 @@ async fn backup_retrieve_handler(
         }
     }
 
+    // Error taxonomy is part of the bridge contract: apps building on this
+    // MUST be able to tell an absent slot (safe to write into) from a slot
+    // holding data they cannot read. Collapsing everything to 404 is what
+    // let write guards treat a foreign identity's backup as an empty slot.
+    //   404 backup_not_found  - the slot is genuinely empty
+    //   409 identity_mismatch - a file exists but does not decrypt under the
+    //                           active identity's key (written by a different
+    //                           identity, or corrupted - indistinguishable by
+    //                           design, and equally unsafe to overwrite)
+    //   500 backup_unreadable - present but damaged before decryption
+    //                           (unparseable file, bad hex, I/O error)
     let (data, meta) = crate::backup::retrieve_backup(
         &state.app_state,
         &req.client_id,
         req.label.as_deref(),
     )
     .map_err(|e| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(IpcError {
-                error: "backup_not_found".into(),
-                description: Some(e),
-            }),
-        )
+        if e.starts_with("No backup found") || e.starts_with("No backups found") {
+            (
+                StatusCode::NOT_FOUND,
+                Json(IpcError {
+                    error: "backup_not_found".into(),
+                    description: Some(e),
+                }),
+            )
+        } else if e.starts_with("Backup decryption failed") {
+            (
+                StatusCode::CONFLICT,
+                Json(IpcError {
+                    error: "identity_mismatch".into(),
+                    description: Some(
+                        "A backup exists under this label but does not decrypt under \
+                         the active identity's key - it was written by a different \
+                         identity (or is corrupted). It is NOT safe to overwrite."
+                            .into(),
+                    ),
+                }),
+            )
+        } else {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(IpcError {
+                    error: "backup_unreadable".into(),
+                    description: Some(e),
+                }),
+            )
+        }
     })?;
 
     let mut resp = serde_json::json!({
@@ -1841,19 +1875,31 @@ async fn backup_delete_handler(
             serde_json::json!({ "success": true, "deleted_count": count }),
         )))
     } else {
+        // Same taxonomy as retrieve: absent is 404; an I/O failure is NOT
+        // absence and must not masquerade as it.
         crate::backup::delete_backup(
             &state.app_state.data_dir,
             &req.client_id,
             req.label.as_deref(),
         )
         .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(IpcError {
-                    error: "backup_not_found".into(),
-                    description: Some(e),
-                }),
-            )
+            if e.starts_with("No backup found") {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(IpcError {
+                        error: "backup_not_found".into(),
+                        description: Some(e),
+                    }),
+                )
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(IpcError {
+                        error: "delete_failed".into(),
+                        description: Some(e),
+                    }),
+                )
+            }
         })?;
         Ok(axum::response::IntoResponse::into_response(Json(
             serde_json::json!({ "success": true }),

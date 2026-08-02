@@ -140,6 +140,9 @@ interface ImportResult {
   sealed_skipped: number;
   backups_restored: number;
   backups_skipped: number;
+  backups_failed: number;
+  backups_unsupported: number;
+  first_failure: string | null;
 }
 
 /** "profile" -> "Profile", "app_record" -> "App record",
@@ -212,6 +215,7 @@ export default component$(() => {
   const importing = useSignal(false);
   const importResult = useSignal<ImportResult | null>(null);
   const importError = useSignal<string | null>(null);
+  const importOverwrite = useSignal(false);
 
   // Expanded app -> its individual backups
   const expandedApp = useSignal<string | null>(null);
@@ -307,7 +311,10 @@ export default component$(() => {
       if (event.payload.op === "import") importProgress.value = event.payload;
     });
     try {
-      const result = await invoke<ImportResult>("import_vault_export", { path });
+      const result = await invoke<ImportResult>("import_vault_export", {
+        path,
+        overwrite: importOverwrite.value,
+      });
       importResult.value = result;
       await refreshAfterImport();
     } catch (e) {
@@ -916,35 +923,87 @@ export default component$(() => {
           </div>
         )}
 
-        {importResult.value && (
-          <div class="mb-4">
-            <Callout intent="success">
-              <p>
-                {importResult.value.sealed_restored === 0 &&
-                importResult.value.backups_restored === 0
-                  ? "Everything in that export is already here - nothing to restore."
-                  : `Restored ${importResult.value.sealed_restored} private record${
-                      importResult.value.sealed_restored !== 1 ? "s" : ""
-                    } and ${importResult.value.backups_restored} app backup${
-                      importResult.value.backups_restored !== 1 ? "s" : ""
-                    }${
-                      importResult.value.sealed_skipped +
-                        importResult.value.backups_skipped >
-                      0
-                        ? ` (${
-                            importResult.value.sealed_skipped +
-                            importResult.value.backups_skipped
-                          } already here)`
-                        : ""
-                    }.`}
-              </p>
-            </Callout>
-          </div>
-        )}
+        {importResult.value &&
+          (() => {
+            const r = importResult.value;
+            const restored = r.sealed_restored + r.backups_restored;
+            const skipped = r.sealed_skipped + r.backups_skipped;
+            // Three honest outcomes. 0 restored with skips is a legitimate
+            // idempotent re-run; 0 restored with NOTHING skipped means the
+            // import found nothing it could bring home - success copy there
+            // would report total failure as a green checkmark.
+            const failedLine =
+              r.backups_failed > 0
+                ? `${r.backups_failed} snapshot${r.backups_failed !== 1 ? "s" : ""} could not be restored${
+                    r.first_failure ? ` (first error: ${r.first_failure})` : ""
+                  }.`
+                : "";
+            const unsupportedLine =
+              r.backups_unsupported > 0
+                ? ` ${r.backups_unsupported} snapshot${
+                    r.backups_unsupported !== 1 ? "s are" : " is"
+                  } from an older export without restore data (still readable in the file).`
+                : "";
+            if (r.backups_failed > 0) {
+              return (
+                <div class="mb-4">
+                  <Callout intent="warning" title="Import was incomplete">
+                    <p>
+                      {failedLine} Restored {restored}
+                      {skipped > 0 ? `, ${skipped} already here.` : "."}
+                      {unsupportedLine}
+                    </p>
+                  </Callout>
+                </div>
+              );
+            }
+            if (restored === 0 && skipped === 0) {
+              return (
+                <div class="mb-4">
+                  <Callout intent="warning" title="Nothing was restored">
+                    <p>
+                      The import completed but nothing in that file could be
+                      restored.{unsupportedLine || " If you expected data here, check that this is the right export file."}
+                    </p>
+                  </Callout>
+                </div>
+              );
+            }
+            return (
+              <div class="mb-4">
+                <Callout intent="success">
+                  <p>
+                    {restored === 0
+                      ? "Everything in that export is already here - nothing to restore."
+                      : `Restored ${r.sealed_restored} private record${
+                          r.sealed_restored !== 1 ? "s" : ""
+                        } and ${r.backups_restored} app backup${
+                          r.backups_restored !== 1 ? "s" : ""
+                        }${skipped > 0 ? ` (${skipped} already here)` : ""}.`}
+                    {unsupportedLine}
+                  </p>
+                </Callout>
+              </div>
+            );
+          })()}
 
         <GlassButton onClick$={handleImport} disabled={importing.value}>
           {importing.value ? "Importing..." : "Import Export File"}
         </GlassButton>
+        <label class="mt-3 flex cursor-pointer items-start gap-2 text-xs text-gray-400">
+          <input
+            type="checkbox"
+            class="mt-0.5"
+            checked={importOverwrite.value}
+            onChange$={(_, el) => (importOverwrite.value = el.checked)}
+          />
+          <span>
+            Replace app backups I already have with the export's copies.
+            Normally existing backups are kept untouched - use this when a
+            backup here is damaged or incomplete and the export holds the
+            good copy.
+          </span>
+        </label>
         {importing.value && (
           <OperationProgress
             progress={importProgress.value}
