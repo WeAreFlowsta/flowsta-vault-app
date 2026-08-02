@@ -251,6 +251,10 @@ async function quotaRefusalLeg(agentKey) {
   console.log('\n── Quota refusal (expects the account at/over its limit)');
   const before = await serverQuota(agentKey);
   if (before) console.log(`  server quota: ${before.used}/${before.limit} (${before.tier})`);
+  if (before && before.used < before.limit) {
+    record(`quota refusal skipped - account not exhausted (${before.used}/${before.limit} ${before.tier}); run --phase=refusal on an at-limit account to exercise it`, true);
+    return;
+  }
   const { stages, final } = await runJob('/sign-document', signBody(randomHash()));
   record('sign at exhausted quota fails', final.stage === 'failed', JSON.stringify(final));
   record('…with quota_exceeded', final.error === 'quota_exceeded', final.error || '');
@@ -283,7 +287,7 @@ async function happyRow(profileName) {
   const aHash = sign.final.result?.action_hash;
 
   const amend = await runJob('/sign-document', signBody(hashA, { supersedes: aHash, thumbnail: TINY_PNG_2, comment: 'amended by matrix' }));
-  record('amend publishes', amend.final.stage === 'done' && !!amend.final.result?.action_hash);
+  record('amend publishes', amend.final.stage === 'done' && !!amend.final.result?.action_hash, JSON.stringify(amend.final).slice(0, 200));
   const bHash = amend.final.result?.action_hash;
   const recAfterAmend = await findRecord(hashA);
   const recB = recAfterAmend.hits.find((s) => s.action_hash === bHash);
