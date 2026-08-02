@@ -11,6 +11,7 @@
  *
  * Usage:
  *   node scripts/bridge-matrix.mjs --phase=refusal   # quota-refusal leg only
+ *   node scripts/bridge-matrix.mjs --phase=backup    # third-party /backup leg
  *   node scripts/bridge-matrix.mjs --phase=full      # everything else
  *   node scripts/bridge-matrix.mjs                   # all legs
  *
@@ -21,6 +22,9 @@
  *                         (default: keep whatever /status reports)
  *   VAULT_MATRIX_API      API base for quota cross-checks
  *                         (default https://auth-api-staging.flowsta.com)
+ *   VAULT_MATRIX_APP_CLIENT_ID
+ *                         registered third-party app client_id for the
+ *                         backup leg (leg self-skips when unset)
  */
 
 import crypto from 'node:crypto';
@@ -450,6 +454,126 @@ async function profileSyncLeg(trueBaseline) {
     `vault pic len ${originalPicLen}, cache pic ${prof?.profile_picture ? 'present' : 'absent'}`);
 }
 
+// ───────────────────────── backup leg ─────────────────────────
+//
+// Exercises the third-party /backup surface (previously ZERO coverage):
+// linked-app fixture, write/retrieve round-trip, the error taxonomy
+// (404 absent vs non-404 failures - the split write guards depend on),
+// per-origin isolation, delete semantics, and an app revoking its own
+// link. Needs a client_id registered on the API the vault points at
+// (auto-approve resolves the link dialog):
+//   VAULT_MATRIX_APP_CLIENT_ID   registered third-party app client_id
+const APP_CLIENT_ID = process.env.VAULT_MATRIX_APP_CLIENT_ID || '';
+const APP_ORIGIN = 'https://backup-matrix.example';
+
+function canonicalPayload(records) {
+  return {
+    version: 1,
+    _summary: { countsByEntryType: { Test: records }, totalRecords: records },
+    cells: [],
+    app: { name: 'Matrix Backup Fixture', client_id: APP_CLIENT_ID },
+  };
+}
+
+async function backupLegs() {
+  console.log('\n── Backups (third-party surface)');
+  if (!APP_CLIENT_ID) {
+    record('backup leg skipped - set VAULT_MATRIX_APP_CLIENT_ID (a registered app client_id)', true);
+    return;
+  }
+
+  // Fixture: link a synthetic app install under our own origin.
+  const linkKey = `u${crypto.randomBytes(39).toString('base64url')}`;
+  const link = await api('/link-identity', {
+    method: 'POST',
+    origin: APP_ORIGIN,
+    body: {
+      app_name: 'Matrix Backup Fixture',
+      client_id: APP_CLIENT_ID,
+      app_agent_pub_key: linkKey,
+    },
+  });
+  record('fixture app links (auto-approved)', link.status === 200 && link.data?.success === true,
+    `${link.status} ${JSON.stringify(link.data)?.slice(0, 120)}`);
+  if (link.status !== 200) return;
+
+  // Unlinked origins stay out.
+  const evilWrite = await api('/backup', {
+    method: 'POST', origin: EVIL_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, app_name: 'x', label: 'evil', data: {} },
+  });
+  record('write refused for unlinked origin', evilWrite.status === 403 && evilWrite.data?.error === 'not_linked');
+
+  const crossId = await api('/backup', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: 'someone_else', app_name: 'x', label: 'evil', data: {} },
+  });
+  record('write refused for foreign client_id', crossId.status === 403 && crossId.data?.error === 'client_id_mismatch');
+
+  // Absent slot reads as 404 backup_not_found - THE contract the slot
+  // gates build on (absent must be distinguishable from unreadable).
+  const absent = await api('/backup/retrieve', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, label: 'matrix-absent' },
+  });
+  record('absent slot -> 404 backup_not_found', absent.status === 404 && absent.data?.error === 'backup_not_found');
+
+  // Write + read back.
+  const wrote = await api('/backup', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: {
+      client_id: APP_CLIENT_ID, app_name: 'Matrix Backup Fixture',
+      label: 'matrix-test', data: canonicalPayload(3),
+    },
+  });
+  record('write accepted for linked origin', wrote.status === 200 && wrote.data?.success === true,
+    `${wrote.status}`);
+
+  const readBack = await api('/backup/retrieve', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, label: 'matrix-test' },
+  });
+  record('round-trip preserves the payload',
+    readBack.status === 200 && readBack.data?.data?._summary?.totalRecords === 3);
+
+  // /backup/limits advertises the incremental contract.
+  const limits = await api('/backup/limits', { origin: APP_ORIGIN });
+  record('limits advertised (named labels never rotate)',
+    limits.status === 200 && limits.data?.named_labels_rotate === false,
+    `${limits.status} ${JSON.stringify(limits.data)?.slice(0, 80)}`);
+
+  // Delete semantics: gone -> 404 on the second attempt (never a silent 200).
+  const del = await api('/backup/delete', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, label: 'matrix-test' },
+  });
+  record('single-label delete succeeds', del.status === 200 && del.data?.success === true);
+  const delAgain = await api('/backup/delete', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, label: 'matrix-test' },
+  });
+  record('deleting an absent label -> 404', delAgain.status === 404 && delAgain.data?.error === 'backup_not_found');
+
+  // An app may revoke ITS OWN link (and only from its own origin).
+  const evilRevoke = await api('/revoke-identity', {
+    method: 'POST', origin: EVIL_ORIGIN,
+    body: { app_name: 'Matrix Backup Fixture', app_agent_pub_key: linkKey },
+  });
+  record('own-link revoke refused for unlinked origin', evilRevoke.status === 403);
+  const revoke = await api('/revoke-identity', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { app_name: 'Matrix Backup Fixture', app_agent_pub_key: linkKey },
+  });
+  record('app revokes its own link', revoke.status === 200 && revoke.data?.success === true,
+    `${revoke.status}`);
+  const afterRevoke = await api('/backup', {
+    method: 'POST', origin: APP_ORIGIN,
+    body: { client_id: APP_CLIENT_ID, app_name: 'x', label: 'after', data: {} },
+  });
+  record('writes refused after the app unlinked itself',
+    afterRevoke.status === 403 && afterRevoke.data?.error === 'not_linked');
+}
+
 // ───────────────────────── main ─────────────────────────
 
 (async () => {
@@ -462,6 +586,10 @@ async function profileSyncLeg(trueBaseline) {
 
   if (PHASE === 'refusal' || PHASE === 'all') {
     await quotaRefusalLeg(agentKey);
+  }
+
+  if (PHASE === 'backup' || PHASE === 'all') {
+    await backupLegs();
   }
 
   if (PHASE === 'full' || PHASE === 'all') {
