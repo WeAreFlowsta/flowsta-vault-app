@@ -500,12 +500,12 @@ export default component$(() => {
             Restore your app backups, or start fresh?
           </p>
           <p class="mb-4 text-sm text-gray-300">
-            This Vault was just restored from your identity. If you kept a
-            Vault export file from your previous device, import it now -
-            BEFORE opening apps like Your Own AI - so their backups are
-            here when they reconnect. Until you choose, apps can read but
-            not write backups, so nothing gets overwritten by mistake.
-            Importing your export finishes this automatically.
+            This Vault was just restored. If you kept a Vault export file
+            from your previous device, import it now, before opening apps
+            like Your Own AI, so their data is back when they reconnect.
+            Until you choose, your apps keep working but can't save new
+            backups here, so nothing your export holds can be overwritten.
+            Importing your export answers this on its own.
           </p>
           <div class="flex flex-col-reverse gap-2 sm:flex-row sm:items-center">
             <button
