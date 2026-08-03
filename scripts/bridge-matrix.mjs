@@ -483,13 +483,20 @@ async function profileSyncLeg(trueBaseline) {
     record('server cache cross-check skipped (no username set)', true);
     return;
   }
-  const resp = await fetch(`${API}/api/v1/profiles/by-username/${encodeURIComponent(uname)}`);
-  const prof = (await resp.json().catch(() => null))?.profile;
-  record('server profile cache agrees with vault at rest',
-    resp.ok && prof?.display_name === original,
+  // The cache is an async best-effort projection (vault frontend pushes it
+  // after the event lands) - allow it a few seconds to catch up.
+  let prof = null;
+  let cacheOk = false;
+  for (let i = 0; i < 5; i++) {
+    const resp = await fetch(`${API}/api/v1/profiles/by-username/${encodeURIComponent(uname)}`);
+    prof = resp.ok ? (await resp.json().catch(() => null))?.profile : null;
+    if (prof?.display_name === original) { cacheOk = true; break; }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  record('server profile cache agrees with vault at rest', cacheOk,
     `cache "${prof?.display_name}" vs vault "${original}"`);
   record('server cache has an avatar when the vault does',
-    resp.ok && (originalPicLen > 0 ? !!prof?.profile_picture : true),
+    prof && (originalPicLen > 0 ? !!prof?.profile_picture : true),
     `vault pic len ${originalPicLen}, cache pic ${prof?.profile_picture ? 'present' : 'absent'}`);
 }
 

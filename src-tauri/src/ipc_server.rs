@@ -2993,9 +2993,18 @@ async fn profile_update_core(
             ),
         })?;
 
-    let _ = state
-        .app_handle
-        .emit("profile-updated", serde_json::json!({}));
+    // Carry the changed fields: the frontend pushes bridge-approved edits
+    // to the server's public-profile cache (same best-effort path as an
+    // in-app edit), so the cache stays fresh no matter which client asked.
+    // In-app edits emit an EMPTY payload (their caller already refreshes) -
+    // the listener only pushes when fields are present.
+    let _ = state.app_handle.emit(
+        "profile-updated",
+        serde_json::json!({
+            "display_name": display_name,
+            "profile_picture": picture,
+        }),
+    );
     Ok(serde_json::json!({ "success": true }))
 }
 

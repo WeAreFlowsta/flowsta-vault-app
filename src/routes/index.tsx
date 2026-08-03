@@ -375,7 +375,23 @@ export default component$(() => {
       } catch { /* ignore */ }
     };
     const unlisten = await listen("profile-synced", refreshIdentity);
-    const unlistenEdit = await listen("profile-updated", refreshIdentity);
+    // Bridge-approved edits carry the changed fields; push them to the
+    // server's public-profile cache through the same best-effort path an
+    // in-app edit uses. In-app edits emit an empty payload (their caller
+    // already refreshed the cache) - nothing to push then.
+    const unlistenEdit = await listen<{ display_name?: string; profile_picture?: string }>(
+      "profile-updated",
+      async (event) => {
+        await refreshIdentity();
+        const changed = event.payload ?? {};
+        if (changed.display_name) {
+          await refreshServerProfile({ displayName: changed.display_name });
+        }
+        if (changed.profile_picture) {
+          await refreshServerProfile({ profilePicture: changed.profile_picture });
+        }
+      },
+    );
     cleanup(() => unlisten());
     cleanup(() => unlistenEdit());
 
