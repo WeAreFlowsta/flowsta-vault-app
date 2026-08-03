@@ -969,17 +969,34 @@ export default component$(() => {
                 </div>
               );
             }
+            if (restored === 0) {
+              // Everything collided with existing copies. Usually that means
+              // the user was already safe - but if the copies HERE are the
+              // problem (the wrong-order recovery case), a green "all done"
+              // would mask it. State what happened and point at the recourse.
+              return (
+                <div class="mb-4">
+                  <Callout intent="info" title="Nothing was changed">
+                    <p>
+                      Every backup in that export already exists in this
+                      Vault, so nothing was added.
+                      {unsupportedLine} If an app is still missing data, the
+                      copy already here may be the problem - import again
+                      with "Also replace backups I already have" checked.
+                    </p>
+                  </Callout>
+                </div>
+              );
+            }
             return (
               <div class="mb-4">
                 <Callout intent="success">
                   <p>
-                    {restored === 0
-                      ? "Everything in that export is already here - nothing to restore."
-                      : `Restored ${r.sealed_restored} private record${
-                          r.sealed_restored !== 1 ? "s" : ""
-                        } and ${r.backups_restored} app backup${
-                          r.backups_restored !== 1 ? "s" : ""
-                        }${skipped > 0 ? ` (${skipped} already here)` : ""}.`}
+                    {`Restored ${r.sealed_restored} private record${
+                      r.sealed_restored !== 1 ? "s" : ""
+                    } and ${r.backups_restored} app backup${
+                      r.backups_restored !== 1 ? "s" : ""
+                    }${skipped > 0 ? ` (${skipped} already here)` : ""}.`}
                     {unsupportedLine}
                   </p>
                 </Callout>
@@ -998,10 +1015,13 @@ export default component$(() => {
             onChange$={(_, el) => (importOverwrite.value = el.checked)}
           />
           <span>
-            Replace app backups I already have with the export's copies.
-            Normally existing backups are kept untouched - use this when a
-            backup here is damaged or incomplete and the export holds the
-            good copy.
+            <span class="text-gray-300">
+              Also replace backups I already have.
+            </span>{" "}
+            An import normally only adds what's missing - it never touches
+            backups already in this Vault. Check this to replace them with
+            the file's versions too, for when a backup here is wrong and
+            the file holds the good copy.
           </span>
         </label>
         {importing.value && (
