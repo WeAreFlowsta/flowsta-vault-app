@@ -5,6 +5,45 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - Unreleased
+
+### Fixed
+- **Signing in on flowsta.com from Chrome and other Chromium browsers works
+  again.** The Vault was refusing to sign the website's login challenge; it
+  now recognizes that challenge as first-party and signs it normally.
+  Sign-in requests carrying other reserved content are still refused, and
+  only Flowsta pages may ask.
+- **Revocation marks stay visible after a reset or restore.** Setting a
+  vault up again on a machine that had one before could quietly revert part
+  of the signing engine, which hid revocations from your records view. The
+  Vault now brings the signing engine current every time it starts.
+
+### Added
+- **After restoring your identity, the Vault asks before apps can write.**
+  The dashboard offers "import your export" or "start fresh"; until you
+  choose, connected apps cannot overwrite or delete backup slots your
+  export may be about to fill. A completed import answers the question
+  automatically.
+- **Backup answers apps can trust.** Retrieving a backup now tells the
+  requesting app whether the slot is empty, holds another identity's data,
+  or exists but cannot be read - three different answers instead of one
+  "not found". Apps use this to avoid ever treating someone else's slot as
+  their own.
+- **Every response names the identity that answered.** Bridge responses
+  carry the Vault's identity while unlocked, and an app can pin any request
+  to the identity it expects - the Vault refuses the call if it holds a
+  different one, even while locked.
+- **A connected app can disconnect itself.** Apps may revoke their own
+  identity link through the bridge; disconnecting in the Vault remains
+  unchanged.
+
+### Changed
+- **Imports report what actually happened.** Importing an export preserves
+  each record's original timestamp, counts unreadable and unsupported
+  records instead of skipping them silently, and finding nothing new to
+  restore is explained plainly rather than shown as a success. Replacing
+  existing records is an explicit choice, never the default.
+
 ## [1.1.3] - 2026-07-28
 
 ### Fixed
