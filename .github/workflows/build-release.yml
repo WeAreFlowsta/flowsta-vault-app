@@ -189,15 +189,30 @@ jobs:
           mkdir -p ~/private_keys
           echo -n "$APPLE_API_KEY_PATH" | base64 --decode -o ~/private_keys/AuthKey_${APPLE_API_KEY}.p8
 
+      # Betas skip Authenticode signing (eSigner bills per signing;
+      # sign-windows.ps1 no-ops when the env below is set). Release
+      # candidates and stable tags sign as always - an rc should look
+      # exactly like the release.
+      - name: Detect beta build
+        id: prerelease
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#vault-v}"
+          if [[ "$VERSION" == *-beta* ]]; then
+            echo "is_beta=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_beta=0" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Java (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.prerelease.outputs.is_beta == '0'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Download CodeSignTool (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.prerelease.outputs.is_beta == '0'
         shell: pwsh
         run: |
           $url = "https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2.zip"
@@ -228,6 +243,8 @@ jobs:
         uses: tauri-apps/tauri-action@action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # sign-windows.ps1 no-ops when this is 1 (betas skip eSigner).
+          VAULT_SKIP_WINDOWS_SIGNING: ${{ steps.prerelease.outputs.is_beta }}
           # base64(STANDARD) of {"client_id":"<vault-prod-app>"} — written
           # into base64_auth_material_bootstrap AND _relay by conductor.rs.
           # Safe to ship before bootstrap.flowsta.com is flipped to
