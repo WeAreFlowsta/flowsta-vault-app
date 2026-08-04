@@ -1863,17 +1863,17 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   Now bring your data home
                 </p>
                 <p class="text-sm text-gray-400">
-                  Your recovery phrase restores your identity - your private
-                  records and app backups come from your export file. Open the
-                  dashboard, go to <span class="text-white">Your Data</span>,
-                  and choose{" "}
-                  <span class="text-white">Restore from an Export</span>.
+                  Your recovery phrase restored your identity. Your private
+                  records and app backups live in your Vault export file -
+                  the next screen asks whether to import it or start fresh.
+                  Import <span class="text-white">before</span> you open your
+                  apps, so everything is back where they expect it.
                 </p>
               </div>
             )}
 
             <GlassButton onClick$={props.onComplete$}>
-              Open Dashboard
+              Continue
             </GlassButton>
           </div>
         )}
