@@ -1188,7 +1188,14 @@ export default component$(() => {
               <button
                 type="button"
                 class="flex items-center gap-2 rounded-full py-1 pl-3 pr-1.5 transition-colors hover:bg-gray-800"
-                onClick$={() => (profileMenuOpen.value = !profileMenuOpen.value)}
+                onClick$={() => {
+                  profileMenuOpen.value = !profileMenuOpen.value;
+                  // The plan loads once with the identity; if that fetch ran
+                  // offline it stayed empty ("Status unavailable offline")
+                  // even after connectivity returned. Opening the menu is
+                  // the moment the answer matters - retry then.
+                  if (profileMenuOpen.value && !planInfo.value) refreshPlan();
+                }}
               >
                 <span class="text-sm text-gray-300">{displayName}</span>
                 {userProfile.profilePicture ? (
