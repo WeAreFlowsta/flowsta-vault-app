@@ -5,7 +5,7 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - Unreleased
+## [1.2.0] - 2026-08-04
 
 ### Fixed
 - **Signing in on flowsta.com from Chrome and other Chromium browsers works
@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now recognizes that challenge as first-party and signs it normally.
   Sign-in requests carrying other reserved content are still refused, and
   only Flowsta pages may ask.
+- **Profile edits approved from the web update your public page.** A
+  name or picture change made on the dashboard and approved in the Vault
+  updated the Vault itself but could leave your public profile page
+  showing the old name until your next in-app edit.
+- The plan status in the header menu loads on demand when the Vault
+  started without a connection.
 - **Revocation marks stay visible after a reset or restore.** Setting a
   vault up again on a machine that had one before could quietly revert part
   of the signing engine, which hid revocations from your records view. The
@@ -38,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
 
 ### Changed
+- **After a phrase restore, setup hands you straight to the recovery
+  question.** The final screen now explains that the dashboard will ask
+  whether to import your export or start fresh, instead of describing
+  menu steps to find on your own.
 - **Imports report what actually happened.** Importing an export preserves
   each record's original timestamp, counts unreadable and unsupported
   records instead of skipping them silently, and finding nothing new to
