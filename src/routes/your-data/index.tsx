@@ -278,6 +278,18 @@ export default component$(() => {
     } catch (e) {
       console.error("Failed to load your data:", e);
     } finally {
+      // Arriving via "Import my export" on the overview: bring the restore
+      // card into view once the page has its data. Hash, not query param -
+      // the static adapter strips query params inside Tauri.
+      if (window.location.hash === "#restore") {
+        setTimeout(
+          () =>
+            document
+              .getElementById("restore")
+              ?.scrollIntoView({ behavior: "smooth", block: "start" }),
+          100,
+        );
+      }
       loading.value = false;
     }
 
@@ -902,7 +914,7 @@ export default component$(() => {
       </div>
 
       {/* Restore from export */}
-      <div class="rounded-xl border border-gray-700 bg-[#15203a] p-6">
+      <div id="restore" class="rounded-xl border border-gray-700 bg-[#15203a] p-6">
         <h3 class="mb-2 text-lg font-semibold text-white">
           Restore from an Export
         </h3>

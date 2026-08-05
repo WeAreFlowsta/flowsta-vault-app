@@ -515,7 +515,7 @@ export default component$(() => {
             >
               Start fresh (no export to import)
             </button>
-            <GlassButton onClick$={() => (window.location.href = "/your-data/")}>
+            <GlassButton onClick$={() => (window.location.href = "/your-data/#restore")}>
               Import my export
             </GlassButton>
           </div>
