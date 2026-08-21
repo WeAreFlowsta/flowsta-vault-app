@@ -398,8 +398,26 @@ async function lockedRow(ctx, profileName) {
     record(`${op} job reports waiting_unlock while locked`, snap.data?.stage === 'waiting_unlock', `stage: ${snap.data?.stage}`);
   }
 
+  // Login challenge arriving while LOCKED is HELD through the unlock (the
+  // sign-in page's zero-click promise): /authenticate must not answer
+  // vault_locked straight away - it raises the unlock screen, waits, and
+  // carries the same request into approval once unlocked.
+  const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
+  let heldSettled = false;
+  const heldLogin = api('/authenticate', {
+    method: 'POST', origin: ORIGIN,
+    body: { app_name: 'Flowsta', challenge: b64('flowsta-auth-challenge:v1:matrixheld:flowsta'), reason: 'matrix: held through unlock' },
+  }).then((r) => { heldSettled = true; return r; });
+  await new Promise((r) => setTimeout(r, 2500));
+  record('login challenge is HELD while locked (no immediate vault_locked)', !heldSettled);
+
   const unlock = await api('/dev/unlock', { method: 'POST', body: {} });
   record('/dev/unlock', unlock.status === 200, JSON.stringify(unlock.data).slice(0, 120));
+
+  const heldResult = await heldLogin;
+  record('held login challenge signs after unlock',
+    heldResult.status === 200 && !!heldResult.data?.signature,
+    `${heldResult.status} ${heldResult.data?.error || ''}`);
 
   for (const [op, id] of Object.entries(jobs)) {
     const done = await pollJob(id);
