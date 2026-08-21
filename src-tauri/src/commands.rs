@@ -332,6 +332,7 @@ impl AppState {
         let linked_apps = load_linked_apps(&data_dir);
         let verified_apps = load_verified_apps(&data_dir);
         let linked_app_scopes = load_linked_app_scopes(&data_dir);
+        let approved_sites = load_approved_sites(&data_dir);
 
         Self {
             vault_config: Mutex::new(None),
@@ -345,7 +346,7 @@ impl AppState {
             pending_cell_op: Mutex::new(None),
             pending_raw_sign: Mutex::new(None),
             recent_link_approvals: Mutex::new(std::collections::HashMap::new()),
-            approved_apps: Mutex::new(Vec::new()),
+            approved_apps: Mutex::new(approved_sites),
             linked_third_party_apps: Mutex::new(linked_apps),
             conductor_handle: Mutex::new(None),
             conductor_status: Mutex::new(ConductorStatus::Stopped),
@@ -392,6 +393,21 @@ impl AppState {
         }
     }
 
+    /// Persist the remembered sites (origins the user chose to auto-approve
+    /// for /authenticate). A remembered site stays remembered until the user
+    /// revokes it in Connections - across lock and across restarts - because
+    /// the unlock password is what authenticated the human; a fresh dialog
+    /// on every launch only trains people to click through.
+    pub fn save_approved_sites(&self) {
+        let json = {
+            let apps = self.approved_apps.lock().unwrap();
+            serde_json::to_string_pretty(&*apps)
+        };
+        if let Ok(json) = json {
+            let _ = std::fs::write(self.data_dir.join("approved-sites.json"), json);
+        }
+    }
+
     /// Persist the granted scopes store to disk.
     pub fn save_linked_app_scopes(&self) {
         let json = {
@@ -406,6 +422,14 @@ impl AppState {
 
 fn load_linked_apps(data_dir: &std::path::Path) -> Vec<LinkedThirdPartyApp> {
     let path = data_dir.join("linked-apps.json");
+    match std::fs::read_to_string(&path) {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn load_approved_sites(data_dir: &std::path::Path) -> Vec<String> {
+    let path = data_dir.join("approved-sites.json");
     match std::fs::read_to_string(&path) {
         Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
         Err(_) => Vec::new(),
@@ -856,8 +880,9 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
         let _ = req.responder.send(false);
     }
 
-    // Session approvals don't outlive an unlock session.
-    state.approved_apps.lock().unwrap().clear();
+    // Remembered sites deliberately survive a lock (and a restart): the user
+    // chose "remember", and unlocking again is what proves it is still them.
+    // Revoking in Connections is the way to forget one.
 
     // The 120s post-link "ceremony window" that suppresses the /sign dialog
     // must not survive a lock either - otherwise it keeps ticking against a
@@ -1491,6 +1516,7 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     // Clear the matching in-memory state so the UI reflects the wipe at once.
     state.connected_sites.lock().unwrap().clear();
     state.approved_apps.lock().unwrap().clear();
+    let _ = std::fs::remove_file(state.data_dir.join("approved-sites.json"));
     state.linked_third_party_apps.lock().unwrap().clear();
     state.verified_apps.lock().unwrap().clear();
     state.linked_app_scopes.lock().unwrap().clear();
@@ -2860,8 +2886,12 @@ pub fn revoke_site(
     let mut sites = state.connected_sites.lock().unwrap();
     sites.remove(&origin);
     // Also remove from approved apps if present
-    let mut approved = state.approved_apps.lock().unwrap();
-    approved.retain(|o| o != &origin);
+    {
+        let mut approved = state.approved_apps.lock().unwrap();
+        approved.retain(|o| o != &origin);
+    }
+    drop(sites);
+    state.save_approved_sites();
     Ok(())
 }
 
@@ -2892,6 +2922,7 @@ pub fn respond_auth_request(
                 apps.push(origin.clone());
             }
         }
+        state.save_approved_sites();
     }
 
     // Send the response - ignore error if receiver was dropped (timeout)

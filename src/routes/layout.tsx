@@ -1123,8 +1123,10 @@ export default component$(() => {
               {unlockAttention.value.origin || "A Flowsta page"} is waiting to
               {unlockAttention.value.reason === "profile"
                 ? " update your profile"
-                : " sign a file"}{" "}
-              - unlock your Vault to review and approve it.
+                : unlockAttention.value.reason === "sign-in"
+                  ? " sign you in"
+                  : " sign a file"}{" "}
+              - unlock your Vault to {unlockAttention.value.reason === "sign-in" ? "carry on" : "review and approve it"}.
             </p>
           </div>
         )}

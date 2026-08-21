@@ -627,18 +627,37 @@ async fn authenticate_handler(
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "authenticate");
 
-    // Vault must be unlocked
-    {
-        let config = state.app_state.vault_config.lock().unwrap();
-        if config.is_none() {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(IpcError {
-                    error: "vault_locked".into(),
-                    description: Some("Vault is locked. Unlock it first.".into()),
-                }),
-            ));
+    // Vault must be unlocked. If it isn't, bring the unlock screen forward
+    // and HOLD the request for a while: the person just clicked "sign in"
+    // somewhere, so the natural next step is to unlock - and then this same
+    // request carries straight on into approval (or auto-approval) without
+    // them having to go back and click again. Same pattern as relay codes,
+    // which are queued through unlock. If they don't unlock in time we answer
+    // vault_locked exactly as before; the page keeps watching for the unlock.
+    if state.app_state.vault_config.lock().unwrap().is_none() {
+        let _ = state.app_handle.emit(
+            "unlock-attention",
+            serde_json::json!({ "reason": "sign-in", "origin": origin }),
+        );
+        raise_window(&state.app_handle);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(55);
+        loop {
+            if state.app_state.vault_config.lock().unwrap().is_some() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(IpcError {
+                        error: "vault_locked".into(),
+                        description: Some("Vault is locked. Unlock it first.".into()),
+                    }),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
+        let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
     }
 
     // Check if this origin is already auto-approved

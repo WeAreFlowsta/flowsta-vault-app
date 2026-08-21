@@ -5,6 +5,20 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **"Remember this site" now means it.** A site you chose to remember when
+  approving a sign-in stays remembered across locking the Vault and across
+  restarts, until you revoke it in Connections. Before, the Vault forgot
+  every remembered site the moment it was locked or relaunched, so the
+  approval dialog came back each time.
+- **A sign-in that arrives while the Vault is locked brings the unlock
+  screen forward and waits for you.** Unlock, and the same sign-in carries
+  straight on to approval - no need to go back to the page and click again.
+  If you don't unlock within about a minute the page is told the Vault is
+  locked, exactly as before.
+
 ## [1.2.0] - 2026-08-04
 
 ### Fixed
