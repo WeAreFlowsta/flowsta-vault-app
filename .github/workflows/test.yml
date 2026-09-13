@@ -34,3 +34,10 @@ jobs:
       - name: Run unit tests
         working-directory: src-tauri
         run: cargo test --lib
+
+      # Debug builds skip every #[cfg(not(debug_assertions))] arm; code used
+      # only there rots invisibly and once failed all four release builds at
+      # the tag. Compile those arms on every push instead.
+      - name: Release-profile check
+        working-directory: src-tauri
+        run: cargo check --release

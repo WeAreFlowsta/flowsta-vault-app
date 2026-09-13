@@ -13,6 +13,7 @@
  *   node scripts/bridge-matrix.mjs --phase=refusal   # quota-refusal leg only
  *   node scripts/bridge-matrix.mjs --phase=backup    # third-party /backup leg
  *   node scripts/bridge-matrix.mjs --phase=password  # change → relock → unlock with the new one → ready
+ *   node scripts/bridge-matrix.mjs --phase=grants    # email never leaks without a grant; scopes ride /authenticate
  *   node scripts/bridge-matrix.mjs --phase=full      # everything else
  *   node scripts/bridge-matrix.mjs                   # all legs
  *
@@ -800,6 +801,43 @@ async function passwordLeg() {
   record('conductor ready on the original password', st?.status === 'ready', JSON.stringify(st));
 }
 
+// ── Email grants leg ─────────────────────────────────────────────────
+//
+// The rule under test: an email reaches an app only through a grant the
+// user made in a Vault dialog. Without one, /status carries no `email`
+// for any origin (first-party pages still get `web_email`, as before) and
+// /authenticate with `scopes: ["email"]` answers without an address when
+// nothing can be granted (unregistered client_id, or an unverified email -
+// the harness vault is never verified). The positive path (dialog → grant
+// → email in the response) is Eric's eyeball item: it needs a registered
+// app and a verified staging identity.
+
+async function grantsLeg() {
+  console.log('\n── Email grants leg');
+  const first = await api('/status');
+  record('/status (Flowsta origin) has no `email` field without a grant', first.status === 200 && !('email' in (first.data || {})),
+    JSON.stringify(Object.keys(first.data || {})));
+  const evil = await api('/status', { origin: EVIL_ORIGIN });
+  record('/status (other origin) has no `email` and no `web_email`',
+    evil.status === 200 && !('email' in (evil.data || {})) && evil.data?.web_email == null);
+
+  const challenge = Buffer.from(`matrix-grants-${randomHash().slice(0, 16)}`).toString('base64');
+  const noApp = await api('/authenticate', {
+    method: 'POST',
+    body: { app_name: 'Matrix', challenge, reason: 'grants leg', scopes: ['email'] },
+  });
+  record('/authenticate with scopes but no client_id: signs, shares no email',
+    noApp.status === 200 && !!noApp.data?.signature && noApp.data?.email === undefined, `${noApp.status}`);
+  const unknownApp = await api('/authenticate', {
+    method: 'POST',
+    body: { app_name: 'Matrix', challenge, reason: 'grants leg', client_id: 'flowsta_app_does_not_exist', scopes: ['email'] },
+  });
+  record('/authenticate with an unregistered client_id + email scope: signs, shares no email',
+    unknownApp.status === 200 && !!unknownApp.data?.signature && unknownApp.data?.email === undefined, `${unknownApp.status}`);
+  const after = await api('/status');
+  record('still no `email` on /status afterwards', after.status === 200 && !('email' in (after.data || {})));
+}
+
 // ───────────────────────── main ─────────────────────────
 
 (async () => {
@@ -820,6 +858,10 @@ async function passwordLeg() {
 
   if (PHASE === 'password' || PHASE === 'all') {
     await passwordLeg();
+  }
+
+  if (PHASE === 'grants' || PHASE === 'all') {
+    await grantsLeg();
   }
 
   if (PHASE === 'full' || PHASE === 'all') {
