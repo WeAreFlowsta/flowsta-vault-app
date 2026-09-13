@@ -873,7 +873,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               </GlassButton>
             </div>
 
-            <p class="mt-4 text-xs text-gray-500">
+            <p class="mt-4 text-sm text-gray-400">
               New here? "Create a new identity" makes a fresh self-custody identity in about a minute.
               Have a recovery phrase from another device? Restore with it.
             </p>
@@ -883,7 +883,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 but it is not one of the two ways to START - it sits below
                 them as a plain link so the choice above stays a choice of
                 two. Same shape carries to a phone screen. */}
-            <div class="mt-6 border-t border-gray-700 pt-4 text-xs text-gray-500">
+            <div class="mt-6 border-t border-gray-700 pt-4 text-sm text-gray-400">
               Have a Flowsta account created before July 2026 that you haven't
               migrated yet?{" "}
               <button
