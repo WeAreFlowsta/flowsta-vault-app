@@ -168,7 +168,7 @@ fn extract_origin(headers: &HeaderMap) -> Option<String> {
         .map(String::from)
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -232,6 +232,12 @@ struct StatusResponse {
     /// apps only ever receive the email through the server AFTER the user
     /// consents (and the server hash-verifies it).
     web_email: Option<String>,
+    /// The user's email - present only for a linked app the user allowed
+    /// `email` for in a Vault dialog, and only while that email is verified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email_verified: Option<bool>,
 }
 
 /// Resolve the caller's origin to the `client_id` of a linked third-party app.
@@ -285,7 +291,7 @@ async fn status_handler(
     headers: HeaderMap,
 ) -> Json<StatusResponse> {
     // Phase 1: extract vault fields, then drop the lock before any other locks.
-    let (unlocked, agent_pub_key, did, display_name_raw, profile_picture_raw, web_username_raw, web_email_raw) = {
+    let (unlocked, agent_pub_key, did, display_name_raw, profile_picture_raw, web_username_raw, web_email_raw, email_verified_raw) = {
         let config = state.app_state.vault_config.lock().unwrap();
         (
             config.is_some(),
@@ -295,6 +301,7 @@ async fn status_handler(
             config.as_ref().and_then(|c| c.profile_picture.clone()),
             config.as_ref().and_then(|c| c.web_username.clone()),
             config.as_ref().and_then(|c| c.web_email.clone()),
+            config.as_ref().and_then(|c| c.email_verified),
         )
     };
 
@@ -309,6 +316,14 @@ async fn status_handler(
 
     // Phase 2: look up granted scopes for this origin (vault_config lock released).
     let scopes = get_scopes_for_origin(&state.app_state, origin.as_deref());
+    // Email goes only to an app the user allowed it for, in a Vault dialog
+    // (email-grants.json, keyed by client_id; the origin is just how the
+    // linked app is recognised locally). CORS is open on this endpoint -
+    // this filter IS the boundary.
+    let email_granted = origin_to_client_id(&state.app_state, origin.as_deref())
+        .map(|cid| state.app_state.email_grants.lock().unwrap().contains_key(&cid))
+        .unwrap_or(false)
+        && email_verified_raw == Some(true);
 
     // Phase 3: return only fields the app was granted at link time.
     Json(StatusResponse {
@@ -321,7 +336,9 @@ async fn status_handler(
         profile_picture: scopes.contains(&"profile_picture".to_string()).then_some(profile_picture_raw).flatten(),
         web_username: scopes.contains(&"username".to_string()).then_some(web_username_raw).flatten(),
         // First-party only (consent-page pre-fill) - see field doc.
-        web_email: is_flowsta_origin(origin.as_deref()).then_some(web_email_raw).flatten(),
+        web_email: is_flowsta_origin(origin.as_deref()).then_some(web_email_raw.clone()).flatten(),
+        email: email_granted.then_some(web_email_raw).flatten(),
+        email_verified: email_granted.then_some(true),
     })
 }
 
@@ -605,8 +622,15 @@ struct AuthenticateRequest {
     challenge: Option<String>,
     /// Human-readable reason shown in the approval dialog.
     reason: Option<String>,
-    /// Developer client_id for MAU tracking (optional).
+    /// Developer client_id for MAU tracking and, with `scopes`, for the
+    /// email grant (optional).
     client_id: Option<String>,
+    /// Scopes the app wants for this sign-in. Only `email` changes anything
+    /// today: with a registered `client_id` whose allowed scopes include it,
+    /// the dialog offers the user's (verified) email and, on Allow, the
+    /// address comes back in the response and a grant is filed for the app.
+    #[serde(default)]
+    scopes: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -617,6 +641,65 @@ struct AuthenticateResponse {
     /// Ed25519 signature of the challenge (only if challenge was provided).
     signature: Option<String>,
     signed_at: String,
+    /// The user's email, when they allowed the app's `email` scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email_verified: Option<bool>,
+}
+
+/// Resolve what an /authenticate caller may ask for: the registered app's
+/// allowed scopes (fresh from the API, or the offline cache) ∩ requested.
+async fn resolve_requested_scopes(
+    state: &AppState,
+    client_id: &str,
+    requested: &[String],
+) -> Vec<String> {
+    if requested.is_empty() {
+        return vec![];
+    }
+    let api_url = option_env!("FLOWSTA_API_URL").unwrap_or("https://auth-api.flowsta.com");
+    let url = format!("{}/api/v1/apps/verify?client_id={}", api_url.trim_end_matches('/'), client_id);
+    let fetched = async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+        let body: serde_json::Value = client.get(&url).send().await.ok()?.json().await.ok()?;
+        if !body.get("valid").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return None;
+        }
+        let app = body.get("app")?;
+        let info = crate::commands::VerifiedAppInfo {
+            name: app.get("name").and_then(|v| v.as_str()).unwrap_or(client_id).to_string(),
+            description: app.get("description").and_then(|v| v.as_str()).map(String::from),
+            app_type: app.get("app_type").and_then(|v| v.as_str()).unwrap_or("oauth").to_string(),
+            logo_url: app.get("logo_url").and_then(|v| v.as_str()).map(String::from),
+            scopes: app
+                .get("scopes")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            organization_name: app.get("organization_name").and_then(|v| v.as_str()).map(String::from),
+        };
+        Some(info)
+    }
+    .await;
+    let allowed: Vec<String> = match fetched {
+        Some(info) => {
+            state.verified_apps.lock().unwrap().insert(client_id.to_string(), info.clone());
+            state.save_verified_apps();
+            info.scopes
+        }
+        None => state
+            .verified_apps
+            .lock()
+            .unwrap()
+            .get(client_id)
+            .map(|i| i.scopes.clone())
+            .unwrap_or_default(),
+    };
+    requested.iter().filter(|s| allowed.contains(s)).cloned().collect()
 }
 
 async fn authenticate_handler(
@@ -660,10 +743,39 @@ async fn authenticate_handler(
         let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
     }
 
-    // Check if this origin is already auto-approved
+    // What the app is asking for beyond the identity proof. `email` is the
+    // one scope that changes the dialog and the response.
+    let scopes = match req.client_id.as_deref() {
+        Some(cid) if !req.scopes.is_empty() => {
+            resolve_requested_scopes(&state.app_state, cid, &req.scopes).await
+        }
+        _ => vec![],
+    };
+    let wants_email = scopes.iter().any(|s| s == "email");
+    let (vault_email, vault_email_verified) = {
+        let config = state.app_state.vault_config.lock().unwrap();
+        (
+            config.as_ref().and_then(|c| c.web_email.clone()),
+            config.as_ref().and_then(|c| c.email_verified).unwrap_or(false),
+        )
+    };
+    let already_granted = match req.client_id.as_deref() {
+        Some(cid) => state.app_state.email_grants.lock().unwrap().contains_key(cid),
+        None => false,
+    };
+    // The address that WILL be shared if the user allows: requested, held,
+    // verified. Unverified → the dialog says so and nothing is shared.
+    let share_email = if wants_email && vault_email_verified { vault_email.clone() } else { None };
+    let email_unverified = wants_email && vault_email.is_some() && !vault_email_verified;
+    // A grant to record on Allow (first time this app gets the email).
+    let email_grant_needed = share_email.is_some() && !already_granted;
+
+    // Check if this origin is already auto-approved. A remembered site does
+    // NOT cover a first request for the email: that is a new thing being
+    // shared, so the dialog shows once more.
     let auto_approved = if let Some(ref orig) = origin {
         let approved = state.app_state.approved_apps.lock().unwrap();
-        approved.contains(orig)
+        approved.contains(orig) && !email_grant_needed
     } else {
         false
     };
@@ -693,13 +805,18 @@ async fn authenticate_handler(
 
         let request_id = format!("auth-{}", unix_now());
 
+        let info = AuthRequestInfo {
+            id: request_id.clone(),
+            app_name: req.app_name.clone(),
+            origin: origin.clone(),
+            reason: req.reason.clone(),
+            client_id: req.client_id.clone(),
+            scopes: scopes.clone(),
+            share_email: share_email.clone(),
+            email_unverified,
+        };
         let pending = PendingAuthRequest {
-            info: AuthRequestInfo {
-                id: request_id.clone(),
-                app_name: req.app_name.clone(),
-                origin: origin.clone(),
-                reason: req.reason.clone(),
-            },
+            info: info.clone(),
             challenge: req.challenge.clone(),
             responder: tx,
         };
@@ -711,12 +828,7 @@ async fn authenticate_handler(
         }
 
         // Emit Tauri event to show the approval dialog
-        let event_payload = serde_json::json!({
-            "id": request_id,
-            "app_name": req.app_name,
-            "origin": origin,
-            "reason": req.reason,
-        });
+        let event_payload = serde_json::to_value(&info).unwrap_or(serde_json::json!({}));
 
         raise_window(&state.app_handle);
         let _ = state.app_handle.emit("auth-request", event_payload);
@@ -853,12 +965,27 @@ async fn authenticate_handler(
         crate::mau::record_mau_event_if_needed(&state.app_state, client_id);
     }
 
+    // The user allowed the email: file the grant (local store + server),
+    // then hand the address to the app. Already-granted apps get it again
+    // without a new record.
+    let (email, email_verified) = match (share_email, req.client_id.as_deref()) {
+        (Some(addr), Some(cid)) => {
+            if email_grant_needed {
+                crate::commands::record_email_grant(&state.app_state, cid, &req.app_name).await;
+            }
+            (Some(addr), Some(true))
+        }
+        _ => (None, None),
+    };
+
     let resp = AuthenticateResponse {
         success: true,
         did,
         agent_pub_key,
         signature,
         signed_at: chrono_now_iso(),
+        email,
+        email_verified,
     };
 
     Ok(axum::response::IntoResponse::into_response(Json(resp)))

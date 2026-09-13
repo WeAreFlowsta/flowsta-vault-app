@@ -32,6 +32,17 @@ pub struct RelayClaim {
     pub ua_family: Option<String>,
     pub ip_prefix: Option<String>,
     pub expires_in: u64,
+    /// The OAuth app the browser consents to after this sign-in (server
+    /// resolved). None when the relay is a plain Flowsta sign-in.
+    pub app_client_id: Option<String>,
+    /// That app's requested ∩ registered scopes.
+    #[serde(default)]
+    pub app_scopes: Vec<String>,
+    /// The address that will be shared with the app on Approve - present
+    /// only when it asked for `email` and the Vault holds a verified one.
+    pub share_email: Option<String>,
+    /// `email` requested, but the Vault's email is not verified yet.
+    pub email_unverified: bool,
 }
 
 #[derive(Deserialize)]
@@ -39,10 +50,18 @@ struct ClaimResponse {
     claim_token: Option<String>,
     challenge: Option<String>,
     app_name: Option<String>,
+    app: Option<ClaimApp>,
     origin_hint: Option<OriginHint>,
     expires_in: Option<u64>,
     error: Option<String>,
     message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ClaimApp {
+    client_id: Option<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +113,10 @@ pub async fn relay_claim_core(api_url: &str, user_code: &str) -> Result<RelayCla
         ua_family: body.origin_hint.as_ref().and_then(|o| o.ua_family.clone()),
         ip_prefix: body.origin_hint.as_ref().and_then(|o| o.ip_prefix.clone()),
         expires_in: body.expires_in.unwrap_or(0),
+        app_client_id: body.app.as_ref().and_then(|a| a.client_id.clone()),
+        app_scopes: body.app.as_ref().map(|a| a.scopes.clone()).unwrap_or_default(),
+        share_email: None,
+        email_unverified: false,
     })
 }
 
@@ -162,7 +185,19 @@ pub async fn relay_claim(
             return Err("vault_locked".into());
         }
     }
-    let claim = relay_claim_core(&api_url, &user_code).await?;
+    let mut claim = relay_claim_core(&api_url, &user_code).await?;
+    // Offer the email when the target app asked for it and the Vault's
+    // email is verified - same rule as the /authenticate dialog.
+    if claim.app_scopes.iter().any(|s| s == "email") {
+        let config = state.vault_config.lock().unwrap();
+        if let Some(cfg) = config.as_ref() {
+            if cfg.email_verified == Some(true) {
+                claim.share_email = cfg.web_email.clone();
+            } else if cfg.web_email.is_some() {
+                claim.email_unverified = true;
+            }
+        }
+    }
     {
         let mut pending = state.pending_relay_claim.lock().unwrap();
         *pending = Some(claim.clone());
@@ -196,6 +231,17 @@ pub async fn relay_approve(
         return Err("Invalid device seed length".into());
     }
     seed.copy_from_slice(&seed_vec);
+
+    // Email grant first, so the consent page the browser lands on after
+    // this sign-in already sees it and does not ask the user to type the
+    // address on a phone. A grant that cannot be filed does not block the
+    // sign-in - the consent page falls back to asking.
+    if let (Some(_), Some(cid)) = (&claim.share_email, &claim.app_client_id) {
+        let already = state.email_grants.lock().unwrap().contains_key(cid);
+        if !already {
+            crate::commands::record_email_grant(state.inner(), cid, &claim.app_name).await;
+        }
+    }
 
     relay_approve_core(&api_url, &claim, &seed, &agent_b64).await
 }

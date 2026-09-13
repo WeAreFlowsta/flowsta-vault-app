@@ -444,6 +444,8 @@ pub fn run() {
             commands::sync_quota_to_server,
             commands::claim_web_username,
             commands::set_web_email,
+            commands::get_email_grants,
+            commands::revoke_email_grant_command,
             commands::request_email_change,
             commands::check_email_change,
             commands::cancel_email_change,

@@ -57,6 +57,8 @@ struct ApiUser {
     username: Option<String>,
     #[serde(rename = "profilePicture")]
     profile_picture: Option<String>,
+    #[serde(rename = "emailVerified")]
+    email_verified: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -173,6 +175,9 @@ pub struct VaultGrantResult {
     /// None for born-device-hosted accounts. Only `restore_device_identity`
     /// fills this in.
     pub web_agent_pub_key: Option<String>,
+    /// Whether the account's email is verified (server truth). The Vault
+    /// caches it: only a verified email is ever shared with an app.
+    pub email_verified: Option<bool>,
 }
 
 /// Shared vault-grant flow: fetch a challenge, sign it raw with the device seed,
@@ -252,6 +257,7 @@ async fn vault_grant(
         username: user.username,
         profile_picture: user.profile_picture,
         web_agent_pub_key: None,
+        email_verified: user.email_verified,
     })
 }
 

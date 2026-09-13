@@ -65,6 +65,11 @@ pub struct VaultConfig {
     #[serde(default)]
     pub pending_email: Option<String>,
 
+    /// Server-asserted verification state of `web_email`, cached from the
+    /// last vault-grant. Only a verified email is offered to apps.
+    #[serde(default)]
+    pub email_verified: Option<bool>,
+
     /// Web account username.
     #[serde(default)]
     pub web_username: Option<String>,
@@ -362,6 +367,7 @@ mod tests {
             web_agent_pub_key: Some("uhCAkWebKey456".to_string()),
             web_email: Some("test@example.com".to_string()),
             pending_email: None,
+            email_verified: None,
             web_username: Some("testuser".to_string()),
             display_name: Some("Test User".to_string()),
             profile_picture: Some("https://example.com/pic.jpg".to_string()),
@@ -411,6 +417,7 @@ mod tests {
             web_agent_pub_key: None,
             web_email: None,
             pending_email: None,
+            email_verified: None,
             web_username: None,
             display_name: None,
             profile_picture: None,

@@ -66,6 +66,34 @@ pub struct AuthRequestInfo {
     pub app_name: String,
     pub origin: Option<String>,
     pub reason: Option<String>,
+    /// The registered app this sign-in is for (None for unregistered callers).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Scopes the app asked for and is registered for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// The address that will be shared if the user allows - present only
+    /// when `email` is requested AND the Vault holds a verified email.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_email: Option<String>,
+    /// `email` was requested but the Vault's email is not verified yet, so
+    /// nothing will be shared (the dialog says so).
+    #[serde(default)]
+    pub email_unverified: bool,
+}
+
+/// One app's email grant, filed when the user allowed `email` in a Vault
+/// dialog. Keyed by client_id in `email-grants.json`. The address itself is
+/// never stored here - it is read live from the vault config, so a change
+/// of email flows through automatically.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EmailGrant {
+    pub app_name: String,
+    pub granted_at: i64,
+    /// True once the server has the same grant on file (/auth/email-grant).
+    /// False = filed locally while offline; retried on the next sign-in.
+    #[serde(default)]
+    pub synced: bool,
 }
 
 /// A pending authentication request awaiting user approval.
@@ -198,6 +226,10 @@ pub struct AppState {
     /// Scopes granted to each linked app at link time (client_id → scopes).
     /// Persisted to linked-app-scopes.json. Used by /status for scope-filtered responses.
     pub linked_app_scopes: Mutex<HashMap<String, Vec<String>>>,
+    /// Apps the user has allowed to receive their email (client_id → grant).
+    /// Persisted to email-grants.json. A remembered site does NOT imply an
+    /// email grant: the first request for `email` always shows the dialog.
+    pub email_grants: Mutex<HashMap<String, EmailGrant>>,
     /// Derived backup encryption key - persists through vault lock so apps
     /// can store backups while the vault is locked. Derived from device_seed
     /// via HMAC (cannot recover seed or sign).
@@ -333,6 +365,7 @@ impl AppState {
         let verified_apps = load_verified_apps(&data_dir);
         let linked_app_scopes = load_linked_app_scopes(&data_dir);
         let approved_sites = load_approved_sites(&data_dir);
+        let email_grants = load_email_grants(&data_dir);
 
         Self {
             vault_config: Mutex::new(None),
@@ -353,6 +386,7 @@ impl AppState {
             mau_state: crate::mau::MauState::new(),
             verified_apps: Mutex::new(verified_apps),
             linked_app_scopes: Mutex::new(linked_app_scopes),
+            email_grants: Mutex::new(email_grants),
             backup_key: Mutex::new(None),
             linked_web_agent_key: Mutex::new(None),
             pending_sign_paths: Mutex::new(Vec::new()),
@@ -408,6 +442,17 @@ impl AppState {
         }
     }
 
+    /// Persist the email grants to disk.
+    pub fn save_email_grants(&self) {
+        let json = {
+            let grants = self.email_grants.lock().unwrap();
+            serde_json::to_string_pretty(&*grants)
+        };
+        if let Ok(json) = json {
+            let _ = std::fs::write(self.data_dir.join("email-grants.json"), json);
+        }
+    }
+
     /// Persist the granted scopes store to disk.
     pub fn save_linked_app_scopes(&self) {
         let json = {
@@ -438,6 +483,14 @@ fn load_approved_sites(data_dir: &std::path::Path) -> Vec<String> {
 
 fn load_linked_app_scopes(data_dir: &std::path::Path) -> HashMap<String, Vec<String>> {
     let path = data_dir.join("linked-app-scopes.json");
+    match std::fs::read_to_string(&path) {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn load_email_grants(data_dir: &std::path::Path) -> HashMap<String, EmailGrant> {
+    let path = data_dir.join("email-grants.json");
     match std::fs::read_to_string(&path) {
         Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
         Err(_) => HashMap::new(),
@@ -687,6 +740,7 @@ pub(crate) fn setup_vault_inner(
         web_agent_pub_key,
         web_email: web_email.clone(),
         pending_email: None,
+        email_verified: None,
         web_username,
         display_name,
         profile_picture,
@@ -1573,6 +1627,8 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.linked_third_party_apps.lock().unwrap().clear();
     state.verified_apps.lock().unwrap().clear();
     state.linked_app_scopes.lock().unwrap().clear();
+    state.email_grants.lock().unwrap().clear();
+    let _ = std::fs::remove_file(state.data_dir.join("email-grants.json"));
     *state.linked_web_agent_key.lock().unwrap() = None;
 
     log::info!("Vault fully erased - identity, keys, conductor data, app links, scopes, and backups cleared.");
@@ -3284,9 +3340,139 @@ pub fn revoke_linked_third_party_app(
     if let Some(cid) = client_id_to_remove {
         state.linked_app_scopes.lock().unwrap().remove(&cid);
         state.save_linked_app_scopes();
+        revoke_email_grant(state.inner(), &cid);
     }
 
     Ok(())
+}
+
+/// Forget an app's email grant locally and, best effort, on the server
+/// (the server row is what /oauth/userinfo serves).
+pub(crate) fn revoke_email_grant(state: &Arc<AppState>, client_id: &str) {
+    let had = state.email_grants.lock().unwrap().remove(client_id).is_some();
+    if !had {
+        return;
+    }
+    state.save_email_grants();
+    let st = state.clone();
+    let cid = client_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = file_email_grant_on_server(&st, &cid, true).await {
+            log::warn!("email grant revoke not mirrored to the server ({}): {}", cid, e);
+        }
+    });
+}
+
+/// Record that the user allowed `client_id` to receive their email, then
+/// file it with the server (signed by the device key). Local first: the
+/// grant stands offline for Holochain apps reading /status; `synced` flips
+/// once the server confirms.
+pub(crate) async fn record_email_grant(state: &Arc<AppState>, client_id: &str, app_name: &str) {
+    {
+        let mut grants = state.email_grants.lock().unwrap();
+        grants.insert(
+            client_id.to_string(),
+            EmailGrant { app_name: app_name.to_string(), granted_at: crate::ipc_server::unix_now() as i64, synced: false },
+        );
+    }
+    state.save_email_grants();
+    match file_email_grant_on_server(state, client_id, false).await {
+        Ok(()) => {
+            if let Some(g) = state.email_grants.lock().unwrap().get_mut(client_id) {
+                g.synced = true;
+            }
+            state.save_email_grants();
+        }
+        Err(e) => log::warn!("email grant for {} not yet filed with the server: {}", client_id, e),
+    }
+}
+
+/// Retry server filing for grants recorded while offline.
+pub(crate) async fn sync_unsynced_email_grants(state: &Arc<AppState>) {
+    let pending: Vec<String> = state
+        .email_grants
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, g)| !g.synced)
+        .map(|(cid, _)| cid.clone())
+        .collect();
+    for cid in pending {
+        if file_email_grant_on_server(state, &cid, false).await.is_ok() {
+            if let Some(g) = state.email_grants.lock().unwrap().get_mut(&cid) {
+                g.synced = true;
+            }
+            state.save_email_grants();
+        }
+    }
+}
+
+/// POST (or DELETE) /auth/email-grant with a device signature over
+/// `flowsta-email-grant[-revoke]:v1:{client_id}:{sha256(email)}:{ts}`.
+async fn file_email_grant_on_server(state: &Arc<AppState>, client_id: &str, revoke: bool) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let (seed, agent_b64, email) = {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config.as_ref().ok_or("Vault is locked")?;
+        if cfg.hosting_model.as_deref() != Some("device-hosted") {
+            return Err("not device-hosted".into());
+        }
+        let seed_vec = cfg.device_seed.clone().ok_or("No device seed")?;
+        let mut seed = [0u8; 32];
+        if seed_vec.len() != 32 {
+            return Err("Invalid device seed length".into());
+        }
+        seed.copy_from_slice(&seed_vec);
+        (
+            seed,
+            cfg.agent_pub_key_raw_b64.clone().ok_or("No raw agent key")?,
+            cfg.web_email.clone().ok_or("No email in vault")?,
+        )
+    };
+    let email_hash = hex::encode(Sha256::digest(email.to_lowercase().as_bytes()));
+    let ts = crate::ipc_server::unix_now() as i64;
+    let prefix = if revoke { "flowsta-email-grant-revoke:v1:" } else { "flowsta-email-grant:v1:" };
+    let canonical = format!("{}{}:{}:{}", prefix, client_id, email_hash, ts);
+    let signature = crate::key_derivation::base64_standard_encode(
+        &crate::key_derivation::sign_with_device_seed(&seed, canonical.as_bytes()),
+    );
+    let api_url = option_env!("FLOWSTA_API_URL").unwrap_or("https://auth-api.flowsta.com");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = format!("{}/auth/email-grant", api_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "client_id": client_id,
+        "agent_pub_key": agent_b64,
+        "email": email,
+        "timestamp": ts,
+        "signature": signature,
+    });
+    let req = if revoke { client.delete(&url) } else { client.post(&url) };
+    let resp = req.json(&body).send().await.map_err(|e| format!("api_unreachable: {}", e))?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let data: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    Err(format!(
+        "{} [{}]",
+        data.get("error").and_then(|v| v.as_str()).unwrap_or("email_grant_failed"),
+        status.as_u16()
+    ))
+}
+
+/// Apps the user has allowed to receive their email (client_id → grant).
+#[tauri::command]
+pub fn get_email_grants(state: State<'_, Arc<AppState>>) -> HashMap<String, EmailGrant> {
+    state.email_grants.lock().unwrap().clone()
+}
+
+/// Stop sharing the email with one app (Connections).
+#[tauri::command]
+pub fn revoke_email_grant_command(client_id: String, state: State<'_, Arc<AppState>>) {
+    revoke_email_grant(state.inner(), &client_id);
 }
 
 /// Toggle whether a connected site is trusted (auto-approved for /authenticate).
@@ -3296,14 +3482,19 @@ pub fn toggle_site_trust(
     trusted: bool,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let mut apps = state.approved_apps.lock().unwrap();
-    if trusted {
-        if !apps.contains(&origin) {
-            apps.push(origin);
+    {
+        let mut apps = state.approved_apps.lock().unwrap();
+        if trusted {
+            if !apps.contains(&origin) {
+                apps.push(origin);
+            }
+        } else {
+            apps.retain(|o| o != &origin);
         }
-    } else {
-        apps.retain(|o| o != &origin);
     }
+    // Remembered sites persist (approved-sites.json) - so must a revoke,
+    // or the site comes back at the next launch.
+    state.save_approved_sites();
     Ok(())
 }
 
@@ -3321,8 +3512,11 @@ pub fn revoke_approved_app(
     origin: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let mut apps = state.approved_apps.lock().unwrap();
-    apps.retain(|o| o != &origin);
+    {
+        let mut apps = state.approved_apps.lock().unwrap();
+        apps.retain(|o| o != &origin);
+    }
+    state.save_approved_sites();
     Ok(())
 }
 
@@ -6096,6 +6290,24 @@ pub async fn check_email_change(
     let grant = crate::device_identity::vault_grant_with_seed(&api_url, &seed, &agent_b64)
         .await
         .map_err(|e| format!("Sign-in failed: {}", e))?;
+    // Every grant carries the server's verified flag - cache it (this runs
+    // at each unlock), and use the moment to file any offline email grants.
+    if let Some(v) = grant.email_verified {
+        let changed = {
+            let mut config = state.vault_config.lock().unwrap();
+            match config.as_mut() {
+                Some(cfg) if cfg.email_verified != Some(v) => {
+                    cfg.email_verified = Some(v);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            let _ = persist_config_now(state.inner());
+        }
+    }
+    sync_unsynced_email_grants(state.inner()).await;
     let resp = reqwest::Client::new()
         .get(format!("{}/auth/pending-email-change", api_url.trim_end_matches('/')))
         .bearer_auth(&grant.token)

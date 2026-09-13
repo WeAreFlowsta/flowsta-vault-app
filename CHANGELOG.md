@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Apps ask for your email in the Vault, and you decide there.** When a
+  registered app requests the `email` scope at sign-in (directly, or
+  through a code on another device), the approval dialog shows the address
+  that will be shared and says plainly that the app receives it as text it
+  can keep. Allow files the grant with Flowsta too, so the web consent
+  page no longer asks you to type it, and Holochain apps you linked can
+  read it from the Vault. Only a verified email is ever offered. A
+  remembered site still sees the dialog the first time it asks for email.
 - **Change your email from the Vault.** Settings has a Change Email card
   for identities created in the Vault. Flowsta sends a link to the new
   address; the Vault applies the change once you click it (it checks on
@@ -21,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already registered to another account.
 
 ### Fixed
+- **Forgetting a remembered site now sticks.** Revoking a site in
+  Connections was not written to disk, so the site came back remembered
+  at the next launch.
 - **Changing your Vault password no longer risks a Vault that opens but
   cannot start.** Two background tasks could re-save the vault under the
   old password moments after a change, leaving the key store and the

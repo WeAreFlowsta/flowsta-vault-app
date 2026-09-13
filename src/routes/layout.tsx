@@ -259,6 +259,10 @@ export default component$(() => {
     app_name: string;
     origin: string | null;
     reason: string | null;
+    client_id?: string | null;
+    scopes?: string[];
+    share_email?: string | null;
+    email_unverified?: boolean;
   } | null>(null);
   const rememberApp = useSignal(false);
 
@@ -334,6 +338,10 @@ export default component$(() => {
     ua_family: string | null;
     ip_prefix: string | null;
     expires_in: number;
+    app_client_id?: string | null;
+    app_scopes?: string[];
+    share_email?: string | null;
+    email_unverified?: boolean;
   } | null>(null);
   // Set while a Flowsta page's request (sign / profile) is waiting behind
   // the lock screen - its approval dialog appears the moment we unlock.
@@ -504,6 +512,10 @@ export default component$(() => {
       app_name: string;
       origin: string | null;
       reason: string | null;
+      client_id?: string | null;
+      scopes?: string[];
+      share_email?: string | null;
+      email_unverified?: boolean;
     }>("auth-request", (event) => {
       pendingAuth.value = event.payload;
       rememberApp.value = false;
@@ -1006,6 +1018,10 @@ export default component$(() => {
         ua_family: string | null;
         ip_prefix: string | null;
         expires_in: number;
+        app_client_id: string | null;
+        app_scopes: string[];
+        share_email: string | null;
+        email_unverified: boolean;
       }>("relay_claim", { apiUrl: __API_URL__, userCode: rawCode });
       pendingRelayClaim.value = claim;
       relayCodeModal.value = false;
@@ -1586,6 +1602,18 @@ export default component$(() => {
                     : ""}
                 </p>
               </div>
+              {pendingRelayClaim.value.share_email && (
+                <div>
+                  <span class="text-xs text-amber-300">Email shared</span>
+                  <p class="text-sm font-medium text-white">
+                    {pendingRelayClaim.value.share_email}
+                  </p>
+                  <p class="mt-0.5 text-xs text-gray-400">
+                    {pendingRelayClaim.value.app_name} receives it as text it can
+                    keep and use to contact you.
+                  </p>
+                </div>
+              )}
             </div>
 
             <p class="mb-4 text-xs text-amber-200/90">
@@ -1766,12 +1794,33 @@ export default component$(() => {
                   </p>
                 </div>
               )}
+              {pendingAuth.value.share_email && (
+                <div>
+                  <span class="text-xs text-amber-300">Email shared</span>
+                  <p class="text-sm font-medium text-white">
+                    {pendingAuth.value.share_email}
+                  </p>
+                </div>
+              )}
             </div>
 
-            <p class="mb-4 text-xs text-gray-400">
-              This will share your DID and public key. Your private key never
-              leaves the vault.
-            </p>
+            {pendingAuth.value.share_email ? (
+              <p class="mb-4 text-xs text-gray-400">
+                Allow shares your DID, public key and email address.{" "}
+                {pendingAuth.value.app_name} receives the address as text it
+                can keep and use to contact you. You can stop sharing it in
+                Connections; that stops future access, it does not unsend.
+                Your private key never leaves the vault.
+              </p>
+            ) : (
+              <p class="mb-4 text-xs text-gray-400">
+                This will share your DID and public key.
+                {pendingAuth.value.email_unverified
+                  ? " The app also asked for your email, but yours isn't verified yet, so it won't be shared."
+                  : ""}{" "}
+                Your private key never leaves the vault.
+              </p>
+            )}
 
             <label class="mb-4 flex items-center gap-2 cursor-pointer">
               <input
@@ -1865,14 +1914,23 @@ export default component$(() => {
                       <li
                         key={scope}
                         class={[
-                          "flex items-center gap-2 text-xs",
+                          "flex items-start gap-2 text-xs",
                           info.elevated ? "text-amber-400" : "text-gray-300",
                         ].join(" ")}
                       >
                         <span class={info.elevated ? "text-amber-500" : "text-green-500"}>
                           {info.elevated ? "\u26A0" : "\u2713"}
                         </span>
-                        {info.label}
+                        <span>
+                          {info.label}
+                          {scope === "email" && (
+                            <span class="block text-gray-500">
+                              {userProfile.email
+                                ? `${userProfile.email} - the app receives it as text it can keep, once you sign in to it.`
+                                : "Shared once you sign in to the app, if your email is verified."}
+                            </span>
+                          )}
+                        </span>
                       </li>
                     );
                   })}
