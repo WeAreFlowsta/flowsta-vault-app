@@ -1375,10 +1375,15 @@ export default component$(() => {
                 {conductorStatus.value === "starting"
                   ? (conductorMessage.value || "Starting...")
                   : conductorStatus.value === "error"
-                    ? "HC Error"
+                    ? "Holochain stopped"
                     : "Holochain"}
               </span>
             </div>
+            {conductorStatus.value === "error" && conductorMessage.value && (
+              <p class="mb-3 rounded-md border border-red-900/60 bg-red-950/40 px-2 py-1.5 text-[11px] leading-snug text-red-200 line-clamp-4">
+                {conductorMessage.value}
+              </p>
+            )}
             <button
               type="button"
               class="mb-2 flex w-full items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-300 transition-colors"

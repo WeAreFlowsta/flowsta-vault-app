@@ -14,6 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   email after a phrase restore, and when repairing an address that was
   already registered to another account.
 
+### Fixed
+- **Changing your Vault password no longer risks a Vault that opens but
+  cannot start.** Two background tasks could re-save the vault under the
+  old password moments after a change, leaving the key store and the
+  vault file protected by different passwords; on the next launch the key
+  store stopped and the sidebar said "try reinstalling". Every save now
+  uses the password the Vault is currently unlocked with, the change
+  itself is all-or-nothing (if the Vault cannot come back up under the
+  new password everything is restored to the current one and the change
+  reports the failure), and a key store that no longer opens with the
+  password that opened your vault is detected within seconds and rebuilt
+  from your vault's own seed instead of failing after several timeouts
+  with "try reinstalling". The key store keeps its own log, and the
+  sidebar shows the reason whenever the local Holochain stops.
+
 ### Changed
 - **Email addresses are stored the way Flowsta matches them.** Every place
   you enter your email now trims it and lowercases it before it is saved

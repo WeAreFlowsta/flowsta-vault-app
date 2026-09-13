@@ -529,10 +529,26 @@ pub async fn start_holochain(
                 "[start_holochain] first attempt failed: {} - auto-restarting conductor",
                 e,
             );
+            let mut message = "Finishing first-time setup...";
+            if e.contains(lair::LAIR_STOPPED_MARKER) {
+                // The keystore no longer opens with the passphrase that just
+                // opened the vault file (the two got out of step - e.g. a
+                // vault re-saved under an old password after a change). It
+                // holds nothing that cannot be rebuilt from the vault's own
+                // seed, so set it aside and let the second attempt
+                // re-initialize it under the working passphrase.
+                match lair::quarantine_lair_dir(&data_dir.join("lair")) {
+                    Ok(moved) => {
+                        log::warn!("[start_holochain] key store set aside at {:?} - rebuilding it from the device seed", moved);
+                        message = "Rebuilding the key store...";
+                    }
+                    Err(qe) => log::error!("[start_holochain] {}", qe),
+                }
+            }
             let _ = app_handle.emit(
                 "conductor-status",
                 ConductorStatus::Starting {
-                    message: "Finishing first-time setup...".into(),
+                    message: message.into(),
                 },
             );
             // Brief pause so the admin WS port is released and any process
@@ -575,8 +591,9 @@ async fn start_holochain_attempt(
         }};
     }
 
-    // 2. Wait for lair socket to be ready.
-    if let Err(e) = lair::wait_for_lair_socket(&connection_url, 15).await {
+    // 2. Wait for lair socket to be ready (watching the process - see
+    // wait_for_lair_socket for why a socket file alone proves nothing).
+    if let Err(e) = lair::wait_for_lair_socket(&connection_url, 15, &mut lair_child, &lair_dir).await {
         fail_with_lair_cleanup!(e);
     }
 
@@ -593,9 +610,19 @@ async fn start_holochain_attempt(
         let mut last_err = String::new();
         let mut connected = None;
         for attempt in 1..=MAX_ATTEMPTS {
+            // A lair that has already exited will never answer - say why
+            // now instead of after six 30-second timeouts.
+            if let Some(err) = lair::lair_exited(&mut lair_child, &lair_dir) {
+                last_err = err;
+                break;
+            }
             match lair::connect_to_lair(&connection_url, &passphrase).await {
                 Ok(c) => { connected = Some(c); break; }
                 Err(e) => {
+                    if let Some(err) = lair::lair_exited(&mut lair_child, &lair_dir) {
+                        last_err = err;
+                        break;
+                    }
                     last_err = e;
                     if attempt < MAX_ATTEMPTS {
                         log::warn!(

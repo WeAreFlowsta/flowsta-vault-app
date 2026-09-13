@@ -12,6 +12,7 @@
  * Usage:
  *   node scripts/bridge-matrix.mjs --phase=refusal   # quota-refusal leg only
  *   node scripts/bridge-matrix.mjs --phase=backup    # third-party /backup leg
+ *   node scripts/bridge-matrix.mjs --phase=password  # change → relock → unlock with the new one → ready
  *   node scripts/bridge-matrix.mjs --phase=full      # everything else
  *   node scripts/bridge-matrix.mjs                   # all legs
  *
@@ -25,6 +26,9 @@
  *   VAULT_MATRIX_APP_CLIENT_ID
  *                         registered third-party app client_id for the
  *                         backup leg (leg self-skips when unset)
+ *   VAULT_MATRIX_PASSWORD the dev vault's CURRENT unlock password, for the
+ *                         password leg (leg self-skips when unset; the leg
+ *                         changes it and changes it back)
  */
 
 import crypto from 'node:crypto';
@@ -712,6 +716,90 @@ async function backupLegs() {
     afterRevoke.status === 403 && afterRevoke.data?.error === 'not_linked');
 }
 
+// ── Password leg ─────────────────────────────────────────────────────
+//
+// The password protects the vault file, the conductor's db.key and the
+// lair keystore together. The field failure was the three disagreeing
+// after a change (vault under one password, key store under another):
+// lair died on its passphrase at the next launch and the UI said "try
+// reinstalling". This leg proves the rotation end to end through the
+// real command, then a full lock (conductor + lair stopped) and an unlock
+// with the NEW password - the same path a relaunch takes - and that the
+// OLD password is refused. Then it changes back so the dev vault stays
+// usable.
+
+async function waitForConductor(want, { timeoutMs = 5 * 60 * 1000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const r = await api('/dev/status');
+    last = r.data?.conductor;
+    if (last?.status === want) return last;
+    if (last?.status === 'error') return last;
+    await new Promise((res) => setTimeout(res, 1000));
+  }
+  return last;
+}
+
+async function passwordLeg() {
+  console.log('\n── Password leg (change → lock → unlock with new → ready → change back)');
+  const CURRENT = process.env.VAULT_MATRIX_PASSWORD;
+  if (!CURRENT) {
+    record('password leg', true, 'skipped - set VAULT_MATRIX_PASSWORD to run it');
+    return;
+  }
+  const TEMP = `Matrix-${crypto.randomBytes(6).toString('hex')}-Aa1!`;
+
+  const wrong = await api('/dev/change-password', {
+    method: 'POST', body: { current_password: 'definitely-not-it-9', new_password: TEMP },
+  });
+  record('change refused with the wrong current password', wrong.status === 400 && /incorrect/i.test(wrong.data?.description || ''),
+    `${wrong.status} ${wrong.data?.description || ''}`);
+
+  const t0 = Date.now();
+  const change = await api('/dev/change-password', {
+    method: 'POST', body: { current_password: CURRENT, new_password: TEMP },
+  });
+  record('change_vault_password succeeds', change.status === 200 && change.data?.success === true,
+    `${change.status} ${change.data?.description || ''} in ${Math.round((Date.now() - t0) / 1000)}s`);
+  if (change.status !== 200) return;
+
+  let st = await waitForConductor('ready');
+  record('conductor ready after the change (command returned only once it was)', st?.status === 'ready', JSON.stringify(st));
+  const dev = await api('/dev/status');
+  record('previous keystore removed after the new stack came up', dev.data?.old_keystores === 0,
+    `old_keystores=${dev.data?.old_keystores}`);
+
+  // Full lock stops conductor + lair; the unlock re-inits/starts lair under
+  // the cached passphrase and decrypts the vault file - the relaunch path.
+  const lock = await api('/dev/lock', { method: 'POST', body: {} });
+  record('/dev/lock', lock.status === 200);
+  const old = await api('/dev/unlock-with-password', { method: 'POST', body: { password: CURRENT } });
+  record('OLD password refused after the change', old.status === 403, `${old.status}`);
+  const fresh = await api('/dev/unlock-with-password', { method: 'POST', body: { password: TEMP } });
+  record('NEW password unlocks the vault', fresh.status === 200 && fresh.data?.success === true,
+    `${fresh.status} ${fresh.data?.description || ''}`);
+  st = await waitForConductor('ready');
+  record('conductor + key store come up under the NEW password', st?.status === 'ready', JSON.stringify(st));
+
+  // A sign still works (lair holds the device key it re-imported).
+  const probe = await api('/status');
+  record('/status unlocked after the round trip', probe.status === 200 && probe.data?.unlocked === true);
+
+  // Change back so the dev vault keeps its known password.
+  const back = await api('/dev/change-password', {
+    method: 'POST', body: { current_password: TEMP, new_password: CURRENT },
+  });
+  record('changed back to the original password', back.status === 200, `${back.status} ${back.data?.description || ''}`);
+  st = await waitForConductor('ready');
+  record('conductor ready after changing back', st?.status === 'ready', JSON.stringify(st));
+  const lock2 = await api('/dev/lock', { method: 'POST', body: {} });
+  const orig = await api('/dev/unlock-with-password', { method: 'POST', body: { password: CURRENT } });
+  record('original password unlocks again', lock2.status === 200 && orig.status === 200, `${orig.status}`);
+  st = await waitForConductor('ready');
+  record('conductor ready on the original password', st?.status === 'ready', JSON.stringify(st));
+}
+
 // ───────────────────────── main ─────────────────────────
 
 (async () => {
@@ -728,6 +816,10 @@ async function backupLegs() {
 
   if (PHASE === 'backup' || PHASE === 'all') {
     await backupLegs();
+  }
+
+  if (PHASE === 'password' || PHASE === 'all') {
+    await passwordLeg();
   }
 
   if (PHASE === 'full' || PHASE === 'all') {

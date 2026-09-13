@@ -1057,7 +1057,7 @@ pub(crate) async fn ensure_conductor_alive(
     let resource_dir = resolve_resource_dir(app_handle, &data_dir);
 
     log::info!("[watchdog] running start_holochain to bring conductor back");
-    let new_handle = crate::conductor::start_holochain(
+    let new_handle = match crate::conductor::start_holochain(
         app_handle.clone(),
         data_dir,
         resource_dir,
@@ -1065,7 +1065,17 @@ pub(crate) async fn ensure_conductor_alive(
         device_seed,
     )
     .await
-    .map_err(|e| format!("[watchdog] restart failed: {}", e))?;
+    {
+        Ok(h) => h,
+        Err(e) => {
+            // Say so in the sidebar - otherwise it sits on "Recovering
+            // conductor..." forever with the real reason only in the log.
+            let status = ConductorStatus::Error { message: e.clone() };
+            *state.conductor_status.lock().unwrap() = status.clone();
+            let _ = app_handle.emit("conductor-status", status);
+            return Err(format!("[watchdog] restart failed: {}", e));
+        }
+    };
 
     log::info!(
         "[watchdog] conductor recovered (admin port {})",
@@ -1150,6 +1160,10 @@ fn spawn_conductor_startup(
                 message: "Initializing...".into(),
             };
 
+            // Unlock-time start: no password change is in flight, so any
+            // `lair.old-*` left by an interrupted one is garbage.
+            crate::lair::sweep_old_lair_dirs(&data_dir);
+
             // Resolve the resource directory where bundled .happ files live
             // (resource_dir with exe-relative and data-dir fallbacks - see
             // resolve_resource_dir).
@@ -1157,7 +1171,6 @@ fn spawn_conductor_startup(
 
             tauri::async_runtime::spawn(async move {
                 let app_handle_ref = app_handle.clone();
-                let passphrase_for_sync = passphrase.clone();
                 match crate::conductor::start_holochain(
                     app_handle,
                     data_dir.clone(),
@@ -1188,7 +1201,6 @@ fn spawn_conductor_startup(
                             &app_handle_ref,
                             port,
                             &data_dir,
-                            &passphrase_for_sync,
                         ).await;
 
                         // Migrated (device-hosted) vaults skip auto-link but
@@ -1258,7 +1270,7 @@ fn spawn_conductor_startup(
                             } else {
                                 log::info!("Auto-linking desktop agent with web account...");
                             }
-                            match auto_link_web_account(&state, &passphrase_for_sync).await {
+                            match auto_link_web_account(&state).await {
                                 Ok(result) => {
                                     if result.success {
                                         log::info!("Auto-link succeeded: {}", result.message);
@@ -1312,7 +1324,6 @@ async fn check_dna_updates(
     app_handle: &tauri::AppHandle,
     admin_port: u16,
     download_dir: &std::path::Path,
-    password: &str,
 ) -> bool {
     // Extract needed values from VaultConfig.
     let (recovery_lookup_hash, current_private_ver, current_identity_ver, agent_key_raw_b64) = {
@@ -1417,7 +1428,10 @@ async fn check_dna_updates(
             identity_updated: id_upd,
             signing_updated,
         } => {
-            // Persist new versions to VaultConfig.
+            // Persist new versions to VaultConfig - under the passphrase the
+            // vault is unlocked with RIGHT NOW (read before the config lock;
+            // writers take the passphrase first, then the config).
+            let live_pw = live_passphrase(state);
             let mut config_guard = state.vault_config.lock().unwrap();
             if let Some(cfg) = config_guard.as_mut() {
                 if let Some(change) = private_updated {
@@ -1434,12 +1448,19 @@ async fn check_dna_updates(
                 }
 
                 // Re-encrypt and save vault with updated versions.
-                let vault_path = state.vault_path.lock().unwrap();
-                if let Ok(mut encrypted) = encrypt_vault(cfg, password) {
-                    encrypted.display_email =
-                        cfg.web_email.clone().or(cfg.web_username.clone());
-                    let _ = save_vault(&vault_path, &encrypted);
-                    log::info!("VaultConfig saved with updated DNA versions");
+                match live_pw {
+                    Some(pw) => {
+                        let vault_path = state.vault_path.lock().unwrap();
+                        if let Ok(mut encrypted) = encrypt_vault(cfg, &pw) {
+                            encrypted.display_email =
+                                cfg.web_email.clone().or(cfg.web_username.clone());
+                            let _ = save_vault(&vault_path, &encrypted);
+                            log::info!("VaultConfig saved with updated DNA versions");
+                        }
+                    }
+                    None => log::warn!(
+                        "DNA versions not persisted: vault locked during the update check"
+                    ),
                 }
             }
         }
@@ -2257,13 +2278,16 @@ fn rekey_conductor_db_key(
 /// The password protects three things on this device, all rotated in one
 /// step: the encrypted vault file, the conductor's database key file
 /// (`databases/db.key`), and the lair keystore. Lair has no rekey
-/// operation, so its store is deleted and re-initialized on the restart
+/// operation, so its store is moved aside and re-initialized on the restart
 /// that follows - the device key is re-imported from the vault's seed on
 /// every conductor start, so no key material is lost.
 ///
-/// Interruption-safe: each step is idempotent or repairable, so re-running
-/// the command with the same passwords completes a change that was cut off
-/// midway (see `rekey_conductor_db_key`'s repair path).
+/// Transactional: the vault-file save is the commit point. Anything that
+/// fails before it is undone and the running stack is brought back under
+/// the current password; if the stack fails to come up under the NEW
+/// password afterwards, everything is rolled back to the current one and
+/// the command fails - so the password the user knows always opens a vault
+/// whose key store agrees with it.
 #[tauri::command]
 pub async fn change_vault_password(
     current_password: String,
@@ -2271,23 +2295,91 @@ pub async fn change_vault_password(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    change_vault_password_inner(current_password, new_password, app_handle, state.inner()).await
+}
+
+/// Remove a directory, retrying briefly: on Windows a just-killed child can
+/// hold its files for a moment after `wait()` returns.
+fn remove_dir_with_retry(path: &std::path::Path) -> std::io::Result<()> {
+    let mut last = None;
+    for _ in 0..5 {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }
+    }
+    Err(last.unwrap())
+}
+
+/// Put the pre-change keystore back: drop whatever the failed start
+/// created under `lair/` and rename `lair.old-<ts>/` into place.
+fn restore_lair_dir(lair_dir: &std::path::Path, backup: &Option<std::path::PathBuf>) {
+    let Some(backup) = backup else { return };
+    if lair_dir.exists() {
+        if let Err(e) = remove_dir_with_retry(lair_dir) {
+            log::error!("rollback: could not remove the new keystore {:?}: {}", lair_dir, e);
+            return;
+        }
+    }
+    match std::fs::rename(backup, lair_dir) {
+        Ok(()) => log::info!("rollback: restored the previous keystore"),
+        Err(e) => log::error!("rollback: could not restore {:?} → {:?}: {}", backup, lair_dir, e),
+    }
+}
+
+fn set_cached_passphrase(state: &AppState, pw: &str) {
+    *state.unlock_passphrase.lock().unwrap() = Some(
+        lair_keystore_api::dependencies::sodoken::LockedArray::from(pw.as_bytes().to_vec()),
+    );
+}
+
+fn emit_starting(state: &AppState, app_handle: &tauri::AppHandle, message: &str) {
+    let status = ConductorStatus::Starting { message: message.to_string() };
+    *state.conductor_status.lock().unwrap() = status.clone();
+    let _ = app_handle.emit("conductor-status", status);
+}
+
+pub(crate) async fn change_vault_password_inner(
+    current_password: String,
+    new_password: String,
+    app_handle: tauri::AppHandle,
+    state: &Arc<AppState>,
+) -> Result<(), String> {
     validate_vault_password(&new_password)?;
     if new_password == current_password {
         return Err("New password must be different from the current password".into());
     }
 
-    // Don't run while a conductor start is in flight - lair and the
-    // database key file are being actively created underneath us.
+    // Wait out a conductor start in flight - lair and the database key file
+    // are being actively created underneath us. Startup normally takes
+    // seconds; first runs (WASM compile) can take a couple of minutes.
     {
-        let status = state.conductor_status.lock().unwrap().clone();
-        if matches!(status, ConductorStatus::Starting { .. }) {
-            return Err("The vault is still starting up - try again in a moment.".into());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let starting = matches!(
+                *state.conductor_status.lock().unwrap(),
+                ConductorStatus::Starting { .. }
+            );
+            if !starting {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(
+                    "The vault is still starting up - wait for it to finish, then try again."
+                        .into(),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
 
     // Serialise with the runtime watchdog so it can't restart the
     // conductor with the old passphrase mid-change.
-    let _restart_guard = state.conductor_restart_lock.lock().await;
+    let restart_guard = state.conductor_restart_lock.lock().await;
 
     let vault_path = state.vault_path.lock().unwrap().clone();
     let config_snapshot = {
@@ -2309,23 +2401,7 @@ pub async fn change_vault_password(
         .map_err(|e| format!("Verify task failed: {}", e))??;
     }
 
-    // 2. Re-wrap the conductor's database key. Safe while the conductor is
-    // running (it only reads db.key at startup), and doing it before the
-    // shutdown means a failure here leaves the running stack untouched.
-    let db_key_path = state.data_dir.join("conductor").join("databases").join("db.key");
-    if db_key_path.exists() {
-        let current = current_password.clone();
-        let new = new_password.clone();
-        tokio::task::spawn_blocking(move || rekey_conductor_db_key(&db_key_path, &current, &new))
-            .await
-            .map_err(|e| format!("Rekey task failed: {}", e))??;
-    } else {
-        // No conductor databases yet - the key file will be generated
-        // under the new (cached) passphrase on the next start.
-        log::info!("No db.key found - skipping database key rewrap");
-    }
-
-    // 3. Compute the re-encrypted vault file before stopping anything.
+    // 2. Compute the re-encrypted vault file before stopping anything.
     let mut new_encrypted = {
         let cfg = config_snapshot.clone();
         let pw = new_password.clone();
@@ -2339,44 +2415,84 @@ pub async fn change_vault_password(
         .clone()
         .or(config_snapshot.web_username.clone());
 
-    // 4. Stop the conductor + lair.
-    if let Some(handle) = state.conductor_handle.lock().unwrap().take() {
-        handle.shutdown();
+    // 3. Stop the conductor + lair. Bind the handle first so the state lock
+    // is not held across the blocking kill/wait.
+    let old_handle = state.conductor_handle.lock().unwrap().take();
+    emit_starting(state, &app_handle, "Applying new password...");
+    if let Some(handle) = old_handle {
+        let _ = tokio::task::spawn_blocking(move || handle.shutdown()).await;
     }
-    *state.conductor_status.lock().unwrap() = ConductorStatus::Starting {
-        message: "Applying new password...".into(),
-    };
-    let _ = app_handle.emit(
-        "conductor-status",
-        ConductorStatus::Starting {
-            message: "Applying new password...".into(),
-        },
-    );
 
-    // 5. Delete the lair keystore - it has no rekey operation. The next
-    // start re-initializes it under the new passphrase and re-imports the
-    // device seed (conductor startup does this on every launch).
-    let lair_dir = state.data_dir.join("lair");
-    if lair_dir.exists() {
-        std::fs::remove_dir_all(&lair_dir)
-            .map_err(|e| format!("Failed to reset lair keystore: {}", e))?;
+    // From here on every failure must leave the device consistent under
+    // the CURRENT password and bring the stack back up.
+    let data_dir = state.data_dir.clone();
+    let lair_dir = data_dir.join("lair");
+    let db_key_path = data_dir.join("conductor").join("databases").join("db.key");
+
+    // 4. Move the lair keystore aside (rename, not delete: atomic, survives
+    // the Windows file locks that made a delete fail halfway, and it is
+    // what a rollback restores). The next start re-initializes `lair/`
+    // under the new passphrase and re-imports the device seed.
+    let lair_backup = if lair_dir.exists() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup = data_dir.join(format!("lair.old-{}", ts));
+        match std::fs::rename(&lair_dir, &backup) {
+            Ok(()) => Some(backup),
+            Err(e) => {
+                drop(restart_guard);
+                let _ = ensure_conductor_alive(state, &app_handle).await;
+                return Err(format!("Could not set the key store aside: {}", e));
+            }
+        }
+    } else {
+        None
+    };
+
+    // 5. Re-wrap the conductor's database key (only read at startup, so
+    // this is safe with the conductor stopped). On failure: put lair back,
+    // restart under the current password.
+    let db_key_present = db_key_path.exists();
+    if db_key_present {
+        let (path, current, new) = (db_key_path.clone(), current_password.clone(), new_password.clone());
+        let rekey = tokio::task::spawn_blocking(move || rekey_conductor_db_key(&path, &current, &new))
+            .await
+            .map_err(|e| format!("Rekey task failed: {}", e))
+            .and_then(|r| r);
+        if let Err(e) = rekey {
+            restore_lair_dir(&lair_dir, &lair_backup);
+            drop(restart_guard);
+            let _ = ensure_conductor_alive(state, &app_handle).await;
+            return Err(format!("Could not re-protect the conductor database: {}", e));
+        }
+    } else {
+        // No conductor databases yet - the key file will be generated
+        // under the new (cached) passphrase on the next start.
+        log::info!("No db.key found - skipping database key rewrap");
     }
 
     // 6. Swap the cached unlock passphrase to NEW *before* writing the new
-    // vault file. Background config writers (set_web_email,
-    // persist_web_agent_pub_key, reconcile) re-encrypt the vault with the
-    // cached passphrase and do NOT take conductor_restart_lock - if one ran
-    // between the save and the swap it would rewrite the vault under the OLD
-    // password and lock the user out of their new one. Swapping first means
-    // any such writer uses NEW and stays consistent with the file we save next.
-    *state.unlock_passphrase.lock().unwrap() = Some(
-        lair_keystore_api::dependencies::sodoken::LockedArray::from(
-            new_password.as_bytes().to_vec(),
-        ),
-    );
+    // vault file, so any config writer that runs from here on re-encrypts
+    // under the same password as the file we are about to save.
+    set_cached_passphrase(state, &new_password);
 
-    // 7. Save the re-encrypted vault file (under the new password).
-    save_vault(&vault_path, &new_encrypted).map_err(|e| format!("Save failed: {}", e))?;
+    // 7. COMMIT: save the re-encrypted vault file. On failure undo 5 + 6,
+    // put lair back, restart under the current password.
+    if let Err(e) = save_vault(&vault_path, &new_encrypted) {
+        set_cached_passphrase(state, &current_password);
+        if db_key_present {
+            let (path, current, new) = (db_key_path.clone(), current_password.clone(), new_password.clone());
+            if let Err(re) = rekey_conductor_db_key(&path, &new, &current) {
+                log::error!("rollback: db.key could not be re-wrapped to the current password: {}", re);
+            }
+        }
+        restore_lair_dir(&lair_dir, &lair_backup);
+        drop(restart_guard);
+        let _ = ensure_conductor_alive(state, &app_handle).await;
+        return Err(format!("Save failed: {}", e));
+    }
 
     log::info!("Vault password changed - restarting conductor under the new passphrase.");
 
@@ -2385,15 +2501,58 @@ pub async fn change_vault_password(
     // with any concurrent command that noticed the stopped conductor. A
     // parallel spawn here raced the watchdog and double-started the stack
     // (orphan lair + zombie conductor, seen live 2026-07-08). The command
-    // therefore returns only once the conductor is back up.
-    drop(_restart_guard);
-    if let Err(e) = ensure_conductor_alive(state.inner(), &app_handle).await {
-        // The password change itself is complete - report the conductor
-        // problem through the status channel, not as a command failure.
-        log::warn!("post-password-change conductor start: {}", e);
+    // returns only once the conductor is back up - or, if it is not, once
+    // everything has been rolled back to the current password.
+    drop(restart_guard);
+    match ensure_conductor_alive(state, &app_handle).await {
+        Ok(()) => {
+            if let Some(backup) = lair_backup {
+                if let Err(e) = remove_dir_with_retry(&backup) {
+                    // Swept on the next lair start (start_lair_process).
+                    log::warn!("previous keystore {:?} not removed yet: {}", backup, e);
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            log::error!("post-password-change start failed - rolling back: {}", e);
+            let guard = state.conductor_restart_lock.lock().await;
+            emit_starting(state, &app_handle, "Restoring your current password...");
+            let stale = state.conductor_handle.lock().unwrap().take();
+            if let Some(handle) = stale {
+                let _ = tokio::task::spawn_blocking(move || handle.shutdown()).await;
+            }
+            restore_lair_dir(&lair_dir, &lair_backup);
+            if db_key_present {
+                let (path, current, new) = (db_key_path.clone(), current_password.clone(), new_password.clone());
+                let _ = tokio::task::spawn_blocking(move || {
+                    rekey_conductor_db_key(&path, &new, &current).map_err(|re| {
+                        log::error!("rollback: db.key could not be re-wrapped to the current password: {}", re)
+                    })
+                })
+                .await;
+            }
+            set_cached_passphrase(state, &current_password);
+            let mut back = {
+                let cfg = config_snapshot.clone();
+                let pw = current_password.clone();
+                tokio::task::spawn_blocking(move || encrypt_vault(&cfg, &pw))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()))
+                    .map_err(|e| format!("rollback: could not re-encrypt the vault under the current password: {}", e))?
+            };
+            back.display_email = new_encrypted.display_email.clone();
+            save_vault(&vault_path, &back)
+                .map_err(|e| format!("rollback: could not save the vault: {}", e))?;
+            drop(guard);
+            let _ = ensure_conductor_alive(state, &app_handle).await;
+            Err(format!(
+                "The new password could not be applied ({}). Your vault still uses your current password.",
+                e
+            ))
+        }
     }
-
-    Ok(())
 }
 
 /// Get the auto-lock timeout in minutes (0 = never).
@@ -2503,7 +2662,7 @@ struct LinkedAgentsResponse {
 
 /// Auto-link desktop agent with web account after conductor startup.
 /// Called from spawn_conductor_startup - non-fatal on failure.
-async fn auto_link_web_account(state: &Arc<AppState>, password: &str) -> Result<LinkResult, String> {
+async fn auto_link_web_account(state: &Arc<AppState>) -> Result<LinkResult, String> {
     let api_url = option_env!("FLOWSTA_API_URL")
         .unwrap_or("https://auth-api.flowsta.com");
 
@@ -2590,8 +2749,11 @@ async fn auto_link_web_account(state: &Arc<AppState>, password: &str) -> Result<
                         }
                     }
                     if profile_updated {
+                        // Live passphrase, never the unlock-time one (see
+                        // live_passphrase) - read before the config lock.
+                        let live_pw = live_passphrase(state);
                         let config = state.vault_config.lock().unwrap();
-                        if let Some(config) = config.as_ref() {
+                        if let (Some(config), Some(password)) = (config.as_ref(), live_pw.as_deref()) {
                             let vault_path = state.vault_path.lock().unwrap();
                             if let Ok(mut encrypted) = encrypt_vault(config, password) {
                                 encrypted.display_email =
@@ -4637,15 +4799,23 @@ async fn fetch_linked_agent_keys(
 /// encrypted vault config (same shape migration writes: standard base64 of
 /// the 39-byte key). Non-fatal on failure - the in-memory cache still
 /// covers the current session.
+/// The passphrase the vault is CURRENTLY unlocked with - the only key any
+/// background writer may re-encrypt the vault file under. Never capture the
+/// unlock-time password into a long-lived task instead: a password change
+/// swaps this value, and a task holding the old one would re-save the vault
+/// under the old password while lair and db.key already use the new one
+/// (vault opens, key store dies on its passphrase - seen in the field).
+pub(crate) fn live_passphrase(state: &AppState) -> Option<String> {
+    let mut guard = state.unlock_passphrase.lock().unwrap();
+    guard
+        .as_mut()
+        .and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok())
+}
+
 pub(crate) fn persist_web_agent_pub_key(state: &Arc<AppState>, key_b64: &str) {
     *state.linked_web_agent_key.lock().unwrap() = Some(key_b64.to_string());
 
-    let passphrase = {
-        let mut guard = state.unlock_passphrase.lock().unwrap();
-        guard
-            .as_mut()
-            .and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok())
-    };
+    let passphrase = live_passphrase(state);
     let Some(pw) = passphrase else {
         log::warn!("web agent key persist skipped: no cached passphrase");
         return;
@@ -6278,6 +6448,90 @@ pub async fn update_local_profile(
     use tauri::Emitter;
     let _ = app.emit("profile-updated", serde_json::json!({}));
     Ok(())
+}
+
+#[cfg(test)]
+mod db_key_rekey_tests {
+    use super::rekey_conductor_db_key;
+    use base64::Engine as _;
+    use lair_keystore_api::dependencies::sodoken;
+
+    const NONCE: usize = sodoken::secretbox::XSALSA_NONCEBYTES;
+    const MAC: usize = sodoken::secretbox::XSALSA_MACBYTES;
+    const SALT: usize = sodoken::argon2::ARGON2_ID_SALTBYTES;
+
+    fn derive(pw: &str, salt: &[u8; SALT]) -> sodoken::SizedLockedArray<32> {
+        let mut secret = sodoken::SizedLockedArray::<32>::new().unwrap();
+        sodoken::argon2::blocking_argon2id(
+            &mut *secret.lock(),
+            pw.as_bytes(),
+            salt,
+            sodoken::argon2::ARGON2_ID_OPSLIMIT_MODERATE,
+            sodoken::argon2::ARGON2_ID_MEMLIMIT_MODERATE,
+        )
+        .unwrap();
+        secret
+    }
+
+    /// Build a db.key exactly as holochain writes it: nonce || box(key) || salt.
+    fn write_db_key(path: &std::path::Path, pw: &str, key: &[u8; 32], salt: &[u8; SALT]) {
+        let mut nonce = [0u8; NONCE];
+        sodoken::random::randombytes_buf(&mut nonce).unwrap();
+        let mut secret = derive(pw, salt);
+        let mut cipher = vec![0u8; 32 + MAC];
+        sodoken::secretbox::xsalsa_easy(&mut cipher, &nonce, key, &secret.lock()).unwrap();
+        let mut out = Vec::new();
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&cipher);
+        out.extend_from_slice(salt);
+        std::fs::write(path, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(out)).unwrap();
+    }
+
+    fn open_db_key(path: &std::path::Path, pw: &str) -> Option<([u8; 32], [u8; SALT])> {
+        let buf = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(std::fs::read_to_string(path).unwrap().trim())
+            .unwrap();
+        let mut salt = [0u8; SALT];
+        salt.copy_from_slice(&buf[NONCE + 32 + MAC..]);
+        let nonce: [u8; NONCE] = buf[..NONCE].try_into().unwrap();
+        let mut secret = derive(pw, &salt);
+        let mut key = [0u8; 32];
+        let opened =
+            sodoken::secretbox::xsalsa_open_easy(&mut key, &buf[NONCE..NONCE + 32 + MAC], &nonce, &secret.lock())
+                .is_ok();
+        if opened { Some((key, salt)) } else { None }
+    }
+
+    #[test]
+    fn rewraps_under_new_password_preserving_key_and_salt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.key");
+        let key = [7u8; 32];
+        let salt = [3u8; SALT];
+        write_db_key(&path, "old-password-1", &key, &salt);
+
+        rekey_conductor_db_key(&path, "old-password-1", "new-password-2").unwrap();
+
+        assert!(open_db_key(&path, "old-password-1").is_none(), "old password must no longer open it");
+        let (k, s) = open_db_key(&path, "new-password-2").expect("new password opens it");
+        assert_eq!(k, key, "the database key itself must not change");
+        assert_eq!(s, salt, "the SQLCipher salt must be preserved");
+    }
+
+    #[test]
+    fn repair_is_idempotent_and_wrong_password_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.key");
+        write_db_key(&path, "old-password-1", &[9u8; 32], &[1u8; SALT]);
+        rekey_conductor_db_key(&path, "old-password-1", "new-password-2").unwrap();
+        // Re-running a change that was cut off midway must succeed (already wrapped with NEW).
+        rekey_conductor_db_key(&path, "old-password-1", "new-password-2").unwrap();
+        // A rollback (NEW → OLD) is the same operation in reverse.
+        rekey_conductor_db_key(&path, "new-password-2", "old-password-1").unwrap();
+        assert!(open_db_key(&path, "old-password-1").is_some());
+        // Neither password matching is an error, not a silent rewrap.
+        assert!(rekey_conductor_db_key(&path, "nope", "new-password-2").is_err());
+    }
 }
 
 #[cfg(test)]

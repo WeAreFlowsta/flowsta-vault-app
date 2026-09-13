@@ -3641,15 +3641,59 @@ async fn signatures_handler(
 // the in-memory passphrase so /dev/unlock can re-unlock - no secret is
 // ever transmitted or logged.
 
-async fn dev_status_handler() -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+async fn dev_status_handler(
+    State(state): State<Arc<IpcState>>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     if !auto_approve_enabled() {
         return Err((
             StatusCode::NOT_FOUND,
             Json(IpcError { error: "not_found".into(), description: None }),
         ));
     }
+    // The conductor status lets the matrix wait for "ready" after a
+    // password change / relock instead of guessing with sleeps.
+    let conductor = state.app_state.conductor_status.lock().unwrap().clone();
+    let old_keystores = std::fs::read_dir(&state.app_state.data_dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("lair.old-"))
+                .count()
+        })
+        .unwrap_or(0);
     Ok(axum::response::IntoResponse::into_response(Json(
-        serde_json::json!({ "harness": true }),
+        serde_json::json!({ "harness": true, "conductor": conductor, "old_keystores": old_keystores }),
+    )))
+}
+
+/// Dev-only: run the real password-change command headlessly so the matrix
+/// can prove change → relock → unlock-with-new → conductor ready.
+async fn dev_change_password_handler(
+    State(state): State<Arc<IpcState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError { error: "not_found".into(), description: None }),
+        ));
+    }
+    let field = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let (current, new) = (field("current_password"), field("new_password"));
+    crate::commands::change_vault_password_inner(
+        current,
+        new,
+        state.app_handle.clone(),
+        &state.app_state,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(IpcError { error: "change_failed".into(), description: Some(e) }),
+        )
+    })?;
+    Ok(axum::response::IntoResponse::into_response(Json(
+        serde_json::json!({ "success": true }),
     )))
 }
 
@@ -4304,6 +4348,7 @@ pub async fn start_ipc_server(
         .route("/dev/setup-legacy-vault", post(dev_setup_legacy_handler))
         .route("/dev/run-upgrade", post(dev_run_upgrade_handler))
         .route("/dev/unlock-with-password", post(dev_unlock_pw_handler))
+        .route("/dev/change-password", post(dev_change_password_handler))
         // Global body cap (8 MB) - generous for base64 images/thumbnails/sign
         // payloads, bounds loopback-DoS amplification. /backup opts into a
         // larger limit above. Was axum's implicit 2 MB default (which also

@@ -157,13 +157,26 @@ pub fn start_lair_process(
     // Read connection URL from config file.
     let connection_url = read_connection_url(&config_path)?;
 
-    // Clean up stale socket file from a previous run (e.g. if lair was killed without cleanup).
-    // Without this, the new lair process can't bind and exits immediately.
-    let socket_path = lair_dir.join("socket");
-    if socket_path.exists() {
-        log::info!("Removing stale lair socket: {:?}", socket_path);
-        let _ = std::fs::remove_file(&socket_path);
+    // Clean up stale socket + pid files from a previous run (e.g. if lair was
+    // killed without cleanup). Without this, the new lair process can't bind
+    // - or refuses on the pid check, which runs BEFORE it reads the
+    // passphrase - and exits immediately.
+    for stale in ["socket", "pid_file"] {
+        let path = lair_dir.join(stale);
+        if path.exists() {
+            log::info!("Removing stale lair {}: {:?}", stale, path);
+            let _ = std::fs::remove_file(&path);
+        }
     }
+
+    // Lair's own output goes to log files next to the store (the conductor
+    // does the same). A lair that dies on its passphrase says why on stderr
+    // - with the pipes unread that message was lost, and a full pipe could
+    // even wedge the child.
+    let stdout_file = std::fs::File::create(lair_dir.join("lair-stdout.log"))
+        .map_err(|e| format!("Failed to create lair stdout log: {}", e))?;
+    let stderr_file = std::fs::File::create(lair_dir.join("lair-stderr.log"))
+        .map_err(|e| format!("Failed to create lair stderr log: {}", e))?;
 
     // Start the lair server.
     log::info!("[lair:server] starting lair-keystore server");
@@ -173,8 +186,8 @@ pub fn start_lair_process(
         .arg("--piped")
         .current_dir(lair_dir)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
         .tie_to_parent()
         .spawn_hidden()
         .map_err(|e| format!("Failed to spawn lair-keystore server: {}", e))?;
@@ -192,6 +205,86 @@ pub fn start_lair_process(
         spawn_start.elapsed().as_millis()
     );
     Ok((child, connection_url))
+}
+
+/// Remove leftover `lair.old-*` / `lair.broken-*` directories. A password
+/// change moves the previous keystore to `lair.old-<ts>` and deletes it
+/// once the new stack is up; a keystore that would not start is set aside
+/// as `lair.broken-<ts>`. Anything still there at the next UNLOCK is
+/// garbage. Called from the unlock-time conductor start only - never from
+/// the start that follows a change, which still needs `lair.old-*` for its
+/// rollback.
+pub fn sweep_old_lair_dirs(data_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(data_dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if (name.starts_with("lair.old-") || name.starts_with("lair.broken-")) && entry.path().is_dir() {
+            match std::fs::remove_dir_all(entry.path()) {
+                Ok(()) => log::info!("Removed leftover keystore {:?}", entry.path()),
+                Err(e) => log::warn!("Could not remove leftover keystore {:?}: {}", entry.path(), e),
+            }
+        }
+    }
+}
+
+/// Lair's own log output (stderr first, then stdout), trimmed to 500 chars.
+pub fn read_lair_logs(lair_dir: &Path) -> String {
+    let stderr = std::fs::read_to_string(lair_dir.join("lair-stderr.log")).unwrap_or_default();
+    let stdout = std::fs::read_to_string(lair_dir.join("lair-stdout.log")).unwrap_or_default();
+    let output = if !stderr.trim().is_empty() { stderr } else { stdout };
+    let output = output.trim();
+    if output.len() > 500 {
+        format!("{}...", &output[..500])
+    } else {
+        output.to_string()
+    }
+}
+
+/// Prefix of every "lair exited" error - `start_holochain` matches on it to
+/// rebuild the keystore before its second attempt.
+pub const LAIR_STOPPED_MARKER: &str = "The local key store stopped right after starting";
+
+/// The error to report when lair has exited: what lair said, plus the one
+/// cause that produces this in the field. Lair verifies its passphrase
+/// only AFTER binding the socket, so a passphrase mismatch (a vault file
+/// re-saved under a different password than the keystore was created
+/// with) shows up as an immediate exit, never as a connect error.
+fn lair_exit_error(status: std::process::ExitStatus, lair_dir: &Path) -> String {
+    let logs = read_lair_logs(lair_dir);
+    format!(
+        "{} (status {}). Lock the Vault and unlock it again; if it keeps happening, \
+         restart your computer or reinstall Flowsta Vault. Details: {}",
+        LAIR_STOPPED_MARKER,
+        status,
+        if logs.is_empty() { "(no output)".to_string() } else { logs }
+    )
+}
+
+/// Set a keystore that will not start aside as `lair.broken-<ts>` so the
+/// next start re-initializes a fresh one. Safe: lair holds only the device
+/// seed (re-imported from the vault's own seed on every start) and its
+/// import helper, so nothing is lost. The directory is swept at the next
+/// unlock like `lair.old-*`.
+pub fn quarantine_lair_dir(lair_dir: &Path) -> Result<std::path::PathBuf, String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let parent = lair_dir.parent().ok_or("lair dir has no parent")?;
+    let target = parent.join(format!("lair.broken-{}", ts));
+    std::fs::rename(lair_dir, &target)
+        .map_err(|e| format!("Could not set the broken key store aside: {}", e))?;
+    Ok(target)
+}
+
+/// If the lair child has exited, the error to fail the start with.
+pub fn lair_exited(child: &mut Child, lair_dir: &Path) -> Option<String> {
+    match child.try_wait() {
+        Ok(Some(status)) => Some(lair_exit_error(status, lair_dir)),
+        Ok(None) => None,
+        Err(e) => Some(format!("Failed to check the key store process: {}", e)),
+    }
 }
 
 /// Read the connection URL from lair's config file.
@@ -239,24 +332,42 @@ pub async fn connect_to_lair(
         Ok(Ok(client)) => Ok(client),
         Ok(Err(e)) => Err(format!("Failed to connect to lair: {}", e)),
         Err(_) => Err(
-            "Timed out connecting to the local key store. \
-             Try reinstalling Flowsta Vault, or restart your computer if \
-             the problem persists."
+            "The local key store is running but did not answer within 30 seconds. \
+             Restart your computer and open Flowsta Vault again; if it keeps \
+             happening, reinstall Flowsta Vault."
                 .to_string(),
         ),
     }
 }
 
-/// Wait for the lair connection to be ready.
-/// On Unix, polls until the socket file exists.
-/// On Windows, lair uses named pipes - poll by attempting a TCP-like connect.
-pub async fn wait_for_lair_socket(connection_url: &str, timeout_secs: u64) -> Result<(), String> {
-    // On Windows, lair uses named pipes which don't have a socket file to poll.
-    // Instead, just wait a fixed period for lair to initialize.
+/// Wait for lair to come up, watching the process the whole time.
+///
+/// On Unix, polls until the socket file exists; on Windows (named pipes,
+/// nothing to poll) waits a fixed 3 s. Either way the child is checked every
+/// 200 ms: lair binds its socket BEFORE it verifies the passphrase, so a
+/// lair that dies on a passphrase mismatch leaves a socket file behind and
+/// would otherwise read as "ready" until every connect attempt timed out.
+pub async fn wait_for_lair_socket(
+    connection_url: &str,
+    timeout_secs: u64,
+    child: &mut Child,
+    lair_dir: &Path,
+) -> Result<(), String> {
+    let tick = std::time::Duration::from_millis(200);
+
     if cfg!(target_os = "windows") {
         log::info!("Windows: waiting for lair-keystore to initialize...");
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        return Ok(());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if let Some(err) = lair_exited(child, lair_dir) {
+                return Err(err);
+            }
+            tokio::time::sleep(tick).await;
+        }
+        return match lair_exited(child, lair_dir) {
+            Some(err) => Err(err),
+            None => Ok(()),
+        };
     }
 
     // Unix: Extract socket path from URL like "unix:///path/to/socket?k=..."
@@ -271,11 +382,21 @@ pub async fn wait_for_lair_socket(connection_url: &str, timeout_secs: u64) -> Re
         std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     while std::time::Instant::now() < deadline {
+        if let Some(err) = lair_exited(child, lair_dir) {
+            return Err(err);
+        }
         if socket_path.exists() {
+            // The socket appears a moment before the passphrase check; one
+            // more tick catches the common immediate exit here instead of
+            // in the connect loop.
+            tokio::time::sleep(tick).await;
+            if let Some(err) = lair_exited(child, lair_dir) {
+                return Err(err);
+            }
             log::info!("Lair socket ready at {:?}", socket_path);
             return Ok(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(tick).await;
     }
 
     Err(format!(
