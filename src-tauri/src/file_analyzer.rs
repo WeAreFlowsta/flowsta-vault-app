@@ -538,7 +538,7 @@ fn check_post_eof(data: &[u8], file_type: FileType) -> Vec<IntegrityIssue> {
             // ZIP ends with End of Central Directory record (PK\x05\x06)
             if let Some(pos) = rfind_bytes(data, &[0x50, 0x4B, 0x05, 0x06]) {
                 // EOCD is at least 22 bytes. Comment length is at offset 20-21 from EOCD start.
-                if pos + 20 < data.len() {
+                if pos + 21 < data.len() {
                     let comment_len =
                         u16::from_le_bytes([data[pos + 20], data[pos + 21]]) as usize;
                     let expected_end = pos + 22 + comment_len;

@@ -504,6 +504,13 @@ async fn wait_until_account_ready(
                         .to_string(),
                 );
             }
+        } else if status_code.as_u16() == 401 || status_code.as_u16() == 403 {
+            // The session is gone or refused - waiting eight minutes will
+            // not change that.
+            return Err(format!(
+                "account_update_unauthorized: the sign-in expired while waiting [{}]. Sign in and run the upgrade again.",
+                status_code.as_u16()
+            ));
         }
         // Older API without the probe: fall through to the export attempt,
         // which enforces the same gate with a clear error.
@@ -601,8 +608,12 @@ pub(crate) async fn verify_lookup_binding(
         .await
         .map_err(|e| format!("Failed to reach API: {}", e))?;
     let (status, body) = parse_json(resp).await?;
-    if status >= 300 {
+    if status == 404 {
         return Err(api_err("lookup_hash_not_found", status, &body));
+    }
+    if status >= 300 {
+        // account_blocked / rate_limited are not "make a new phrase".
+        return Err(api_err("lookup_failed", status, &body));
     }
     let key_b64 = body
         .get("agent_pub_key")

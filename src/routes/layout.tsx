@@ -369,6 +369,7 @@ export default component$(() => {
         web_email: string | null;
         web_username: string | null;
         web_agent_pub_key: string | null;
+        hosting_model: string | null;
       }>("get_identity");
 
       userProfile.displayName = identity.display_name ?? "";
@@ -376,8 +377,13 @@ export default component$(() => {
       userProfile.email = identity.web_email ?? "";
       userProfile.username = identity.web_username ?? "";
       userProfile.did = identity.did ?? "";
-      // Subscriptions attach to the linked web account when there is one.
-      userProfile.agentKey = identity.web_agent_pub_key || identity.agent_pub_key;
+      // Subscriptions attach to the linked web account when there is one;
+      // a device-hosted identity IS the account (its migrated web key is
+      // history and the quota lookup 404s on it).
+      userProfile.agentKey =
+        identity.hosting_model === "device-hosted"
+          ? identity.agent_pub_key
+          : identity.web_agent_pub_key || identity.agent_pub_key;
       refreshPlan();
 
       // Scope the signatures cache to this agent_pub_key. If a previous

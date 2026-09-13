@@ -271,6 +271,9 @@ fn encrypt_with_key(data: &[u8], key: &[u8; 32]) -> Result<(Vec<u8>, [u8; 12]), 
 }
 
 fn decrypt_with_key(ciphertext: &[u8], nonce_bytes: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+    if nonce_bytes.len() != 12 {
+        return Err("Backup nonce has the wrong length (damaged file)".into());
+    }
     let nonce = Nonce::from_slice(nonce_bytes);
 
     let cipher = <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(key)
@@ -427,7 +430,7 @@ pub fn save_backup_with_time(
     let path = backup_file_path(&app_state.data_dir, client_id, label_str);
     let json = serde_json::to_string(&encrypted)
         .map_err(|e| format!("Backup serialize failed: {}", e))?;
-    std::fs::write(&path, json).map_err(|e| format!("Backup write failed: {}", e))?;
+    crate::vault::write_atomic(&path, json.as_bytes()).map_err(|e| format!("Backup write failed: {}", e))?;
 
     log::info!(
         "Saved backup for {} ({}) - {} bytes, label: {}",

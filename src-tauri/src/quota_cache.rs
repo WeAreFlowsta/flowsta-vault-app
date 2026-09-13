@@ -58,20 +58,25 @@ fn load_or_create_key(data_dir: &PathBuf) -> Result<[u8; 32], String> {
     if path.exists() {
         let hex_str = fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read quota key: {}", e))?;
-        let bytes = hex::decode(hex_str.trim())
-            .map_err(|e| format!("Invalid quota key encoding: {}", e))?;
-        if bytes.len() != 32 {
-            return Err("Quota key has wrong length".into());
+        match hex::decode(hex_str.trim()) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&bytes);
+                return Ok(key);
+            }
+            _ => {
+                // A truncated key file used to fail every quota read forever.
+                // The cache it signs is advisory - set the key aside and mint
+                // a new one (the cache then reads as absent until online).
+                crate::vault::quarantine_file(&path, "quota key unreadable");
+            }
         }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&bytes);
-        return Ok(key);
     }
 
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
     fs::create_dir_all(data_dir).map_err(|e| format!("Failed to create data dir: {}", e))?;
-    fs::write(&path, hex::encode(&key))
+    crate::vault::write_atomic(&path, hex::encode(&key).as_bytes())
         .map_err(|e| format!("Failed to write quota key: {}", e))?;
     Ok(key)
 }
@@ -128,7 +133,7 @@ pub fn write(data_dir: &PathBuf, mut payload: QuotaCache) -> Result<QuotaCache, 
         .map_err(|e| format!("Failed to serialize signed cache: {}", e))?;
 
     fs::create_dir_all(data_dir).map_err(|e| format!("Failed to create data dir: {}", e))?;
-    fs::write(cache_path(data_dir), json)
+    crate::vault::write_atomic(&cache_path(data_dir), json.as_bytes())
         .map_err(|e| format!("Failed to write quota cache: {}", e))?;
     Ok(payload)
 }

@@ -185,7 +185,10 @@ pub fn run() {
             // single-instance callback). The relay code is
             // queued in AppState and drained by the frontend after mount.
             let (startup_urls, startup_rest): (Vec<String>, Vec<String>) =
-                std::env::args().skip(1).partition(|a| relay_login::is_flowsta_url(a));
+                std::env::args_os()
+                    .skip(1)
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .partition(|a| relay_login::is_flowsta_url(a));
             for u in &startup_urls {
                 match relay_login::parse_relay_code(u) {
                     Some(code) => {
@@ -357,7 +360,7 @@ pub fn run() {
             // hiding after creation), so hide it now. Anything that needs the
             // user - a page asking to sign, a relay code - already raises the
             // window through the existing bridge/deep-link paths.
-            if std::env::args().any(|a| a == "--autostart-hidden") {
+            if std::env::args_os().any(|a| a == "--autostart-hidden") {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.hide();
                 }
@@ -450,6 +453,7 @@ pub fn run() {
             commands::check_email_change,
             commands::cancel_email_change,
             commands::get_my_signatures,
+            commands::get_signatures_for_hash,
             commands::get_my_own_signatures,
             commands::get_my_linked_signatures,
             commands::revoke_signature,

@@ -409,10 +409,12 @@ impl AppState {
 
     /// Persist the verified apps cache to disk.
     pub fn save_verified_apps(&self) {
-        let apps = self.verified_apps.lock().unwrap();
-        let path = self.data_dir.join("verified-apps.json");
-        if let Ok(json) = serde_json::to_string_pretty(&*apps) {
-            let _ = std::fs::write(path, json);
+        let json = {
+            let apps = self.verified_apps.lock().unwrap();
+            serde_json::to_string_pretty(&*apps)
+        };
+        if let Ok(json) = json {
+            let _ = crate::vault::write_atomic(&self.data_dir.join("verified-apps.json"), json.as_bytes());
         }
     }
 
@@ -428,7 +430,7 @@ impl AppState {
             serde_json::to_string_pretty(&*apps)
         };
         if let Ok(json) = json {
-            let _ = std::fs::write(self.data_dir.join("linked-apps.json"), json);
+            let _ = crate::vault::write_atomic(&self.data_dir.join("linked-apps.json"), json.as_bytes());
         }
     }
 
@@ -443,7 +445,7 @@ impl AppState {
             serde_json::to_string_pretty(&*apps)
         };
         if let Ok(json) = json {
-            let _ = std::fs::write(self.data_dir.join("approved-sites.json"), json);
+            let _ = crate::vault::write_atomic(&self.data_dir.join("approved-sites.json"), json.as_bytes());
         }
     }
 
@@ -454,7 +456,7 @@ impl AppState {
             serde_json::to_string_pretty(&*grants)
         };
         if let Ok(json) = json {
-            let _ = std::fs::write(self.data_dir.join("email-grants.json"), json);
+            let _ = crate::vault::write_atomic(&self.data_dir.join("email-grants.json"), json.as_bytes());
         }
     }
 
@@ -465,49 +467,29 @@ impl AppState {
             serde_json::to_string_pretty(&*scopes)
         };
         if let Ok(json) = json {
-            let _ = std::fs::write(self.data_dir.join("linked-app-scopes.json"), json);
+            let _ = crate::vault::write_atomic(&self.data_dir.join("linked-app-scopes.json"), json.as_bytes());
         }
     }
 }
 
 fn load_linked_apps(data_dir: &std::path::Path) -> Vec<LinkedThirdPartyApp> {
-    let path = data_dir.join("linked-apps.json");
-    match std::fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
+    crate::vault::load_json_or_quarantine(&data_dir.join("linked-apps.json"))
 }
 
 fn load_approved_sites(data_dir: &std::path::Path) -> Vec<String> {
-    let path = data_dir.join("approved-sites.json");
-    match std::fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
+    crate::vault::load_json_or_quarantine(&data_dir.join("approved-sites.json"))
 }
 
 fn load_linked_app_scopes(data_dir: &std::path::Path) -> HashMap<String, Vec<String>> {
-    let path = data_dir.join("linked-app-scopes.json");
-    match std::fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-        Err(_) => HashMap::new(),
-    }
+    crate::vault::load_json_or_quarantine(&data_dir.join("linked-app-scopes.json"))
 }
 
 fn load_email_grants(data_dir: &std::path::Path) -> HashMap<String, EmailGrant> {
-    let path = data_dir.join("email-grants.json");
-    match std::fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-        Err(_) => HashMap::new(),
-    }
+    crate::vault::load_json_or_quarantine(&data_dir.join("email-grants.json"))
 }
 
 fn load_verified_apps(data_dir: &std::path::Path) -> HashMap<String, VerifiedAppInfo> {
-    let path = data_dir.join("verified-apps.json");
-    match std::fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-        Err(_) => HashMap::new(),
-    }
+    crate::vault::load_json_or_quarantine(&data_dir.join("verified-apps.json"))
 }
 
 #[derive(Serialize)]
@@ -522,7 +504,7 @@ pub struct VaultStatus {
 /// Get the current vault status.
 #[tauri::command]
 pub fn get_vault_status(state: State<'_, Arc<AppState>>) -> VaultStatus {
-    let vault_path = state.vault_path.lock().unwrap();
+    let vault_path = state.vault_path.lock().unwrap().clone();
     let config = state.vault_config.lock().unwrap();
 
     VaultStatus {
@@ -620,7 +602,7 @@ pub(crate) fn normalize_email(raw: &str) -> Result<String, String> {
 /// Set up a new vault from a recovery phrase and web account password.
 /// The web login password is used to encrypt the vault on disk.
 /// After setup, spawns the Holochain conductor in the background.
-#[tauri::command]
+#[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
 pub fn setup_vault(
     mnemonic: String,
@@ -694,7 +676,7 @@ pub(crate) fn setup_vault_inner(
     }
 
     // Check not already initialized
-    let vault_path = state.vault_path.lock().unwrap();
+    let vault_path = state.vault_path.lock().unwrap().clone();
     if vault_exists(&vault_path) {
         return Err("Vault already exists. Use unlock instead.".into());
     }
@@ -817,7 +799,7 @@ pub(crate) fn setup_vault_inner(
 
 /// Unlock an existing vault with the master password.
 /// After unlock, spawns the Holochain conductor in the background.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn unlock_vault(
     password: String,
     app_handle: tauri::AppHandle,
@@ -831,7 +813,7 @@ pub(crate) fn unlock_vault_inner(
     app_handle: tauri::AppHandle,
     state: &Arc<AppState>,
 ) -> Result<SetupResult, String> {
-    let vault_path = state.vault_path.lock().unwrap();
+    let vault_path = state.vault_path.lock().unwrap().clone();
 
     if !vault_exists(&vault_path) {
         return Err("No vault found. Run setup first.".into());
@@ -840,8 +822,16 @@ pub(crate) fn unlock_vault_inner(
     // Load and decrypt
     let encrypted =
         load_vault(&vault_path).map_err(|e| format!("Failed to read vault: {}", e))?;
-    let config = decrypt_vault(&encrypted, &password)
-        .map_err(|_| "Wrong password or corrupted vault".to_string())?;
+    let config = decrypt_vault(&encrypted, &password).map_err(|e| match e {
+        crate::vault::VaultError::Decryption => "Wrong password".to_string(),
+        // The key opened the box but the contents did not match the config
+        // shape: the password was right, the file is damaged.
+        crate::vault::VaultError::Serialization(d) => format!(
+            "Your vault file is damaged ({}). Your password was right - restore this identity from its recovery phrase.",
+            d
+        ),
+        other => other.to_string(),
+    })?;
 
     let result = SetupResult {
         agent_pub_key: config.agent_pub_key.clone(),
@@ -891,7 +881,7 @@ pub(crate) fn unlock_vault_inner(
 }
 
 /// Lock the vault (clear in-memory config and stop conductor).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     lock_vault_inner(state.inner())
 }
@@ -1396,6 +1386,13 @@ async fn check_dna_updates(
                 return false;
             }
         };
+        // The bundle download is authorised by the lookup hash, which the
+        // server only knows once the identity is registered/reconciled -
+        // until then the check would just log a 401 as a failure.
+        if cfg.pending_registration || cfg.pending_reconcile {
+            log::info!("DNA update check deferred: account layer not attached yet");
+            return false;
+        }
         let rlh = match &cfg.recovery_lookup_hash {
             Some(h) => h.clone(),
             None => {
@@ -1515,7 +1512,7 @@ async fn check_dna_updates(
                 // Re-encrypt and save vault with updated versions.
                 match live_pw {
                     Some(pw) => {
-                        let vault_path = state.vault_path.lock().unwrap();
+                        let vault_path = state.vault_path.lock().unwrap().clone();
                         if let Ok(mut encrypted) = encrypt_vault(cfg, &pw) {
                             encrypted.display_email =
                                 cfg.web_email.clone().or(cfg.web_username.clone());
@@ -1557,7 +1554,7 @@ async fn check_dna_updates(
 
 /// Delete the vault file and clear in-memory state.
 /// Returns the app to the "not initialized" state.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     // Stop conductor + lair before touching their data dirs. Without
     // this we'd leak processes and (on Windows) the dir delete would
@@ -1863,8 +1860,11 @@ pub async fn authenticate_web_account(
         .map_err(|e| format!("Invalid API response: {}", e))?;
 
     if !status.is_success() {
+        // Prefer the human sentence; `error` is a machine code
+        // (account_blocked, device_hosted_account, ...) the wizard showed raw.
         let err = body
-            .get("error")
+            .get("message")
+            .or_else(|| body.get("error"))
             .and_then(|v| v.as_str())
             .unwrap_or("Login failed");
         return Err(err.to_string());
@@ -2122,6 +2122,13 @@ pub async fn refresh_cached_profile(
     let (identifier, vault_path) = {
         let config = state.vault_config.lock().unwrap();
         let cfg = config.as_ref().ok_or("Vault is locked")?;
+        // Device-hosted identities have no web password: the call would be
+        // refused (403) and that refusal counts against the SAME per-IP
+        // login limiter every vault-grant uses - a few unlocks locked the
+        // user out of email changes and app grants.
+        if cfg.hosting_model.as_deref() == Some("device-hosted") {
+            return Ok(());
+        }
         let id = cfg
             .web_email
             .clone()
@@ -2141,6 +2148,8 @@ pub async fn refresh_cached_profile(
         .json(&serde_json::json!({
             "emailOrUsername": identifier,
             "password": password,
+            // The Vault's own sign-in stays allowed after the password cutover.
+            "vault_migration": true,
         }))
         .send()
         .await
@@ -2205,7 +2214,7 @@ pub struct VaultDisplayInfo {
 pub fn get_vault_display_info(
     state: State<'_, Arc<AppState>>,
 ) -> Result<VaultDisplayInfo, String> {
-    let vault_path = state.vault_path.lock().unwrap();
+    let vault_path = state.vault_path.lock().unwrap().clone();
     if !vault_exists(&vault_path) {
         return Err("No vault found".into());
     }
@@ -2232,7 +2241,8 @@ pub async fn check_api_connectivity(api_url: String) -> bool {
         .get(format!("{}/health", api_url.trim_end_matches('/')))
         .send()
         .await
-        .is_ok()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 /// Re-wrap the conductor's SQLCipher key file (`databases/db.key`) under a
@@ -2402,10 +2412,11 @@ fn restore_lair_dir(lair_dir: &std::path::Path, backup: &Option<std::path::PathB
     }
 }
 
-fn set_cached_passphrase(state: &AppState, pw: &str) {
-    // Never re-populate the passphrase of a vault that has been locked
-    // meanwhile (auto-lock mid-change) - a locked vault holds no passphrase.
-    if state.vault_config.try_lock().map(|c| c.is_none()).unwrap_or(false) {
+/// Callers hold the `vault_config` fence and pass whether the vault is
+/// still unlocked - a vault locked mid-change (auto-lock) must not get a
+/// passphrase re-populated.
+fn set_cached_passphrase(state: &AppState, pw: &str, still_unlocked: bool) {
+    if !still_unlocked {
         log::warn!("passphrase not cached: vault locked during the change");
         return;
     }
@@ -2556,12 +2567,12 @@ pub(crate) async fn change_vault_password_inner(
     // and re-save the file under OLD after this point. On failure undo 5 +
     // 6, put lair back, restart under the current password.
     let commit = {
-        let _fence = state.vault_config.lock().unwrap();
-        set_cached_passphrase(state, &new_password);
+        let fence = state.vault_config.lock().unwrap();
+        set_cached_passphrase(state, &new_password, fence.is_some());
         save_vault(&vault_path, &new_encrypted)
     };
     if let Err(e) = commit {
-        set_cached_passphrase(state, &current_password);
+        set_cached_passphrase(state, &current_password, state.vault_config.lock().unwrap().is_some());
         if db_key_present {
             let (path, current, new) = (db_key_path.clone(), current_password.clone(), new_password.clone());
             if let Err(re) = rekey_conductor_db_key(&path, &new, &current) {
@@ -2633,8 +2644,8 @@ pub(crate) async fn change_vault_password_inner(
             let restored = match back {
                 Ok(mut back) => {
                     back.display_email = new_encrypted.display_email.clone();
-                    let _fence = state.vault_config.lock().unwrap();
-                    set_cached_passphrase(state, &current_password);
+                    let fence = state.vault_config.lock().unwrap();
+                    set_cached_passphrase(state, &current_password, fence.is_some());
                     save_vault(&vault_path, &back).map_err(|e| e.to_string())
                 }
                 Err(e) => Err(e),
@@ -2670,7 +2681,7 @@ pub(crate) async fn change_vault_password_inner(
 #[tauri::command]
 pub fn get_auto_lock_minutes(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
     let settings_path = {
-        let vault_path = state.vault_path.lock().unwrap();
+        let vault_path = state.vault_path.lock().unwrap().clone();
         vault_path.with_file_name("settings.json")
     };
     if settings_path.exists() {
@@ -2694,7 +2705,7 @@ pub fn set_auto_lock_minutes(
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
     let settings_path = {
-        let vault_path = state.vault_path.lock().unwrap();
+        let vault_path = state.vault_path.lock().unwrap().clone();
         vault_path.with_file_name("settings.json")
     };
 
@@ -2705,12 +2716,16 @@ pub fn set_auto_lock_minutes(
     } else {
         serde_json::json!({})
     };
+    if !settings.is_object() {
+        // Indexing a non-object Value by key panics; start clean instead.
+        settings = serde_json::json!({});
+    }
 
     settings["auto_lock_minutes"] = serde_json::json!(minutes);
 
     let data = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("Serialization failed: {}", e))?;
-    std::fs::write(&settings_path, data)
+    crate::vault::write_atomic(&settings_path, data.as_bytes())
         .map_err(|e| format!("Failed to save settings: {}", e))?;
 
     log::info!("Auto-lock set to {} minutes.", minutes);
@@ -2865,7 +2880,7 @@ async fn auto_link_web_account(state: &Arc<AppState>) -> Result<LinkResult, Stri
                         let config = state.vault_config.lock().unwrap();
                         let live_pw = live_passphrase(state); // under the config lock - see check_dna_updates
                         if let (Some(config), Some(password)) = (config.as_ref(), live_pw.as_deref()) {
-                            let vault_path = state.vault_path.lock().unwrap();
+                            let vault_path = state.vault_path.lock().unwrap().clone();
                             if let Ok(mut encrypted) = encrypt_vault(config, password) {
                                 encrypted.display_email =
                                     config.web_email.clone().or(config.web_username.clone());
@@ -3573,7 +3588,7 @@ pub fn revoke_approved_app(
 // ── Backup commands ────────────────────────────────────────────────
 
 /// Get backup stats for all apps (for Your Data page).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_backup_stats(
     state: State<'_, Arc<AppState>>,
 ) -> crate::backup::BackupStats {
@@ -3788,7 +3803,7 @@ pub async fn export_all_data_to_file(
 /// Export (decrypt) one app's backup straight to `path` - the file-writing
 /// sibling of `export_single_backup`, so the save dialog can come first and
 /// the payload never crosses IPC. Returns `{ bytes }`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_single_backup_to_file(
     client_id: String,
     label: Option<String>,
@@ -4137,7 +4152,7 @@ pub async fn import_vault_export(
 }
 
 /// List individual backup metadata for a specific app.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_app_backup_details(
     client_id: String,
     state: State<'_, Arc<AppState>>,
@@ -4169,7 +4184,7 @@ pub fn list_app_backup_details(
 /// the SDK passes through arbitrary top-level fields (alongside `cells[]`
 /// and `_summary`) so an app can add e.g. an `app_keys` block and Vault
 /// will inline it here verbatim under `backup.data`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_single_backup(
     client_id: String,
     label: Option<String>,
@@ -5419,6 +5434,28 @@ pub(crate) async fn get_my_linked_signatures_inner(
     })
 }
 
+/// Local signatures for one file hash - the Sign It page's OFFLINE
+/// duplicate check ("you already signed this") when the API cannot be
+/// reached. The frontend has called this since the page was built; the
+/// command did not exist, so the check was silently dead.
+#[tauri::command]
+pub async fn get_signatures_for_hash(
+    file_hash: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let wanted = file_hash.trim().to_lowercase();
+    let all = get_my_signatures_inner(state.inner()).await?;
+    Ok(all
+        .into_iter()
+        .filter(|v| {
+            v.get("file_hash")
+                .and_then(|h| h.as_str())
+                .map(|h| h.eq_ignore_ascii_case(&wanted))
+                .unwrap_or(false)
+        })
+        .collect())
+}
+
 /// Combined own + linked fetch, used by `export_all_data` where the
 /// caller wants a single blocking result and is happy to wait. The
 /// interactive UI uses `get_my_own_signatures` + `get_my_linked_signatures`
@@ -6107,7 +6144,7 @@ pub(crate) async fn commit_signature_to_dht(
 /// restore, where the server can't supply it back (it stores only a hash)
 /// - the user re-enters it, the API verifies it against the hash on use,
 /// and from then on the vault knows it again.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_web_email(state: State<'_, Arc<AppState>>, email: String) -> Result<(), String> {
     let email = normalize_email(&email)?;
     let mut config = state.vault_config.lock().unwrap();
@@ -6696,10 +6733,15 @@ pub(crate) async fn current_sign_quota(
     // attached to) over the local device key - same rule as the in-app UI.
     let agent_key = {
         let config = state.vault_config.lock().unwrap();
-        config.as_ref().and_then(|c| {
-            c.web_agent_pub_key
-                .clone()
-                .or_else(|| Some(c.agent_pub_key.clone()))
+        // Device-hosted identities are known to the server by the device
+        // key; the web key kept from a migration is history (the flip moved
+        // it to custodial_agent_pub_key), and asking with it 404s.
+        config.as_ref().map(|c| {
+            if c.hosting_model.as_deref() == Some("device-hosted") {
+                c.agent_pub_key.clone()
+            } else {
+                c.web_agent_pub_key.clone().unwrap_or_else(|| c.agent_pub_key.clone())
+            }
         })
     };
 

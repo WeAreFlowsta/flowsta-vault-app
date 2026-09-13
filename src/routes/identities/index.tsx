@@ -234,7 +234,7 @@ export default component$(() => {
     } catch (err) {
       linkStatus.value = "error";
       linkMessage.value =
-        err instanceof Error ? err.message : "An unexpected error occurred";
+        typeof err === "string" ? err : err instanceof Error ? err.message : "An unexpected error occurred";
     }
   });
 

@@ -1084,24 +1084,20 @@ async fn link_identity_handler(
         .build()
         .unwrap_or_default();
 
-    let api_result = client.get(&verify_url).send().await;
+    // "Reachable" means a 2xx with a JSON body. A 5xx, a 429 or a proxy
+    // error page is server trouble, not a verdict on the app - those fall
+    // back to the offline cache exactly like a network failure does.
+    let api_result: Result<serde_json::Value, String> = match client.get(&verify_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            resp.json::<serde_json::Value>().await.map_err(|e| format!("bad JSON: {}", e))
+        }
+        Ok(resp) => Err(format!("HTTP {}", resp.status().as_u16())),
+        Err(e) => Err(e.to_string()),
+    };
 
     let app_info = match api_result {
-      Ok(api_resp) => {
-        let api_resp = api_resp; // keep binding
-        // API reachable - parse and use fresh data
-
-        let body: serde_json::Value =
-            api_resp.json().await.map_err(|_| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(IpcError {
-                        error: "api_unreachable".into(),
-                        description: Some("Invalid response from Flowsta API.".into()),
-                    }),
-                )
-            })?;
-
+      Ok(body) => {
+        // API reachable - use fresh data
         let valid = body.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
         if !valid {
             let error_code = body
@@ -4237,8 +4233,11 @@ async fn connections_handler(
     // `trusted` on the raw map is a display field computed at query time -
     // the live source of truth is the approved_apps list.
     let trusted_origins: Vec<serde_json::Value> = {
-        let approved = state.app_state.approved_apps.lock().unwrap();
+        // Lock order matches get_connected_sites / revoke_site on the UI
+        // thread (sites, then approved) - the reverse order deadlocked the
+        // whole IPC server against an open Connections page.
         let sites = state.app_state.connected_sites.lock().unwrap();
+        let approved = state.app_state.approved_apps.lock().unwrap();
         approved
             .iter()
             .map(|origin| {

@@ -71,7 +71,9 @@ struct ApiEnvelope {
 }
 
 fn api_error(status: reqwest::StatusCode, body: &ApiEnvelope, context: &str) -> String {
-    let code = body.error.as_deref().unwrap_or("unknown_error");
+    // The limiters answer 429 with a human sentence in `error`; give callers
+    // one machine code to branch on instead of the raw sentence.
+    let code = if status.as_u16() == 429 { "rate_limited" } else { body.error.as_deref().unwrap_or("unknown_error") };
     let msg = body.message.as_deref().unwrap_or("");
     format!("{}: {} ({}) [{}]", context, code, msg, status.as_u16())
 }
@@ -373,7 +375,7 @@ pub(crate) async fn reconcile_account_layer(
                 // The Overview learns about the conflict by refetching
                 // get_identity - which it only does on an event. Without
                 // this emit the collision UI never appeared (drill find).
-                let _ = app_handle.emit("profile-updated", ());
+                let _ = app_handle.emit("profile-updated", serde_json::json!({}));
                 return;
             }
             Err(e) => {

@@ -239,6 +239,12 @@ pub fn decrypt_vault(encrypted: &EncryptedVault, password: &str) -> Result<Vault
     let nonce_bytes = base64_decode(&encrypted.nonce).map_err(|_| VaultError::Decryption)?;
     let ciphertext = base64_decode(&encrypted.ciphertext).map_err(|_| VaultError::Decryption)?;
 
+    // A damaged nonce field must read as a decryption failure, not a panic
+    // (GenericArray::from_slice asserts the length).
+    if nonce_bytes.len() != 12 {
+        return Err(VaultError::Decryption);
+    }
+
     // Derive AES key from password
     let key = derive_key(password, &salt_bytes)?;
 
@@ -257,20 +263,99 @@ pub fn decrypt_vault(encrypted: &EncryptedVault, password: &str) -> Result<Vault
     Ok(config)
 }
 
-/// Save encrypted vault to disk.
+/// Write a file so a crash can never leave it half-written: temp file in
+/// the same directory, fsync, atomic rename over the target. Every file the
+/// Vault reads back at launch goes through here - a truncated vault.enc or
+/// linked-apps.json is a lost identity or a lost consent list.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut tmp_name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
+/// Move a file that failed to parse aside as `<name>.corrupt-<ts>` so the
+/// next save cannot overwrite the evidence, and log it. Returns the new path.
+pub fn quarantine_file(path: &std::path::Path, why: &str) -> Option<std::path::PathBuf> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!(".corrupt-{}", ts));
+    let target = path.with_file_name(name);
+    match std::fs::rename(path, &target) {
+        Ok(()) => {
+            log::error!("{:?} could not be read ({}) - moved aside to {:?}", path, why, target);
+            Some(target)
+        }
+        Err(e) => {
+            log::error!("{:?} could not be read ({}) and could not be moved aside: {}", path, why, e);
+            None
+        }
+    }
+}
+
+/// Read a JSON list/map file that the Vault owns. A missing file is the
+/// empty default; a file that does not parse is quarantined (never silently
+/// treated as empty, which the next save would then make permanent).
+pub fn load_json_or_quarantine<T: Default + serde::de::DeserializeOwned>(path: &std::path::Path) -> T {
+    match std::fs::read_to_string(path) {
+        Ok(json) => match serde_json::from_str::<T>(&json) {
+            Ok(v) => v,
+            Err(e) => {
+                quarantine_file(path, &e.to_string());
+                T::default()
+            }
+        },
+        Err(_) => T::default(),
+    }
+}
+
+/// Save encrypted vault to disk - atomically, keeping the previous good
+/// file as `vault.enc.bak` so a damaged primary still has a way back.
 pub fn save_vault(path: &std::path::Path, encrypted: &EncryptedVault) -> Result<(), VaultError> {
     let json = serde_json::to_string_pretty(encrypted)
         .map_err(|e| VaultError::Serialization(e.to_string()))?;
-    std::fs::write(path, json)?;
+    if path.exists() {
+        let _ = std::fs::copy(path, backup_path(path));
+    }
+    write_atomic(path, json.as_bytes())?;
     Ok(())
 }
 
-/// Load encrypted vault from disk.
+fn backup_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".bak");
+    path.with_file_name(name)
+}
+
+/// Load encrypted vault from disk. If the primary does not parse, fall back
+/// to the previous good copy and say so - a truncated write must not read
+/// as "no identity".
 pub fn load_vault(path: &std::path::Path) -> Result<EncryptedVault, VaultError> {
     let json = std::fs::read_to_string(path)?;
-    let encrypted: EncryptedVault = serde_json::from_str(&json)
-        .map_err(|e| VaultError::Serialization(e.to_string()))?;
-    Ok(encrypted)
+    match serde_json::from_str::<EncryptedVault>(&json) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let bak = backup_path(path);
+            if let Ok(bjson) = std::fs::read_to_string(&bak) {
+                if let Ok(v) = serde_json::from_str::<EncryptedVault>(&bjson) {
+                    log::error!("vault file did not parse ({}) - using the previous good copy", e);
+                    quarantine_file(path, &e.to_string());
+                    let _ = write_atomic(path, bjson.as_bytes());
+                    return Ok(v);
+                }
+            }
+            Err(VaultError::Serialization(e.to_string()))
+        }
+    }
 }
 
 /// Check if a vault file exists at the given path.

@@ -144,7 +144,7 @@ fn save_mau_store(
     let path = mau_store_path(data_dir);
     let json = serde_json::to_string(&encrypted)
         .map_err(|e| format!("MAU envelope serialize failed: {}", e))?;
-    std::fs::write(&path, json).map_err(|e| format!("MAU write failed: {}", e))?;
+    crate::vault::write_atomic(&path, json.as_bytes()).map_err(|e| format!("MAU write failed: {}", e))?;
     Ok(())
 }
 
@@ -172,6 +172,9 @@ fn load_mau_store(
     let nonce_bytes = hex::decode(nonce_hex).map_err(|_| "MAU bad nonce hex")?;
     let ciphertext = hex::decode(ct_hex).map_err(|_| "MAU bad ciphertext hex")?;
 
+    if nonce_bytes.len() != 12 {
+        return Err("MAU nonce has the wrong length".into());
+    }
     let key = derive_mau_storage_key(device_seed);
     let nonce = Nonce::from_slice(&nonce_bytes);
     let cipher = <Aes256Gcm as aes_gcm::KeyInit>::new_from_slice(&key)
@@ -208,7 +211,9 @@ pub fn load_mau_state(app_state: &AppState) {
             log::info!("MAU store loaded ({} events)", event_count);
         }
         Err(e) => {
-            log::warn!("Failed to load MAU store (starting fresh): {}", e);
+            // Never silently start fresh over an unreadable store - the next
+            // event would overwrite unsynced billing events. Set it aside.
+            crate::vault::quarantine_file(&mau_store_path(&app_state.data_dir), &e);
             *app_state.mau_state.store.lock().unwrap() = Some(MauStore::default());
         }
     }
@@ -513,9 +518,23 @@ pub async fn sync_mau_to_api(app_state: &AppState) -> Result<usize, String> {
 
     let synced_count = body["synced"].as_u64().unwrap_or(0) as usize;
 
-    // Mark synced events
+    // Mark synced only what the server accepted: events it skipped
+    // ("Unknown or inactive client_id", "MAU limit reached", "Processing
+    // failed") come back in `errors[].client_id` and must be retried.
+    let skipped: std::collections::HashSet<String> = body["errors"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.get("client_id").and_then(|c| c.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !skipped.is_empty() {
+        log::warn!("MAU sync: server skipped {} event(s) - kept for retry", skipped.len());
+    }
     let synced_pairs: Vec<(String, String)> = pending
         .iter()
+        .filter(|e| !skipped.contains(&e.client_id))
         .map(|e| (e.client_id.clone(), e.month_year.clone()))
         .collect();
     mark_events_synced(app_state, &synced_pairs);

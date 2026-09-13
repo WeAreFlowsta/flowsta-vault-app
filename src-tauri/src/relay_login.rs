@@ -23,6 +23,15 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 
+/// Relay calls carry a timeout like every other API call the Vault makes -
+/// a hung API must not hang the approval dialog.
+fn relay_http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default()
+}
+
 /// A claimed relay session held between claim and approve/deny.
 #[derive(Debug, Clone, Serialize)]
 pub struct RelayClaim {
@@ -90,7 +99,7 @@ fn api_err(status: reqwest::StatusCode, error: Option<String>, message: Option<S
 /// can drive it without Tauri state.
 pub async fn relay_claim_core(api_url: &str, user_code: &str) -> Result<RelayClaim, String> {
     let base = api_url.trim_end_matches('/');
-    let resp = reqwest::Client::new()
+    let resp = relay_http()
         .post(format!("{}/auth/relay/claim", base))
         .json(&serde_json::json!({ "user_code": user_code }))
         .send()
@@ -135,7 +144,7 @@ pub async fn relay_approve_core(
     ));
 
     let base = api_url.trim_end_matches('/');
-    let resp = reqwest::Client::new()
+    let resp = relay_http()
         .post(format!("{}/auth/relay/approve", base))
         .json(&serde_json::json!({
             "claim_token": claim.claim_token,
@@ -159,7 +168,7 @@ pub async fn relay_approve_core(
 /// Tell the API the user declined (or the approval timed out). Best-effort.
 pub async fn relay_deny_core(api_url: &str, claim_token: &str) -> Result<(), String> {
     let base = api_url.trim_end_matches('/');
-    let _ = reqwest::Client::new()
+    let _ = relay_http()
         .post(format!("{}/auth/relay/deny", base))
         .json(&serde_json::json!({ "claim_token": claim_token }))
         .send()
@@ -401,7 +410,7 @@ mod tests {
         let device_seed = derive_seed(&mnemonic, DEVICE_1_CONSTANT).expect("seed");
 
         // Phone side: start.
-        let client = reqwest::Client::new();
+        let client = relay_http();
         let start: serde_json::Value = client
             .post(format!("{}/auth/relay/start", STAGING))
             .json(&serde_json::json!({ "client_id": "flowsta" }))
