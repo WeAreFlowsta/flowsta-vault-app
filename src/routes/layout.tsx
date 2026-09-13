@@ -1885,6 +1885,15 @@ export default component$(() => {
               </div>
             </div>
 
+            {pendingLinkIdentity.value.origin && (
+              <div class="mb-3">
+                <span class="text-xs text-gray-500">Requesting page</span>
+                <p class="break-all text-sm text-gray-300">
+                  {pendingLinkIdentity.value.origin}
+                </p>
+              </div>
+            )}
+
             {pendingLinkIdentity.value.replacing_existing && (
               <p class="mb-3 text-xs text-amber-400">
                 This app has updated its registration. Approving will update your existing link.

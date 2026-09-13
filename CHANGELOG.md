@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   email after a phrase restore, and when repairing an address that was
   already registered to another account.
 
+### Security
+- **An app's email grant belongs to the page that asked.** The Vault only
+  treats an email as already shared with an app when the page requesting it
+  is that app's linked page or a Flowsta page. Any other page sees the
+  approval dialog every time and never files a grant under another app's
+  name.
+- **The "link this app" dialog shows the requesting page**, so an app's
+  name can be checked against where the request came from.
+
 ### Fixed
 - **A crash or power cut can no longer leave the Vault's files half-written.**
   The vault file, the connected-app and remembered-site lists, app backups

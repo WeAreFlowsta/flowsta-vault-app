@@ -761,16 +761,31 @@ async fn authenticate_handler(
     } else {
         false
     };
-    let already_granted = match req.client_id.as_deref() {
-        Some(cid) => state.app_state.email_grants.lock().unwrap().contains_key(cid),
+    // `client_id` is caller-supplied. A grant is only THIS caller's when the
+    // origin is entitled to act for that app: a Flowsta page (the consent
+    // page runs the OAuth flow) or an origin linked to that client_id. Any
+    // other origin gets no ride on an existing grant and files none.
+    let origin_bound_to_client = match req.client_id.as_deref() {
+        Some(cid) => {
+            is_flowsta_origin(origin.as_deref())
+                || origin_to_client_id(&state.app_state, origin.as_deref()).as_deref() == Some(cid)
+        }
         None => false,
+    };
+    let already_granted = match req.client_id.as_deref() {
+        Some(cid) if origin_bound_to_client => {
+            state.app_state.email_grants.lock().unwrap().contains_key(cid)
+        }
+        _ => false,
     };
     // The address that WILL be shared if the user allows: requested, held,
     // verified. Unverified → the dialog says so and nothing is shared.
     let share_email = if wants_email && vault_email_verified { vault_email.clone() } else { None };
     let email_unverified = wants_email && vault_email.is_some() && !vault_email_verified;
-    // A grant to record on Allow (first time this app gets the email).
+    // The dialog is shown for every email share that no grant of this
+    // caller's covers; a grant is recorded on Allow only for a bound origin.
     let email_grant_needed = share_email.is_some() && !already_granted;
+    let email_grant_recordable = email_grant_needed && origin_bound_to_client;
 
     // Check if this origin is already auto-approved. A remembered site does
     // NOT cover a first request for the email: that is a new thing being
@@ -972,8 +987,13 @@ async fn authenticate_handler(
     // without a new record.
     let (email, email_verified) = match (share_email, req.client_id.as_deref()) {
         (Some(addr), Some(cid)) => {
-            if email_grant_needed {
+            if email_grant_recordable {
                 crate::commands::record_email_grant(&state.app_state, cid, &req.app_name).await;
+            } else if email_grant_needed {
+                log::info!(
+                    "email shared with {:?} for {} on the user's say-so; no grant filed (origin not linked to that app)",
+                    origin, cid
+                );
             }
             (Some(addr), Some(true))
         }

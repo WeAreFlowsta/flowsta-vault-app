@@ -6522,6 +6522,20 @@ pub async fn check_email_change(
             }
         }
         persist_config_now(state.inner())?;
+        // The address is stored here now: the server can drop the plaintext
+        // from its request row (best effort; the daily sweep covers a miss).
+        {
+            let api = api_url.trim_end_matches('/').to_string();
+            let tok = token.clone();
+            tokio::spawn(async move {
+                let _ = reqwest::Client::new()
+                    .post(format!("{}/auth/pending-email-change/collected", api))
+                    .bearer_auth(&tok)
+                    .timeout(std::time::Duration::from_secs(15))
+                    .send()
+                    .await;
+            });
+        }
         let sealed_state = state.inner().clone();
         let sealed_email = verified_email.clone();
         tokio::spawn(async move {
