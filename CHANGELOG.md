@@ -29,6 +29,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already registered to another account.
 
 ### Fixed
+- **A crash or power cut can no longer leave the Vault's files half-written.**
+  The vault file, the connected-app and remembered-site lists, app backups
+  and the usage records are written to a temporary file and swapped in
+  whole; the vault file also keeps a copy of its last good version. A file
+  that cannot be read is set aside instead of being silently treated as
+  empty and then overwritten.
+- **"Wrong password" now means the password.** A damaged vault file says
+  so, and says the password was right.
+- **Two freezes fixed.** The Connections page and a Flowsta page reading
+  connections at the same moment could lock the whole app and its local
+  bridge; so could the status poll landing during a DNA update. Unlock,
+  setup, lock, reset and the backup readers also no longer run on the
+  window's own thread, so a slow disk no longer freezes it.
+- **Damaged files no longer crash the app**: a bad nonce in a vault,
+  backup or usage file, a ZIP truncated by one byte, or a file opened with
+  a name the system cannot read as text.
+- **Sign It's offline "you already signed this" check works.** It called a
+  command that did not exist, so it silently never ran without the API.
+- **Migrated accounts see their plan and quota again** - the Vault asked
+  the server with the retired web key.
+- **Remembered apps could be locked out of sign-in by the Vault itself**: a
+  profile refresh at every unlock counted as a failed login for Vault
+  identities and could exhaust the sign-in limit for the whole network.
+- **App links fall back to the local record when Flowsta is having
+  trouble**, not only when the network is down; usage reports the server
+  skipped are kept for retry; rate limits read as one clear message;
+  re-running an interrupted account upgrade after it already finished says
+  so instead of failing.
 - **Forgetting a remembered site now sticks.** Revoking a site in
   Connections was not written to disk, so the site came back remembered
   at the next launch.
