@@ -226,6 +226,10 @@ pub struct AppState {
     /// Scopes granted to each linked app at link time (client_id → scopes).
     /// Persisted to linked-app-scopes.json. Used by /status for scope-filtered responses.
     pub linked_app_scopes: Mutex<HashMap<String, Vec<String>>>,
+    /// A vault-grant JWT reused by the email-change poll and cancel, so a
+    /// 60 s poll does not mint a fresh challenge each time (the challenge
+    /// endpoint is rate-limited per IP). Cleared on lock.
+    pub grant_token_cache: Mutex<Option<(String, std::time::Instant)>>,
     /// Apps the user has allowed to receive their email (client_id → grant).
     /// Persisted to email-grants.json. A remembered site does NOT imply an
     /// email grant: the first request for `email` always shows the dialog.
@@ -387,6 +391,7 @@ impl AppState {
             verified_apps: Mutex::new(verified_apps),
             linked_app_scopes: Mutex::new(linked_app_scopes),
             email_grants: Mutex::new(email_grants),
+            grant_token_cache: Mutex::new(None),
             backup_key: Mutex::new(None),
             linked_web_agent_key: Mutex::new(None),
             pending_sign_paths: Mutex::new(Vec::new()),
@@ -994,6 +999,7 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     // Drop the cached passphrase. `LockedArray::Drop` zeroes the bytes
     // and unlocks the memory pages.
     *state.unlock_passphrase.lock().unwrap() = None;
+    *state.grant_token_cache.lock().unwrap() = None;
 
     log::info!("Vault locked.");
     Ok(())
@@ -1486,8 +1492,12 @@ async fn check_dna_updates(
             // Persist new versions to VaultConfig - under the passphrase the
             // vault is unlocked with RIGHT NOW (read before the config lock;
             // writers take the passphrase first, then the config).
-            let live_pw = live_passphrase(state);
             let mut config_guard = state.vault_config.lock().unwrap();
+            // Passphrase read UNDER the config lock: a password change swaps
+            // the passphrase and saves the file while holding this same lock,
+            // so a writer sees either the old world or the new one, never a
+            // mix (config → passphrase is the one allowed nesting order).
+            let live_pw = live_passphrase(state);
             if let Some(cfg) = config_guard.as_mut() {
                 if let Some(change) = private_updated {
                     log::info!("Private DNA updated: {} → {}", change.from, change.to);
@@ -2393,6 +2403,12 @@ fn restore_lair_dir(lair_dir: &std::path::Path, backup: &Option<std::path::PathB
 }
 
 fn set_cached_passphrase(state: &AppState, pw: &str) {
+    // Never re-populate the passphrase of a vault that has been locked
+    // meanwhile (auto-lock mid-change) - a locked vault holds no passphrase.
+    if state.vault_config.try_lock().map(|c| c.is_none()).unwrap_or(false) {
+        log::warn!("passphrase not cached: vault locked during the change");
+        return;
+    }
     *state.unlock_passphrase.lock().unwrap() = Some(
         lair_keystore_api::dependencies::sodoken::LockedArray::from(pw.as_bytes().to_vec()),
     );
@@ -2534,14 +2550,17 @@ pub(crate) async fn change_vault_password_inner(
         log::info!("No db.key found - skipping database key rewrap");
     }
 
-    // 6. Swap the cached unlock passphrase to NEW *before* writing the new
-    // vault file, so any config writer that runs from here on re-encrypts
-    // under the same password as the file we are about to save.
-    set_cached_passphrase(state, &new_password);
-
-    // 7. COMMIT: save the re-encrypted vault file. On failure undo 5 + 6,
-    // put lair back, restart under the current password.
-    if let Err(e) = save_vault(&vault_path, &new_encrypted) {
+    // 6 + 7. Swap the cached passphrase to NEW and COMMIT the new vault file
+    // while holding the config lock: every config writer takes that lock
+    // before it reads the passphrase, so none can read OLD, lose the race,
+    // and re-save the file under OLD after this point. On failure undo 5 +
+    // 6, put lair back, restart under the current password.
+    let commit = {
+        let _fence = state.vault_config.lock().unwrap();
+        set_cached_passphrase(state, &new_password);
+        save_vault(&vault_path, &new_encrypted)
+    };
+    if let Err(e) = commit {
         set_cached_passphrase(state, &current_password);
         if db_key_present {
             let (path, current, new) = (db_key_path.clone(), current_password.clone(), new_password.clone());
@@ -2569,7 +2588,7 @@ pub(crate) async fn change_vault_password_inner(
         Ok(()) => {
             if let Some(backup) = lair_backup {
                 if let Err(e) = remove_dir_with_retry(&backup) {
-                    // Swept on the next lair start (start_lair_process).
+                    // Swept at the next unlock-time start (spawn_conductor_startup).
                     log::warn!("previous keystore {:?} not removed yet: {}", backup, e);
                 }
             }
@@ -2592,26 +2611,57 @@ pub(crate) async fn change_vault_password_inner(
                     })
                 })
                 .await;
+            } else if db_key_path.exists() {
+                // The failed start was the conductor's first ever: it created
+                // databases under NEW. Nothing existed before - drop them so the
+                // next start creates them under the current password.
+                if let Some(dbs) = db_key_path.parent() {
+                    if let Err(re) = remove_dir_with_retry(dbs) {
+                        log::error!("rollback: could not remove databases created under the new password: {}", re);
+                    }
+                }
             }
-            set_cached_passphrase(state, &current_password);
-            let mut back = {
+            // Re-save under the current password while holding the fence (see 6 + 7).
+            let back = {
                 let cfg = config_snapshot.clone();
                 let pw = current_password.clone();
                 tokio::task::spawn_blocking(move || encrypt_vault(&cfg, &pw))
                     .await
                     .map_err(|e| e.to_string())
                     .and_then(|r| r.map_err(|e| e.to_string()))
-                    .map_err(|e| format!("rollback: could not re-encrypt the vault under the current password: {}", e))?
             };
-            back.display_email = new_encrypted.display_email.clone();
-            save_vault(&vault_path, &back)
-                .map_err(|e| format!("rollback: could not save the vault: {}", e))?;
+            let restored = match back {
+                Ok(mut back) => {
+                    back.display_email = new_encrypted.display_email.clone();
+                    let _fence = state.vault_config.lock().unwrap();
+                    set_cached_passphrase(state, &current_password);
+                    save_vault(&vault_path, &back).map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e),
+            };
             drop(guard);
-            let _ = ensure_conductor_alive(state, &app_handle).await;
-            Err(format!(
-                "The new password could not be applied ({}). Your vault still uses your current password.",
-                e
-            ))
+            match restored {
+                Ok(()) => {
+                    let _ = ensure_conductor_alive(state, &app_handle).await;
+                    Err(format!(
+                        "The new password could not be applied ({}). Your vault still uses your current password.",
+                        e
+                    ))
+                }
+                Err(re) => {
+                    // The one state we could not undo: the file is under NEW,
+                    // the cache under OLD. Say so loudly instead of hanging on
+                    // "Restoring..." - the new password opens the vault.
+                    let msg = format!(
+                        "The password change could not be completed or undone ({}). Your vault file now uses the NEW password - lock the Vault and unlock it with the new password.",
+                        re
+                    );
+                    let status = ConductorStatus::Error { message: msg.clone() };
+                    *state.conductor_status.lock().unwrap() = status.clone();
+                    let _ = app_handle.emit("conductor-status", status);
+                    Err(msg)
+                }
+            }
         }
     }
 }
@@ -2812,8 +2862,8 @@ async fn auto_link_web_account(state: &Arc<AppState>) -> Result<LinkResult, Stri
                     if profile_updated {
                         // Live passphrase, never the unlock-time one (see
                         // live_passphrase) - read before the config lock.
-                        let live_pw = live_passphrase(state);
                         let config = state.vault_config.lock().unwrap();
+                        let live_pw = live_passphrase(state); // under the config lock - see check_dna_updates
                         if let (Some(config), Some(password)) = (config.as_ref(), live_pw.as_deref()) {
                             let vault_path = state.vault_path.lock().unwrap();
                             if let Ok(mut encrypted) = encrypt_vault(config, password) {
@@ -5014,13 +5064,13 @@ pub(crate) fn live_passphrase(state: &AppState) -> Option<String> {
 pub(crate) fn persist_web_agent_pub_key(state: &Arc<AppState>, key_b64: &str) {
     *state.linked_web_agent_key.lock().unwrap() = Some(key_b64.to_string());
 
-    let passphrase = live_passphrase(state);
+    let vault_path = state.vault_path.lock().unwrap().clone();
+    let mut config = state.vault_config.lock().unwrap();
+    let passphrase = live_passphrase(state); // under the config lock - see check_dna_updates
     let Some(pw) = passphrase else {
         log::warn!("web agent key persist skipped: no cached passphrase");
         return;
     };
-    let vault_path = state.vault_path.lock().unwrap().clone();
-    let mut config = state.vault_config.lock().unwrap();
     if let Some(cfg) = config.as_mut() {
         cfg.web_agent_pub_key = Some(key_b64.to_string());
         match crate::vault::encrypt_vault(cfg, &pw) {
@@ -6060,13 +6110,8 @@ pub(crate) async fn commit_signature_to_dht(
 #[tauri::command]
 pub fn set_web_email(state: State<'_, Arc<AppState>>, email: String) -> Result<(), String> {
     let email = normalize_email(&email)?;
-    let passphrase = {
-        let mut guard = state.unlock_passphrase.lock().unwrap();
-        guard
-            .as_mut()
-            .and_then(|locked| String::from_utf8(locked.lock().to_vec()).ok())
-    };
     let mut config = state.vault_config.lock().unwrap();
+    let passphrase = live_passphrase(state.inner()); // under the config lock - see check_dna_updates
     let cfg = config.as_mut().ok_or("Vault is locked")?;
     cfg.web_email = Some(email);
     if let Some(pw) = passphrase {
@@ -6134,13 +6179,8 @@ pub async fn claim_web_username(
 
     // Mirror on-device: config (instant UI) + persisted vault file.
     {
-        let passphrase = {
-            let mut guard = state.unlock_passphrase.lock().unwrap();
-            guard
-                .as_mut()
-                .and_then(|locked| String::from_utf8(locked.lock().to_vec()).ok())
-        };
         let mut config = state.vault_config.lock().unwrap();
+        let passphrase = live_passphrase(state.inner()); // under the config lock - see check_dna_updates
         if let Some(cfg) = config.as_mut() {
             cfg.web_username = Some(username.clone());
             if let Some(pw) = passphrase {
@@ -6176,9 +6216,9 @@ pub async fn claim_web_username(
 /// Persist the in-memory config under the live passphrase, restamping the
 /// display_email sidecar. Shared by the email-change commands.
 fn persist_config_now(state: &Arc<AppState>) -> Result<(), String> {
-    let pw = live_passphrase(state).ok_or("Vault is locked")?;
     let vault_path = state.vault_path.lock().unwrap().clone();
     let config = state.vault_config.lock().unwrap();
+    let pw = live_passphrase(state).ok_or("Vault is locked")?; // under the config lock
     let cfg = config.as_ref().ok_or("Vault is locked")?;
     let mut encrypted = crate::vault::encrypt_vault(cfg, &pw).map_err(|e| e.to_string())?;
     encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
@@ -6202,6 +6242,58 @@ fn device_hosted_grant_material(state: &Arc<AppState>) -> Result<([u8; 32], Stri
     seed.copy_from_slice(&seed_vec);
     let agent_b64 = cfg.agent_pub_key_raw_b64.clone().ok_or("No raw agent key in vault")?;
     Ok((seed, agent_b64, cfg.web_email.clone()))
+}
+
+/// A vault-grant token for API calls that only need a session: reused for
+/// 20 minutes so polling does not burn the per-IP challenge budget. Callers
+/// that need the grant's `emailVerified` flag do a fresh grant instead.
+async fn cached_grant_token(state: &Arc<AppState>, api_url: &str) -> Result<String, String> {
+    if let Some((tok, at)) = state.grant_token_cache.lock().unwrap().clone() {
+        if at.elapsed() < std::time::Duration::from_secs(20 * 60) {
+            return Ok(tok);
+        }
+    }
+    let (seed, agent_b64, _) = device_hosted_grant_material(state)?;
+    let grant = crate::device_identity::vault_grant_with_seed(api_url, &seed, &agent_b64)
+        .await
+        .map_err(|e| format!("Sign-in failed: {}", e))?;
+    cache_email_verified(state, grant.email_verified);
+    *state.grant_token_cache.lock().unwrap() = Some((grant.token.clone(), std::time::Instant::now()));
+    Ok(grant.token)
+}
+
+/// Store the server's verified flag when it changed.
+fn cache_email_verified(state: &Arc<AppState>, verified: Option<bool>) {
+    let Some(v) = verified else { return };
+    let changed = {
+        let mut config = state.vault_config.lock().unwrap();
+        match config.as_mut() {
+            Some(cfg) if cfg.email_verified != Some(v) => {
+                cfg.email_verified = Some(v);
+                true
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        let _ = persist_config_now(state);
+    }
+}
+
+/// Learn whether the email is verified when the Vault does not know yet
+/// (a fresh identity that has not relocked since setup). One vault-grant;
+/// returns the cached value when already known. Device-hosted only.
+pub(crate) async fn ensure_email_verified_known(state: &Arc<AppState>) -> Option<bool> {
+    let known = state.vault_config.lock().unwrap().as_ref().and_then(|c| c.email_verified);
+    if known.is_some() {
+        return known;
+    }
+    let (seed, agent_b64, _) = device_hosted_grant_material(state).ok()?;
+    let api_url = option_env!("FLOWSTA_API_URL").unwrap_or("https://auth-api.flowsta.com");
+    let grant = crate::device_identity::vault_grant_with_seed(api_url, &seed, &agent_b64).await.ok()?;
+    cache_email_verified(state, grant.email_verified);
+    *state.grant_token_cache.lock().unwrap() = Some((grant.token, std::time::Instant::now()));
+    grant.email_verified
 }
 
 #[derive(Serialize)]
@@ -6286,31 +6378,14 @@ pub async fn check_email_change(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<EmailChangeState, String> {
-    let (seed, agent_b64, current_email) = device_hosted_grant_material(state.inner())?;
-    let grant = crate::device_identity::vault_grant_with_seed(&api_url, &seed, &agent_b64)
-        .await
-        .map_err(|e| format!("Sign-in failed: {}", e))?;
-    // Every grant carries the server's verified flag - cache it (this runs
-    // at each unlock), and use the moment to file any offline email grants.
-    if let Some(v) = grant.email_verified {
-        let changed = {
-            let mut config = state.vault_config.lock().unwrap();
-            match config.as_mut() {
-                Some(cfg) if cfg.email_verified != Some(v) => {
-                    cfg.email_verified = Some(v);
-                    true
-                }
-                _ => false,
-            }
-        };
-        if changed {
-            let _ = persist_config_now(state.inner());
-        }
-    }
+    let (_, _, current_email) = device_hosted_grant_material(state.inner())?;
+    // A fresh grant every ~20 min (cached_grant_token) keeps the verified
+    // flag current; also the moment to file any offline email grants.
+    let token = cached_grant_token(state.inner(), &api_url).await?;
     sync_unsynced_email_grants(state.inner()).await;
     let resp = reqwest::Client::new()
         .get(format!("{}/auth/pending-email-change", api_url.trim_end_matches('/')))
-        .bearer_auth(&grant.token)
+        .bearer_auth(&token)
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
@@ -6405,13 +6480,10 @@ pub async fn cancel_email_change(
     api_url: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let (seed, agent_b64, _) = device_hosted_grant_material(state.inner())?;
-    let grant = crate::device_identity::vault_grant_with_seed(&api_url, &seed, &agent_b64)
-        .await
-        .map_err(|e| format!("Sign-in failed: {}", e))?;
+    let token = cached_grant_token(state.inner(), &api_url).await?;
     let resp = reqwest::Client::new()
         .delete(format!("{}/auth/cancel-email-change", api_url.trim_end_matches('/')))
-        .bearer_auth(&grant.token)
+        .bearer_auth(&token)
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
@@ -6850,13 +6922,8 @@ pub(crate) async fn write_profile_records(
     // immediately; persist with the cached unlock passphrase (best-effort -
     // the sealed records above are the canonical store).
     {
-        let passphrase = {
-            let mut guard = state.unlock_passphrase.lock().unwrap();
-            guard
-                .as_mut()
-                .and_then(|locked| String::from_utf8(locked.lock().to_vec()).ok())
-        };
         let mut config = state.vault_config.lock().unwrap();
+        let passphrase = live_passphrase(state); // under the config lock - see check_dna_updates
         if let Some(cfg) = config.as_mut() {
             if let Some(ref name) = display_name {
                 cfg.display_name = Some(name.clone());

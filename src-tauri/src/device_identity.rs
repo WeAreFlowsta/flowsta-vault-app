@@ -395,20 +395,16 @@ pub(crate) async fn reconcile_account_layer(
         Ok(grant) => {
             let legacy_web_key = derive_legacy_web_key(&grant.did, &agent_b64);
 
-            // Persist under the cached passphrase (set_web_email pattern).
-            let passphrase = {
-                let mut guard = state.unlock_passphrase.lock().unwrap();
-                guard
-                    .as_mut()
-                    .and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok())
-            };
-            let Some(pw) = passphrase else {
-                log::warn!("[reconcile] skipped: no cached passphrase");
-                return;
-            };
+            // Persist under the cached passphrase, read UNDER the config lock
+            // (a password change swaps it while holding that lock).
             let vault_path = state.vault_path.lock().unwrap().clone();
             {
                 let mut config = state.vault_config.lock().unwrap();
+                let passphrase = crate::commands::live_passphrase(state);
+                let Some(pw) = passphrase else {
+                    log::warn!("[reconcile] skipped: no cached passphrase");
+                    return;
+                };
                 if let Some(cfg) = config.as_mut() {
                     if cfg.display_name.is_none() {
                         cfg.display_name = grant.display_name.clone();
@@ -566,19 +562,15 @@ pub async fn update_pending_registration_email(
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
     let email = crate::commands::normalize_email(&email)?;
-    // Persist the new address (set_web_email pattern).
+    // Persist the new address (set_web_email pattern; passphrase read under
+    // the config lock).
     {
-        let passphrase = {
-            let mut guard = state.unlock_passphrase.lock().unwrap();
-            guard
-                .as_mut()
-                .and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok())
-        };
+        let vault_path = state.vault_path.lock().unwrap().clone();
+        let mut config = state.vault_config.lock().unwrap();
+        let passphrase = crate::commands::live_passphrase(state.inner());
         let Some(pw) = passphrase else {
             return Err("Vault is locked".into());
         };
-        let vault_path = state.vault_path.lock().unwrap().clone();
-        let mut config = state.vault_config.lock().unwrap();
         let cfg = config.as_mut().ok_or("Vault is locked")?;
         cfg.web_email = Some(email);
         if let Ok(mut encrypted) = crate::vault::encrypt_vault(cfg, &pw) {

@@ -234,8 +234,12 @@ pub fn read_lair_logs(lair_dir: &Path) -> String {
     let stdout = std::fs::read_to_string(lair_dir.join("lair-stdout.log")).unwrap_or_default();
     let output = if !stderr.trim().is_empty() { stderr } else { stdout };
     let output = output.trim();
-    if output.len() > 500 {
-        format!("{}...", &output[..500])
+    // Cut on a char boundary - a byte slice panics inside a multibyte
+    // character (non-ASCII profile paths in the log), and this runs
+    // exactly when we are reporting a failure.
+    let cut = output.char_indices().nth(500).map(|(i, _)| i).unwrap_or(output.len());
+    if cut < output.len() {
+        format!("{}...", &output[..cut])
     } else {
         output.to_string()
     }

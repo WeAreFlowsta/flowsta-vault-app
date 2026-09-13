@@ -752,12 +752,14 @@ async fn authenticate_handler(
         _ => vec![],
     };
     let wants_email = scopes.iter().any(|s| s == "email");
-    let (vault_email, vault_email_verified) = {
-        let config = state.app_state.vault_config.lock().unwrap();
-        (
-            config.as_ref().and_then(|c| c.web_email.clone()),
-            config.as_ref().and_then(|c| c.email_verified).unwrap_or(false),
-        )
+    let vault_email = state.app_state.vault_config.lock().unwrap().as_ref().and_then(|c| c.web_email.clone());
+    // A fresh identity may not know its verified state yet (learned from a
+    // vault-grant; none has happened before the first relock) - ask now
+    // rather than tell the user "not verified" for the whole first session.
+    let vault_email_verified = if wants_email && vault_email.is_some() {
+        crate::commands::ensure_email_verified_known(&state.app_state).await == Some(true)
+    } else {
+        false
     };
     let already_granted = match req.client_id.as_deref() {
         Some(cid) => state.app_state.email_grants.lock().unwrap().contains_key(cid),

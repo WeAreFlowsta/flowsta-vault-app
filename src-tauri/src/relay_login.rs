@@ -189,9 +189,10 @@ pub async fn relay_claim(
     // Offer the email when the target app asked for it and the Vault's
     // email is verified - same rule as the /authenticate dialog.
     if claim.app_scopes.iter().any(|s| s == "email") {
+        let verified = crate::commands::ensure_email_verified_known(state.inner()).await;
         let config = state.vault_config.lock().unwrap();
         if let Some(cfg) = config.as_ref() {
-            if cfg.email_verified == Some(true) {
+            if verified == Some(true) {
                 claim.share_email = cfg.web_email.clone();
             } else if cfg.web_email.is_some() {
                 claim.email_unverified = true;

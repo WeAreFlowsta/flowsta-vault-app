@@ -1084,6 +1084,11 @@ export default component$(() => {
         screen.value = "dashboard";
         await fetchProfile();
         checkConnectivity();
+        // Already unlocked at mount (a frontend reload): same catch-up as
+        // the unlock path, so a confirmed email change is not missed.
+        invoke<{ status: string }>("check_email_change", { apiUrl: __API_URL__ })
+          .then((r) => { if (r.status === "applied") fetchProfile(); })
+          .catch(() => {});
         try {
           autoLockMinutes.value = await invoke<number>("get_auto_lock_minutes");
         } catch { /* use default */ }
@@ -1131,6 +1136,13 @@ export default component$(() => {
           screen.value = "dashboard";
           await fetchProfile();
           checkConnectivity();
+          // A brand-new identity learns its email's verified state from a
+          // vault-grant; without this it would report "not verified" to
+          // apps until the first relock (device-hosted only; the command
+          // refuses the rest before any network call).
+          invoke<{ status: string }>("check_email_change", { apiUrl: __API_URL__ })
+            .then((r) => { if (r.status === "applied") fetchProfile(); })
+            .catch(() => {});
         }}
       />
     );

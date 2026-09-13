@@ -75,15 +75,20 @@ export default component$(() => {
   });
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ cleanup }) => {
+    // Interval + cleanup registered BEFORE the first await: a cleanup added
+    // after the component unmounted never runs, and the interval would
+    // outlive the page. The tick is a no-op until a change is pending.
+    // 60 s: every check reuses a cached session, but the challenge
+    // endpoint behind a fresh one is rate-limited per IP.
+    const timer = setInterval(() => {
+      if (identityHosting.value === "device-hosted" && pendingEmail.value) checkEmailChange(true);
+    }, 60_000);
+    cleanup(() => clearInterval(timer));
     await loadEmailState();
     if (identityHosting.value !== "device-hosted") return;
     // One check on open (catches a link clicked while the Vault was closed
-    // or a change made from the web), then a slow poll while one is pending.
+    // or a change made from the web).
     await checkEmailChange(true);
-    const timer = setInterval(() => {
-      if (pendingEmail.value) checkEmailChange(true);
-    }, 30_000);
-    cleanup(() => clearInterval(timer));
   });
   const emailValid = isValidEmail(newEmail.value);
   const emailsAgree = newEmail2.value.length > 0 && emailsMatch(newEmail.value, newEmail2.value);
