@@ -916,7 +916,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   autoFocus
                   onInput$={(e) => { createEmail.value = (e.target as HTMLInputElement).value; error.value = ""; }}
                 />
-                <p class="mt-1 text-xs text-gray-500">Used to verify your account and for account notices.</p>
+                <p class="mt-1 text-xs text-gray-400">Used to verify your Flowsta identity and for notices about it - and shared with apps only when you choose to.</p>
               </div>
 
               <div class="mb-4">
@@ -963,8 +963,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   value={createPassword2.value}
                   onInput$={(v) => { createPassword2.value = v; error.value = ""; }}
                 />
-                <p class="mt-1 text-xs text-gray-500">
-                  Unlocks your vault on this device. It is not a Flowsta account password.
+                <p class="mt-1 text-xs text-gray-400">
+                  Unlocks your vault on this device.
                 </p>
               </div>
 
