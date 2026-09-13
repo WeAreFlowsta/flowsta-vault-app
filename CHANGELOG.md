@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with "try reinstalling". The key store keeps its own log, and the
   sidebar shows the reason whenever the local Holochain stops.
 
+- **Apps can see which labels they have backed up.** `GET /backup/list`
+  now includes each app's stored labels, so an app can compare its own
+  index against what the Vault holds in one call.
+
 ### Changed
 - **Email addresses are stored the way Flowsta matches them.** Every place
   you enter your email now trims it and lowercases it before it is saved

@@ -188,6 +188,12 @@ pub struct AppBackupSummary {
     /// multi-part ".pN" objects counted once).
     #[serde(default)]
     pub conversation_count: usize,
+    /// Every label this app has stored (unlabelled snapshots are not
+    /// listed). Lets an app reconcile its own index against what the
+    /// Vault actually holds in one call instead of retrieving per label.
+    /// Omitted when empty, so older readers see the same shape as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 /// Overall backup stats for the vault.
@@ -555,6 +561,7 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
             let mut manifest_summary: Option<BackupRecordSummary> = None;
             let mut conv_bases: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
+            let mut labels: Vec<String> = Vec::new();
 
             if let Ok(files) = std::fs::read_dir(entry.path()) {
                 for file in files.filter_map(|f| f.ok()) {
@@ -567,6 +574,7 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
                             app_backups += 1;
                             app_size += enc.meta.data_size;
                             if let Some(label) = enc.meta.label.as_deref() {
+                                labels.push(label.to_string());
                                 if label == "manifest" {
                                     has_manifest = true;
                                 } else if let Some(rest) = label.strip_prefix("conv-") {
@@ -611,6 +619,10 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
                     latest_summary: manifest_summary.or(latest_summary),
                     has_manifest,
                     conversation_count: conv_bases.len(),
+                    labels: {
+                        labels.sort();
+                        labels
+                    },
                 });
             }
         }
