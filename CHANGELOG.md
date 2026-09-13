@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   index against what the Vault holds in one call.
 
 ### Changed
+- **Every password field has a show/hide toggle** - setup, restore, the
+  account sign-in used when moving a Flowsta account in, the unlock screen
+  and Change Password.
+- **The first screen offers two ways to start.** Create a new identity or
+  restore from a recovery phrase are the choices; moving in an existing
+  Flowsta account from the website or the phone app is a link underneath.
+  The path itself is unchanged.
 - **Email addresses are stored the way Flowsta matches them.** Every place
   you enter your email now trims it and lowercases it before it is saved
   or sent, so an address typed with capitals no longer stops matching the

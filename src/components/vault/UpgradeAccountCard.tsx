@@ -1,4 +1,5 @@
 import { $, component$, useSignal, useStore, useVisibleTask$, type QRL } from "@builder.io/qwik";
+import { PasswordField } from "~/components/common/PasswordField";
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
 
@@ -313,13 +314,14 @@ export const UpgradeAccountCard = component$<UpgradeAccountCardProps>((props) =>
               error.value = "";
             }}
           />
-          <input
-            type="password"
-            class="mb-4 w-full rounded-md border border-white/10 bg-black/30 px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          <PasswordField
+            class="mb-4"
+            variant="blue"
             placeholder="Your Flowsta password"
+            autocomplete="current-password"
             value={password.value}
-            onInput$={(e) => {
-              password.value = (e.target as HTMLInputElement).value;
+            onInput$={(v) => {
+              password.value = v;
               error.value = "";
             }}
           />

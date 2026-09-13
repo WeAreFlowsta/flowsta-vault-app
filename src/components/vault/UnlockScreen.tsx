@@ -7,6 +7,7 @@ import {
 } from "@builder.io/qwik";
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
+import { PasswordField } from "~/components/common/PasswordField";
 
 interface UnlockScreenProps {
   onUnlock$: QRL<(password: string) => void>;
@@ -73,15 +74,15 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
 
         <div class="rounded-lg border border-gray-700 bg-gray-800 p-6">
           <form preventdefault:submit onSubmit$={handleUnlock}>
-            <input
-              type="password"
-              class="mb-4 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+            <PasswordField
+              class="mb-4"
               placeholder="Password"
+              autocomplete="current-password"
               value={password.value}
               autoFocus
               disabled={loading.value}
-              onInput$={(e) => {
-                password.value = (e.target as HTMLInputElement).value;
+              onInput$={(v) => {
+                password.value = v;
                 error.value = "";
               }}
             />

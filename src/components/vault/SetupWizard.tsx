@@ -2,6 +2,7 @@ import { component$, useSignal, useStore, $, type QRL } from "@builder.io/qwik";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
 import { GlassButton } from "~/components/common/GlassButton";
+import { PasswordField } from "~/components/common/PasswordField";
 import { PasswordStrength } from "~/components/vault/PasswordStrength";
 import { checkVaultPassword } from "~/lib/password-strength";
 import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATCH } from "~/lib/email";
@@ -870,15 +871,28 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               <GlassButton variant="secondary" onClick$={() => { error.value = ""; step.value = "restore-phrase"; }}>
                 Restore from recovery phrase
               </GlassButton>
-              <GlassButton variant="secondary" onClick$={() => { error.value = ""; step.value = "signin"; }}>
-                Sign in with your Flowsta account
-              </GlassButton>
             </div>
 
-            <p class="mt-6 text-xs text-gray-500">
+            <p class="mt-4 text-xs text-gray-500">
               New here? "Create a new identity" makes a fresh self-custody identity in about a minute.
-              Already have a flowsta.com account? Use "Sign in with your Flowsta account".
+              Have a recovery phrase from another device? Restore with it.
             </p>
+
+            {/* Moving in from the legacy web/phone account is a real path
+                for a long time yet (many phone-only users have not moved),
+                but it is not one of the two ways to START - it sits below
+                them as a plain link so the choice above stays a choice of
+                two. Same shape carries to a phone screen. */}
+            <div class="mt-6 border-t border-gray-700 pt-4 text-xs text-gray-500">
+              Already have a Flowsta account from the website or the phone app?{" "}
+              <button
+                type="button"
+                class="text-amber-300 underline decoration-amber-300/40 underline-offset-2 hover:text-amber-200"
+                onClick$={() => { error.value = ""; step.value = "signin"; }}
+              >
+                Move it into this Vault
+              </button>
+            </div>
           </div>
         )}
 
@@ -933,24 +947,23 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
 
               <div class="mb-4">
                 <label class="mb-1 block text-xs font-medium text-gray-400">Vault password</label>
-                <input
-                  type="password"
-                  class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                <PasswordField
+                  class="mb-2"
                   placeholder="At least 10 characters"
+                  autocomplete="new-password"
                   value={createPassword.value}
-                  onInput$={(e) => { createPassword.value = (e.target as HTMLInputElement).value; error.value = ""; }}
+                  onInput$={(v) => { createPassword.value = v; error.value = ""; }}
                 />
                 <PasswordStrength password={createPassword.value} />
               </div>
 
               <div class="mb-4">
                 <label class="mb-1 block text-xs font-medium text-gray-400">Confirm vault password</label>
-                <input
-                  type="password"
-                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                <PasswordField
                   placeholder="Repeat your password"
+                  autocomplete="new-password"
                   value={createPassword2.value}
-                  onInput$={(e) => { createPassword2.value = (e.target as HTMLInputElement).value; error.value = ""; }}
+                  onInput$={(v) => { createPassword2.value = v; error.value = ""; }}
                 />
                 <p class="mt-1 text-xs text-gray-500">
                   Unlocks your vault on this device. It is not a Flowsta account password.
@@ -1098,23 +1111,22 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
 
             <div class="mb-4">
               <label class="mb-1 block text-xs font-medium text-gray-400">New vault password</label>
-              <input
-                type="password"
-                class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+              <PasswordField
+                class="mb-2"
                 placeholder="At least 10 characters"
+                autocomplete="new-password"
                 value={restorePassword.value}
-                onInput$={(e) => { restorePassword.value = (e.target as HTMLInputElement).value; error.value = ""; }}
+                onInput$={(v) => { restorePassword.value = v; error.value = ""; }}
               />
               <PasswordStrength password={restorePassword.value} />
             </div>
             <div class="mb-4">
               <label class="mb-1 block text-xs font-medium text-gray-400">Confirm vault password</label>
-              <input
-                type="password"
-                class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+              <PasswordField
                 placeholder="Repeat your password"
+                autocomplete="new-password"
                 value={restorePassword2.value}
-                onInput$={(e) => { restorePassword2.value = (e.target as HTMLInputElement).value; error.value = ""; }}
+                onInput$={(v) => { restorePassword2.value = v; error.value = ""; }}
               />
             </div>
 
@@ -1191,13 +1203,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 <label class="mb-1 block text-xs font-medium text-gray-400">
                   Password
                 </label>
-                <input
-                  type="password"
-                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                <PasswordField
                   placeholder="Your Flowsta password"
+                  autocomplete="current-password"
                   value={loginPassword.value}
-                  onInput$={(e) => {
-                    loginPassword.value = (e.target as HTMLInputElement).value;
+                  onInput$={(v) => {
+                    loginPassword.value = v;
                     error.value = "";
                   }}
                 />

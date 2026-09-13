@@ -3,6 +3,7 @@ import Callout from "~/components/dashboard/Callout";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
+import { PasswordField } from "~/components/common/PasswordField";
 import { autoLockContext } from "~/lib/context";
 import { clearSignaturesCache } from "~/lib/signatures-cache";
 import { PasswordStrength } from "~/components/vault/PasswordStrength";
@@ -251,13 +252,12 @@ export default component$(() => {
                 <label class="mb-1 block text-sm font-medium text-gray-300">
                   Current password
                 </label>
-                <input
-                  type="password"
-                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                <PasswordField
                   placeholder="Your current password"
+                  autocomplete="current-password"
                   value={currentPassword.value}
-                  onInput$={(e) => {
-                    currentPassword.value = (e.target as HTMLInputElement).value;
+                  onInput$={(v) => {
+                    currentPassword.value = v;
                     changeError.value = "";
                   }}
                 />
@@ -266,13 +266,13 @@ export default component$(() => {
                 <label class="mb-1 block text-sm font-medium text-gray-300">
                   New password
                 </label>
-                <input
-                  type="password"
-                  class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                <PasswordField
+                  class="mb-2"
                   placeholder="At least 10 characters"
+                  autocomplete="new-password"
                   value={newPassword.value}
-                  onInput$={(e) => {
-                    newPassword.value = (e.target as HTMLInputElement).value;
+                  onInput$={(v) => {
+                    newPassword.value = v;
                     changeError.value = "";
                   }}
                 />
@@ -287,13 +287,12 @@ export default component$(() => {
                 <label class="mb-1 block text-sm font-medium text-gray-300">
                   Confirm new password
                 </label>
-                <input
-                  type="password"
-                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                <PasswordField
                   placeholder="Repeat your new password"
+                  autocomplete="new-password"
                   value={confirmPassword.value}
-                  onInput$={(e) => {
-                    confirmPassword.value = (e.target as HTMLInputElement).value;
+                  onInput$={(v) => {
+                    confirmPassword.value = v;
                     changeError.value = "";
                   }}
                 />
@@ -402,7 +401,8 @@ export default component$(() => {
 
                 <p class="text-xs text-gray-500">
                   Your username, recovery phrase and everything in this Vault stay
-                  the same - only the address Flowsta can reach you at changes.
+                  the same. Only your email changes: the address Flowsta reaches
+                  you at, and the one you share with apps when you choose to.
                 </p>
               </div>
             </div>
