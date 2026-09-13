@@ -884,14 +884,14 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 them as a plain link so the choice above stays a choice of
                 two. Same shape carries to a phone screen. */}
             <div class="mt-6 border-t border-gray-700 pt-4 text-xs text-gray-500">
-              Have an account from the earlier Flowsta - made on the website or
-              the phone app before July 2026 - that you haven't moved yet?{" "}
+              Have a Flowsta account created before July 2026 that you haven't
+              migrated yet?{" "}
               <button
                 type="button"
                 class="text-amber-300 underline decoration-amber-300/40 underline-offset-2 hover:text-amber-200"
                 onClick$={() => { error.value = ""; step.value = "signin"; }}
               >
-                Move it into this Vault
+                Migrate it into Vault now
               </button>
             </div>
           </div>
