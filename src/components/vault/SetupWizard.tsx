@@ -859,11 +859,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Step 0: Choose path ── */}
         {step.value === "choose" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-2 text-2xl font-bold text-white">Welcome to Flowsta Vault</h2>
-            <p class="mb-6 text-base text-gray-300">
-              One identity for every app that works with Flowsta. It is made and
-              kept here, on this computer, and you decide what each app gets to know.
-            </p>
+            <h2 class="mb-6 text-2xl font-bold text-white">Welcome to Flowsta Vault</h2>
 
             <div class="flex flex-col gap-3">
               <GlassButton onClick$={() => { error.value = ""; step.value = "create-form"; }}>
@@ -875,7 +871,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </div>
 
             <p class="mt-4 text-sm text-gray-400">
-              New here? "Create a new identity" makes a fresh self-custody identity in about a minute.
+              New here? "Create a new identity" creates your own self-sovereign Flowsta identity in about a minute.
               Have a recovery phrase from another device? Restore with it.
             </p>
 
