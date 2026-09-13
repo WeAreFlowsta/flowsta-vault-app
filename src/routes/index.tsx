@@ -10,6 +10,7 @@ import { GlassButton } from "~/components/common/GlassButton";
 import ImageCropper from "~/components/sign-it/ImageCropper";
 import { UpgradeAccountCard } from "~/components/vault/UpgradeAccountCard";
 import { connectionStatusContext, signaturesContext } from "~/lib/context";
+import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATCH } from "~/lib/email";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 
 declare const __API_URL__: string;
@@ -112,12 +113,17 @@ export default component$(() => {
   });
   // Offline-create email collision: retry with a different address.
   const conflictEmail = useSignal("");
+  const conflictEmail2 = useSignal("");
   const conflictBusy = useSignal(false);
   const conflictNote = useSignal("");
   const retryRegistrationEmail = $(async () => {
-    const email = conflictEmail.value.trim().toLowerCase();
-    if (!email.includes("@")) {
-      conflictNote.value = "Enter a valid email address.";
+    const email = normalizeEmail(conflictEmail.value);
+    if (!isValidEmail(email)) {
+      conflictNote.value = EMAIL_INVALID;
+      return;
+    }
+    if (!emailsMatch(email, conflictEmail2.value)) {
+      conflictNote.value = EMAIL_MISMATCH;
       return;
     }
     conflictBusy.value = true;
@@ -128,6 +134,8 @@ export default component$(() => {
         email,
       });
       conflictNote.value = "";
+      conflictEmail.value = "";
+      conflictEmail2.value = "";
       identity.value = await invoke<VaultIdentity>("get_identity");
     } catch (e) {
       conflictNote.value = String(e).includes("email_already_registered")
@@ -175,6 +183,7 @@ export default component$(() => {
   // holds only a hash) - the user types it, the API verifies it against
   // the hash, and we remember it on success.
   const resendEmailInput = useSignal("");
+  const resendEmailInput2 = useSignal("");
 
   // In-app profile edits - name inline, picture via the cropper modal.
   const nameEditing = useSignal(false);
@@ -254,10 +263,18 @@ export default component$(() => {
 
   const resendVerification = $(async () => {
     if (resendBusy.value) return;
-    const email =
-      identity.value?.web_email || resendEmailInput.value.trim().toLowerCase();
+    const typed = !identity.value?.web_email;
+    const email = identity.value?.web_email || normalizeEmail(resendEmailInput.value);
     if (!email) {
       resendNote.value = "Enter your account email above first.";
+      return;
+    }
+    if (typed && !isValidEmail(email)) {
+      resendNote.value = EMAIL_INVALID;
+      return;
+    }
+    if (typed && !emailsMatch(email, resendEmailInput2.value)) {
+      resendNote.value = EMAIL_MISMATCH;
       return;
     }
     resendBusy.value = true;
@@ -564,20 +581,33 @@ export default component$(() => {
                 different address - or if that account is yours, restore it
                 with its recovery phrase instead.
               </p>
-              <div class="flex gap-2">
+              <div class="flex flex-wrap gap-2">
                 <input
                   type="email"
+                  autocomplete="email"
                   value={conflictEmail.value}
                   onInput$={(e) => {
                     conflictEmail.value = (e.target as HTMLInputElement).value;
                     conflictNote.value = "";
                   }}
                   placeholder="you@example.com"
-                  class="flex-1 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  class="min-w-[12rem] flex-1 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <input
+                  type="email"
+                  autocomplete="off"
+                  value={conflictEmail2.value}
+                  onInput$={(e) => {
+                    conflictEmail2.value = (e.target as HTMLInputElement).value;
+                    conflictNote.value = "";
+                  }}
+                  onPaste$={(e) => e.preventDefault()}
+                  placeholder="Repeat your email"
+                  class="min-w-[12rem] flex-1 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <PillButton
                   accent="sky"
-                  disabled={conflictBusy.value || !conflictEmail.value.trim()}
+                  disabled={conflictBusy.value || !normalizeEmail(conflictEmail.value) || !normalizeEmail(conflictEmail2.value)}
                   onClick$={retryRegistrationEmail}
                 >
                   {conflictBusy.value ? "Attaching…" : "Use this email"}
@@ -855,13 +885,25 @@ export default component$(() => {
             {usernameNeedsVerify.value && (
               <div class="mt-2 space-y-2">
                 {!id.web_email && (
-                  <input
-                    type="email"
-                    placeholder="Your account email"
-                    value={resendEmailInput.value}
-                    onInput$={(_, el) => (resendEmailInput.value = el.value)}
-                    class="w-full max-w-xs rounded-md border border-white/10 bg-black/30 px-3 py-1.5 text-sm text-white placeholder-gray-500 focus:border-sky-500 focus:outline-none"
-                  />
+                  <div class="space-y-2">
+                    <input
+                      type="email"
+                      autocomplete="email"
+                      placeholder="Your account email"
+                      value={resendEmailInput.value}
+                      onInput$={(_, el) => { resendEmailInput.value = el.value; resendNote.value = ""; }}
+                      class="w-full max-w-xs rounded-md border border-white/10 bg-black/30 px-3 py-1.5 text-sm text-white placeholder-gray-500 focus:border-sky-500 focus:outline-none"
+                    />
+                    <input
+                      type="email"
+                      autocomplete="off"
+                      placeholder="Repeat your email"
+                      value={resendEmailInput2.value}
+                      onInput$={(_, el) => { resendEmailInput2.value = el.value; resendNote.value = ""; }}
+                      onPaste$={(e) => e.preventDefault()}
+                      class="w-full max-w-xs rounded-md border border-white/10 bg-black/30 px-3 py-1.5 text-sm text-white placeholder-gray-500 focus:border-sky-500 focus:outline-none"
+                    />
+                  </div>
                 )}
                 <div class="flex items-center gap-2">
                   <PillButton disabled={resendBusy.value} onClick$={resendVerification}>

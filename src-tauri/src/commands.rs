@@ -535,6 +535,30 @@ pub(crate) fn validate_vault_password(pw: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The ONE email normalization rule for every boundary the user's address
+/// crosses (setup wizard, registration, resend, conflict repair, change):
+/// trim + lowercase, then a light shape check. The server hashes the
+/// lowercased form, so anything else stored on-device silently diverges
+/// from the account (403 email_mismatch later). Mirrors `normalizeEmail`
+/// in src/lib/email.ts.
+pub(crate) fn normalize_email(raw: &str) -> Result<String, String> {
+    let email = raw.trim().to_lowercase();
+    let Some((local, domain)) = email.split_once('@') else {
+        return Err("That doesn't look like an email address.".into());
+    };
+    let shape_ok = !local.is_empty()
+        && !domain.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && email.matches('@').count() == 1
+        && !email.chars().any(char::is_whitespace);
+    if !shape_ok {
+        return Err("That doesn't look like an email address.".into());
+    }
+    Ok(email)
+}
+
 /// Set up a new vault from a recovery phrase and web account password.
 /// The web login password is used to encrypt the vault on disk.
 /// After setup, spawns the Holochain conductor in the background.
@@ -556,6 +580,13 @@ pub fn setup_vault(
     state: State<'_, Arc<AppState>>,
 ) -> Result<SetupResult, String> {
     validate_vault_password(&password)?;
+    // Wizard-entered emails are normalized HERE (the command), not in
+    // setup_vault_inner: migration and the dev endpoints pass through inner
+    // with server-supplied or absent addresses.
+    let web_email = web_email
+        .filter(|e| !e.trim().is_empty())
+        .map(|e| normalize_email(&e))
+        .transpose()?;
     let result = setup_vault_inner(
         mnemonic,
         password,
@@ -5659,10 +5690,7 @@ pub(crate) async fn commit_signature_to_dht(
 /// and from then on the vault knows it again.
 #[tauri::command]
 pub fn set_web_email(state: State<'_, Arc<AppState>>, email: String) -> Result<(), String> {
-    let email = email.trim().to_lowercase();
-    if email.is_empty() || !email.contains('@') {
-        return Err("That doesn't look like an email address".into());
-    }
+    let email = normalize_email(&email)?;
     let passphrase = {
         let mut guard = state.unlock_passphrase.lock().unwrap();
         guard
@@ -6250,6 +6278,28 @@ pub async fn update_local_profile(
     use tauri::Emitter;
     let _ = app.emit("profile-updated", serde_json::json!({}));
     Ok(())
+}
+
+#[cfg(test)]
+mod email_normalization_tests {
+    use super::normalize_email;
+
+    #[test]
+    fn trims_and_lowercases() {
+        assert_eq!(normalize_email("  Bob@Example.COM ").unwrap(), "bob@example.com");
+    }
+
+    #[test]
+    fn rejects_malformed() {
+        for bad in ["", "   ", "bob", "@example.com", "bob@", "bob@example", "bob@@example.com", "bo b@example.com", "bob@.com", "bob@example."] {
+            assert!(normalize_email(bad).is_err(), "accepted {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn same_address_different_case_normalizes_equal() {
+        assert_eq!(normalize_email("Eric@Flowsta.com").unwrap(), normalize_email("eric@flowsta.com").unwrap());
+    }
 }
 
 #[cfg(test)]

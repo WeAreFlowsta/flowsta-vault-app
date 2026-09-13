@@ -86,10 +86,7 @@ pub async fn register_device_identity(
     if !validate_mnemonic(&mnemonic) {
         return Err("Invalid recovery phrase".into());
     }
-    let email = email.trim().to_string();
-    if !email.contains('@') {
-        return Err("A valid email address is required".into());
-    }
+    let email = crate::commands::normalize_email(&email)?;
 
     let signing_key =
         derive_device_keypair(&mnemonic).map_err(|e| format!("Key derivation failed: {}", e))?;
@@ -562,10 +559,7 @@ pub async fn update_pending_registration_email(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let email = email.trim().to_lowercase();
-    if !email.contains('@') {
-        return Err("A valid email address is required".into());
-    }
+    let email = crate::commands::normalize_email(&email)?;
     // Persist the new address (set_web_email pattern).
     {
         let passphrase = {

@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **You type your email twice when creating an identity.** A mistyped
+  address used to be locked in the moment the identity was registered.
+  The same confirm field appears where the Vault asks for your account
+  email after a phrase restore, and when repairing an address that was
+  already registered to another account.
+
 ### Changed
+- **Email addresses are stored the way Flowsta matches them.** Every place
+  you enter your email now trims it and lowercases it before it is saved
+  or sent, so an address typed with capitals no longer stops matching the
+  account later.
+- **"Import my export" on the overview lands on the restore card** in Your
+  Data instead of the top of the page.
 - **"Remember this site" now means it.** A site you chose to remember when
   approving a sign-in stays remembered across locking the Vault and across
   restarts, until you revoke it in Connections. Before, the Vault forgot

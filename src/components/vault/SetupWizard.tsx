@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-shell";
 import { GlassButton } from "~/components/common/GlassButton";
 import { PasswordStrength } from "~/components/vault/PasswordStrength";
 import { checkVaultPassword } from "~/lib/password-strength";
+import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATCH } from "~/lib/email";
 
 interface SetupWizardProps {
   onComplete$: QRL<() => void>;
@@ -75,6 +76,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
 
   // Create-new-identity state (device-hosted identity)
   const createEmail = useSignal("");
+  // Typed twice: a mistyped address used to be unfixable once the identity
+  // was registered (change-email exists now, but confirm at the source).
+  const createEmail2 = useSignal("");
   const createDisplayName = useSignal("");
   const createPassword = useSignal("");
   const createPassword2 = useSignal("");
@@ -480,9 +484,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
 
   const handleCreateForm = $(async () => {
     error.value = "";
-    const em = createEmail.value.trim();
-    if (!em.includes("@") || em.length < 5) {
-      error.value = "Please enter a valid email address.";
+    if (!isValidEmail(createEmail.value)) {
+      error.value = EMAIL_INVALID;
+      return;
+    }
+    if (!emailsMatch(createEmail.value, createEmail2.value)) {
+      error.value = EMAIL_MISMATCH;
       return;
     }
     const pwCheck = checkVaultPassword(createPassword.value);
@@ -534,7 +541,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       }>("register_device_identity", {
         apiUrl: __API_URL__,
         mnemonic: newMnemonic.value,
-        email: createEmail.value.trim(),
+        email: normalizeEmail(createEmail.value),
         displayName: createDisplayName.value.trim() || null,
       });
 
@@ -545,7 +552,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           mnemonic: newMnemonic.value,
           password: createPassword.value,
           webAgentPubKey: null,
-          webEmail: createEmail.value.trim(),
+          webEmail: normalizeEmail(createEmail.value),
           webUsername: null,
           displayName: createDisplayName.value.trim() || null,
           // The server generates an identicon from the DID at registration -
@@ -555,7 +562,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         }
       );
 
-      webUser.email = createEmail.value.trim();
+      webUser.email = normalizeEmail(createEmail.value);
       newMnemonic.value = "";
       createPassword.value = "";
       createPassword2.value = "";
@@ -577,7 +584,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               mnemonic: newMnemonic.value,
               password: createPassword.value,
               webAgentPubKey: null,
-              webEmail: createEmail.value.trim(),
+              webEmail: normalizeEmail(createEmail.value),
               webUsername: null,
               displayName: createDisplayName.value.trim() || null,
               profilePicture: null,
@@ -586,7 +593,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               pendingRegistration: true,
             }
           );
-          webUser.email = createEmail.value.trim();
+          webUser.email = normalizeEmail(createEmail.value);
           newMnemonic.value = "";
           createPassword.value = "";
           createPassword2.value = "";
@@ -889,6 +896,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 <label class="mb-1 block text-xs font-medium text-gray-400">Email</label>
                 <input
                   type="email"
+                  name="email"
+                  autocomplete="email"
                   class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                   placeholder="you@example.com"
                   value={createEmail.value}
@@ -896,6 +905,19 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   onInput$={(e) => { createEmail.value = (e.target as HTMLInputElement).value; error.value = ""; }}
                 />
                 <p class="mt-1 text-xs text-gray-500">Used to verify your account and for account notices.</p>
+              </div>
+
+              <div class="mb-4">
+                <label class="mb-1 block text-xs font-medium text-gray-400">Confirm email</label>
+                <input
+                  type="email"
+                  autocomplete="off"
+                  class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                  placeholder="Repeat your email"
+                  value={createEmail2.value}
+                  onInput$={(e) => { createEmail2.value = (e.target as HTMLInputElement).value; error.value = ""; }}
+                  onPaste$={(e) => e.preventDefault()}
+                />
               </div>
 
               <div class="mb-4">
@@ -943,7 +965,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 </GlassButton>
                 <GlassButton
                   type="submit"
-                  disabled={loading.value || !createEmail.value.trim() || !createPassword.value || !createPassword2.value}
+                  disabled={loading.value || !normalizeEmail(createEmail.value) || !normalizeEmail(createEmail2.value) || !createPassword.value || !createPassword2.value}
                 >
                   {loading.value ? "Preparing..." : "Continue"}
                 </GlassButton>
