@@ -2,6 +2,7 @@ import { component$, useSignal, useContext, useVisibleTask$, $ } from "@builder.
 import Callout from "~/components/dashboard/Callout";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-shell";
 import { GlassButton } from "~/components/common/GlassButton";
 import { PasswordField } from "~/components/common/PasswordField";
 import { autoLockContext } from "~/lib/context";
@@ -89,6 +90,15 @@ export default component$(() => {
     // One check on open (catches a link clicked while the Vault was closed
     // or a change made from the web).
     await checkEmailChange(true);
+  });
+  // About tab: is a newer Vault shipped?
+  const aboutUpdate = useSignal<{ current: string; latest: string | null; update_available: boolean; download_url: string } | null>(null);
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(async ({ track }) => {
+    if (track(() => activeTab.value) !== "about") return;
+    try {
+      aboutUpdate.value = await invoke("check_vault_update", { apiUrl: __API_URL__ });
+    } catch { /* offline - leave blank */ }
   });
   const emailValid = isValidEmail(newEmail.value);
   const emailsAgree = newEmail2.value.length > 0 && emailsMatch(newEmail.value, newEmail2.value);
@@ -550,6 +560,21 @@ export default component$(() => {
             <div class="flex justify-between">
               <span class="text-gray-400">Version</span>
               <span class="text-white">{__APP_VERSION__}</span>
+            </div>
+            <div class="flex items-center justify-between">
+              <span class="text-gray-400">Updates</span>
+              {aboutUpdate.value?.update_available ? (
+                <span class="flex items-center gap-3">
+                  <span class="text-sky-300">{aboutUpdate.value.latest} is available</span>
+                  <GlassButton variant="secondary" onClick$={() => open(aboutUpdate.value?.download_url || "https://flowsta.com/vault/")}>
+                    Get the update
+                  </GlassButton>
+                </span>
+              ) : aboutUpdate.value?.latest ? (
+                <span class="text-gray-300">Up to date</span>
+              ) : (
+                <span class="text-gray-500">Checking…</span>
+              )}
             </div>
             <div class="flex justify-between">
               <span class="text-gray-400">Framework</span>

@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The Vault tells you when a newer version is out.** A notice on the
+  Overview names the version, what it brings, and opens the download page;
+  dismiss it and it stays quiet until the next release. Settings, About
+  shows "Up to date" or the version available.
 - **Apps ask for your email in the Vault, and you decide there.** When a
   registered app requests the `email` scope at sign-in (directly, or
   through a code on another device), the approval dialog shows the address
@@ -79,6 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   index against what the Vault holds in one call.
 
 ### Changed
+- **Notices share one look.** The "update needed" bar, and the lock-screen
+  messages for a sign-in, profile update, file or another device's code
+  waiting on your unlock, now use the same styled notice as the rest of
+  the app instead of a full-width strip.
 - **Every password field has a show/hide toggle** - setup, restore, the
   account sign-in used when moving a Flowsta account in, the unlock screen
   and Change Password.

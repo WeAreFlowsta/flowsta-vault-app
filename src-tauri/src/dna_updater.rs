@@ -547,7 +547,7 @@ fn make_app_id(dna_type: &str, version: &str) -> String {
 
 /// Compare two semver-like version strings (e.g. "0.1.0" < "0.2.0").
 /// Supports 2-part (1.10) and 3-part (0.1.0) versions.
-fn version_less_than(a: &str, b: &str) -> bool {
+pub(crate) fn version_less_than(a: &str, b: &str) -> bool {
     let parse = |v: &str| -> Vec<u32> {
         v.split('.').filter_map(|s| s.parse::<u32>().ok()).collect()
     };

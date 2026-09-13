@@ -3529,6 +3529,60 @@ async fn file_email_grant_on_server(state: &Arc<AppState>, client_id: &str, revo
     Err(format!("{} [{}]", code, status.as_u16()))
 }
 
+#[derive(Serialize)]
+pub struct VaultUpdateInfo {
+    pub current: String,
+    pub latest: Option<String>,
+    pub summary: Option<String>,
+    pub download_url: String,
+    pub update_available: bool,
+}
+
+/// The soft update notice: is a newer Flowsta Vault shipped? Reads the
+/// `vault` block of /api/v1/vault/dna-versions (the same call the DNA
+/// updater makes at unlock). Offline or an older API → "unknown", never an
+/// error the UI has to explain. The hard gate (min_vault_version) is
+/// separate and stays in the DNA updater.
+#[tauri::command]
+pub async fn check_vault_update(api_url: String) -> Result<VaultUpdateInfo, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let mut info = VaultUpdateInfo {
+        current: current.clone(),
+        latest: None,
+        summary: None,
+        download_url: "https://flowsta.com/vault/".into(),
+        update_available: false,
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = match client
+        .get(format!("{}/api/v1/vault/dna-versions", api_url.trim_end_matches('/')))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Ok(info),
+    };
+    let body: serde_json::Value = match resp.json().await {
+        Ok(b) => b,
+        Err(_) => return Ok(info),
+    };
+    let Some(vault) = body.get("vault") else { return Ok(info) };
+    if let Some(latest) = vault.get("latest_version").and_then(|v| v.as_str()) {
+        info.update_available = crate::dna_updater::version_less_than(&current, latest);
+        info.latest = Some(latest.to_string());
+    }
+    info.summary = vault.get("latest_summary").and_then(|v| v.as_str()).map(str::to_string);
+    if let Some(u) = vault.get("download_url").and_then(|v| v.as_str()) {
+        if u.starts_with("https://flowsta.com/") {
+            info.download_url = u.to_string();
+        }
+    }
+    Ok(info)
+}
+
 /// Apps the user has allowed to receive their email (client_id → grant).
 #[tauri::command]
 pub fn get_email_grants(state: State<'_, Arc<AppState>>) -> HashMap<String, EmailGrant> {

@@ -11,6 +11,7 @@ import type { ConnectionStatus } from "~/components/vault/StatusIndicator";
 import { connectionStatusContext, autoLockContext, signaturesContext, pendingSignPathsContext } from "~/lib/context";
 import { hydrateSignaturesCache, persistSignaturesCache, setActiveSignatureAgent } from "~/lib/signatures-cache";
 import { GlassButton } from "~/components/common/GlassButton";
+import Callout from "~/components/dashboard/Callout";
 
 type AppScreen = "loading" | "setup" | "unlock" | "dashboard";
 
@@ -1157,29 +1158,25 @@ export default component$(() => {
   if (screen.value === "unlock") {
     return (
       <>
-        {unlockAttention.value && (
-          <div class="fixed top-0 inset-x-0 z-50 bg-amber-500/15 border-b border-amber-500/40 px-4 py-3 text-center">
-            <p class="text-sm text-amber-200">
-              {unlockAttention.value.origin || "A Flowsta page"} is waiting to
-              {unlockAttention.value.reason === "profile"
-                ? " update your profile"
-                : unlockAttention.value.reason === "sign-in"
-                  ? " sign you in"
-                  : " sign a file"}{" "}
-              - unlock your Vault to {unlockAttention.value.reason === "sign-in" ? "carry on" : "review and approve it"}.
-            </p>
-          </div>
-        )}
-        {queuedRelayCode.value && (
-          <div class="fixed top-0 inset-x-0 z-50 bg-amber-500/15 border-b border-amber-500/40 px-4 py-3 text-center">
-            <p class="text-sm text-amber-200">
-              A sign-in from another device is waiting - unlock your Vault to
-              review it. The code expires about five minutes after it was
-              requested.
-            </p>
-          </div>
-        )}
         <UnlockScreen
+          notice={
+            unlockAttention.value
+              ? {
+                  title:
+                    unlockAttention.value.reason === "profile"
+                      ? "A profile update is waiting"
+                      : unlockAttention.value.reason === "sign-in"
+                        ? "A sign-in is waiting"
+                        : "A file is waiting to be signed",
+                  body: `${unlockAttention.value.origin || "A Flowsta page"} is waiting - unlock your Vault to ${unlockAttention.value.reason === "sign-in" ? "carry on" : "review and approve it"}.`,
+                }
+              : queuedRelayCode.value
+                ? {
+                    title: "A sign-in from another device is waiting",
+                    body: "Unlock your Vault to review it. The code expires about five minutes after it was requested.",
+                  }
+                : null
+          }
           onUnlock$={handleUnlockPassword}
           onResetVault$={async () => {
             // Must WIPE on disk (vault.enc + lair keystore + conductor), not
@@ -1313,36 +1310,19 @@ export default component$(() => {
         </div>
       </header>
 
-      {/* App-update banner - shown when the API reports this build is below
-          min_vault_version. Advisory only: the vault stays usable. */}
+      {/* Hard update gate - the API says this build is below the DNA's
+          min_vault_version. Advisory: the vault stays usable. */}
       {appUpdateRequired.value !== null && (
-        <div class="flex items-center gap-3 border-b border-amber-500/40 bg-amber-500/10 px-6 py-2.5">
-          <svg
-            class="h-4 w-4 shrink-0 text-amber-400"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            stroke-width={2}
+        <div class="px-4 pt-4 sm:px-6 lg:px-8">
+          <Callout
+            intent="warning"
+            title={`Flowsta Vault ${appUpdateRequired.value || "update"} or newer is needed`}
+            actionLabel="Get the update"
+            onAction$={() => open(`${__WEB_URL__}/vault/`)}
           >
-            <path
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
-            />
-          </svg>
-          <p class="flex-1 text-xs text-amber-200">
-            A new version of Flowsta Vault is available
-            {appUpdateRequired.value ? ` (v${appUpdateRequired.value} or newer)` : ""}.
-            Until you update you won't sync with the network - your local data
+            Until you update you won't sync with the network. Your local data
             stays safe and accessible.
-          </p>
-          <button
-            type="button"
-            class="shrink-0 rounded-md border border-amber-500/50 bg-amber-500/20 px-3 py-1 text-xs font-medium text-amber-100 transition-colors hover:bg-amber-500/30"
-            onClick$={() => open(`${__WEB_URL__}/vault/`)}
-          >
-            Update
-          </button>
+          </Callout>
         </div>
       )}
 

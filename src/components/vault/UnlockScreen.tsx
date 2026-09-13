@@ -8,10 +8,13 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { GlassButton } from "~/components/common/GlassButton";
 import { PasswordField } from "~/components/common/PasswordField";
+import Callout from "~/components/dashboard/Callout";
 
 interface UnlockScreenProps {
   onUnlock$: QRL<(password: string) => void>;
   onResetVault$: QRL<() => void>;
+  /** Something is waiting on the unlock (a page's sign-in, a relay code). */
+  notice?: { title: string; body: string } | null;
   initialError?: string;
 }
 
@@ -71,6 +74,12 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
             </p>
           )}
         </div>
+
+        {props.notice && (
+          <Callout intent="warning" title={props.notice.title} class="mb-4">
+            {props.notice.body}
+          </Callout>
+        )}
 
         <div class="rounded-lg border border-gray-700 bg-gray-800 p-6">
           <form preventdefault:submit onSubmit$={handleUnlock}>
