@@ -92,6 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   index against what the Vault holds in one call.
 
 ### Changed
+- **Sign-ins on this computer use the identity in your Vault.** When a
+  browser remembers a sign-in for a different identity than the one your
+  Vault holds, the sign-in runs again as your Vault's identity instead of
+  silently using the old one; a locked Vault is unlocked first. On phones,
+  where no Vault can be reached, the remembered sign-in stands.
 - **Notices share one look.** The "update needed" bar, and the lock-screen
   messages for a sign-in, profile update, file or another device's code
   waiting on your unlock, now use the same styled notice as the rest of
