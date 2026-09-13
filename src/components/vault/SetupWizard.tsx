@@ -860,8 +860,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {step.value === "choose" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">Welcome to Flowsta Vault</h2>
-            <p class="mb-6 text-sm text-gray-400">
-              Your identity and keys live on this device - not on anyone's server.
+            <p class="mb-6 text-base text-gray-300">
+              One identity for every app that works with Flowsta. It is made and
+              kept here, on this computer, and you decide what each app gets to know.
             </p>
 
             <div class="flex flex-col gap-3">
