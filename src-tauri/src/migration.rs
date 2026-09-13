@@ -432,6 +432,9 @@ pub struct MeInfo {
     pub username: Option<String>,
     pub display_name: Option<String>,
     pub profile_picture: Option<String>,
+    /// "device-hosted" once the flip has happened - an upgrade re-run after
+    /// a crash must not try to export/flip again.
+    pub hosting_model: Option<String>,
 }
 
 pub(crate) async fn fetch_me(api_url: &str, jwt: &str) -> Result<MeInfo, String> {
@@ -453,6 +456,7 @@ pub(crate) async fn fetch_me(api_url: &str, jwt: &str) -> Result<MeInfo, String>
         username: get("username"),
         display_name: get("displayName").or_else(|| get("display_name")),
         profile_picture: get("profilePicture").or_else(|| get("profile_picture")),
+        hosting_model: get("hostingModel").or_else(|| get("hosting_model")),
     })
 }
 
@@ -983,6 +987,13 @@ pub(crate) async fn migrate_custodial_account_inner(
 
     emit_progress(&app_handle, "account", "Checking your account…");
     let me = fetch_me(&api_url, &jwt).await?;
+    if me.hosting_model.as_deref() == Some("device-hosted") {
+        // The flip already happened (a previous run crashed between the
+        // flip and the local persist). Exporting again would be refused
+        // with 403 device_hosted_account and read as a failure; both
+        // upgrade UIs map this code to "already on this device".
+        return Err("device_hosted_account: this account is already upgraded - close and reopen Vault to finish.".into());
+    }
 
     wait_until_account_ready(&api_url, &jwt, &app_handle).await?;
     emit_progress(&app_handle, "export", "Fetching your account data…");

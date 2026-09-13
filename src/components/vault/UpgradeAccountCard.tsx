@@ -26,6 +26,12 @@ function friendlyAuthError(msg: string): string {
   if (msg.includes("password_login_disabled")) {
     return "This account has already been upgraded. Close and reopen Vault to finish.";
   }
+  if (msg.includes("account_blocked")) {
+    return "This account is blocked. Contact support at flowsta.com/support.";
+  }
+  if (msg.includes("rate_limited") || msg.includes("Too many")) {
+    return "Too many attempts from this network - wait 15 minutes and try again.";
+  }
   return msg;
 }
 

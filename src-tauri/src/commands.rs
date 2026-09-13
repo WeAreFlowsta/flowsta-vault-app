@@ -3521,11 +3521,12 @@ async fn file_email_grant_on_server(state: &Arc<AppState>, client_id: &str, revo
         return Ok(());
     }
     let data: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
-    Err(format!(
-        "{} [{}]",
-        data.get("error").and_then(|v| v.as_str()).unwrap_or("email_grant_failed"),
-        status.as_u16()
-    ))
+    let code = if status.as_u16() == 429 {
+        "rate_limited"
+    } else {
+        data.get("error").and_then(|v| v.as_str()).unwrap_or("email_grant_failed")
+    };
+    Err(format!("{} [{}]", code, status.as_u16()))
 }
 
 /// Apps the user has allowed to receive their email (client_id → grant).
