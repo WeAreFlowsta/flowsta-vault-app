@@ -424,6 +424,12 @@ export default component$(() => {
     await invoke("refresh_cached_profile", { apiUrl: __API_URL__, password }).catch(() => {});
     await fetchProfile();
     screen.value = "dashboard";
+    // An email change confirmed while the Vault was closed (or made from
+    // the web) lands here. Device-hosted only; the command refuses the
+    // rest before any network call. Not awaited - the dashboard is up.
+    invoke<{ status: string }>("check_email_change", { apiUrl: __API_URL__ })
+      .then((r) => { if (r.status === "applied") fetchProfile(); })
+      .catch(() => {});
     checkConnectivity();
     // Process a relay sign-in code that arrived while locked.
     if (queuedRelayCode.value) {

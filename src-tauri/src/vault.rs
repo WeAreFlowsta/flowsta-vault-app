@@ -58,6 +58,13 @@ pub struct VaultConfig {
     #[serde(default)]
     pub web_email: Option<String>,
 
+    /// An email change requested from this Vault that the server has not
+    /// confirmed yet (the user still has to click the link). The change is
+    /// applied to `web_email` only once /auth/pending-email-change reports
+    /// it verified - never optimistically.
+    #[serde(default)]
+    pub pending_email: Option<String>,
+
     /// Web account username.
     #[serde(default)]
     pub web_username: Option<String>,
@@ -354,6 +361,7 @@ mod tests {
             agent_pub_key_raw_b64: Some("dGVzdA==".to_string()),
             web_agent_pub_key: Some("uhCAkWebKey456".to_string()),
             web_email: Some("test@example.com".to_string()),
+            pending_email: None,
             web_username: Some("testuser".to_string()),
             display_name: Some("Test User".to_string()),
             profile_picture: Some("https://example.com/pic.jpg".to_string()),
@@ -402,6 +410,7 @@ mod tests {
             agent_pub_key_raw_b64: None,
             web_agent_pub_key: None,
             web_email: None,
+            pending_email: None,
             web_username: None,
             display_name: None,
             profile_picture: None,

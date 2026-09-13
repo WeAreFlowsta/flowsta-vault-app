@@ -7,6 +7,15 @@ import { autoLockContext } from "~/lib/context";
 import { clearSignaturesCache } from "~/lib/signatures-cache";
 import { PasswordStrength } from "~/components/vault/PasswordStrength";
 import { checkVaultPassword } from "~/lib/password-strength";
+import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATCH } from "~/lib/email";
+
+declare const __API_URL__: string;
+
+interface EmailChangeState {
+  status: "pending" | "applied" | "current" | "expired" | "cancelled";
+  email: string | null;
+  expires_at: string | null;
+}
 
 declare const __APP_VERSION__: string;
 
@@ -25,6 +34,91 @@ export default component$(() => {
 
   const showResetConfirm = useSignal(false);
   const resetting = useSignal(false);
+
+  // Change email (device-hosted identities only - the Vault IS the account).
+  const identityHosting = useSignal<string | null>(null);
+  const currentEmail = useSignal("");
+  const pendingEmail = useSignal<string | null>(null);
+  const newEmail = useSignal("");
+  const newEmail2 = useSignal("");
+  const emailBusy = useSignal(false);
+  const emailError = useSignal("");
+  const emailNotice = useSignal("");
+  const loadEmailState = $(async () => {
+    try {
+      const id = await invoke<{ hosting_model: string | null; web_email: string | null; pending_email: string | null }>("get_identity");
+      identityHosting.value = id.hosting_model;
+      currentEmail.value = id.web_email ?? "";
+      pendingEmail.value = id.pending_email;
+    } catch (err) {
+      console.error("Failed to read identity:", err);
+    }
+  });
+  const checkEmailChange = $(async (quiet: boolean) => {
+    try {
+      const r = await invoke<EmailChangeState>("check_email_change", { apiUrl: __API_URL__ });
+      if (r.status === "applied") {
+        emailNotice.value = `Done - your account email is now ${r.email}. Apps you've shared your email with get the new address the next time they ask.`;
+        emailError.value = "";
+      } else if (r.status === "expired" && pendingEmail.value) {
+        emailError.value = "The verification link expired. Start the change again.";
+      } else if (r.status === "cancelled" && pendingEmail.value) {
+        emailNotice.value = "The email change was cancelled.";
+      } else if (r.status === "pending" && !quiet) {
+        emailNotice.value = "Not confirmed yet - click the link in the email we sent to the new address.";
+      }
+      await loadEmailState();
+    } catch (err) {
+      if (!quiet) emailError.value = String(err);
+    }
+  });
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(async ({ cleanup }) => {
+    await loadEmailState();
+    if (identityHosting.value !== "device-hosted") return;
+    // One check on open (catches a link clicked while the Vault was closed
+    // or a change made from the web), then a slow poll while one is pending.
+    await checkEmailChange(true);
+    const timer = setInterval(() => {
+      if (pendingEmail.value) checkEmailChange(true);
+    }, 30_000);
+    cleanup(() => clearInterval(timer));
+  });
+  const emailValid = isValidEmail(newEmail.value);
+  const emailsAgree = newEmail2.value.length > 0 && emailsMatch(newEmail.value, newEmail2.value);
+  const emailDiffers = normalizeEmail(newEmail.value) !== normalizeEmail(currentEmail.value);
+  const canRequestEmail = !emailBusy.value && emailValid && emailsAgree && emailDiffers;
+  const handleRequestEmailChange = $(async () => {
+    emailError.value = "";
+    emailNotice.value = "";
+    if (!isValidEmail(newEmail.value)) { emailError.value = EMAIL_INVALID; return; }
+    if (!emailsMatch(newEmail.value, newEmail2.value)) { emailError.value = EMAIL_MISMATCH; return; }
+    emailBusy.value = true;
+    try {
+      const r = await invoke<EmailChangeState>("request_email_change", { apiUrl: __API_URL__, newEmail: normalizeEmail(newEmail.value) });
+      emailNotice.value = `We've emailed ${r.email ?? "the new address"}. Click the link there to confirm - your Vault notices on its own within a minute while it's open, or the next time you unlock it.`;
+      newEmail.value = "";
+      newEmail2.value = "";
+      await loadEmailState();
+    } catch (err) {
+      emailError.value = String(err);
+    } finally {
+      emailBusy.value = false;
+    }
+  });
+  const handleCancelEmailChange = $(async () => {
+    emailBusy.value = true;
+    emailError.value = "";
+    try {
+      await invoke("cancel_email_change", { apiUrl: __API_URL__ });
+      emailNotice.value = "The email change was cancelled.";
+      await loadEmailState();
+    } catch (err) {
+      emailError.value = String(err);
+    } finally {
+      emailBusy.value = false;
+    }
+  });
 
   // Start-at-login (default on for new installs). Optimistic default while
   // the real state loads.
@@ -231,6 +325,88 @@ export default component$(() => {
               </p>
             </div>
           </div>
+
+          {/* Change email - device-hosted identities only */}
+          {identityHosting.value === "device-hosted" && (
+            <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
+              <h3 class="mb-2 text-lg font-semibold text-white">Change Email</h3>
+              <p class="mb-4 text-sm text-gray-400">
+                Flowsta keeps only a fingerprint of your email; this Vault holds
+                the address itself. Changing it asks Flowsta to send a link to
+                the new address - the change takes effect when you click it,
+                and apps you've shared your email with get the new address the
+                next time they ask.
+              </p>
+
+              <div class="max-w-md space-y-4">
+                {currentEmail.value && (
+                  <p class="text-sm text-gray-300">
+                    Current email: <span class="font-medium text-white">{currentEmail.value}</span>
+                  </p>
+                )}
+
+                {pendingEmail.value ? (
+                  <div class="space-y-3">
+                    <Callout intent="info">
+                      Waiting for you to confirm <span class="font-medium">{pendingEmail.value}</span> -
+                      click the link in the email we sent there. Links last 72 hours.
+                    </Callout>
+                    <div class="flex flex-wrap gap-2">
+                      <GlassButton variant="secondary" disabled={emailBusy.value} onClick$={() => checkEmailChange(false)}>
+                        Check now
+                      </GlassButton>
+                      <GlassButton variant="secondary" disabled={emailBusy.value} onClick$={handleCancelEmailChange}>
+                        Cancel change
+                      </GlassButton>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <label class="mb-1 block text-sm font-medium text-gray-300">New email</label>
+                      <input
+                        type="email"
+                        autocomplete="email"
+                        class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                        placeholder="you@example.com"
+                        value={newEmail.value}
+                        onInput$={(e) => { newEmail.value = (e.target as HTMLInputElement).value; emailError.value = ""; }}
+                      />
+                      {newEmail.value.length > 0 && !emailDiffers && (
+                        <p class="mt-1 text-xs text-gray-500">That is already the email on this account.</p>
+                      )}
+                    </div>
+                    <div>
+                      <label class="mb-1 block text-sm font-medium text-gray-300">Confirm new email</label>
+                      <input
+                        type="email"
+                        autocomplete="off"
+                        class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                        placeholder="Repeat your new email"
+                        value={newEmail2.value}
+                        onInput$={(e) => { newEmail2.value = (e.target as HTMLInputElement).value; emailError.value = ""; }}
+                        onPaste$={(e) => e.preventDefault()}
+                      />
+                      {newEmail2.value.length > 0 && !emailsAgree && (
+                        <p class="mt-1 text-xs text-gray-500">Email addresses don't match.</p>
+                      )}
+                    </div>
+                    <GlassButton variant="primary" disabled={!canRequestEmail} onClick$={handleRequestEmailChange}>
+                      {emailBusy.value ? "Sending..." : "Send Confirmation Link"}
+                    </GlassButton>
+                  </>
+                )}
+
+                {emailError.value && <Callout intent="danger">{emailError.value}</Callout>}
+                {emailNotice.value && <Callout intent="success">{emailNotice.value}</Callout>}
+
+                <p class="text-xs text-gray-500">
+                  Your username, recovery phrase and everything in this Vault stay
+                  the same - only the address Flowsta can reach you at changes.
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* Auto-lock */}
           <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">

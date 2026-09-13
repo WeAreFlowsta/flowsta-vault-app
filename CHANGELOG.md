@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Change your email from the Vault.** Settings has a Change Email card
+  for identities created in the Vault. Flowsta sends a link to the new
+  address; the Vault applies the change once you click it (it checks on
+  its own while open and at every unlock), keeps the address in the
+  identity it holds for you, and tells you that apps you have shared
+  your email with get the new address the next time they ask.
 - **You type your email twice when creating an identity.** A mistyped
   address used to be locked in the moment the identity was registered.
   The same confirm field appears where the Vault asks for your account

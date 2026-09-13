@@ -686,6 +686,7 @@ pub(crate) fn setup_vault_inner(
         agent_pub_key_raw_b64: Some(agent_pub_key_raw_b64),
         web_agent_pub_key,
         web_email: web_email.clone(),
+        pending_email: None,
         web_username,
         display_name,
         profile_picture,
@@ -1600,6 +1601,7 @@ pub fn get_identity(state: State<'_, Arc<AppState>>) -> Result<VaultIdentity, St
         display_name: config.display_name.clone(),
         profile_picture: config.profile_picture.clone(),
         web_email: config.web_email.clone(),
+        pending_email: config.pending_email.clone(),
         web_username: config.web_username.clone(),
         web_agent_pub_key,
         hosting_model: config.hosting_model.clone(),
@@ -1618,6 +1620,9 @@ pub struct VaultIdentity {
     pub display_name: Option<String>,
     pub profile_picture: Option<String>,
     pub web_email: Option<String>,
+    /// Email change requested from this Vault, awaiting the user's click
+    /// on the verification link.
+    pub pending_email: Option<String>,
     pub web_username: Option<String>,
     pub web_agent_pub_key: Option<String>,
     /// "device-hosted" = this vault IS the account; anything else = a
@@ -5972,6 +5977,273 @@ pub async fn claim_web_username(
     });
 
     Ok(username)
+}
+
+/// Persist the in-memory config under the live passphrase, restamping the
+/// display_email sidecar. Shared by the email-change commands.
+fn persist_config_now(state: &Arc<AppState>) -> Result<(), String> {
+    let pw = live_passphrase(state).ok_or("Vault is locked")?;
+    let vault_path = state.vault_path.lock().unwrap().clone();
+    let config = state.vault_config.lock().unwrap();
+    let cfg = config.as_ref().ok_or("Vault is locked")?;
+    let mut encrypted = crate::vault::encrypt_vault(cfg, &pw).map_err(|e| e.to_string())?;
+    encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
+    crate::vault::save_vault(&vault_path, &encrypted).map_err(|e| e.to_string())
+}
+
+/// Device-hosted vaults only: the vault-grant is the account's login, and
+/// verifying a change clears the custodial password-reset material, which
+/// a custodial-linked vault's web account still relies on.
+fn device_hosted_grant_material(state: &Arc<AppState>) -> Result<([u8; 32], String, Option<String>), String> {
+    let config = state.vault_config.lock().unwrap();
+    let cfg = config.as_ref().ok_or("Vault is locked")?;
+    if cfg.hosting_model.as_deref() != Some("device-hosted") {
+        return Err("Email changes from the Vault are available for identities created in the Vault. Change it from your account on flowsta.com instead.".into());
+    }
+    let seed_vec = cfg.device_seed.clone().ok_or("No device seed in vault")?;
+    if seed_vec.len() != 32 {
+        return Err("Invalid device seed length".into());
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&seed_vec);
+    let agent_b64 = cfg.agent_pub_key_raw_b64.clone().ok_or("No raw agent key in vault")?;
+    Ok((seed, agent_b64, cfg.web_email.clone()))
+}
+
+#[derive(Serialize)]
+pub struct EmailChangeState {
+    /// "pending" (link not clicked yet) · "applied" (this call wrote the new
+    /// address) · "current" (nothing to do) · "expired" · "cancelled"
+    pub status: String,
+    /// Masked while pending; the address actually applied on "applied".
+    pub email: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+/// Ask Flowsta to change the account email. Nothing is written locally
+/// except the pending marker: the server has to see the user click the link
+/// in the NEW inbox first (and it answers success even for an address it
+/// will silently refuse, to keep addresses unenumerable).
+#[tauri::command]
+pub async fn request_email_change(
+    api_url: String,
+    new_email: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<EmailChangeState, String> {
+    let new_email = normalize_email(&new_email)?;
+    let (seed, agent_b64, current_email) = device_hosted_grant_material(state.inner())?;
+    if current_email.as_deref() == Some(new_email.as_str()) {
+        return Err("That is already the email on this account.".into());
+    }
+
+    let grant = crate::device_identity::vault_grant_with_seed(&api_url, &seed, &agent_b64)
+        .await
+        .map_err(|e| format!("Sign-in for the email change failed: {}", e))?;
+
+    let mut body = serde_json::json!({ "newEmail": new_email, "source": "vault" });
+    // The Vault holds the plaintext the server only has a hash of - sending
+    // it lets the server verify it and warn the OLD inbox about the change.
+    if let Some(cur) = &current_email {
+        body["currentEmail"] = serde_json::json!(cur);
+    }
+    let resp = reqwest::Client::new()
+        .post(format!("{}/auth/request-email-change", api_url.trim_end_matches('/')))
+        .bearer_auth(&grant.token)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Flowsta: {}", e))?;
+    let status = resp.status();
+    let data: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        let msg = data
+            .get("message")
+            .or_else(|| data.get("error"))
+            .and_then(|e| e.as_str())
+            .unwrap_or("The email change could not be started.")
+            .to_string();
+        return Err(msg);
+    }
+
+    {
+        let mut config = state.vault_config.lock().unwrap();
+        if let Some(cfg) = config.as_mut() {
+            cfg.pending_email = Some(new_email.clone());
+        }
+    }
+    if let Err(e) = persist_config_now(state.inner()) {
+        log::warn!("pending email marker not persisted (non-fatal): {}", e);
+    }
+    Ok(EmailChangeState {
+        status: "pending".into(),
+        email: data.get("pendingEmail").and_then(|v| v.as_str()).map(str::to_string),
+        expires_at: None,
+    })
+}
+
+/// Poll the server for the outcome of an email change and apply it when
+/// verified. Also catches changes made from the web dashboard: whenever the
+/// account's latest verified address differs from what the Vault holds,
+/// the Vault follows the account. Idempotent - safe on every unlock.
+#[tauri::command]
+pub async fn check_email_change(
+    api_url: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<EmailChangeState, String> {
+    let (seed, agent_b64, current_email) = device_hosted_grant_material(state.inner())?;
+    let grant = crate::device_identity::vault_grant_with_seed(&api_url, &seed, &agent_b64)
+        .await
+        .map_err(|e| format!("Sign-in failed: {}", e))?;
+    let resp = reqwest::Client::new()
+        .get(format!("{}/auth/pending-email-change", api_url.trim_end_matches('/')))
+        .bearer_auth(&grant.token)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Flowsta: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Could not check the email change ({})", resp.status().as_u16()));
+    }
+    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let flag = |k: &str| data.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    let masked = data.get("newEmail").and_then(|v| v.as_str()).map(str::to_string);
+
+    if flag("verified") {
+        let verified_email = data
+            .get("newEmail")
+            .and_then(|v| v.as_str())
+            .map(|e| normalize_email(e))
+            .transpose()?
+            .ok_or("Server reported a verified change without the address")?;
+        if current_email.as_deref() == Some(verified_email.as_str()) {
+            // Already applied (or nothing changed) - just clear a stale marker.
+            let stale = {
+                let mut config = state.vault_config.lock().unwrap();
+                match config.as_mut() {
+                    Some(cfg) if cfg.pending_email.is_some() => {
+                        cfg.pending_email = None;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if stale {
+                let _ = persist_config_now(state.inner());
+            }
+            return Ok(EmailChangeState { status: "current".into(), email: current_email, expires_at: None });
+        }
+        // Apply: config + vault file, then the sealed profile, then the UI.
+        {
+            let mut config = state.vault_config.lock().unwrap();
+            if let Some(cfg) = config.as_mut() {
+                cfg.web_email = Some(verified_email.clone());
+                cfg.pending_email = None;
+            }
+        }
+        persist_config_now(state.inner())?;
+        let sealed_state = state.inner().clone();
+        let sealed_email = verified_email.clone();
+        tokio::spawn(async move {
+            if let Err(e) = mirror_email_into_sealed_profile(&sealed_state, &sealed_email).await {
+                log::warn!("Sealed email mirror failed (non-fatal): {}", e);
+            }
+        });
+        let _ = app_handle.emit("profile-updated", serde_json::json!({}));
+        log::info!("Account email change applied in the Vault");
+        return Ok(EmailChangeState { status: "applied".into(), email: Some(verified_email), expires_at: None });
+    }
+
+    if flag("pending") {
+        return Ok(EmailChangeState {
+            status: "pending".into(),
+            email: masked,
+            expires_at: data.get("expiresAt").and_then(|v| v.as_str()).map(str::to_string),
+        });
+    }
+
+    // Not pending, not verified: expired or cancelled (or never requested).
+    let had_marker = {
+        let mut config = state.vault_config.lock().unwrap();
+        match config.as_mut() {
+            Some(cfg) if cfg.pending_email.is_some() => {
+                cfg.pending_email = None;
+                true
+            }
+            _ => false,
+        }
+    };
+    if had_marker {
+        let _ = persist_config_now(state.inner());
+    }
+    let status = if flag("cancelled") {
+        "cancelled"
+    } else if flag("expired") {
+        "expired"
+    } else {
+        "current"
+    };
+    Ok(EmailChangeState { status: status.into(), email: masked, expires_at: None })
+}
+
+/// Cancel a pending email change.
+#[tauri::command]
+pub async fn cancel_email_change(
+    api_url: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let (seed, agent_b64, _) = device_hosted_grant_material(state.inner())?;
+    let grant = crate::device_identity::vault_grant_with_seed(&api_url, &seed, &agent_b64)
+        .await
+        .map_err(|e| format!("Sign-in failed: {}", e))?;
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/auth/cancel-email-change", api_url.trim_end_matches('/')))
+        .bearer_auth(&grant.token)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Flowsta: {}", e))?;
+    // 404 = nothing pending any more - same end state.
+    if !resp.status().is_success() && resp.status().as_u16() != 404 {
+        return Err(format!("Could not cancel the email change ({})", resp.status().as_u16()));
+    }
+    {
+        let mut config = state.vault_config.lock().unwrap();
+        if let Some(cfg) = config.as_mut() {
+            cfg.pending_email = None;
+        }
+    }
+    let _ = persist_config_now(state.inner());
+    Ok(())
+}
+
+/// Replace the email in the sealed user_profile record (the on-device copy
+/// that outlives the server). Write-once until now: nothing else updates it.
+async fn mirror_email_into_sealed_profile(state: &Arc<AppState>, email: &str) -> Result<(), String> {
+    let existing = crate::sealed::sealed_list_inner(state).await?;
+    let now_us = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)) as i64;
+    let Some(record) = existing.iter().find(|r| r.entry_type == "user_profile") else {
+        // No profile record yet - the username/creation paths create one
+        // from the config, which already carries the new email.
+        return Ok(());
+    };
+    let mut body = record.body.clone();
+    body["email"] = serde_json::json!(email);
+    body["updated_at"] = serde_json::json!(now_us);
+    crate::sealed::sealed_replace_inner(
+        state,
+        &record.action_hash,
+        "user_profile".into(),
+        body,
+        record.refs.clone(),
+        record.created_at,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Write the username into the sealed user_profile record (replace-or-create),
