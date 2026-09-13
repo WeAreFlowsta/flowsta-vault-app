@@ -1,0 +1,7 @@
+# Snyk (https://snyk.io) policy file
+version: v1.25.0
+# The headless bridge matrix is a test harness: its fixed "wrong password"
+# strings exist to prove refusals, not to authenticate anything.
+exclude:
+  code:
+    - scripts/bridge-matrix.mjs

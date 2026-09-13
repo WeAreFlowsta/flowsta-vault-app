@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { CopyButton } from "~/components/ui/CopyButton";
 import { GlassButton } from "~/components/common/GlassButton";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
+import { sanitizeImageUrl } from "~/lib/safe-url";
 import { PillButton } from "~/components/ui/PillButton";
 
 declare const __API_URL__: string;
@@ -562,8 +563,8 @@ export default component$(() => {
               >
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center gap-2">
-                    {site.logoUrl ? (
-                      <img src={site.logoUrl} alt="" width={24} height={24} class="h-6 w-6 shrink-0 rounded" />
+                    {sanitizeImageUrl(site.logoUrl) ? (
+                      <img src={sanitizeImageUrl(site.logoUrl)!} alt="" width={24} height={24} class="h-6 w-6 shrink-0 rounded" />
                     ) : (
                       <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-blue-900/50 text-xs text-blue-400">
                         {(site.appName || site.clientId || "?").charAt(0).toUpperCase()}
