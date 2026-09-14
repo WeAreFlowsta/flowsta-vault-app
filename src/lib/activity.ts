@@ -96,6 +96,7 @@ const KIND_ICON: Record<string, FeedIcon> = {
   site_forgotten: "site",
   app_unlinked: "link",
   email_changed: "identity",
+  email_added: "identity",
   password_changed: "password",
   identity_created: "identity",
   identity_restored: "identity",

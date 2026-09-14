@@ -6274,6 +6274,56 @@ pub fn set_web_email(state: State<'_, Arc<AppState>>, email: String) -> Result<(
     Ok(())
 }
 
+/// A restored vault holds no email (Flowsta keeps only its hash). The
+/// person re-enters the address; the server confirms it matches; the vault
+/// stores it (and whether it is verified) so apps can be offered it.
+pub(crate) async fn confirm_account_email_inner(state: &Arc<AppState>, api_url: &str, email: &str) -> Result<bool, String> {
+    let email = normalize_email(email)?;
+    let token = cached_grant_token(state, api_url).await?;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/auth/confirm-email", api_url.trim_end_matches('/')))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "email": email }))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Flowsta: {}", e))?;
+    let status = resp.status();
+    let data: serde_json::Value = resp.json().await.unwrap_or_default();
+    if status.as_u16() == 403 {
+        return Err("email_mismatch".into());
+    }
+    if status.as_u16() == 429 {
+        return Err("rate_limited".into());
+    }
+    if !status.is_success() || data.get("match").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(format!("Could not confirm the email ({})", status.as_u16()));
+    }
+    let verified = data.get("emailVerified").and_then(|v| v.as_bool()).unwrap_or(false);
+    {
+        let mut config = state.vault_config.lock().unwrap();
+        if let Some(cfg) = config.as_mut() {
+            cfg.web_email = Some(email.clone());
+            cfg.email_verified = Some(verified);
+        }
+    }
+    persist_config_now(state)?;
+    state.activity.record("email_added", "Added your email on this device", Some("Confirmed against the account - nothing changed at Flowsta".into()), None, None);
+    let sealed_state = state.clone();
+    let sealed_email = email.clone();
+    tokio::spawn(async move {
+        if let Err(e) = mirror_email_into_sealed_profile(&sealed_state, &sealed_email).await {
+            log::warn!("Sealed email mirror failed (non-fatal): {}", e);
+        }
+    });
+    Ok(verified)
+}
+
+#[tauri::command(async)]
+pub async fn confirm_account_email(api_url: String, email: String, state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    confirm_account_email_inner(state.inner(), &api_url, &email).await
+}
+
 #[tauri::command]
 pub async fn claim_web_username(
     api_url: String,

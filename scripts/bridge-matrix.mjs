@@ -1022,9 +1022,26 @@ async function createLeg() {
   record('conductor ready after restore', await waitConductorReady(restorePort, 120));
   const dev2 = await vaultFetch(restorePort, '/dev/status');
   record('activity log says the identity was restored here', (dev2.data?.activity || []).includes('identity_restored'), JSON.stringify(dev2.data?.activity || []));
-  // The account layer reattaches from Flowsta on its own (reconcile after unlock).
-  const reattached = await waitFor(restorePort, (status) => status?.web_email === email, 90);
-  record('account layer reattached by itself: the restored vault knows the email', reattached, `web_email=${(await vaultFetch(restorePort, '/status')).data?.web_email}`);
+  // The account layer (display name, picture, username) reattaches from
+  // Flowsta by itself once the vault is unlocked online. The EMAIL does not:
+  // Flowsta holds only its hash, so a restored vault has none until the
+  // person re-enters it on the Overview, where it is checked against the
+  // hash. Both facts are asserted.
+  await vaultFetch(restorePort, '/dev/lock', { method: 'POST', body: {} });
+  await vaultFetch(restorePort, '/dev/unlock', { method: 'POST', body: {} });
+  const reattached = await waitFor(restorePort, (status) => status?.display_name === 'Matrix Create', 120);
+  const stR = await vaultFetch(restorePort, '/status');
+  record('account layer reattached by itself after unlock: display name (and picture) are back', reattached, `display_name=${stR.data?.display_name} picture=${!!stR.data?.profile_picture}`);
+  record('the email is NOT back by itself (Flowsta holds only its hash) - the Overview asks for it', stR.data?.web_email == null, `web_email=${stR.data?.web_email}`);
+  // The Overview's step: re-enter the address; the server checks the hash.
+  const wrongEmail = await vaultFetch(restorePort, '/dev/confirm-email', { method: 'POST', body: { api_url: API, email: `wrong-${email}` } });
+  record('re-entering a WRONG email is refused (email_mismatch)', wrongEmail.status === 403 && wrongEmail.data?.error === 'email_mismatch', `${wrongEmail.status} ${wrongEmail.data?.error || ''}`);
+  const rightEmail = await vaultFetch(restorePort, '/dev/confirm-email', { method: 'POST', body: { api_url: API, email: email.toUpperCase() } });
+  const stE = await vaultFetch(restorePort, '/status');
+  const devE = await vaultFetch(restorePort, '/dev/status');
+  record('re-entering the registered email (any case) is confirmed and stored; activity says so',
+    rightEmail.status === 200 && stE.data?.web_email === email && (devE.data?.activity || []).includes('email_added'),
+    `${rightEmail.status} web_email=${stE.data?.web_email} activity=${JSON.stringify((devE.data?.activity || []).slice(0, 3))}`);
 }
 
 // ───────────────────────── main ─────────────────────────

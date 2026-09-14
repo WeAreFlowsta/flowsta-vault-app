@@ -456,6 +456,7 @@ pub fn run() {
             commands::check_vault_update,
             commands::get_email_grants,
             commands::get_activity,
+            commands::confirm_account_email,
             commands::revoke_email_grant_command,
             commands::request_email_change,
             commands::check_email_change,

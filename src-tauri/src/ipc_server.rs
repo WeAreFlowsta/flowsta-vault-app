@@ -3951,6 +3951,26 @@ struct DevLegacyBody {
 /// the conductor starts WITHOUT the v2 encrypted cell, exactly like a vault
 /// from before device hosting. This is the true starting state for the
 /// in-place account-upgrade walkthrough; no historical build needed.
+/// Dev-only: the Overview's "add the email you registered with" step.
+async fn dev_confirm_email_handler(
+    State(state): State<Arc<IpcState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError { error: "not_found".into(), description: None }),
+        ));
+    }
+    let api_url = body.get("api_url").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let email = body.get("email").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    match crate::commands::confirm_account_email_inner(&state.app_state, &api_url, &email).await {
+        Ok(verified) => Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({ "success": true, "email_verified": verified })))),
+        Err(e) if e == "email_mismatch" => Err((StatusCode::FORBIDDEN, Json(IpcError { error: "email_mismatch".into(), description: None }))),
+        Err(e) => Err((StatusCode::BAD_GATEWAY, Json(IpcError { error: "confirm_failed".into(), description: Some(e) }))),
+    }
+}
+
 /// Dev-only: what the "Remember this site" tick does on approval - so the
 /// matrix can prove a remembered origin signs in without a dialog and that
 /// the memory survives lock and relaunch.
@@ -4639,6 +4659,7 @@ pub async fn start_ipc_server(
         .route("/dev/setup-legacy-vault", post(dev_setup_legacy_handler))
         .route("/dev/setup-identity", post(dev_setup_identity_handler))
         .route("/dev/remember-origin", post(dev_remember_origin_handler))
+        .route("/dev/confirm-email", post(dev_confirm_email_handler))
         .route("/dev/run-upgrade", post(dev_run_upgrade_handler))
         .route("/dev/unlock-with-password", post(dev_unlock_pw_handler))
         .route("/dev/change-password", post(dev_change_password_handler))

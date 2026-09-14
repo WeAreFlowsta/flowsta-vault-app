@@ -73,6 +73,11 @@ export default component$(() => {
   // The Vault's own log (sign-ins, grants, changes) - the rest of the feed
   // is derived from signatures, backups and links.
   const activityLog = useSignal<ActivityLogEntry[]>([]);
+  // Restored vault: re-enter the registered email (confirmed against the hash).
+  const confirmEmailInput = useSignal("");
+  const confirmEmailInput2 = useSignal("");
+  const confirmEmailNote = useSignal("");
+  const confirmEmailBusy = useSignal(false);
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ cleanup }) => {
     const unlisten = await listen("activity-recorded", async () => {
@@ -473,6 +478,67 @@ export default component$(() => {
 
   return (
     <div>
+      {/* A restored vault holds no email: Flowsta keeps only its hash, so the
+          person re-enters the address and the server confirms it. Until
+          then no app can be offered the email. */}
+      {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && (
+        <Callout intent="info" title="Add the email you registered with" class="mb-6">
+          <p class="mb-3">
+            This Vault was restored from your recovery phrase, so it doesn't hold your email yet. Flowsta keeps only a
+            fingerprint of it and can't send it back. Enter it here and apps you allow can ask for it again.
+          </p>
+          <form
+            preventdefault:submit
+            class="flex flex-col gap-2 sm:flex-row sm:items-start"
+            onSubmit$={async () => {
+              const email = normalizeEmail(confirmEmailInput.value);
+              if (!isValidEmail(email)) { confirmEmailNote.value = EMAIL_INVALID; return; }
+              if (!emailsMatch(email, confirmEmailInput2.value)) { confirmEmailNote.value = EMAIL_MISMATCH; return; }
+              confirmEmailBusy.value = true;
+              confirmEmailNote.value = "";
+              try {
+                await invoke<boolean>("confirm_account_email", { apiUrl: __API_URL__, email });
+                identity.value = { ...identity.value!, web_email: email };
+                confirmEmailInput.value = "";
+                confirmEmailInput2.value = "";
+              } catch (e) {
+                const msg = String(e);
+                confirmEmailNote.value = msg.includes("email_mismatch")
+                  ? "That address doesn't match the one this account registered with."
+                  : msg.includes("rate_limited")
+                    ? "Too many tries - wait a few minutes."
+                    : "Couldn't reach Flowsta to confirm it. Are you online?";
+              } finally {
+                confirmEmailBusy.value = false;
+              }
+            }}
+          >
+            <div class="flex min-w-0 flex-1 flex-col gap-2">
+              <input
+                type="email"
+                autocomplete="email"
+                placeholder="Your account email"
+                class="w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none"
+                value={confirmEmailInput.value}
+                onInput$={(_, el) => { confirmEmailInput.value = el.value; confirmEmailNote.value = ""; }}
+              />
+              <input
+                type="email"
+                autocomplete="off"
+                placeholder="Repeat your email"
+                class="w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none"
+                value={confirmEmailInput2.value}
+                onInput$={(_, el) => { confirmEmailInput2.value = el.value; confirmEmailNote.value = ""; }}
+              />
+              {confirmEmailNote.value && <p class="text-xs text-red-300">{confirmEmailNote.value}</p>}
+            </div>
+            <GlassButton type="submit" disabled={confirmEmailBusy.value || !confirmEmailInput.value}>
+              {confirmEmailBusy.value ? "Checking…" : "Confirm"}
+            </GlassButton>
+          </form>
+        </Callout>
+      )}
+
       {vaultUpdate.value?.update_available && !updateDismissed.value && (
         <Callout
           intent="info"
