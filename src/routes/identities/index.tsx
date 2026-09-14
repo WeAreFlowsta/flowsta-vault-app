@@ -93,6 +93,40 @@ export default component$(() => {
   const webToken = useSignal<string | null>(null);
   const revokingWebId = useSignal("");
 
+  // Email grants made in this Vault's dialogs (client_id → grant). Local
+  // first; `synced` says whether Flowsta has the same grant on file.
+  const emailGrants = useSignal<{ client_id: string; app_name: string; granted_at: number; synced: boolean }[]>([]);
+  const revokingGrant = useSignal("");
+  const loadEmailGrants = $(async () => {
+    try {
+      const map = await invoke<Record<string, { app_name: string; granted_at: number; synced: boolean }>>("get_email_grants");
+      emailGrants.value = Object.entries(map)
+        .map(([client_id, g]) => ({ client_id, ...g }))
+        .sort((a, b) => b.granted_at - a.granted_at);
+    } catch {
+      /* locked */
+    }
+  });
+  const handleRevokeEmailGrant = $(async (clientId: string) => {
+    revokingGrant.value = clientId;
+    try {
+      await invoke("revoke_email_grant_command", { clientId });
+      await loadEmailGrants();
+    } catch (e) {
+      console.error("Failed to stop sharing the email:", e);
+    } finally {
+      revokingGrant.value = "";
+    }
+  });
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(async ({ cleanup }) => {
+    await loadEmailGrants();
+    const unlisten = await listen<{ kind: string }>("activity-recorded", (e) => {
+      if (e.payload?.kind === "email_shared" || e.payload?.kind === "email_unshared") loadEmailGrants();
+    });
+    cleanup(() => unlisten());
+  });
+
   const loadWebSites = $(async () => {
     try {
       const grant = await invoke<{ token: string }>("vault_grant_login", {
@@ -669,6 +703,50 @@ export default component$(() => {
         </div>
       )}
 
+
+      {/* Email shared with apps - the grants made in this Vault's dialogs */}
+      <div class="mt-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
+        <div class="mb-4 flex items-center justify-between">
+          <h3 class="text-lg font-semibold text-white">Email shared with</h3>
+          <span class="text-xs text-gray-500">
+            {emailGrants.value.length} app{emailGrants.value.length !== 1 ? "s" : ""}
+          </span>
+        </div>
+        {emailGrants.value.length === 0 ? (
+          <p class="text-sm text-gray-500">
+            No app has your email. When an app asks for it, you decide here in the Vault.
+          </p>
+        ) : (
+          <div class="space-y-2">
+            {emailGrants.value.map((g) => (
+              <div key={`grant-${g.client_id}`} class="flex items-center justify-between rounded-lg border border-gray-700 bg-black/30 px-4 py-3">
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <div class="flex h-6 w-6 items-center justify-center rounded bg-pink-900/30 text-xs text-pink-300">
+                      {g.app_name.charAt(0).toUpperCase()}
+                    </div>
+                    <span class="truncate text-sm font-medium text-white">{g.app_name}</span>
+                  </div>
+                  <div class="mt-1 flex items-center gap-3 text-xs text-gray-500">
+                    <span>Since {new Date(g.granted_at * 1000).toLocaleDateString()}</span>
+                    {!g.synced && <span class="text-amber-400">Not yet filed with Flowsta - it will be at your next sign-in</span>}
+                  </div>
+                </div>
+                <GlassButton
+                  variant="danger"
+                  disabled={revokingGrant.value === g.client_id}
+                  onClick$={() => handleRevokeEmailGrant(g.client_id)}
+                >
+                  {revokingGrant.value === g.client_id ? "Stopping…" : "Stop sharing"}
+                </GlassButton>
+              </div>
+            ))}
+          </div>
+        )}
+        <p class="mt-3 text-xs text-gray-500">
+          Stopping removes the app's copy of your address at Flowsta as well. The app keeps whatever it already saved on its side.
+        </p>
+      </div>
     </div>
   );
 });
