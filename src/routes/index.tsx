@@ -484,8 +484,9 @@ export default component$(() => {
       {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && (
         <Callout intent="info" title="Add the email you registered with" class="mb-6">
           <p class="mb-3">
-            This Vault was restored from your recovery phrase, so it doesn't hold your email yet. Flowsta keeps only a
-            fingerprint of it and can't send it back. Enter it here and apps you allow can ask for it again.
+            This Vault doesn't hold your email yet - Flowsta keeps only a fingerprint of it and can't send it back.
+            Enter the address you registered this identity with and apps you allow can ask for it. A wrong address is
+            simply refused; nothing is changed or sent.
           </p>
           <form
             preventdefault:submit

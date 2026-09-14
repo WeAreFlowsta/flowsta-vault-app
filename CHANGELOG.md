@@ -16,11 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listed newest first, grouped by day, alongside signatures, backups and
   app links. The Overview shows the latest three with a link to the rest.
   The log lives only on this device and is never sent anywhere.
-- **A restored Vault asks for the email you registered with.** Flowsta
-  keeps only a fingerprint of your address, so a Vault restored from your
-  recovery phrase cannot be sent it. The Overview now asks you to enter it
-  once; Flowsta confirms it matches the account, nothing is changed or
-  mailed, and apps you allow can ask for it again.
+- **A Vault without your email asks for it once.** Flowsta keeps only a
+  fingerprint of your address, so a Vault restored from your recovery
+  phrase - or one created before the Vault held emails - cannot be sent
+  it. The Overview asks you to enter the address you registered with;
+  Flowsta confirms it matches, nothing is changed or mailed, a wrong
+  address is simply refused, and apps you allow can then ask for it.
 - **The Vault tells you when a newer version is out.** A notice on the
   Overview names the version, what it brings, and opens the download page;
   dismiss it and it stays quiet until the next release. Settings, About
