@@ -869,6 +869,12 @@ async function grantsLeg() {
       record('Flowsta origin + same app: signs and (verified email) files the grant',
         boundAuth.status === 200 && !!boundAuth.data?.signature && (boundRecorded || !boundAuth.data?.email),
         `${boundAuth.status} email=${boundAuth.data?.email ? 'shared' : 'none (unverified vault → nothing to grant)'} recorded=${boundRecorded}`);
+      // The Vault's activity log saw both: the sign-in and, when a grant was
+      // filed, the email share (newest first on /dev/status.activity).
+      const acts = dev2.data?.activity || [];
+      record('activity log recorded the sign-in (and the email share when granted)',
+        acts.includes('sign_in') && (!boundRecorded || acts.includes('email_shared')),
+        JSON.stringify(acts.slice(0, 5)));
     }
   } else {
     record('grant binding probe skipped - set VAULT_MATRIX_APP_CLIENT_ID (a registered app with the email scope)', true);

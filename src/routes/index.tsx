@@ -13,6 +13,8 @@ import { UpgradeAccountCard } from "~/components/vault/UpgradeAccountCard";
 import { connectionStatusContext, signaturesContext } from "~/lib/context";
 import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATCH } from "~/lib/email";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
+import { ActivityRow } from "~/components/vault/ActivityRow";
+import { buildFeed, timeAgo, type ActivityLogEntry } from "~/lib/activity";
 
 declare const __API_URL__: string;
 declare const __WEB_URL__: string;
@@ -50,19 +52,6 @@ interface BackupStats {
   }[];
 }
 
-/** "12 polls, 38 votes" or null if nothing to show. */
-function formatSummary(s: BackupRecordSummary | null | undefined): string | null {
-  if (!s || s.total_records === 0) return null;
-  const parts = Object.entries(s.counts_by_entry_type)
-    .filter(([, n]) => n > 0)
-    .map(([t, n]) => {
-      const lower = t.toLowerCase();
-      const plural = n === 1 ? lower : `${lower}s`;
-      return `${n} ${plural}`;
-    });
-  return parts.length > 0 ? parts.join(", ") : null;
-}
-
 interface LinkedApp {
   app_name: string;
   app_agent_pub_key: string;
@@ -78,18 +67,19 @@ function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(k, i)).toFixed(i > 0 ? 1 : 0)} ${sizes[i]}`;
 }
 
-function timeAgo(unixSecs: number): string {
-  const now = Math.floor(Date.now() / 1000);
-  const diff = now - unixSecs;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return new Date(unixSecs * 1000).toLocaleDateString();
-}
 
 export default component$(() => {
   const identity = useSignal<VaultIdentity | null>(null);
+  // The Vault's own log (sign-ins, grants, changes) - the rest of the feed
+  // is derived from signatures, backups and links.
+  const activityLog = useSignal<ActivityLogEntry[]>([]);
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(async ({ cleanup }) => {
+    const unlisten = await listen("activity-recorded", async () => {
+      activityLog.value = await invoke<ActivityLogEntry[]>("get_activity", { limit: 20 }).catch(() => []);
+    });
+    cleanup(() => unlisten());
+  });
   // Soft update notice: a newer Vault is shipped. Dismissed per version.
   const vaultUpdate = useSignal<{ current: string; latest: string | null; summary: string | null; download_url: string; update_available: boolean } | null>(null);
   const updateDismissed = useSignal(true);
@@ -374,15 +364,17 @@ export default component$(() => {
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ cleanup }) => {
     try {
-      const [id, stats, apps, choicePending] = await Promise.all([
+      const [id, stats, apps, choicePending, log] = await Promise.all([
         invoke<VaultIdentity>("get_identity"),
         invoke<BackupStats>("get_backup_stats"),
         invoke<LinkedApp[]>("get_linked_third_party_apps"),
         invoke<boolean>("restore_choice_pending").catch(() => false),
+        invoke<ActivityLogEntry[]>("get_activity", { limit: 20 }).catch(() => []),
       ]);
       identity.value = id;
       backupStats.value = stats;
       linkedApps.value = apps;
+      activityLog.value = log;
       restoreChoicePending.value = choicePending;
       // Paint NOW - everything above is local. The plan fetch below is
       // network-bound and must never hold the identity render hostage: on
@@ -469,54 +461,15 @@ export default component$(() => {
   const activeSigs = currentSigs.filter((s: any) => !s.revoked).length;
   const revokedSigs = sigCount - activeSigs;
   const amendedSigs = sigStore.signatures.value.filter((s: any) => (s as any).superseded_by).length;
-  // Unified Recent Activity feed across signatures + backups + linked apps.
-  // currentSigs already filters out superseded chain entries, so an amended
-  // signature shows once (its latest signed_at) rather than twice.
-  type Activity =
-    | { kind: "signature"; timestamp: number; label: string }
-    | { kind: "backup"; timestamp: number; appName: string; summary?: BackupRecordSummary | null }
-    | { kind: "link"; timestamp: number; appName: string };
-  const recentActivities: Activity[] = [];
-  // Only surface sigs in the activity feed once linked has settled -
-  // otherwise we'd leak the same partial count the Signatures tile is
-  // hiding behind "Syncing from the network…".
-  if (sigsLoaded) {
-    for (const sig of currentSigs as any[]) {
-      if (typeof sig.signed_at === "number" && sig.signed_at > 0) {
-        const label =
-          sig.fileName ||
-          (typeof sig.file_hash === "string" && sig.file_hash.length >= 8
-            ? `${sig.file_hash.slice(0, 8)}…`
-            : "a file");
-        // `signed_at` is committed by the signing DNA in milliseconds
-        // (commands.rs uses `as_millis()`), but `timeAgo` + the other
-        // activity sources (backups, links) deal in seconds - convert
-        // so the merged feed sorts and renders correctly.
-        recentActivities.push({
-          kind: "signature",
-          timestamp: Math.floor(sig.signed_at / 1000),
-          label,
-        });
-      }
-    }
-  }
-  for (const app of stats?.apps ?? []) {
-    if (app.last_backup_at > 0) {
-      recentActivities.push({
-        kind: "backup",
-        timestamp: app.last_backup_at,
-        appName: app.app_name,
-        summary: app.latest_summary,
-      });
-    }
-  }
-  for (const app of linkedApps.value) {
-    if (app.linked_at > 0) {
-      recentActivities.push({ kind: "link", timestamp: app.linked_at, appName: app.app_name });
-    }
-  }
-  recentActivities.sort((a, b) => b.timestamp - a.timestamp);
-  const recentActivitiesTop = recentActivities.slice(0, 5);
+  // Unified Recent Activity feed: the Vault's log + signatures + backups +
+  // linked apps, newest first. The Activity page shows all of it.
+  const recentActivitiesTop = buildFeed({
+    log: activityLog.value,
+    sigs: currentSigs,
+    sigsLoaded,
+    stats,
+    linkedApps: linkedApps.value,
+  }).slice(0, 3);
 
   return (
     <div>
@@ -1060,73 +1013,24 @@ export default component$(() => {
         </div>
       )}
 
-      {/* Recent Activity - unified feed: signatures, backups, linked apps. */}
+      {/* Recent Activity - the latest three; the Activity page has everything. */}
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
-        <h3 class="mb-4 text-lg font-semibold text-white">
-          Recent Activity
-        </h3>
+        <div class="mb-4 flex items-center justify-between">
+          <h3 class="text-lg font-semibold text-white">Recent Activity</h3>
+          <Link href="/activity/" class="text-sm text-amber-400 hover:text-amber-300">
+            See all activity →
+          </Link>
+        </div>
 
         {recentActivitiesTop.length === 0 ? (
           <p class="py-4 text-center text-sm text-gray-500">
-            No activity yet - sign a file or connect an app to see it here.
+            No activity yet - sign in to an app, sign a file or connect an app to see it here.
           </p>
         ) : (
           <div class="space-y-3">
-            {recentActivitiesTop.map((a, i) => {
-              if (a.kind === "signature") {
-                return (
-                  <div key={`s${i}`} class="flex items-center gap-3">
-                    <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-900/30">
-                      <svg class="h-4 w-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
-                      </svg>
-                    </div>
-                    <div class="min-w-0 flex-1">
-                      <p class="truncate text-sm text-white">
-                        Signed <span class="font-medium">{a.label}</span>
-                      </p>
-                      <p class="text-xs text-gray-500">{timeAgo(a.timestamp)}</p>
-                    </div>
-                  </div>
-                );
-              }
-              if (a.kind === "backup") {
-                const summaryLabel = formatSummary(a.summary);
-                return (
-                  <div key={`b${i}`} class="flex items-center gap-3">
-                    <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-900/30">
-                      <svg class="h-4 w-4 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                      </svg>
-                    </div>
-                    <div class="min-w-0 flex-1">
-                      <p class="text-sm text-white">
-                        <span class="font-medium">{a.appName}</span>{" "}
-                        {summaryLabel
-                          ? <>backed up <span class="text-gray-400">{summaryLabel}</span></>
-                          : "backed up data"}
-                      </p>
-                      <p class="text-xs text-gray-500">{timeAgo(a.timestamp)}</p>
-                    </div>
-                  </div>
-                );
-              }
-              return (
-                <div key={`l${i}`} class="flex items-center gap-3">
-                  <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-green-900/30">
-                    <svg class="h-4 w-4 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-                    </svg>
-                  </div>
-                  <div class="min-w-0 flex-1">
-                    <p class="text-sm text-white">
-                      <span class="font-medium">{a.appName}</span> linked identity
-                    </p>
-                    <p class="text-xs text-gray-500">{timeAgo(a.timestamp)}</p>
-                  </div>
-                </div>
-              );
-            })}
+            {recentActivitiesTop.map((item) => (
+              <ActivityRow key={item.key} item={item} when={timeAgo(item.timestamp)} />
+            ))}
           </div>
         )}
       </div>

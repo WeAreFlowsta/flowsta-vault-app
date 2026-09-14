@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **An Activity page, and a Vault that remembers what happened.** Every
+  sign-in (and whether a remembered site let it through without asking),
+  every email you shared with an app or stopped sharing, sites remembered
+  and forgotten, apps unlinked, your email and password changes, and the
+  moment your identity was created or restored on this device - all
+  listed newest first, grouped by day, alongside signatures, backups and
+  app links. The Overview shows the latest three with a link to the rest.
+  The log lives only on this device and is never sent anywhere.
 - **The Vault tells you when a newer version is out.** A notice on the
   Overview names the version, what it brings, and opens the download page;
   dismiss it and it stays quiet until the next release. Settings, About

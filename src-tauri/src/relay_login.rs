@@ -246,6 +246,13 @@ pub async fn relay_approve(
     // this sign-in already sees it and does not ask the user to type the
     // address on a phone. A grant that cannot be filed does not block the
     // sign-in - the consent page falls back to asking.
+    state.activity.record(
+        "relay_approved",
+        format!("Approved a sign-in to {} from another device", claim.app_name),
+        claim.share_email.as_ref().map(|_| "Your email was shared".to_string()),
+        None,
+        Some(claim.app_name.clone()),
+    );
     if let (Some(_), Some(cid)) = (&claim.share_email, &claim.app_client_id) {
         let already = state.email_grants.lock().unwrap().contains_key(cid);
         if !already {

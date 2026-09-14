@@ -234,6 +234,8 @@ pub struct AppState {
     /// Persisted to email-grants.json. A remembered site does NOT imply an
     /// email grant: the first request for `email` always shows the dialog.
     pub email_grants: Mutex<HashMap<String, EmailGrant>>,
+    /// What happened in this Vault, newest last (activity.json).
+    pub activity: crate::activity::ActivityLog,
     /// Derived backup encryption key - persists through vault lock so apps
     /// can store backups while the vault is locked. Derived from device_seed
     /// via HMAC (cannot recover seed or sign).
@@ -362,6 +364,7 @@ pub(crate) fn invalidate_cell_credentials(state: &Arc<AppState>) {
 
 impl AppState {
     pub fn new(data_dir: std::path::PathBuf) -> Self {
+        let activity = crate::activity::ActivityLog::load(&data_dir);
         let vault_path = data_dir.join("vault.enc");
 
         // Load persisted linked apps, verified apps cache, and granted scopes
@@ -391,6 +394,7 @@ impl AppState {
             verified_apps: Mutex::new(verified_apps),
             linked_app_scopes: Mutex::new(linked_app_scopes),
             email_grants: Mutex::new(email_grants),
+            activity,
             grant_token_cache: Mutex::new(None),
             backup_key: Mutex::new(None),
             linked_web_agent_key: Mutex::new(None),
@@ -649,6 +653,9 @@ pub fn setup_vault(
         if let Err(e) = std::fs::write(restore_choice_pending_path(&state.data_dir), b"") {
             log::warn!("could not write the restore-choice marker: {}", e);
         }
+        state.activity.record("identity_restored", "Restored your identity on this device", None, None, None);
+    } else {
+        state.activity.record("identity_created", "Created your identity on this device", None, None, None);
     }
     Ok(result)
 }
@@ -2586,6 +2593,7 @@ pub(crate) async fn change_vault_password_inner(
     }
 
     log::info!("Vault password changed - restarting conductor under the new passphrase.");
+    state.activity.record("password_changed", "Changed your password", None, None, None);
 
     // 8. Restart the conductor stack under the new passphrase - via the
     // watchdog's recovery path, so it serialises on conductor_restart_lock
@@ -3207,7 +3215,11 @@ pub fn revoke_site(
     // Also remove from approved apps if present
     {
         let mut approved = state.approved_apps.lock().unwrap();
+        let before = approved.len();
         approved.retain(|o| o != &origin);
+        if approved.len() != before {
+            state.activity.record("site_forgotten", format!("Forgot {}", origin), Some("Sign-ins from this site ask again".into()), Some(origin.clone()), None);
+        }
     }
     drop(sites);
     state.save_approved_sites();
@@ -3235,18 +3247,29 @@ pub fn respond_auth_request(
 
     // If user chose to remember and approved, save the origin
     if approved && remember {
+        let mut newly = None;
         if let Some(ref origin) = req.info.origin {
             let mut apps = state.approved_apps.lock().unwrap();
             if !apps.contains(origin) {
                 apps.push(origin.clone());
+                newly = Some(origin.clone());
             }
         }
         state.save_approved_sites();
+        if let Some(origin) = newly {
+            state.activity.record("site_remembered", format!("Remembered {}", origin), Some("Sign-ins from this site no longer ask".into()), Some(origin), Some(req.info.app_name.clone()));
+        }
     }
 
     // Send the response - ignore error if receiver was dropped (timeout)
     let _ = req.responder.send(approved);
     Ok(())
+}
+
+/// The Vault's activity log, newest first.
+#[tauri::command]
+pub fn get_activity(limit: Option<usize>, state: State<'_, Arc<AppState>>) -> Vec<crate::activity::ActivityEvent> {
+    state.activity.recent(limit.unwrap_or(500))
 }
 
 /// Get info about the current pending link-identity request (if any).
@@ -3392,6 +3415,13 @@ pub fn revoke_linked_third_party_app(
             .and_then(|a| a.client_id.clone())
     };
 
+    let unlinked_name = {
+        let apps = state.linked_third_party_apps.lock().unwrap();
+        apps.iter().find(|a| a.app_agent_pub_key == app_agent_pub_key).map(|a| a.app_name.clone())
+    };
+    if let Some(name) = unlinked_name {
+        state.activity.record("app_unlinked", format!("Unlinked {}", name), None, None, Some(name));
+    }
     {
         let mut apps = state.linked_third_party_apps.lock().unwrap();
         let before = apps.len();
@@ -3414,11 +3444,12 @@ pub fn revoke_linked_third_party_app(
 /// Forget an app's email grant locally and, best effort, on the server
 /// (the server row is what /oauth/userinfo serves).
 pub(crate) fn revoke_email_grant(state: &Arc<AppState>, client_id: &str) {
-    let had = state.email_grants.lock().unwrap().remove(client_id).is_some();
-    if !had {
+    let removed = state.email_grants.lock().unwrap().remove(client_id);
+    let Some(grant) = removed else {
         return;
-    }
+    };
     state.save_email_grants();
+    state.activity.record("email_unshared", format!("Stopped sharing your email with {}", grant.app_name), None, None, Some(grant.app_name.clone()));
     let st = state.clone();
     let cid = client_id.to_string();
     tauri::async_runtime::spawn(async move {
@@ -3441,6 +3472,7 @@ pub(crate) async fn record_email_grant(state: &Arc<AppState>, client_id: &str, a
         );
     }
     state.save_email_grants();
+    state.activity.record("email_shared", format!("Shared your email with {}", app_name), Some("Only this app; revoke it any time in Connections".into()), None, Some(app_name.to_string()));
     match file_email_grant_on_server(state, client_id, false).await {
         Ok(()) => {
             if let Some(g) = state.email_grants.lock().unwrap().get_mut(client_id) {
@@ -3634,7 +3666,11 @@ pub fn revoke_approved_app(
 ) -> Result<(), String> {
     {
         let mut apps = state.approved_apps.lock().unwrap();
+        let before = apps.len();
         apps.retain(|o| o != &origin);
+        if apps.len() != before {
+            state.activity.record("site_forgotten", format!("Forgot {}", origin), Some("Sign-ins from this site ask again".into()), Some(origin.clone()), None);
+        }
     }
     state.save_approved_sites();
     Ok(())
@@ -6522,6 +6558,7 @@ pub async fn check_email_change(
             }
         }
         persist_config_now(state.inner())?;
+        state.activity.record("email_changed", "Changed your email", None, None, None);
         // The address is stored here now: the server can drop the plaintext
         // from its request row (best effort; the daily sweep covers a miss).
         {

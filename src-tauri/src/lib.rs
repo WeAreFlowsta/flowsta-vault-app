@@ -1,3 +1,4 @@
+mod activity;
 mod backup;
 mod commands;
 mod conductor;
@@ -178,6 +179,7 @@ pub fn run() {
 
             // Initialize app state (shared between Tauri commands and IPC server)
             let app_state = Arc::new(AppState::new(data_dir));
+            app_state.activity.attach(app.handle().clone());
 
             // Share state with Tauri commands
             app.manage(app_state.clone());
@@ -453,6 +455,7 @@ pub fn run() {
             commands::set_web_email,
             commands::check_vault_update,
             commands::get_email_grants,
+            commands::get_activity,
             commands::revoke_email_grant_command,
             commands::request_email_change,
             commands::check_email_change,

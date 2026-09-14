@@ -1005,6 +1005,23 @@ async fn authenticate_handler(
         _ => (None, None),
     };
 
+    // The log line for this sign-in: the page's own wording when it gave
+    // one ("Sign in to Website-dev"), else the app's name.
+    {
+        let label = match req.reason.as_deref() {
+            Some(r) if r.starts_with("Sign in to ") => r.replacen("Sign in", "Signed in", 1),
+            _ => format!("Signed in to {}", req.app_name),
+        };
+        let detail = if auto_approved {
+            Some("Remembered site - no dialog".to_string())
+        } else if email.is_some() {
+            Some("Your email was shared".to_string())
+        } else {
+            None
+        };
+        state.app_state.activity.record("sign_in", label, detail, origin.clone(), Some(req.app_name.clone()));
+    }
+
     let resp = AuthenticateResponse {
         success: true,
         did,
@@ -3813,8 +3830,9 @@ async fn dev_status_handler(
     // Which apps hold an email grant in this vault - lets the matrix prove
     // that an unbound origin files none.
     let email_grants: Vec<String> = state.app_state.email_grants.lock().unwrap().keys().cloned().collect();
+    let activity = state.app_state.activity.kinds_newest_first(10);
     Ok(axum::response::IntoResponse::into_response(Json(
-        serde_json::json!({ "harness": true, "conductor": conductor, "old_keystores": old_keystores, "email_grants": email_grants }),
+        serde_json::json!({ "harness": true, "conductor": conductor, "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity }),
     )))
 }
 
