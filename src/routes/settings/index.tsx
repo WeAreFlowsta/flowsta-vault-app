@@ -4,6 +4,8 @@ import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
 import { GlassButton } from "~/components/common/GlassButton";
+import { PillButton } from "~/components/ui/PillButton";
+import { timeAgo } from "~/lib/activity";
 import { PasswordField } from "~/components/common/PasswordField";
 import { autoLockContext } from "~/lib/context";
 import { clearSignaturesCache } from "~/lib/signatures-cache";
@@ -12,6 +14,14 @@ import { checkVaultPassword } from "~/lib/password-strength";
 import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATCH } from "~/lib/email";
 
 declare const __API_URL__: string;
+
+/** Flowsta's own pages and loopback callers never count as "knocking". */
+function isFlowstaOrLocal(origin: string): boolean {
+  try {
+    const host = new URL(origin).hostname;
+    return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host.endsWith("flowsta.com");
+  } catch { return false; }
+}
 
 interface EmailChangeState {
   status: "pending" | "applied" | "current" | "expired" | "cancelled";
@@ -25,6 +35,31 @@ export default component$(() => {
   const autoLockMinutes = useContext(autoLockContext);
 
   const activeTab = useSignal<"general" | "about">("general");
+
+  // Privacy: sites that reached this Vault's local port without holding any
+  // permission. Traffic, not access - kept so nothing can talk to the Vault
+  // without leaving a trace. Flowsta's own pages and trusted sites are
+  // listed on Connections instead.
+  interface KnockingSite { origin: string; last_request: number; request_count: number; last_action: string; has_authenticated: boolean; trusted: boolean }
+  const knockingSites = useSignal<KnockingSite[]>([]);
+  const loadKnocking = $(async () => {
+    try {
+      const sites = await invoke<KnockingSite[]>("get_connected_sites");
+      knockingSites.value = sites.filter((s) => !s.trusted && !isFlowstaOrLocal(s.origin));
+    } catch { /* locked */ }
+  });
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ cleanup }) => {
+    loadKnocking();
+    const id = setInterval(loadKnocking, 5_000);
+    cleanup(() => clearInterval(id));
+  });
+  const trustKnocking = $(async (origin: string) => {
+    try { await invoke("toggle_site_trust", { origin, trusted: true }); await loadKnocking(); } catch (e) { console.error(e); }
+  });
+  const clearKnocking = $(async (origin: string) => {
+    try { await invoke("revoke_site", { origin }); await loadKnocking(); } catch (e) { console.error(e); }
+  });
 
   // Change password state
   const currentPassword = useSignal("");
@@ -422,6 +457,44 @@ export default component$(() => {
               </div>
             </div>
           )}
+
+          {/* Privacy: who knocked */}
+          <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
+            <h3 class="mb-2 text-lg font-semibold text-white">Sites that tried to reach this Vault</h3>
+            <p class="mb-4 text-sm text-gray-400">
+              Your Vault listens on this computer, so any page open in your browser can knock on its door. Nothing is
+              answered without your approval. This is who knocked without holding any permission - Flowsta's own pages
+              and the sites you connected are not listed here.
+            </p>
+            {knockingSites.value.length === 0 ? (
+              <p class="text-sm text-gray-500">No one, so far.</p>
+            ) : (
+              <div class="space-y-2">
+                {knockingSites.value.map((site) => (
+                  <div key={site.origin} class="flex items-center justify-between rounded-lg border border-gray-700 bg-black/30 px-4 py-2.5">
+                    <div class="min-w-0 flex-1">
+                      <span class="truncate text-sm text-gray-300">{site.origin}</span>
+                      <div class="mt-0.5 flex items-center gap-3 text-xs text-gray-500">
+                        <span>{site.request_count} request{site.request_count !== 1 ? "s" : ""}</span>
+                        <span>Last: {timeAgo(site.last_request)}</span>
+                        <span class="rounded bg-gray-700 px-1.5 py-0.5 text-[10px] text-gray-400">{site.last_action}</span>
+                      </div>
+                    </div>
+                    <div class="ml-4 flex items-center gap-2">
+                      {site.has_authenticated && (
+                        <PillButton accent="green" title="Trust this site to sign you in without asking" onClick$={() => trustKnocking(site.origin)}>
+                          Trust
+                        </PillButton>
+                      )}
+                      <PillButton accent="red" title="Forget this site" onClick$={() => clearKnocking(site.origin)}>
+                        Clear
+                      </PillButton>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Auto-lock */}
           <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">

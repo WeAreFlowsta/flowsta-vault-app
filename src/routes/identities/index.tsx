@@ -6,7 +6,7 @@ import { CopyButton } from "~/components/ui/CopyButton";
 import { GlassButton } from "~/components/common/GlassButton";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 import { sanitizeImageUrl } from "~/lib/safe-url";
-import { PillButton } from "~/components/ui/PillButton";
+import { ScopeChips } from "~/components/vault/ScopeChips";
 
 declare const __API_URL__: string;
 
@@ -28,23 +28,6 @@ function isInternalOrigin(origin: string): boolean {
   } catch {
     return false;
   }
-}
-
-// Granted powers in the user's language, not scope strings.
-const POWER_LABELS: Record<string, string> = {
-  display_name: "your name",
-  username: "your username",
-  email: "your email address",
-  profile_picture: "your profile picture",
-  did: "your DID",
-  public_key: "your public key",
-  holochain: "Holochain access",
-};
-function humanPowers(perms: unknown): string {
-  const list = (Array.isArray(perms) ? perms : [])
-    .filter((x: string) => x !== "openid")
-    .map((x: string) => POWER_LABELS[x] || x);
-  return list.length > 0 ? list.join(", ") : "your identity";
 }
 
 function timeAgo(unixSecs: number): string {
@@ -81,8 +64,6 @@ export default component$(() => {
   // grants list; the rest live in the collapsed Bridge Activity log.
   const connectedSites = useSignal<ConnectedSite[]>([]);
   const trustedSites = useComputed$(() => connectedSites.value.filter((s) => s.trusted));
-  const activitySites = useComputed$(() => connectedSites.value.filter((s) => !s.trusted));
-  const activityOpen = useSignal(false);
 
   // Web sign-ins (OAuth grants) - server-authoritative, fetched with a
   // vault-grant session so this page shows the COMPLETE picture. The web
@@ -419,17 +400,7 @@ export default component$(() => {
             {dedupedApps.value.map((app) => {
               const scopes = (app.client_id ? appScopes.value[app.client_id] : null) ?? [];
               const deviceCount = app.agent_keys.length;
-              const scopeLabels: Record<string, string> = {
-                openid: "Identity",
-                display_name: "Display name",
-                username: "Username",
-                profile_picture: "Profile picture",
-                email: "Email",
-                did: "DID",
-                public_key: "Public key",
-                holochain: "Holochain",
-              };
-              const visibleScopes = scopes.filter((s) => s !== "openid");
+              const grant = app.client_id ? emailGrants.value.find((g) => g.client_id === app.client_id) : undefined;
               return (
                 <div
                   key={`app-${app.client_id ?? app.app_name}`}
@@ -456,18 +427,12 @@ export default component$(() => {
                           </code>
                         )}
                       </div>
-                      {visibleScopes.length > 0 && (
-                        <div class="mt-2 flex flex-wrap gap-1">
-                          {visibleScopes.map((scope) => (
-                            <span
-                              key={scope}
-                              class="rounded-full border border-gray-700 bg-black/30 px-2 py-0.5 text-[10px] text-gray-400"
-                            >
-                              {scopeLabels[scope] ?? scope}
-                            </span>
-                          ))}
-                        </div>
-                      )}
+                      <ScopeChips
+                        scopes={scopes}
+                        emailShared={!!grant}
+                        stopping={!!grant && revokingGrant.value === grant.client_id}
+                        onStopSharing$={grant ? $(() => handleRevokeEmailGrant(grant.client_id)) : undefined}
+                      />
                     </div>
                     <GlassButton
                       variant="danger"
@@ -619,8 +584,18 @@ export default component$(() => {
                         Connected {new Date(site.firstConnectedAt).toLocaleDateString()}
                       </span>
                     )}
-                    <span class="truncate">Can see: {humanPowers(site.permissions)}</span>
                   </div>
+                  {(() => {
+                    const grant = site.clientId ? emailGrants.value.find((g) => g.client_id === site.clientId) : undefined;
+                    return (
+                      <ScopeChips
+                        scopes={Array.isArray(site.permissions) ? site.permissions : []}
+                        emailShared={!!grant}
+                        stopping={!!grant && revokingGrant.value === grant.client_id}
+                        onStopSharing$={grant ? $(() => handleRevokeEmailGrant(grant.client_id)) : undefined}
+                      />
+                    );
+                  })()}
                 </div>
                 <GlassButton
                   variant="danger"
@@ -642,113 +617,36 @@ export default component$(() => {
         )}
       </div>
 
-      {/* Bridge activity - traffic log, NOT grants. Origins that called
-          this device's bridge without holding any standing permission. */}
-      {activitySites.value.length > 0 && (
-        <div class="mt-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
-          <button
-            type="button"
-            class="flex w-full items-center justify-between"
-            onClick$={() => (activityOpen.value = !activityOpen.value)}
-          >
-            <div class="text-left">
-              <h3 class="text-sm font-semibold text-white">Other sites that reached this Vault</h3>
-              <p class="mt-0.5 text-xs text-gray-500">
-                {activitySites.value.length} site{activitySites.value.length !== 1 ? "s" : ""} contacted this Vault without holding any permission - traffic, not access. Trust one to let it sign you in without asking; Clear forgets it.
-              </p>
-            </div>
-            <svg
-              class={["h-4 w-4 text-gray-500 transition-transform", activityOpen.value ? "rotate-180" : ""].join(" ")}
-              fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}
-            >
-              <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-            </svg>
-          </button>
 
-          {activityOpen.value && (
-            <div class="mt-4 space-y-2">
-              {activitySites.value.map((site) => (
-                <div
-                  key={`activity-${site.origin}`}
-                  class="flex items-center justify-between rounded-lg border border-gray-700 bg-black/30 px-4 py-2.5"
-                >
+      {/* Email grants whose app has no row above (asked through the Vault,
+          never linked or signed in on the web) */}
+      {(() => {
+        const listed = new Set<string>([
+          ...dedupedApps.value.map((a) => a.client_id).filter(Boolean) as string[],
+          ...webSites.value.map((w: any) => w.clientId).filter(Boolean),
+        ]);
+        const orphans = emailGrants.value.filter((g) => !listed.has(g.client_id));
+        if (orphans.length === 0) return null;
+        return (
+          <div class="mt-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
+            <h3 class="mb-1 text-lg font-semibold text-white">Also shared your email with</h3>
+            <p class="mb-4 text-xs text-gray-500">Apps that asked through the Vault but are not connected here.</p>
+            <div class="space-y-2">
+              {orphans.map((g) => (
+                <div key={`grant-${g.client_id}`} class="flex items-center justify-between rounded-lg border border-gray-700 bg-black/30 px-4 py-3">
                   <div class="min-w-0 flex-1">
-                    <span class="truncate text-sm text-gray-300">{site.origin}</span>
-                    <div class="mt-0.5 flex items-center gap-3 text-xs text-gray-500">
-                      <span>{site.request_count} request{site.request_count !== 1 ? "s" : ""}</span>
-                      <span>Last: {timeAgo(site.last_request)}</span>
-                      <span class="rounded bg-gray-700 px-1.5 py-0.5 text-[10px] text-gray-400">{site.last_action}</span>
-                    </div>
+                    <span class="truncate text-sm font-medium text-white">{g.app_name}</span>
+                    <div class="mt-1 text-xs text-gray-500">Since {new Date(g.granted_at * 1000).toLocaleDateString()}</div>
                   </div>
-                  <div class="ml-4 flex items-center gap-2">
-                    {site.has_authenticated && (
-                      <PillButton
-                        accent="green"
-                        title="Trust this site to sign you in without asking"
-                        onClick$={() => handleToggleTrust(site.origin, true)}
-                      >
-                        Trust
-                      </PillButton>
-                    )}
-                    <PillButton
-                      accent="red"
-                      title="Clear from this log"
-                      onClick$={() => handleRevokeSite(site.origin)}
-                    >
-                      Clear
-                    </PillButton>
-                  </div>
+                  <GlassButton variant="danger" disabled={revokingGrant.value === g.client_id} onClick$={() => handleRevokeEmailGrant(g.client_id)}>
+                    {revokingGrant.value === g.client_id ? "Stopping…" : "Stop sharing"}
+                  </GlassButton>
                 </div>
               ))}
             </div>
-          )}
-        </div>
-      )}
-
-
-      {/* Email shared with apps - the grants made in this Vault's dialogs */}
-      <div class="mt-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
-        <div class="mb-4 flex items-center justify-between">
-          <h3 class="text-lg font-semibold text-white">Email shared with</h3>
-          <span class="text-xs text-gray-500">
-            {emailGrants.value.length} app{emailGrants.value.length !== 1 ? "s" : ""}
-          </span>
-        </div>
-        {emailGrants.value.length === 0 ? (
-          <p class="text-sm text-gray-500">
-            No app has your email. When an app asks for it, you decide here in the Vault.
-          </p>
-        ) : (
-          <div class="space-y-2">
-            {emailGrants.value.map((g) => (
-              <div key={`grant-${g.client_id}`} class="flex items-center justify-between rounded-lg border border-gray-700 bg-black/30 px-4 py-3">
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2">
-                    <div class="flex h-6 w-6 items-center justify-center rounded bg-pink-900/30 text-xs text-pink-300">
-                      {g.app_name.charAt(0).toUpperCase()}
-                    </div>
-                    <span class="truncate text-sm font-medium text-white">{g.app_name}</span>
-                  </div>
-                  <div class="mt-1 flex items-center gap-3 text-xs text-gray-500">
-                    <span>Since {new Date(g.granted_at * 1000).toLocaleDateString()}</span>
-                    {!g.synced && <span class="text-amber-400">Not yet filed with Flowsta - it will be at your next sign-in</span>}
-                  </div>
-                </div>
-                <GlassButton
-                  variant="danger"
-                  disabled={revokingGrant.value === g.client_id}
-                  onClick$={() => handleRevokeEmailGrant(g.client_id)}
-                >
-                  {revokingGrant.value === g.client_id ? "Stopping…" : "Stop sharing"}
-                </GlassButton>
-              </div>
-            ))}
           </div>
-        )}
-        <p class="mt-3 text-xs text-gray-500">
-          Stopping removes the app's copy of your address at Flowsta as well. The app keeps whatever it already saved on its side.
-        </p>
-      </div>
+        );
+      })()}
     </div>
   );
 });
