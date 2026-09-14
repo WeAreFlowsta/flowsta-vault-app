@@ -3618,7 +3618,16 @@ pub async fn check_vault_update(api_url: String) -> Result<VaultUpdateInfo, Stri
 /// Apps the user has allowed to receive their email (client_id → grant).
 #[tauri::command]
 pub fn get_email_grants(state: State<'_, Arc<AppState>>) -> HashMap<String, EmailGrant> {
-    state.email_grants.lock().unwrap().clone()
+    // Older grants were labelled with the requesting page's own name; show
+    // the registered name whenever the app is known here.
+    let verified = state.verified_apps.lock().unwrap();
+    let mut grants = state.email_grants.lock().unwrap().clone();
+    for (cid, g) in grants.iter_mut() {
+        if let Some(app) = verified.get(cid) {
+            g.app_name = app.name.clone();
+        }
+    }
+    grants
 }
 
 /// Stop sharing the email with one app (Connections).

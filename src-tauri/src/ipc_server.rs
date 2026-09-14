@@ -993,7 +993,12 @@ async fn authenticate_handler(
     let (email, email_verified) = match (share_email, req.client_id.as_deref()) {
         (Some(addr), Some(cid)) => {
             if email_grant_recordable {
-                crate::commands::record_email_grant(&state.app_state, cid, &req.app_name).await;
+                // The grant carries the app's REGISTERED name (fetched with
+                // its scopes), never the requesting page's own label - the
+                // login page calls itself "Flowsta", a harness "Matrix".
+                let registered = state.app_state.verified_apps.lock().unwrap().get(cid).map(|a| a.name.clone());
+                let grant_name = registered.unwrap_or_else(|| req.app_name.clone());
+                crate::commands::record_email_grant(&state.app_state, cid, &grant_name).await;
             } else if email_grant_needed {
                 log::info!(
                     "email shared with {:?} for {} on the user's say-so; no grant filed (origin not linked to that app)",
