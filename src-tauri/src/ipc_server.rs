@@ -3836,8 +3836,9 @@ async fn dev_status_handler(
     // that an unbound origin files none.
     let email_grants: Vec<String> = state.app_state.email_grants.lock().unwrap().keys().cloned().collect();
     let activity = state.app_state.activity.kinds_newest_first(10);
+    let activity_last = state.app_state.activity.recent(1).into_iter().next();
     Ok(axum::response::IntoResponse::into_response(Json(
-        serde_json::json!({ "harness": true, "conductor": conductor, "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity }),
+        serde_json::json!({ "harness": true, "conductor": conductor, "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity, "activity_last": activity_last }),
     )))
 }
 
@@ -3950,6 +3951,117 @@ struct DevLegacyBody {
 /// the conductor starts WITHOUT the v2 encrypted cell, exactly like a vault
 /// from before device hosting. This is the true starting state for the
 /// in-place account-upgrade walkthrough; no historical build needed.
+/// Dev-only: what the "Remember this site" tick does on approval - so the
+/// matrix can prove a remembered origin signs in without a dialog and that
+/// the memory survives lock and relaunch.
+async fn dev_remember_origin_handler(
+    State(state): State<Arc<IpcState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError { error: "not_found".into(), description: None }),
+        ));
+    }
+    let origin = body.get("origin").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    if origin.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(IpcError { error: "origin_required".into(), description: None })));
+    }
+    let forget = body.get("forget").and_then(|v| v.as_bool()).unwrap_or(false);
+    {
+        let mut apps = state.app_state.approved_apps.lock().unwrap();
+        apps.retain(|o| o != &origin);
+        if !forget {
+            apps.push(origin.clone());
+        }
+    }
+    state.app_state.save_approved_sites();
+    Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({ "success": true, "remembered": !forget }))))
+}
+
+#[derive(Deserialize)]
+struct DevSetupIdentityBody {
+    api_url: String,
+    password: String,
+    /// Omitted = a fresh 24-word phrase is generated (create). Given with
+    /// `restore: true` = the offline-restore path from that phrase.
+    #[serde(default)]
+    phrase: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    restore: bool,
+}
+
+/// Dev-only: create an identity exactly as the wizard does online
+/// (register the device key with Flowsta, then build the vault), or restore
+/// one offline from a phrase (keys derive locally; the account layer
+/// reattaches on the first unlock). Returns the phrase so a second fresh
+/// instance can restore the same identity.
+async fn dev_setup_identity_handler(
+    State(state): State<Arc<IpcState>>,
+    Json(body): Json<DevSetupIdentityBody>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError { error: "not_found".into(), description: None }),
+        ));
+    }
+    let fail = |code: &str, e: String| (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(IpcError { error: code.into(), description: Some(e) }),
+    );
+    if state.app_state.vault_config.lock().unwrap().is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(IpcError { error: "already_set_up".into(), description: Some("this instance already holds an identity".into()) }),
+        ));
+    }
+    let app_state = state.app_state.clone();
+    let phrase = match body.phrase.clone() {
+        Some(p) => p,
+        None => crate::device_identity::generate_new_mnemonic().map_err(|e| fail("mnemonic_failed", e))?,
+    };
+    crate::commands::validate_vault_password(&body.password).map_err(|e| fail("weak_password", e))?;
+
+    let result = if body.restore {
+        // The wizard's offline restore: no web fields, marked for reconcile.
+        crate::commands::setup_vault_inner(
+            phrase.clone(), body.password.clone(), None, None, None, None, None,
+            Some("device-hosted".to_string()), true, false,
+            state.app_handle.clone(), &app_state,
+        )
+        .map_err(|e| fail("setup_failed", e))?
+    } else {
+        let email = body.email.clone().ok_or_else(|| fail("email_required", "create needs an email".into()))?;
+        let reg = crate::device_identity::register_device_identity(
+            body.api_url.clone(), phrase.clone(), email.clone(), body.display_name.clone(),
+        )
+        .await
+        .map_err(|e| fail("register_failed", e))?;
+        let email = crate::commands::normalize_email(&email).map_err(|e| fail("bad_email", e))?;
+        crate::commands::setup_vault_inner(
+            phrase.clone(), body.password.clone(), None, Some(email), None,
+            body.display_name.clone(), reg.profile_picture.clone(),
+            Some("device-hosted".to_string()), false, false,
+            state.app_handle.clone(), &app_state,
+        )
+        .map_err(|e| fail("setup_failed", e))?
+    };
+    crate::commands::record_identity_setup(&app_state, body.restore);
+    log::warn!("DEV: identity {} headlessly ({})", if body.restore { "restored" } else { "created" }, result.agent_pub_key);
+    Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({
+        "agent_pub_key": result.agent_pub_key,
+        "did": result.did,
+        "phrase": phrase,
+        "restored": body.restore,
+    }))))
+}
+
 async fn dev_setup_legacy_handler(
     State(state): State<Arc<IpcState>>,
     Json(body): Json<DevLegacyBody>,
@@ -4525,6 +4637,8 @@ pub async fn start_ipc_server(
         .route("/dev/lock", post(dev_lock_handler))
         .route("/dev/unlock", post(dev_unlock_handler))
         .route("/dev/setup-legacy-vault", post(dev_setup_legacy_handler))
+        .route("/dev/setup-identity", post(dev_setup_identity_handler))
+        .route("/dev/remember-origin", post(dev_remember_origin_handler))
         .route("/dev/run-upgrade", post(dev_run_upgrade_handler))
         .route("/dev/unlock-with-password", post(dev_unlock_pw_handler))
         .route("/dev/change-password", post(dev_change_password_handler))

@@ -15,6 +15,9 @@
  *   node scripts/bridge-matrix.mjs --phase=password  # change → relock → unlock with the new one → ready
  *   node scripts/bridge-matrix.mjs --phase=grants    # email never leaks without a grant; scopes ride /authenticate
  *   node scripts/bridge-matrix.mjs --phase=full      # everything else
+ *   node scripts/bridge-matrix.mjs --phase=create    # create an identity on a FRESH instance (+ restore twin)
+ *       needs VAULT_MATRIX_PORT = a fresh test instance (no identity yet), and
+ *       optionally VAULT_MATRIX_RESTORE_PORT = a second fresh instance for the twin
  *   node scripts/bridge-matrix.mjs                   # all legs
  *
  * Env:
@@ -881,10 +884,160 @@ async function grantsLeg() {
   }
 }
 
+// ── Remembered-site leg ──────────────────────────────────────────────
+//
+// "Remember this site" must mean it: a remembered origin signs in with no
+// dialog (the activity line says so), the memory survives a lock + unlock,
+// and forgetting it brings the dialog back. Runs inside the full phase.
+
+async function rememberedSiteLeg() {
+  console.log('\n── Remembered-site leg');
+  const origin = 'https://remembered.example';
+  const dev0 = await api('/dev/status');
+  if (dev0.status !== 200) { record('remembered-site leg skipped - not a harness build', true); return; }
+  const signIn = async () => {
+    const challenge = Buffer.from(`matrix-remember-${randomHash().slice(0, 16)}`).toString('base64');
+    const r = await api('/authenticate', { method: 'POST', origin, body: { app_name: 'Remembered', challenge, reason: 'Sign in to Remembered' } });
+    const d = await api('/dev/status');
+    return { status: r.status, last: d.data?.activity_last };
+  };
+  const before = await signIn();
+  record('not remembered yet: sign-in logged without the "remembered" note',
+    before.status === 200 && before.last?.kind === 'sign_in' && !(before.last?.detail || '').includes('Remembered'), JSON.stringify(before.last));
+  const rem = await api('/dev/remember-origin', { method: 'POST', body: { origin } });
+  record('remember the origin (what the tick does)', rem.status === 200 && rem.data?.remembered === true);
+  const after = await signIn();
+  record('remembered: the sign-in is logged as "Remembered site - no dialog"',
+    after.status === 200 && after.last?.kind === 'sign_in' && (after.last?.detail || '').includes('Remembered'), JSON.stringify(after.last));
+  // Survives a lock + unlock (the store is on disk, not in the session).
+  await api('/dev/lock', { method: 'POST' });
+  const unl = await api('/dev/unlock', { method: 'POST' });
+  record('unlock after lock (harness)', unl.status === 200);
+  const ready = await (async () => { const deadline = Date.now() + 120_000; while (Date.now() < deadline) { const d = await api('/dev/status'); if (d.data?.conductor?.status === 'ready') return true; await new Promise((r) => setTimeout(r, 2000)); } return false; })();
+  record('conductor ready after relock', ready);
+  const again = await signIn();
+  record('still remembered after lock + unlock', again.status === 200 && (again.last?.detail || '').includes('Remembered'), JSON.stringify(again.last));
+  const forget = await api('/dev/remember-origin', { method: 'POST', body: { origin, forget: true } });
+  const gone = await signIn();
+  record('forgotten: the next sign-in asks again (no "remembered" note)', forget.status === 200 && gone.status === 200 && !(gone.last?.detail || '').includes('Remembered'), JSON.stringify(gone.last));
+}
+
+// ── Create-identity leg ──────────────────────────────────────────────
+//
+// The wizard's create path, headlessly, on a FRESH instance: register the
+// device key with Flowsta, build the vault, conductor up, the identity
+// visible on /status, the server able to sign it in, the activity log
+// saying "Created", lock, wrong password refused, right password unlocks.
+// Then (second fresh instance) the offline restore from the same phrase
+// lands on the same agent key and logs "Restored", and the account layer
+// (email) reattaches from Flowsta by itself.
+
+async function vaultFetch(port, path, { method = 'GET', body, origin = ORIGIN } = {}) {
+  const headers = { 'content-type': 'application/json' };
+  if (origin) headers.origin = origin;
+  const resp = await fetch(`http://127.0.0.1:${port}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const data = await resp.json().catch(() => null);
+  return { status: resp.status, data };
+}
+
+async function waitConductorReady(port, secs) {
+  const deadline = Date.now() + secs * 1000;
+  while (Date.now() < deadline) {
+    const d = await vaultFetch(port, '/dev/status').catch(() => null);
+    if (d?.data?.conductor?.status === 'ready') return true;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return false;
+}
+
+async function waitFor(port, predicate, secs) {
+  const deadline = Date.now() + secs * 1000;
+  while (Date.now() < deadline) {
+    const d = await vaultFetch(port, '/dev/status').catch(() => null);
+    const st = await vaultFetch(port, '/status').catch(() => null);
+    if (predicate(st?.data, d?.data)) return true;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return false;
+}
+
+async function createLeg() {
+  console.log('\n── Create-identity leg');
+  const port = Number(process.env.VAULT_MATRIX_PORT || 0);
+  if (!port) { record('create leg skipped - set VAULT_MATRIX_PORT to a FRESH test instance', true); return; }
+  const restorePort = Number(process.env.VAULT_MATRIX_RESTORE_PORT || 0);
+  const password = process.env.VAULT_MATRIX_PASSWORD || `Matrix-create-${randomHash().slice(0, 12)}!`;
+  const email = `matrix-create-${Date.now()}@example.com`;
+
+  const fresh = await vaultFetch(port, '/status');
+  record('fresh instance: no identity yet', fresh.status === 200 && fresh.data?.initialized === false, JSON.stringify(fresh.data));
+  const dev0 = await vaultFetch(port, '/dev/status');
+  if (dev0.status !== 200) { record('create leg skipped - instance is not a harness build (/dev/status 404)', true); return; }
+  if (fresh.data?.initialized !== false) { record('create leg skipped - instance already holds an identity', true); return; }
+
+  const t0 = Date.now();
+  const created = await vaultFetch(port, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, email, display_name: 'Matrix Create' } });
+  record('create: registered with Flowsta + vault built (wizard path, headless)', created.status === 200 && !!created.data?.agent_pub_key && !!created.data?.phrase,
+    `${created.status} ${created.data?.error || ''} ${created.data?.description || ''} in ${Date.now() - t0} ms`);
+  if (created.status !== 200) return;
+  const { agent_pub_key: agent, did, phrase } = created.data;
+
+  record('conductor ready after create', await waitConductorReady(port, 120));
+  const st = await vaultFetch(port, '/status');
+  record('/status: unlocked, initialized, the new agent key + DID, email held for Flowsta pages',
+    st.data?.unlocked === true && st.data?.initialized === true && st.data?.agent_pub_key === agent && st.data?.did === did && st.data?.web_email === email,
+    JSON.stringify({ agent: st.data?.agent_pub_key === agent, did: st.data?.did === did, email: st.data?.web_email }));
+
+  // Flowsta knows the key: a login challenge signed by this vault is accepted.
+  const ch = await fetch(`${API}/auth/vault/challenge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_id: 'flowsta' }) }).then((r) => r.json()).catch(() => ({}));
+  const signed = await vaultFetch(port, '/authenticate', { method: 'POST', body: { app_name: 'Flowsta', challenge: Buffer.from(ch.challenge || '').toString('base64'), reason: 'Sign in to Matrix' } });
+  const tok = await fetch(`${API}/auth/vault/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ challenge: ch.challenge, agent_pub_key: agent, signature: signed.data?.signature }) }).then(async (r) => ({ status: r.status, data: await r.json().catch(() => ({})) }));
+  record('Flowsta signs the new identity in (registration is real)', signed.status === 200 && tok.status === 200 && !!tok.data?.token,
+    `authenticate ${signed.status}, token ${tok.status} ${tok.data?.error || ''}`);
+  record('…and it is a device-hosted account', tok.data?.user?.hostingModel === 'device-hosted', `hostingModel=${tok.data?.user?.hostingModel}`);
+
+  const dev1 = await vaultFetch(port, '/dev/status');
+  record('activity log says the identity was created here', (dev1.data?.activity || []).includes('identity_created'), JSON.stringify(dev1.data?.activity || []));
+
+  // Lock; the wrong password is refused; the right one unlocks and the conductor returns.
+  const locked = await vaultFetch(port, '/dev/lock', { method: 'POST' });
+  const stL = await vaultFetch(port, '/status');
+  record('lock: /status reports locked, identity still initialized', locked.status === 200 && stL.data?.unlocked === false && stL.data?.initialized === true);
+  const wrong = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: password + 'x' } });
+  record('wrong password refused', wrong.status !== 200 || wrong.data?.success !== true, `${wrong.status}`);
+  const right = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password } });
+  record('right password unlocks the new vault', right.status === 200 && right.data?.success === true && (right.data?.agent_pub_key === agent || right.data?.already_unlocked), `${right.status} ${right.data?.error || ''}`);
+  record('conductor ready again after unlock', await waitConductorReady(port, 120));
+
+  if (!restorePort) { record('restore twin skipped - set VAULT_MATRIX_RESTORE_PORT to a second FRESH instance', true); return; }
+  const fresh2 = await vaultFetch(restorePort, '/status');
+  if (fresh2.data?.initialized !== false) { record('restore twin skipped - second instance already holds an identity', true); return; }
+  const t1 = Date.now();
+  const restored = await vaultFetch(restorePort, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, phrase, restore: true } });
+  record('restore (offline path) from the same phrase on a second fresh instance', restored.status === 200 && restored.data?.restored === true,
+    `${restored.status} ${restored.data?.error || ''} in ${Date.now() - t1} ms`);
+  if (restored.status !== 200) return;
+  record('same agent key and DID as the created identity', restored.data?.agent_pub_key === agent && restored.data?.did === did,
+    `${(restored.data?.agent_pub_key || '').slice(0, 16)}… vs ${agent.slice(0, 16)}…`);
+  record('conductor ready after restore', await waitConductorReady(restorePort, 120));
+  const dev2 = await vaultFetch(restorePort, '/dev/status');
+  record('activity log says the identity was restored here', (dev2.data?.activity || []).includes('identity_restored'), JSON.stringify(dev2.data?.activity || []));
+  // The account layer reattaches from Flowsta on its own (reconcile after unlock).
+  const reattached = await waitFor(restorePort, (status) => status?.web_email === email, 90);
+  record('account layer reattached by itself: the restored vault knows the email', reattached, `web_email=${(await vaultFetch(restorePort, '/status')).data?.web_email}`);
+}
+
 // ───────────────────────── main ─────────────────────────
 
 (async () => {
   console.log(`Bridge matrix — phase: ${PHASE}, origin: ${ORIGIN}`);
+  if (PHASE === 'create') {
+    // A fresh instance has nothing for preflight to check yet.
+    await createLeg();
+    const passedC = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedC}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    process.exit(failures ? 1 : 0);
+  }
   const { status, baseline } = await preflight();
   const agentKey = status.agent_pub_key;
   const profileName = process.env.VAULT_MATRIX_NAME || status.display_name || 'Vlah test';
@@ -905,6 +1058,10 @@ async function grantsLeg() {
 
   if (PHASE === 'grants' || PHASE === 'all') {
     await grantsLeg();
+  }
+
+  if (PHASE === 'full' || PHASE === 'all') {
+    await rememberedSiteLeg();
   }
 
   if (PHASE === 'full' || PHASE === 'all') {

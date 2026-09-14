@@ -653,11 +653,19 @@ pub fn setup_vault(
         if let Err(e) = std::fs::write(restore_choice_pending_path(&state.data_dir), b"") {
             log::warn!("could not write the restore-choice marker: {}", e);
         }
+    }
+    record_identity_setup(&state, is_restore.unwrap_or(false));
+    Ok(result)
+}
+
+/// The activity line for a finished setup - shared by the wizard command
+/// and the dev harness endpoint so both paths log the same way.
+pub(crate) fn record_identity_setup(state: &Arc<AppState>, is_restore: bool) {
+    if is_restore {
         state.activity.record("identity_restored", "Restored your identity on this device", None, None, None);
     } else {
         state.activity.record("identity_created", "Created your identity on this device", None, None, None);
     }
-    Ok(result)
 }
 
 /// Vault creation shared by the wizard command and the account-migration
