@@ -5,7 +5,34 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.0-beta.1] - 2026-09-14
+## [1.3.0] - 2026-09-14
+
+### Highlights
+- **Your email is decided in the Vault.** When an app asks for it, the
+  Vault shows the address it would share and you allow or decline there.
+  Nothing is typed on a web page any more, and Connections shows which
+  apps have it, with Stop sharing on each.
+- **The Vault decides who is signing in.** A remembered browser session no
+  longer outranks the identity in your Vault: a different identity signs in
+  afresh, a locked Vault brings its unlock screen forward and carries the
+  sign-in on, a closed one asks to be opened.
+- **An Activity page.** Sign-ins and whether they were remembered, emails
+  shared or withdrawn, sites remembered and forgotten, apps unlinked, your
+  email and password changes - next to signatures, backups and links. Kept
+  on this device only.
+- **Your email, handled end to end.** Change it from Settings, type it
+  twice when creating an identity, and a restored or older Vault asks for
+  it once and confirms it against the account. Existing users meet that
+  question at the first unlock after upgrading.
+- **The Vault tells you when a newer version is out.**
+- **Sturdier under the hood.** Files are never left half-written, a
+  password change is all or nothing with a key store that repairs itself,
+  and "wrong password" means the password.
+
+One deliberate change in what "remember" means: a site you chose to
+remember now stays remembered across locking the Vault and across
+restarts, until you revoke it in Connections. Until now the Vault forgot
+every remembered site the moment it was locked or relaunched.
 
 ### Added
 - **An Activity page, and a Vault that remembers what happened.** Every
@@ -55,6 +82,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The "link this app" dialog shows the requesting page**, so an app's
   name can be checked against where the request came from.
 
+### Changed
+- **Sign-ins on this computer use the identity in your Vault.** When a
+  browser remembers a sign-in for a different identity than the one your
+  Vault holds, the sign-in runs again as your Vault's identity instead of
+  silently using the old one. A locked Vault is unlocked first, and a closed
+  one is opened first - a remembered sign-in no longer goes through with
+  the Vault shut. On phones, and in browsers that cannot reach a Vault, the
+  remembered sign-in stands as before.
+- **Notices share one look.** The "update needed" bar, and the lock-screen
+  messages for a sign-in, profile update, file or another device's code
+  waiting on your unlock, now use the same styled notice as the rest of
+  the app instead of a full-width strip.
+- **Every password field has a show/hide toggle** - setup, restore, the
+  account sign-in used when moving a Flowsta account in, the unlock screen
+  and Change Password.
+- **The first screen offers two ways to start.** Create a new identity or
+  restore from a recovery phrase are the choices; moving in an existing
+  Flowsta account from the website or the phone app is a link underneath.
+  The path itself is unchanged.
+- **Email addresses are stored the way Flowsta matches them.** Every place
+  you enter your email now trims it and lowercases it before it is saved
+  or sent, so an address typed with capitals no longer stops matching the
+  account later.
+- **"Import my export" on the overview lands on the restore card** in Your
+  Data instead of the top of the page.
+- **"Remember this site" now means it.** A site you chose to remember when
+  approving a sign-in stays remembered across locking the Vault and across
+  restarts, until you revoke it in Connections. Before, the Vault forgot
+  every remembered site the moment it was locked or relaunched, so the
+  approval dialog came back each time.
+- **A sign-in that arrives while the Vault is locked brings the unlock
+  screen forward and waits for you.** The unlock screen says what is
+  waiting - "Sign in to Website-dev, from https://login.flowsta.com" - and
+  keeps saying so until you unlock. Unlock, and the same sign-in carries
+  straight on to approval - no need to go back to the page and click again.
+  If you don't unlock within about a minute the page is told the Vault is
+  locked and simply asks again the moment you do.
+
 ### Fixed
 - **A crash or power cut can no longer leave the Vault's files half-written.**
   The vault file, the connected-app and remembered-site lists, app backups
@@ -101,47 +166,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with "try reinstalling". The key store keeps its own log, and the
   sidebar shows the reason whenever the local Holochain stops.
 
+### For developers
+- **`@flowsta/holochain` 3.2.0** (additive): `authenticateWithVault` gains
+  `clientId` + `scopes` and returns `email` / `emailVerified`;
+  `getVaultStatus` and `listVaultBackups` expose the new fields.
+- **`POST /authenticate` takes `scopes`** and answers `email` +
+  `email_verified` when the user allows; **`GET /status`** serves `email`
+  to a linked app holding the grant.
 - **Apps can see which labels they have backed up.** `GET /backup/list`
   now includes each app's stored labels, so an app can compare its own
   index against what the Vault holds in one call.
-
-### Changed
-- **Sign-ins on this computer use the identity in your Vault.** When a
-  browser remembers a sign-in for a different identity than the one your
-  Vault holds, the sign-in runs again as your Vault's identity instead of
-  silently using the old one. A locked Vault is unlocked first, and a closed
-  one is opened first - a remembered sign-in no longer goes through with
-  the Vault shut. On phones, and in browsers that cannot reach a Vault, the
-  remembered sign-in stands as before.
-- **Notices share one look.** The "update needed" bar, and the lock-screen
-  messages for a sign-in, profile update, file or another device's code
-  waiting on your unlock, now use the same styled notice as the rest of
-  the app instead of a full-width strip.
-- **Every password field has a show/hide toggle** - setup, restore, the
-  account sign-in used when moving a Flowsta account in, the unlock screen
-  and Change Password.
-- **The first screen offers two ways to start.** Create a new identity or
-  restore from a recovery phrase are the choices; moving in an existing
-  Flowsta account from the website or the phone app is a link underneath.
-  The path itself is unchanged.
-- **Email addresses are stored the way Flowsta matches them.** Every place
-  you enter your email now trims it and lowercases it before it is saved
-  or sent, so an address typed with capitals no longer stops matching the
-  account later.
-- **"Import my export" on the overview lands on the restore card** in Your
-  Data instead of the top of the page.
-- **"Remember this site" now means it.** A site you chose to remember when
-  approving a sign-in stays remembered across locking the Vault and across
-  restarts, until you revoke it in Connections. Before, the Vault forgot
-  every remembered site the moment it was locked or relaunched, so the
-  approval dialog came back each time.
-- **A sign-in that arrives while the Vault is locked brings the unlock
-  screen forward and waits for you.** The unlock screen says what is
-  waiting - "Sign in to Website-dev, from https://login.flowsta.com" - and
-  keeps saying so until you unlock. Unlock, and the same sign-in carries
-  straight on to approval - no need to go back to the page and click again.
-  If you don't unlock within about a minute the page is told the Vault is
-  locked and simply asks again the moment you do.
+- **Flowsta API**: `POST`/`DELETE /auth/email-grant` (device-signed),
+  `POST /auth/confirm-email`, `POST /auth/pending-email-change/collected`.
 
 ## [1.2.0] - 2026-08-04
 
