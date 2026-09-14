@@ -3810,8 +3810,11 @@ async fn dev_status_handler(
                 .count()
         })
         .unwrap_or(0);
+    // Which apps hold an email grant in this vault - lets the matrix prove
+    // that an unbound origin files none.
+    let email_grants: Vec<String> = state.app_state.email_grants.lock().unwrap().keys().cloned().collect();
     Ok(axum::response::IntoResponse::into_response(Json(
-        serde_json::json!({ "harness": true, "conductor": conductor, "old_keystores": old_keystores }),
+        serde_json::json!({ "harness": true, "conductor": conductor, "old_keystores": old_keystores, "email_grants": email_grants }),
     )))
 }
 

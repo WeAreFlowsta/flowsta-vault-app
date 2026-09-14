@@ -836,6 +836,43 @@ async function grantsLeg() {
     unknownApp.status === 200 && !!unknownApp.data?.signature && unknownApp.data?.email === undefined, `${unknownApp.status}`);
   const after = await api('/status');
   record('still no `email` on /status afterwards', after.status === 200 && !('email' in (after.data || {})));
+
+  // A grant belongs to the page that asked. With a registered app that has
+  // the email scope and a vault whose email is verified (Eric's staging
+  // identity), an origin that is neither a Flowsta page nor the app's linked
+  // page gets the dialog (auto-approved here) and may be handed the address
+  // for that one answer, but files NO grant under the app's client_id; a
+  // Flowsta page does. Observed through /dev/status.email_grants.
+  if (APP_CLIENT_ID) {
+    const dev0 = await api('/dev/status');
+    const grants0 = dev0.data?.email_grants || [];
+    if (dev0.status !== 200) {
+      record('grant binding probe skipped - /dev/status unavailable (needs FLOWSTA_VAULT_AUTO_APPROVE=1)', true);
+    } else if (grants0.includes(APP_CLIENT_ID)) {
+      record(`grant binding probe skipped - ${APP_CLIENT_ID.slice(0, 20)}… already holds a grant in this vault`, true);
+    } else {
+      const ch2 = Buffer.from(`matrix-bind-${randomHash().slice(0, 16)}`).toString('base64');
+      const evilAuth = await api('/authenticate', {
+        method: 'POST', origin: EVIL_ORIGIN,
+        body: { app_name: 'Matrix', challenge: ch2, reason: 'grants leg', client_id: APP_CLIENT_ID, scopes: ['email'] },
+      });
+      const dev1 = await api('/dev/status');
+      record('unbound origin + registered app + email scope: signs, files NO grant',
+        evilAuth.status === 200 && !!evilAuth.data?.signature && !(dev1.data?.email_grants || []).includes(APP_CLIENT_ID),
+        `${evilAuth.status} email=${evilAuth.data?.email ? 'shared for this answer' : 'none'} grants=${JSON.stringify(dev1.data?.email_grants || [])}`);
+      const boundAuth = await api('/authenticate', {
+        method: 'POST',
+        body: { app_name: 'Matrix', challenge: ch2, reason: 'grants leg', client_id: APP_CLIENT_ID, scopes: ['email'] },
+      });
+      const dev2 = await api('/dev/status');
+      const boundRecorded = (dev2.data?.email_grants || []).includes(APP_CLIENT_ID);
+      record('Flowsta origin + same app: signs and (verified email) files the grant',
+        boundAuth.status === 200 && !!boundAuth.data?.signature && (boundRecorded || !boundAuth.data?.email),
+        `${boundAuth.status} email=${boundAuth.data?.email ? 'shared' : 'none (unverified vault → nothing to grant)'} recorded=${boundRecorded}`);
+    }
+  } else {
+    record('grant binding probe skipped - set VAULT_MATRIX_APP_CLIENT_ID (a registered app with the email scope)', true);
+  }
 }
 
 // ───────────────────────── main ─────────────────────────
