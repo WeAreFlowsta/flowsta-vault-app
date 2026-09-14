@@ -989,7 +989,11 @@ async function createLeg() {
     JSON.stringify({ agent: st.data?.agent_pub_key === agent, did: st.data?.did === did, email: st.data?.web_email }));
 
   // Flowsta knows the key: a login challenge signed by this vault is accepted.
-  const ch = await fetch(`${API}/auth/vault/challenge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_id: 'flowsta' }) }).then((r) => r.json()).catch(() => ({}));
+  const chResp = await fetch(`${API}/auth/vault/challenge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_id: 'flowsta' }) }).catch(() => null);
+  const ch = chResp ? await chResp.json().catch(() => ({})) : {};
+  if (!ch.challenge) {
+    record(`Flowsta challenge unavailable (${chResp?.status || 'no response'}${chResp?.status === 429 ? ' - staging limiter; wait 15 min' : ''}) - the sign-in, reattach and confirm checks below cannot pass`, false, JSON.stringify(ch).slice(0, 120));
+  }
   const signed = await vaultFetch(port, '/authenticate', { method: 'POST', body: { app_name: 'Flowsta', challenge: Buffer.from(ch.challenge || '').toString('base64'), reason: 'Sign in to Matrix' } });
   const tok = await fetch(`${API}/auth/vault/token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ challenge: ch.challenge, agent_pub_key: agent, signature: signed.data?.signature }) }).then(async (r) => ({ status: r.status, data: await r.json().catch(() => ({})) }));
   record('Flowsta signs the new identity in (registration is real)', signed.status === 200 && tok.status === 200 && !!tok.data?.token,
@@ -1029,19 +1033,24 @@ async function createLeg() {
   // hash. Both facts are asserted.
   await vaultFetch(restorePort, '/dev/lock', { method: 'POST', body: {} });
   await vaultFetch(restorePort, '/dev/unlock', { method: 'POST', body: {} });
-  const reattached = await waitFor(restorePort, (status) => status?.display_name === 'Matrix Create', 120);
-  const stR = await vaultFetch(restorePort, '/status');
-  record('account layer reattached by itself after unlock: display name (and picture) are back', reattached, `display_name=${stR.data?.display_name} picture=${!!stR.data?.profile_picture}`);
-  record('the email is NOT back by itself (Flowsta holds only its hash) - the Overview asks for it', stR.data?.web_email == null, `web_email=${stR.data?.web_email}`);
+  // The reconcile is chained behind the post-unlock network checks, so it
+  // can take a few minutes on staging - wait generously.
+  // /status filters profile fields by the caller's granted scopes, so the
+  // harness reads the config itself via /dev/identity.
+  const devIdentity = async () => (await vaultFetch(restorePort, '/dev/identity')).data || {};
+  const reattached = await (async () => { const deadline = Date.now() + 300_000; while (Date.now() < deadline) { const id = await devIdentity(); if (id.display_name === 'Matrix Create') return true; await new Promise((r) => setTimeout(r, 3000)); } return false; })();
+  const idR = await devIdentity();
+  record('account layer reattached by itself after unlock: display name (and picture) are back', reattached && idR.profile_picture_len > 0, `display_name=${idR.display_name} picture_len=${idR.profile_picture_len}`);
+  record('the email is NOT back by itself (Flowsta holds only its hash) - the Overview asks for it', idR.web_email == null, `web_email=${idR.web_email}`);
   // The Overview's step: re-enter the address; the server checks the hash.
   const wrongEmail = await vaultFetch(restorePort, '/dev/confirm-email', { method: 'POST', body: { api_url: API, email: `wrong-${email}` } });
   record('re-entering a WRONG email is refused (email_mismatch)', wrongEmail.status === 403 && wrongEmail.data?.error === 'email_mismatch', `${wrongEmail.status} ${wrongEmail.data?.error || ''}`);
   const rightEmail = await vaultFetch(restorePort, '/dev/confirm-email', { method: 'POST', body: { api_url: API, email: email.toUpperCase() } });
-  const stE = await vaultFetch(restorePort, '/status');
+  const idE = await devIdentity();
   const devE = await vaultFetch(restorePort, '/dev/status');
   record('re-entering the registered email (any case) is confirmed and stored; activity says so',
-    rightEmail.status === 200 && stE.data?.web_email === email && (devE.data?.activity || []).includes('email_added'),
-    `${rightEmail.status} web_email=${stE.data?.web_email} activity=${JSON.stringify((devE.data?.activity || []).slice(0, 3))}`);
+    rightEmail.status === 200 && idE.web_email === email && (devE.data?.activity || []).includes('email_added'),
+    `${rightEmail.status} web_email=${idE.web_email} activity=${JSON.stringify((devE.data?.activity || []).slice(0, 3))}`);
 }
 
 // ───────────────────────── main ─────────────────────────
