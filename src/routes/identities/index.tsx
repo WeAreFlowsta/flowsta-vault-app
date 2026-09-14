@@ -519,8 +519,10 @@ export default component$(() => {
               </div>
             ))}
 
-            {/* Connected sites */}
-            {connectedSites.value.map((site) => (
+            {/* Remembered sites - the origins the user chose to trust for
+                sign-ins. Sites that merely contacted the Vault are traffic,
+                listed in the collapsed card at the bottom. */}
+            {trustedSites.value.map((site) => (
               <div
                 key={`site-${site.origin}`}
                 class={[
@@ -650,9 +652,9 @@ export default component$(() => {
             onClick$={() => (activityOpen.value = !activityOpen.value)}
           >
             <div class="text-left">
-              <h3 class="text-sm font-semibold text-white">Bridge activity</h3>
+              <h3 class="text-sm font-semibold text-white">Other sites that reached this Vault</h3>
               <p class="mt-0.5 text-xs text-gray-500">
-                {activitySites.value.length} site{activitySites.value.length !== 1 ? "s" : ""} contacted this Vault without holding any permission
+                {activitySites.value.length} site{activitySites.value.length !== 1 ? "s" : ""} contacted this Vault without holding any permission - traffic, not access. Trust one to let it sign you in without asking; Clear forgets it.
               </p>
             </div>
             <svg
