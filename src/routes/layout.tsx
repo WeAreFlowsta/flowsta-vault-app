@@ -22,10 +22,10 @@ declare const __WEB_URL__: string;
 // Same icon set + pill styling as the Website dashboard nav.
 const navItems = [
   { label: "Overview", href: "/", icon: "🏠" },
-  { label: "Activity", href: "/activity/", icon: "🕒" },
   { label: "Sign It", href: "/sign-it/", icon: "✍️" },
   { label: "Connections", href: "/identities/", icon: "🌐" },
   { label: "Your Data", href: "/your-data/", icon: "🔐" },
+  { label: "Activity", href: "/activity/", icon: "🕒" },
   { label: "Settings", href: "/settings/", icon: "⚙️" },
 ];
 
