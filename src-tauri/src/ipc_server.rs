@@ -718,9 +718,12 @@ async fn authenticate_handler(
     // which are queued through unlock. If they don't unlock in time we answer
     // vault_locked exactly as before; the page keeps watching for the unlock.
     if state.app_state.vault_config.lock().unwrap().is_none() {
+        // The notice leads with what the person recognises (the page's own
+        // label, e.g. "Sign in to Website-dev") and carries the origin as
+        // the part the Vault can vouch for.
         let _ = state.app_handle.emit(
             "unlock-attention",
-            serde_json::json!({ "reason": "sign-in", "origin": origin }),
+            serde_json::json!({ "reason": "sign-in", "origin": origin, "label": req.reason }),
         );
         raise_window(&state.app_handle);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(55);
@@ -729,7 +732,9 @@ async fn authenticate_handler(
                 break;
             }
             if std::time::Instant::now() >= deadline {
-                let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
+                // The notice stays: the page keeps watching for the unlock
+                // (up to ten minutes) and sends the sign-in again the moment
+                // it happens. The unlock itself takes the screen away.
                 return Err((
                     StatusCode::FORBIDDEN,
                     Json(IpcError {

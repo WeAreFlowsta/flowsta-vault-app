@@ -122,10 +122,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every remembered site the moment it was locked or relaunched, so the
   approval dialog came back each time.
 - **A sign-in that arrives while the Vault is locked brings the unlock
-  screen forward and waits for you.** Unlock, and the same sign-in carries
+  screen forward and waits for you.** The unlock screen says what is
+  waiting - "Sign in to Website-dev, from https://login.flowsta.com" - and
+  keeps saying so until you unlock. Unlock, and the same sign-in carries
   straight on to approval - no need to go back to the page and click again.
   If you don't unlock within about a minute the page is told the Vault is
-  locked, exactly as before.
+  locked and simply asks again the moment you do.
 
 ## [1.2.0] - 2026-08-04
 

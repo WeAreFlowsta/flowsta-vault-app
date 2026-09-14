@@ -346,7 +346,7 @@ export default component$(() => {
   } | null>(null);
   // Set while a Flowsta page's request (sign / profile) is waiting behind
   // the lock screen - its approval dialog appears the moment we unlock.
-  const unlockAttention = useSignal<{ reason: string; origin: string | null } | null>(null);
+  const unlockAttention = useSignal<{ reason: string; origin: string | null; label?: string | null } | null>(null);
   const relayCodeModal = useSignal(false);
   const relayCodeInput = useSignal("");
   const relayBusy = useSignal(false);
@@ -533,6 +533,13 @@ export default component$(() => {
     });
   });
 
+  // A notice held past the Vault's own deadline ends with the unlock; the
+  // next lock must start clean.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track }) => {
+    if (track(() => screen.value) !== "unlock") unlockAttention.value = null;
+  });
+
   // Listen for link-identity-request events from the IPC server
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ track, cleanup }) => {
@@ -587,7 +594,7 @@ export default component$(() => {
     const unlistenPublished = listen("signature-published", () => {
       refreshSignatures();
     });
-    const unlistenAttention = listen<{ reason: string; origin: string | null }>(
+    const unlistenAttention = listen<{ reason: string; origin: string | null; label?: string | null }>(
       "unlock-attention",
       (event) => {
         unlockAttention.value = event.payload;
@@ -596,6 +603,7 @@ export default component$(() => {
     const unlistenAttentionClear = listen("unlock-attention-clear", () => {
       unlockAttention.value = null;
     });
+
     const unlistenOpPending = listen<{ op: string; origin: string | null }>(
       "op-pending",
       (event) => {
@@ -1168,7 +1176,10 @@ export default component$(() => {
                       : unlockAttention.value.reason === "sign-in"
                         ? "A sign-in is waiting"
                         : "A file is waiting to be signed",
-                  body: `${unlockAttention.value.origin || "A Flowsta page"} is waiting - unlock your Vault to ${unlockAttention.value.reason === "sign-in" ? "carry on" : "review and approve it"}.`,
+                  body:
+                    unlockAttention.value.reason === "sign-in" && unlockAttention.value.label
+                      ? `${unlockAttention.value.label}, from ${unlockAttention.value.origin || "a Flowsta page"}. Unlock your Vault to carry on.`
+                      : `${unlockAttention.value.origin || "A Flowsta page"} is waiting - unlock your Vault to ${unlockAttention.value.reason === "sign-in" ? "carry on" : "review and approve it"}.`,
                 }
               : queuedRelayCode.value
                 ? {
