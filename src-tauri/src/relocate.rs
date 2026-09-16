@@ -264,6 +264,21 @@ mod tests {
     }
 
     #[test]
+    fn restore_choice_marker_lifecycle_follows_the_identity_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let key = legacy_install(root);
+        std::fs::write(crate::commands::restore_choice_pending_path(root), b"").unwrap();
+        let state = AppState::new(root.to_path_buf());
+        assert!(matches!(relocate_if_legacy(&state, &key), Outcome::Relocated(_)));
+        let new_root = state.identity_root();
+        assert!(crate::commands::restore_choice_pending_path(&new_root).exists(), "the hold moved with the identity");
+        assert!(!crate::commands::restore_choice_pending_path(root).exists());
+        crate::commands::clear_restore_choice(&new_root);
+        assert!(!crate::commands::restore_choice_pending_path(&new_root).exists());
+    }
+
+    #[test]
     fn a_conflicting_partition_leaves_the_legacy_layout_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

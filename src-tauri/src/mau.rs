@@ -191,6 +191,25 @@ fn load_mau_store(
 // ── Public API ─────────────────────────────────────────────────────
 
 /// Load the MAU store into memory. Called on vault unlock.
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+    #[test]
+    fn store_roundtrips_under_a_root_and_refuses_another_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let seed = [11u8; 32];
+        let mut store = MauStore { events: vec![], analytics_ids: HashMap::new() };
+        store.analytics_ids.insert("app-a".into(), "uuid-a".into());
+        save_mau_store(root, &store, &seed).unwrap();
+        assert!(crate::paths::mau_store_path(root).exists());
+        let back = load_mau_store(root, &seed).unwrap();
+        assert_eq!(back.analytics_ids.get("app-a").map(String::as_str), Some("uuid-a"));
+        // encrypted under a seed-derived key: another identity's seed cannot read it
+        assert!(load_mau_store(root, &[12u8; 32]).is_err());
+    }
+}
+
 pub fn load_mau_state(app_state: &AppState) {
     let device_seed = {
         let config = app_state.vault_config.lock().unwrap();

@@ -229,6 +229,33 @@ pub fn sweep_old_lair_dirs(data_dir: &Path) {
 }
 
 /// Lair's own log output (stderr first, then stdout), trimmed to 500 chars.
+#[cfg(test)]
+mod dir_tests {
+    use super::*;
+    #[test]
+    fn sweep_removes_leftovers_but_never_the_live_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for d in ["lair", "lair.old-1", "lair.broken-2", "unrelated"] { std::fs::create_dir_all(root.join(d)).unwrap(); }
+        std::fs::write(root.join("lair/store_file"), b"s").unwrap();
+        sweep_old_lair_dirs(root);
+        assert!(root.join("lair/store_file").exists());
+        assert!(root.join("unrelated").exists());
+        assert!(!root.join("lair.old-1").exists() && !root.join("lair.broken-2").exists());
+    }
+    #[test]
+    fn quarantine_sets_the_store_aside_beside_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let lair = crate::paths::lair_dir(dir.path());
+        std::fs::create_dir_all(&lair).unwrap();
+        std::fs::write(lair.join("lair-keystore-config.yaml"), b"x").unwrap();
+        let moved = quarantine_lair_dir(&lair).unwrap();
+        assert!(!lair.exists());
+        assert!(moved.file_name().unwrap().to_string_lossy().starts_with(crate::paths::LAIR_BROKEN_PREFIX));
+        assert!(moved.join("lair-keystore-config.yaml").exists());
+    }
+}
+
 pub fn read_lair_logs(lair_dir: &Path) -> String {
     let stderr = std::fs::read_to_string(lair_dir.join("lair-stderr.log")).unwrap_or_default();
     let stdout = std::fs::read_to_string(lair_dir.join("lair-stdout.log")).unwrap_or_default();

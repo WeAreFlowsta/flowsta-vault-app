@@ -140,6 +140,27 @@ pub fn write(data_dir: &PathBuf, mut payload: QuotaCache) -> Result<QuotaCache, 
 
 /// Increment the cached `used` count by 1. Returns the new state.
 /// Used after a successful local sign so the cache stays accurate offline.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn write_read_increment_roundtrip_under_a_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        assert!(read(&root).unwrap().is_none(), "no cache yet");
+        let written = write(&root, QuotaCache { tier: "free".into(), used: 3, limit: 10, period_end: None, last_synced_at: 0, write_counter: 0 }).unwrap();
+        assert_eq!(written.used, 3);
+        assert!(crate::paths::quota_cache_path(&root).exists() && crate::paths::quota_key_path(&root).exists());
+        let back = read(&root).unwrap().expect("cache present");
+        assert_eq!(back.used, 3);
+        let bumped = increment_used(&root).unwrap().expect("cache present");
+        assert_eq!(bumped.used, 4);
+        // a cache moved without its key must not read as valid
+        std::fs::remove_file(crate::paths::quota_key_path(&root)).unwrap();
+        assert!(read(&root).is_err() || read(&root).unwrap().is_none());
+    }
+}
+
 pub fn increment_used(data_dir: &PathBuf) -> Result<Option<QuotaCache>, String> {
     let Some(mut cache) = read(data_dir)? else { return Ok(None); };
     cache.used = cache.used.saturating_add(1);

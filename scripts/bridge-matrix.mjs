@@ -1012,6 +1012,11 @@ async function createLeg() {
   const right = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password } });
   record('right password unlocks the new vault', right.status === 200 && right.data?.success === true && (right.data?.agent_pub_key === agent || right.data?.already_unlocked), `${right.status} ${right.data?.error || ''}`);
   record('conductor ready again after unlock', await waitConductorReady(port, 120));
+  // Phase 2: the first unlock of a legacy layout moves the identity into
+  // identities/<partition key>/ (relocate.rs). The harness reports the layout.
+  const devAfter = await vaultFetch(port, '/dev/status');
+  record('unlock moved the identity into its partition (layout: partitioned)', devAfter.data?.layout === 'partitioned',
+    `${devAfter.data?.layout} ${(devAfter.data?.identity_root || '').split('/').slice(-2).join('/')}`);
 
   if (!restorePort) { record('restore twin skipped - set VAULT_MATRIX_RESTORE_PORT to a second FRESH instance', true); return; }
   const fresh2 = await vaultFetch(restorePort, '/status');

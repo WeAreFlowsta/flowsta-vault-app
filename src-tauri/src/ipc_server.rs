@@ -3838,7 +3838,12 @@ async fn dev_status_handler(
     let activity = state.app_state.activity.kinds_newest_first(10);
     let activity_last = state.app_state.activity.recent(1).into_iter().next();
     Ok(axum::response::IntoResponse::into_response(Json(
-        serde_json::json!({ "harness": true, "conductor": conductor, "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity, "activity_last": activity_last }),
+        serde_json::json!({
+            "harness": true, "conductor": conductor, "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity, "activity_last": activity_last,
+            // Phase 2 partitioning: where this identity's files live.
+            "layout": if state.app_state.identity_root() == state.app_state.data_dir { "legacy" } else { "partitioned" },
+            "identity_root": state.app_state.identity_root().display().to_string(),
+        }),
     )))
 }
 

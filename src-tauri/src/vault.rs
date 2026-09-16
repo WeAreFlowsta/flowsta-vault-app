@@ -535,6 +535,18 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_store_is_quarantined_and_reads_as_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("linked-apps.json");
+        std::fs::write(&p, b"{not json").unwrap();
+        let v: Vec<String> = load_json_or_quarantine(&p);
+        assert!(v.is_empty());
+        assert!(!p.exists(), "the corrupt file is moved aside");
+        let aside: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains(".corrupt-")).collect();
+        assert_eq!(aside.len(), 1);
+    }
+
+    #[test]
     fn test_base64_roundtrip() {
         let data = b"Hello, Flowsta Vault!";
         let encoded = base64_encode(data);
