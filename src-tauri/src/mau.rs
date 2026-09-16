@@ -204,7 +204,7 @@ pub fn load_mau_state(app_state: &AppState) {
         }
     };
 
-    match load_mau_store(&app_state.data_dir, &device_seed) {
+    match load_mau_store(&app_state.identity_root(), &device_seed) {
         Ok(store) => {
             let event_count = store.events.len();
             *app_state.mau_state.store.lock().unwrap() = Some(store);
@@ -213,7 +213,7 @@ pub fn load_mau_state(app_state: &AppState) {
         Err(e) => {
             // Never silently start fresh over an unreadable store - the next
             // event would overwrite unsynced billing events. Set it aside.
-            crate::vault::quarantine_file(&mau_store_path(&app_state.data_dir), &e);
+            crate::vault::quarantine_file(&mau_store_path(&app_state.identity_root()), &e);
             *app_state.mau_state.store.lock().unwrap() = Some(MauStore::default());
         }
     }
@@ -370,7 +370,7 @@ pub fn record_mau_event_if_needed(app_state: &AppState, client_id: &str) {
     }
 
     // Persist to disk (fire-and-forget - non-critical if it fails)
-    if let Err(e) = save_mau_store(&app_state.data_dir, store, &device_seed) {
+    if let Err(e) = save_mau_store(&app_state.identity_root(), store, &device_seed) {
         log::warn!("Failed to persist MAU store: {}", e);
     }
 }
@@ -451,7 +451,7 @@ pub fn mark_events_synced(app_state: &AppState, client_id_months: &[(String, Str
         }
     }
 
-    if let Err(e) = save_mau_store(&app_state.data_dir, store, &device_seed) {
+    if let Err(e) = save_mau_store(&app_state.identity_root(), store, &device_seed) {
         log::warn!("Failed to persist MAU store after marking synced: {}", e);
     }
 }

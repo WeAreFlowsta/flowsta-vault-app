@@ -374,9 +374,9 @@ pub fn save_backup_with_time(
     // backup is a separate snapshot rather than overwriting "latest".
     let auto_label = format!("backup-{}", unix_now());
     let label_str = label.unwrap_or(&auto_label);
-    let app_dir = app_backup_dir(&app_state.data_dir, client_id);
+    let app_dir = app_backup_dir(&app_state.identity_root(), client_id);
     if app_dir.exists() {
-        let target_path = backup_file_path(&app_state.data_dir, client_id, label_str);
+        let target_path = backup_file_path(&app_state.identity_root(), client_id, label_str);
         let is_overwrite = target_path.exists();
 
         if !is_overwrite {
@@ -453,10 +453,10 @@ pub fn save_backup_with_time(
     };
 
     // Write to disk
-    std::fs::create_dir_all(app_backup_dir(&app_state.data_dir, client_id))
+    std::fs::create_dir_all(app_backup_dir(&app_state.identity_root(), client_id))
         .map_err(|e| format!("Failed to create backup dir: {}", e))?;
 
-    let path = backup_file_path(&app_state.data_dir, client_id, label_str);
+    let path = backup_file_path(&app_state.identity_root(), client_id, label_str);
     let json = serde_json::to_string(&encrypted)
         .map_err(|e| format!("Backup serialize failed: {}", e))?;
     crate::vault::write_atomic(&path, json.as_bytes()).map_err(|e| format!("Backup write failed: {}", e))?;
@@ -482,20 +482,20 @@ pub fn retrieve_backup(
 
     // If no label given, find the most recent backup for this app
     let path = if let Some(l) = label {
-        let p = backup_file_path(&app_state.data_dir, client_id, l);
+        let p = backup_file_path(&app_state.identity_root(), client_id, l);
         if !p.exists() {
             return Err(format!("No backup found for label '{}'", l));
         }
         p
     } else {
         // Try "latest" first for backwards compat, then fall back to newest
-        let latest_path = backup_file_path(&app_state.data_dir, client_id, "latest");
+        let latest_path = backup_file_path(&app_state.identity_root(), client_id, "latest");
         if latest_path.exists() {
             latest_path
         } else {
-            let metas = list_app_backups(&app_state.data_dir, client_id)?;
+            let metas = list_app_backups(&app_state.identity_root(), client_id)?;
             let newest = metas.first().ok_or("No backups found for this app")?;
-            backup_file_path(&app_state.data_dir, client_id, newest.label.as_deref().unwrap_or("latest"))
+            backup_file_path(&app_state.identity_root(), client_id, newest.label.as_deref().unwrap_or("latest"))
         }
     };
 
@@ -804,14 +804,14 @@ pub fn export_all_data_with_progress(
         config.as_ref().ok_or("Vault is locked")?.clone()
     };
 
-    let stats = get_backup_stats(&app_state.data_dir);
+    let stats = get_backup_stats(&app_state.identity_root());
 
     // Collect decrypted backup data for each app
     let total_apps = stats.apps.len();
     let mut app_data = Vec::new();
     for (app_index, app_summary) in stats.apps.iter().enumerate() {
         progress(app_index + 1, total_apps, &app_summary.app_name);
-        let metas = list_app_backups(&app_state.data_dir, &app_summary.client_id)?;
+        let metas = list_app_backups(&app_state.identity_root(), &app_summary.client_id)?;
         let mut snapshots = Vec::new();
 
         for meta in &metas {

@@ -193,8 +193,15 @@ pub struct AppState {
     pub vault_config: Mutex<Option<VaultConfig>>,
     /// Path to the vault file.
     pub vault_path: Mutex<std::path::PathBuf>,
-    /// App data directory (parent of vault file, lair dir, conductor dir).
+    /// Device root: Tauri's app data directory. Holds device-level files only
+    /// (active-identity marker, settings, autostart marker, download cache).
     pub data_dir: std::path::PathBuf,
+    /// Identity root: where this identity's files live (vault, lair, conductor,
+    /// backups, app-link stores, MAU, quota, activity). Equal to `data_dir` for
+    /// the legacy single-identity layout; Phase 2 partitioning points it at
+    /// `<data_dir>/identities/<partition key>/`. Read it at call time - never
+    /// capture it for longer than one operation.
+    pub identity_root: Mutex<std::path::PathBuf>,
     /// Sites that have connected via the IPC server (origin → info).
     pub connected_sites: Mutex<HashMap<String, ConnectedSite>>,
     /// A pending /authenticate request waiting for user approval.
@@ -365,20 +372,28 @@ pub(crate) fn invalidate_cell_credentials(state: &Arc<AppState>) {
 }
 
 impl AppState {
+    /// The current identity root (see the field). Cheap clone.
+    pub fn identity_root(&self) -> std::path::PathBuf {
+        self.identity_root.lock().unwrap().clone()
+    }
+
     pub fn new(data_dir: std::path::PathBuf) -> Self {
-        let activity = crate::activity::ActivityLog::load(&data_dir);
-        let vault_path = crate::paths::vault_file(&data_dir);
+        // Legacy layout: the identity root is the device root.
+        let root = data_dir.clone();
+        let activity = crate::activity::ActivityLog::load(&root);
+        let vault_path = crate::paths::vault_file(&root);
 
         // Load persisted linked apps, verified apps cache, and granted scopes
-        let linked_apps = load_linked_apps(&data_dir);
-        let verified_apps = load_verified_apps(&data_dir);
-        let linked_app_scopes = load_linked_app_scopes(&data_dir);
-        let approved_sites = load_approved_sites(&data_dir);
-        let email_grants = load_email_grants(&data_dir);
+        let linked_apps = load_linked_apps(&root);
+        let verified_apps = load_verified_apps(&root);
+        let linked_app_scopes = load_linked_app_scopes(&root);
+        let approved_sites = load_approved_sites(&root);
+        let email_grants = load_email_grants(&root);
 
         Self {
             vault_config: Mutex::new(None),
             vault_path: Mutex::new(vault_path),
+            identity_root: Mutex::new(root),
             data_dir,
             connected_sites: Mutex::new(HashMap::new()),
             pending_auth: Mutex::new(None),
@@ -421,7 +436,7 @@ impl AppState {
             serde_json::to_string_pretty(&*apps)
         };
         if let Ok(json) = json {
-            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.data_dir, crate::paths::VERIFIED_APPS), json.as_bytes());
+            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.identity_root(), crate::paths::VERIFIED_APPS), json.as_bytes());
         }
     }
 
@@ -437,7 +452,7 @@ impl AppState {
             serde_json::to_string_pretty(&*apps)
         };
         if let Ok(json) = json {
-            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.data_dir, crate::paths::LINKED_APPS), json.as_bytes());
+            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.identity_root(), crate::paths::LINKED_APPS), json.as_bytes());
         }
     }
 
@@ -452,7 +467,7 @@ impl AppState {
             serde_json::to_string_pretty(&*apps)
         };
         if let Ok(json) = json {
-            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.data_dir, crate::paths::APPROVED_SITES), json.as_bytes());
+            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.identity_root(), crate::paths::APPROVED_SITES), json.as_bytes());
         }
     }
 
@@ -463,7 +478,7 @@ impl AppState {
             serde_json::to_string_pretty(&*grants)
         };
         if let Ok(json) = json {
-            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.data_dir, crate::paths::EMAIL_GRANTS), json.as_bytes());
+            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.identity_root(), crate::paths::EMAIL_GRANTS), json.as_bytes());
         }
     }
 
@@ -474,7 +489,7 @@ impl AppState {
             serde_json::to_string_pretty(&*scopes)
         };
         if let Ok(json) = json {
-            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.data_dir, crate::paths::LINKED_APP_SCOPES), json.as_bytes());
+            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.identity_root(), crate::paths::LINKED_APP_SCOPES), json.as_bytes());
         }
     }
 }
@@ -653,7 +668,7 @@ pub fn setup_vault(
     // NOT in setup_vault_inner: the migration orchestrator calls that
     // directly and must keep writing.
     if is_restore.unwrap_or(false) {
-        if let Err(e) = std::fs::write(restore_choice_pending_path(&state.data_dir), b"") {
+        if let Err(e) = std::fs::write(restore_choice_pending_path(&state.identity_root()), b"") {
             log::warn!("could not write the restore-choice marker: {}", e);
         }
     }
@@ -774,7 +789,7 @@ pub(crate) fn setup_vault_inner(
 
     // Extract conductor startup params before storing config
     let conductor_seed = config.device_seed.clone();
-    let conductor_data_dir = state.data_dir.clone();
+    let conductor_data_dir = state.identity_root();
     let conductor_passphrase = password.clone();
 
     // Store decrypted config in app state (vault is now unlocked)
@@ -863,7 +878,7 @@ pub(crate) fn unlock_vault_inner(
 
     // Extract conductor startup params before storing config
     let device_seed = config.device_seed.clone();
-    let data_dir = state.data_dir.clone();
+    let data_dir = state.identity_root();
     let passphrase = password.clone();
     let agent_key_for_marker = config.agent_pub_key.clone();
 
@@ -947,13 +962,13 @@ pub(crate) fn clear_restore_choice(data_dir: &std::path::Path) {
 /// Whether the restore-or-fresh question is still unanswered.
 #[tauri::command]
 pub fn restore_choice_pending(state: State<'_, Arc<AppState>>) -> bool {
-    restore_choice_pending_path(&state.data_dir).exists()
+    restore_choice_pending_path(&state.identity_root()).exists()
 }
 
 /// The user chose "start fresh" (or finished importing) - resume backups.
 #[tauri::command]
 pub fn resolve_restore_choice(state: State<'_, Arc<AppState>>) {
-    clear_restore_choice(&state.data_dir);
+    clear_restore_choice(&state.identity_root());
 }
 
 /// Record which identity this vault's on-disk state belongs to, readable
@@ -1136,8 +1151,8 @@ pub(crate) async fn ensure_conductor_alive(
         seed
     };
 
-    let data_dir = state.data_dir.clone();
-    let resource_dir = resolve_resource_dir(app_handle, &data_dir);
+    let data_dir = state.identity_root();
+    let resource_dir = resolve_resource_dir(app_handle, &state.data_dir);
 
     log::info!("[watchdog] running start_holochain to bring conductor back");
     let new_handle = match crate::conductor::start_holochain(
@@ -1250,7 +1265,8 @@ fn spawn_conductor_startup(
             // Resolve the resource directory where bundled .happ files live
             // (resource_dir with exe-relative and data-dir fallbacks - see
             // resolve_resource_dir).
-            let resource_dir = resolve_resource_dir(&app_handle, &data_dir);
+            // Bundled resources and the DNA download cache are device-level.
+            let resource_dir = resolve_resource_dir(&app_handle, &state.data_dir);
 
             tauri::async_runtime::spawn(async move {
                 let app_handle_ref = app_handle.clone();
@@ -1283,7 +1299,7 @@ fn spawn_conductor_startup(
                             &state,
                             &app_handle_ref,
                             port,
-                            &data_dir,
+                            &state.data_dir,
                         ).await;
 
                         // Migrated (device-hosted) vaults skip auto-link but
@@ -1614,7 +1630,8 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     // producing "early eof" failures on lair IPC handshake. The same
     // device seed also gets reused, which silently breaks isolation
     // between what should be different identities on the machine.
-    let lair_dir = crate::paths::lair_dir(&state.data_dir);
+    let root = state.identity_root();
+    let lair_dir = crate::paths::lair_dir(&root);
     if lair_dir.exists() {
         std::fs::remove_dir_all(&lair_dir)
             .map_err(|e| format!("Failed to delete lair dir: {}", e))?;
@@ -1624,7 +1641,7 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     // Leaving these behind across a reset produces CellDisabled /
     // agent-key-mismatch errors on the next setup because the cells
     // are keyed to the prior identity.
-    let conductor_dir = crate::paths::conductor_dir(&state.data_dir);
+    let conductor_dir = crate::paths::conductor_dir(&root);
     if conductor_dir.exists() {
         std::fs::remove_dir_all(&conductor_dir)
             .map_err(|e| format!("Failed to delete conductor dir: {}", e))?;
@@ -1644,17 +1661,18 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
         crate::paths::MAU_EVENTS,
         crate::paths::QUOTA_CACHE,
         crate::paths::QUOTA_KEY,
-        ACTIVE_IDENTITY_MARKER,
         RESTORE_CHOICE_MARKER,
     ] {
-        let p = crate::paths::store_path(&state.data_dir, name);
+        let p = crate::paths::store_path(&root, name);
         if p.exists() {
             if let Err(e) = std::fs::remove_file(&p) {
                 log::warn!("reset: failed to remove {}: {}", name, e);
             }
         }
     }
-    let backups_dir = crate::paths::backups_dir(&state.data_dir);
+    // The marker lives at the device root: it selects the identity root.
+    let _ = std::fs::remove_file(crate::paths::active_identity_path(&state.data_dir));
+    let backups_dir = crate::paths::backups_dir(&root);
     if backups_dir.exists() {
         if let Err(e) = std::fs::remove_dir_all(&backups_dir) {
             log::warn!("reset: failed to remove backups dir: {}", e);
@@ -1664,12 +1682,12 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     // Clear the matching in-memory state so the UI reflects the wipe at once.
     state.connected_sites.lock().unwrap().clear();
     state.approved_apps.lock().unwrap().clear();
-    let _ = std::fs::remove_file(crate::paths::store_path(&state.data_dir, crate::paths::APPROVED_SITES));
+    let _ = std::fs::remove_file(crate::paths::store_path(&root, crate::paths::APPROVED_SITES));
     state.linked_third_party_apps.lock().unwrap().clear();
     state.verified_apps.lock().unwrap().clear();
     state.linked_app_scopes.lock().unwrap().clear();
     state.email_grants.lock().unwrap().clear();
-    let _ = std::fs::remove_file(crate::paths::store_path(&state.data_dir, crate::paths::EMAIL_GRANTS));
+    let _ = std::fs::remove_file(crate::paths::store_path(&root, crate::paths::EMAIL_GRANTS));
     *state.linked_web_agent_key.lock().unwrap() = None;
 
     log::info!("Vault fully erased - identity, keys, conductor data, app links, scopes, and backups cleared.");
@@ -2547,7 +2565,7 @@ pub(crate) async fn change_vault_password_inner(
 
     // From here on every failure must leave the device consistent under
     // the CURRENT password and bring the stack back up.
-    let data_dir = state.data_dir.clone();
+    let data_dir = state.identity_root();
     let lair_dir = crate::paths::lair_dir(&data_dir);
     let db_key_path = crate::paths::db_key_path(&data_dir);
 
@@ -3715,7 +3733,7 @@ pub fn revoke_approved_app(
 pub fn get_backup_stats(
     state: State<'_, Arc<AppState>>,
 ) -> crate::backup::BackupStats {
-    crate::backup::get_backup_stats(&state.data_dir)
+    crate::backup::get_backup_stats(&state.identity_root())
 }
 
 /// Delete all backups for a specific app.
@@ -3724,7 +3742,7 @@ pub fn delete_app_backup(
     client_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<usize, String> {
-    crate::backup::delete_app_backups(&state.data_dir, &client_id)
+    crate::backup::delete_app_backups(&state.identity_root(), &client_id)
 }
 
 /// Progress event for the Your Data page's long operations (export/import).
@@ -4056,7 +4074,7 @@ pub async fn import_vault_export(
         let content_type = backup.get("content_type").and_then(|v| v.as_str());
 
         let existing_labels: std::collections::HashSet<String> =
-            crate::backup::list_app_backups(&state.data_dir, client_id)
+            crate::backup::list_app_backups(&state.identity_root(), client_id)
                 .unwrap_or_default()
                 .into_iter()
                 .filter_map(|m| m.label)
@@ -4189,7 +4207,7 @@ pub async fn import_vault_export(
             // Name-only comparison: a stub under a real label shadows the
             // export's copy, so `overwrite` explicitly replaces collisions.
             let existing_labels: std::collections::HashSet<String> =
-                crate::backup::list_app_backups(&state.data_dir, client_id)
+                crate::backup::list_app_backups(&state.identity_root(), client_id)
                     .unwrap_or_default()
                     .into_iter()
                     .filter_map(|m| m.label)
@@ -4260,7 +4278,7 @@ pub async fn import_vault_export(
     // it actually restored or confirmed everything present - a total
     // failure must keep holding app writes).
     if backups_failed == 0 {
-        clear_restore_choice(&state.data_dir);
+        clear_restore_choice(&state.identity_root());
     }
 
     Ok(serde_json::json!({
@@ -4280,7 +4298,7 @@ pub fn list_app_backup_details(
     client_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<crate::backup::BackupMeta>, String> {
-    crate::backup::list_app_backups(&state.data_dir, &client_id)
+    crate::backup::list_app_backups(&state.identity_root(), &client_id)
 }
 
 /// Export (decrypt) a single app's backup, packaged to help the user
@@ -4400,7 +4418,7 @@ pub fn delete_single_backup(
     label: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    crate::backup::delete_backup(&state.data_dir, &client_id, label.as_deref())
+    crate::backup::delete_backup(&state.identity_root(), &client_id, label.as_deref())
 }
 
 /// Write JSON content to a file path (used with save dialog from frontend).
@@ -6811,7 +6829,7 @@ async fn mirror_username_into_sealed_profile(
 
 #[tauri::command]
 pub fn read_quota_cache(state: State<'_, Arc<AppState>>) -> Result<Option<crate::quota_cache::QuotaCache>, String> {
-    crate::quota_cache::read(&state.data_dir)
+    crate::quota_cache::read(&state.identity_root())
 }
 
 /// POST to the API's /quota/sync-by-agent with an Ed25519 signature.
@@ -6992,7 +7010,7 @@ pub(crate) async fn current_sign_quota(
                 // write them into the personal quota cache.
                 return Some((cache, sponsor));
             }
-            match crate::quota_cache::write(&state.data_dir, cache) {
+            match crate::quota_cache::write(&state.identity_root(), cache) {
                 Ok(written) => return Some((written, sponsor)),
                 Err(e) => log::warn!("Quota cache write failed (non-fatal): {}", e),
             }
@@ -7001,7 +7019,7 @@ pub(crate) async fn current_sign_quota(
 
     // Offline / lookup failed: trust the HMAC-signed local cache. Sponsor
     // state is unknowable offline - sync settles attribution later.
-    crate::quota_cache::read(&state.data_dir)
+    crate::quota_cache::read(&state.identity_root())
         .ok()
         .flatten()
         .map(|c| (c, None))
@@ -7024,12 +7042,12 @@ pub fn write_quota_cache(
     state: State<'_, Arc<AppState>>,
     cache: crate::quota_cache::QuotaCache,
 ) -> Result<crate::quota_cache::QuotaCache, String> {
-    crate::quota_cache::write(&state.data_dir, cache)
+    crate::quota_cache::write(&state.identity_root(), cache)
 }
 
 #[tauri::command]
 pub fn increment_quota_used(state: State<'_, Arc<AppState>>) -> Result<Option<crate::quota_cache::QuotaCache>, String> {
-    crate::quota_cache::increment_used(&state.data_dir)
+    crate::quota_cache::increment_used(&state.identity_root())
 }
 
 

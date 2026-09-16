@@ -1764,7 +1764,7 @@ async fn backup_handler(
     // can't claim an empty slot first - the exact ordering mistake that
     // used to destroy backups. Cleared by "start fresh" or a completed
     // import on the Vault's own dashboard.
-    if crate::commands::restore_choice_pending_path(&state.app_state.data_dir).exists() {
+    if crate::commands::restore_choice_pending_path(&state.app_state.identity_root()).exists() {
         return Err((
             StatusCode::FORBIDDEN,
             Json(IpcError {
@@ -1930,7 +1930,7 @@ async fn backup_list_handler(
     }
 
     // Get all stats then filter to only the caller's app.
-    let mut stats = crate::backup::get_backup_stats(&state.app_state.data_dir);
+    let mut stats = crate::backup::get_backup_stats(&state.app_state.identity_root());
     stats.apps.retain(|a| a.client_id == caller_client_id);
     stats.app_count = stats.apps.len();
     stats.total_backups = stats.apps.iter().map(|a| a.backup_count).sum();
@@ -2131,7 +2131,7 @@ async fn backup_delete_handler(
     }
 
     // Same hold as /backup writes: deleting is destructive too.
-    if crate::commands::restore_choice_pending_path(&state.app_state.data_dir).exists() {
+    if crate::commands::restore_choice_pending_path(&state.app_state.identity_root()).exists() {
         return Err((
             StatusCode::FORBIDDEN,
             Json(IpcError {
@@ -2147,7 +2147,7 @@ async fn backup_delete_handler(
 
     if req.delete_all {
         let count =
-            crate::backup::delete_app_backups(&state.app_state.data_dir, &req.client_id)
+            crate::backup::delete_app_backups(&state.app_state.identity_root(), &req.client_id)
                 .map_err(|e| {
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -2164,7 +2164,7 @@ async fn backup_delete_handler(
         // Same taxonomy as retrieve: absent is 404; an I/O failure is NOT
         // absence and must not masquerade as it.
         crate::backup::delete_backup(
-            &state.app_state.data_dir,
+            &state.app_state.identity_root(),
             &req.client_id,
             req.label.as_deref(),
         )
@@ -2811,7 +2811,7 @@ async fn sign_document_core(
                     sponsor_state.as_ref().map(|sp| !sp.exhausted).unwrap_or(false);
                 if sponsored_active {
                     // The org pool paid - the personal meter is untouched.
-                } else if let Err(e) = crate::quota_cache::increment_used(&state.app_state.data_dir) {
+                } else if let Err(e) = crate::quota_cache::increment_used(&state.app_state.identity_root()) {
                     log::warn!("Quota cache increment failed (non-fatal): {}", e);
                 }
                 let sync_state = state.app_state.clone();
@@ -3825,7 +3825,7 @@ async fn dev_status_handler(
     // The conductor status lets the matrix wait for "ready" after a
     // password change / relock instead of guessing with sleeps.
     let conductor = state.app_state.conductor_status.lock().unwrap().clone();
-    let old_keystores = std::fs::read_dir(&state.app_state.data_dir)
+    let old_keystores = std::fs::read_dir(&state.app_state.identity_root())
         .map(|rd| {
             rd.flatten()
                 .filter(|e| e.file_name().to_string_lossy().starts_with(crate::paths::LAIR_OLD_PREFIX))
