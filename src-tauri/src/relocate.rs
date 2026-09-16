@@ -232,6 +232,38 @@ mod tests {
     }
 
     #[test]
+    fn full_erase_removes_a_partition_and_returns_to_the_legacy_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let key = legacy_install(root);
+        let state = std::sync::Arc::new(AppState::new(root.to_path_buf()));
+        assert!(matches!(relocate_if_legacy(&state, &key), Outcome::Relocated(_)));
+        *state.backup_key.lock().unwrap() = Some([1u8; 32]);
+        crate::commands::reset_vault_inner(&state).unwrap();
+        assert!(!paths::identities_dir(root).exists(), "partition and identities/ gone");
+        assert_eq!(paths::read_active_identity(root), None);
+        assert!(paths::settings_path(root).exists() && paths::autostart_marker_path(root).exists(), "device-level files survive");
+        assert_eq!(state.identity_root(), root);
+        assert_eq!(*state.vault_path.lock().unwrap(), paths::vault_file(root));
+        assert!(state.backup_key.lock().unwrap().is_none());
+        // a fresh start sees no identity at all
+        assert_eq!(AppState::new(root.to_path_buf()).identity_root(), root);
+    }
+
+    #[test]
+    fn full_erase_on_the_legacy_layout_removes_every_leftover() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        legacy_install(root);
+        std::fs::write(paths::active_identity_path(root), "garbage").unwrap();
+        let state = std::sync::Arc::new(AppState::new(root.to_path_buf()));
+        crate::commands::reset_vault_inner(&state).unwrap();
+        let left: Vec<String> = std::fs::read_dir(root).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        let mut left_sorted = left.clone(); left_sorted.sort();
+        assert_eq!(left_sorted, vec![paths::AUTOSTART_MARKER.to_string(), paths::SETTINGS_FILE.to_string()], "only device-level files remain: {:?}", left);
+    }
+
+    #[test]
     fn a_conflicting_partition_leaves_the_legacy_layout_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

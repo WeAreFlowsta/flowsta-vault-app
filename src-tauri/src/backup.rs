@@ -149,6 +149,11 @@ pub struct BackupMeta {
     pub data_size: usize,
     /// MIME type hint for the data (default: application/json).
     pub content_type: String,
+    /// Agent key of the identity this backup was written for (since Phase 2);
+    /// `None` on older files. Lets a foreign identity's leftovers be told
+    /// apart from the current identity's without decrypting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
     /// Per-entry-type counts extracted from canonical-shape payloads at save
     /// time. None for legacy / non-canonical backups. Lets the Your Data UI
     /// show "12 polls, 38 votes" without decrypting the payload.
@@ -446,6 +451,13 @@ pub fn save_backup_with_time(
         created_at: created_at.unwrap_or_else(unix_now),
         data_size: data.len(),
         content_type: content_type.unwrap_or("application/json").to_string(),
+        identity: app_state
+            .vault_config
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.agent_pub_key.clone())
+            .or_else(|| crate::paths::read_active_identity(&app_state.data_dir)),
         summary,
     };
 

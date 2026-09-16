@@ -1618,94 +1618,94 @@ async fn check_dna_updates(
 /// Returns the app to the "not initialized" state.
 #[tauri::command(async)]
 pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    reset_vault_inner(state.inner())
+}
+
+/// Full erase of the active identity on this device: its files (the whole
+/// partition when partitioned; every identity-scoped file and leftover when
+/// on the legacy layout), the device-root marker, and every in-memory value
+/// that belongs to it. Never returns early: each removal is attempted and
+/// the first failure is reported at the end, so a partial wipe cannot leave
+/// the marker pointing at a deleted vault. Device-level files (settings,
+/// autostart marker) survive.
+pub(crate) fn reset_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     // Stop conductor + lair before touching their data dirs. Without
     // this we'd leak processes and (on Windows) the dir delete would
     // fail on the still-open lair socket / conductor files.
-    let handle = state.conductor_handle.lock().unwrap().take();
-    if let Some(h) = handle {
+    if let Some(h) = state.conductor_handle.lock().unwrap().take() {
         h.shutdown();
     }
+    *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
+    *state.vault_config.lock().unwrap() = None;
 
-    // Clear in-memory config
-    {
-        let mut config = state.vault_config.lock().unwrap();
-        *config = None;
-    }
-
-    // Delete vault file from disk
-    let vault_path = state.vault_path.lock().unwrap().clone();
-    if vault_path.exists() {
-        std::fs::remove_file(&vault_path)
-            .map_err(|e| format!("Failed to delete vault file: {}", e))?;
-    }
-
-    // Delete lair keystore directory - otherwise the next vault create
-    // reuses the old encrypted lair store with a mismatched passphrase,
-    // producing "early eof" failures on lair IPC handshake. The same
-    // device seed also gets reused, which silently breaks isolation
-    // between what should be different identities on the machine.
+    let device_root = state.data_dir.clone();
     let root = state.identity_root();
-    let lair_dir = crate::paths::lair_dir(&root);
-    if lair_dir.exists() {
-        std::fs::remove_dir_all(&lair_dir)
-            .map_err(|e| format!("Failed to delete lair dir: {}", e))?;
-    }
+    let mut first_error: Option<String> = None;
+    let mut note = |what: &str, r: std::io::Result<()>| {
+        if let Err(e) = r {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("reset: failed to remove {}: {}", what, e);
+                if first_error.is_none() { first_error = Some(format!("{}: {}", what, e)); }
+            }
+        }
+    };
 
-    // Delete conductor data - source chains, installed apps, DHT cache.
-    // Leaving these behind across a reset produces CellDisabled /
-    // agent-key-mismatch errors on the next setup because the cells
-    // are keyed to the prior identity.
-    let conductor_dir = crate::paths::conductor_dir(&root);
-    if conductor_dir.exists() {
-        std::fs::remove_dir_all(&conductor_dir)
-            .map_err(|e| format!("Failed to delete conductor dir: {}", e))?;
-    }
-
-    // Full erase: also remove the local app data so a reset is a true clean
-    // slate, not just an identity reset. `backups/` holds OTHER apps' user data
-    // (e.g. a linked app's exported records) and these JSON files list which
-    // apps are connected and what they can access - none of it should survive a
-    // wipe the user intends as "erase everything from this device".
-    // Phase 2 step 6 widens this to paths::IDENTITY_STORE_FILES (activity.json,
-    // vault.enc.bak, quarantine files); until then the set is unchanged.
-    for name in [
-        crate::paths::LINKED_APPS,
-        crate::paths::VERIFIED_APPS,
-        crate::paths::LINKED_APP_SCOPES,
-        crate::paths::MAU_EVENTS,
-        crate::paths::QUOTA_CACHE,
-        crate::paths::QUOTA_KEY,
-        RESTORE_CHOICE_MARKER,
-    ] {
-        let p = crate::paths::store_path(&root, name);
-        if p.exists() {
-            if let Err(e) = std::fs::remove_file(&p) {
-                log::warn!("reset: failed to remove {}: {}", name, e);
+    if root != device_root {
+        // Partitioned: the identity is exactly one folder.
+        note("identity partition", std::fs::remove_dir_all(&root));
+        // Drop the now-empty identities/ folder so a legacy-layout create is clean.
+        let _ = std::fs::remove_dir(crate::paths::identities_dir(&device_root));
+    } else {
+        // Legacy layout: every identity-scoped file and directory at the root.
+        for name in crate::paths::IDENTITY_STORE_FILES {
+            note(name, std::fs::remove_file(crate::paths::store_path(&root, name)));
+            note(name, std::fs::remove_file(root.join(format!("{}.bak", name))));
+        }
+        for dir in [crate::paths::lair_dir(&root), crate::paths::conductor_dir(&root), crate::paths::backups_dir(&root)] {
+            note(&dir.display().to_string(), std::fs::remove_dir_all(&dir));
+        }
+        if let Ok(rd) = std::fs::read_dir(&root) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if crate::paths::is_lair_leftover_name(&name) && e.path().is_dir() {
+                    note(&name, std::fs::remove_dir_all(e.path()));
+                } else if name.contains(".corrupt-") && e.path().is_file() {
+                    note(&name, std::fs::remove_file(e.path()));
+                }
             }
         }
     }
     // The marker lives at the device root: it selects the identity root.
-    let _ = std::fs::remove_file(crate::paths::active_identity_path(&state.data_dir));
-    let backups_dir = crate::paths::backups_dir(&root);
-    if backups_dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&backups_dir) {
-            log::warn!("reset: failed to remove backups dir: {}", e);
-        }
-    }
+    note("active-identity marker", std::fs::remove_file(crate::paths::active_identity_path(&device_root)));
 
-    // Clear the matching in-memory state so the UI reflects the wipe at once.
+    // Back to the legacy single-identity layout for whatever is created next;
+    // its first unlock partitions it again.
+    *state.identity_root.lock().unwrap() = device_root.clone();
+    *state.vault_path.lock().unwrap() = crate::paths::vault_file(&device_root);
+
+    // Clear every in-memory value that belonged to the identity.
     state.connected_sites.lock().unwrap().clear();
     state.approved_apps.lock().unwrap().clear();
-    let _ = std::fs::remove_file(crate::paths::store_path(&root, crate::paths::APPROVED_SITES));
     state.linked_third_party_apps.lock().unwrap().clear();
     state.verified_apps.lock().unwrap().clear();
     state.linked_app_scopes.lock().unwrap().clear();
     state.email_grants.lock().unwrap().clear();
-    let _ = std::fs::remove_file(crate::paths::store_path(&root, crate::paths::EMAIL_GRANTS));
     *state.linked_web_agent_key.lock().unwrap() = None;
+    *state.backup_key.lock().unwrap() = None;
+    *state.backup_key_identity.lock().unwrap() = None;
+    *state.unlock_passphrase.lock().unwrap() = None;
+    invalidate_cell_credentials(state);
+    state.activity.clear();
+    state.activity.set_root(&device_root);
+    crate::mau::clear_mau_state(state);
 
-    log::info!("Vault fully erased - identity, keys, conductor data, app links, scopes, and backups cleared.");
-    Ok(())
+    match first_error {
+        None => {
+            log::info!("Vault fully erased - identity, keys, conductor data, app links, scopes, and backups cleared.");
+            Ok(())
+        }
+        Some(e) => Err(format!("Erase incomplete - {}", e)),
+    }
 }
 
 /// Get the identity info (only when unlocked).

@@ -54,6 +54,11 @@ impl ActivityLog {
         Self { data_dir: Mutex::new(data_dir.to_path_buf()), events: Mutex::new(events), app_handle: Mutex::new(None) }
     }
 
+    /// Forget every entry (full erase); the file is removed by the caller.
+    pub fn clear(&self) {
+        self.events.lock().unwrap().clear();
+    }
+
     /// Point the log at a new identity root (the file itself was moved).
     pub fn set_root(&self, root: &std::path::Path) {
         *self.data_dir.lock().unwrap() = root.to_path_buf();
