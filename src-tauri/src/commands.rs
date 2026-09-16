@@ -378,8 +378,13 @@ impl AppState {
     }
 
     pub fn new(data_dir: std::path::PathBuf) -> Self {
-        // Legacy layout: the identity root is the device root.
-        let root = data_dir.clone();
+        // Before unlock the marker (if any) decides which identity root to
+        // open; without a marker or a partition folder this is the legacy
+        // single-identity layout: the identity root is the device root.
+        let root = crate::paths::select_identity_root(&data_dir);
+        if root != data_dir {
+            log::info!("Identity root: {:?}", root);
+        }
         let activity = crate::activity::ActivityLog::load(&root);
         let vault_path = crate::paths::vault_file(&root);
 
@@ -933,8 +938,6 @@ pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     lock_vault_inner(state.inner())
 }
 
-/// Filename of the plaintext active-identity marker in the data dir (defined in paths.rs).
-pub(crate) use crate::paths::ACTIVE_IDENTITY_MARKER;
 
 /// Marker set when a vault is created by RESTORING an existing identity
 /// (phrase restore, offline restore, or web-account sign-in) - the moment
@@ -986,7 +989,8 @@ pub(crate) fn write_active_identity_marker(data_dir: &std::path::Path, agent_pub
     {
         return;
     }
-    if let Err(e) = std::fs::write(&path, agent_pub_key) {
+    // Atomic: a torn marker would select the wrong root or none at startup.
+    if let Err(e) = crate::vault::write_atomic(&path, agent_pub_key.as_bytes()) {
         log::warn!("could not write the active-identity marker: {}", e);
     }
 }

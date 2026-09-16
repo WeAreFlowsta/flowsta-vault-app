@@ -79,6 +79,48 @@ pub fn quota_key_path(root: &Path) -> PathBuf { root.join(QUOTA_KEY) }
 pub fn activity_path(root: &Path) -> PathBuf { root.join(ACTIVITY_FILE) }
 pub fn restore_choice_path(root: &Path) -> PathBuf { root.join(RESTORE_CHOICE_MARKER) }
 
+// ---- partitions ------------------------------------------------------------
+/// Folder under the device root that holds one sub-folder per identity.
+pub const IDENTITIES_DIR: &str = "identities";
+
+/// Partition key for an identity: lowercase hex sha256 of the 39-byte agent
+/// key (decision D4). A hash, not the key string: agent-key strings are
+/// case-sensitive base64url and would collide on case-insensitive
+/// filesystems (macOS, Windows defaults). `None` when the string is not an
+/// agent key in either known encoding.
+pub fn partition_key(agent_pub_key: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = crate::key_derivation::decode_agent_pub_key_flexible(agent_pub_key.trim())?;
+    Some(hex::encode(Sha256::digest(bytes)))
+}
+
+pub fn identities_dir(device_root: &Path) -> PathBuf { device_root.join(IDENTITIES_DIR) }
+pub fn identity_root_for(device_root: &Path, partition_key: &str) -> PathBuf { identities_dir(device_root).join(partition_key) }
+
+/// The agent key in the active-identity marker, if the marker exists and
+/// holds a decodable key. A missing, empty or garbled marker reads as `None`
+/// so callers fall back to the legacy layout rather than fail.
+pub fn read_active_identity(device_root: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(active_identity_path(device_root)).ok()?;
+    let key = s.trim();
+    if key.is_empty() || crate::key_derivation::decode_agent_pub_key_flexible(key).is_none() { return None; }
+    Some(key.to_string())
+}
+
+/// Where this identity's files are, decided before unlock:
+/// the marker names an identity AND its partition folder exists → that
+/// folder; otherwise the device root itself (the single-identity legacy
+/// layout, and every install until the relocation has run).
+pub fn select_identity_root(device_root: &Path) -> PathBuf {
+    if let Some(key) = read_active_identity(device_root) {
+        if let Some(pk) = partition_key(&key) {
+            let root = identity_root_for(device_root, &pk);
+            if root.is_dir() { return root; }
+        }
+    }
+    device_root.to_path_buf()
+}
+
 // ---- device-root helpers ---------------------------------------------------
 pub fn active_identity_path(device_root: &Path) -> PathBuf { device_root.join(ACTIVE_IDENTITY_MARKER) }
 pub fn settings_path(device_root: &Path) -> PathBuf { device_root.join(SETTINGS_FILE) }
@@ -99,6 +141,33 @@ mod tests {
         assert!(!IDENTITY_STORE_FILES.contains(&ACTIVE_IDENTITY_MARKER), "the marker selects the root; it cannot live in it");
         assert!(!IDENTITY_STORE_FILES.contains(&SETTINGS_FILE));
     }
+    #[test]
+    fn partition_selection_falls_back_to_the_legacy_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // no marker
+        assert_eq!(select_identity_root(root), root);
+        // garbled marker
+        std::fs::write(active_identity_path(root), "not a key").unwrap();
+        assert_eq!(read_active_identity(root), None);
+        assert_eq!(select_identity_root(root), root);
+        // valid marker, no partition folder yet
+        let key = crate::key_derivation::construct_agent_pub_key_string(&[3u8; 32]);
+        std::fs::write(active_identity_path(root), &key).unwrap();
+        assert_eq!(read_active_identity(root).as_deref(), Some(key.as_str()));
+        assert_eq!(select_identity_root(root), root);
+        // partition folder present → selected
+        let pk = partition_key(&key).unwrap();
+        assert_eq!(pk.len(), 64);
+        assert_eq!(pk, pk.to_lowercase());
+        assert_eq!(partition_key(&format!("  {}\n", key)), Some(pk.clone()), "whitespace-tolerant, deterministic");
+        std::fs::create_dir_all(identity_root_for(root, &pk)).unwrap();
+        assert_eq!(select_identity_root(root), identity_root_for(root, &pk));
+        // a different key never maps to the same folder
+        let other = crate::key_derivation::construct_agent_pub_key_string(&[4u8; 32]);
+        assert_ne!(partition_key(&other).unwrap(), pk);
+    }
+
     #[test]
     fn helpers_compose_under_the_root() {
         let r = Path::new("/r");
