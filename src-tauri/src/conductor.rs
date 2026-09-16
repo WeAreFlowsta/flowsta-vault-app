@@ -541,7 +541,7 @@ pub async fn start_holochain(
                 // holds nothing that cannot be rebuilt from the vault's own
                 // seed, so set it aside and let the second attempt
                 // re-initialize it under the working passphrase.
-                match lair::quarantine_lair_dir(&data_dir.join("lair")) {
+                match lair::quarantine_lair_dir(&crate::paths::lair_dir(&data_dir)) {
                     Ok(moved) => {
                         log::warn!("[start_holochain] key store set aside at {:?} - rebuilding it from the device seed", moved);
                         message = "Rebuilding the key store...";
@@ -581,7 +581,7 @@ async fn start_holochain_attempt(
     });
 
     // 1. Start lair-keystore process.
-    let lair_dir = data_dir.join("lair");
+    let lair_dir = crate::paths::lair_dir(&data_dir);
     let (mut lair_child, connection_url) = lair::start_lair_process(&lair_dir, &passphrase)?;
 
     // Helper: kill lair on error so we don't leak orphan processes.
@@ -669,7 +669,7 @@ async fn start_holochain_attempt(
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
         message: "Starting Holochain conductor...".into(),
     });
-    let conductor_dir = data_dir.join("conductor");
+    let conductor_dir = crate::paths::conductor_dir(&data_dir);
     let admin_port = match find_available_admin_port() {
         Ok(p) => p,
         Err(e) => fail_with_lair_cleanup!(e),

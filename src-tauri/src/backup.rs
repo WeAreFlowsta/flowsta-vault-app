@@ -241,8 +241,8 @@ fn sanitize_id(client_id: &str) -> String {
         .collect()
 }
 
-fn backups_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("backups")
+pub(crate) fn backups_dir(data_dir: &Path) -> PathBuf {
+    crate::paths::backups_dir(data_dir)
 }
 
 fn app_backup_dir(data_dir: &Path, client_id: &str) -> PathBuf {

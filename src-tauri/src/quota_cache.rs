@@ -44,11 +44,11 @@ struct SignedCache {
 }
 
 fn key_path(data_dir: &PathBuf) -> PathBuf {
-    data_dir.join(".quota.key")
+    crate::paths::quota_key_path(data_dir)
 }
 
 fn cache_path(data_dir: &PathBuf) -> PathBuf {
-    data_dir.join("quota_cache.json")
+    crate::paths::quota_cache_path(data_dir)
 }
 
 /// Get or create the HMAC key. Stored as 32 random bytes hex-encoded.

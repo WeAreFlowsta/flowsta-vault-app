@@ -3828,7 +3828,7 @@ async fn dev_status_handler(
     let old_keystores = std::fs::read_dir(&state.app_state.data_dir)
         .map(|rd| {
             rd.flatten()
-                .filter(|e| e.file_name().to_string_lossy().starts_with("lair.old-"))
+                .filter(|e| e.file_name().to_string_lossy().starts_with(crate::paths::LAIR_OLD_PREFIX))
                 .count()
         })
         .unwrap_or(0);
@@ -4503,10 +4503,7 @@ fn active_identity_for_gate(state: &IpcState) -> Option<String> {
     {
         return Some(key);
     }
-    let path = state
-        .app_state
-        .data_dir
-        .join(crate::commands::ACTIVE_IDENTITY_MARKER);
+    let path = crate::paths::active_identity_path(&state.app_state.data_dir);
     std::fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())

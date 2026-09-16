@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
-pub const ACTIVITY_FILE: &str = "activity.json";
+pub use crate::paths::ACTIVITY_FILE;
 /// Newest entries kept; older ones fall off the end.
 const CAP: usize = 500;
 
@@ -43,7 +43,7 @@ pub struct ActivityLog {
 impl ActivityLog {
     pub fn load(data_dir: &std::path::Path) -> Self {
         let mut events: Vec<ActivityEvent> =
-            crate::vault::load_json_or_quarantine(&data_dir.join(ACTIVITY_FILE));
+            crate::vault::load_json_or_quarantine(&crate::paths::activity_path(data_dir));
         events.sort_by_key(|e| e.at);
         if events.len() > CAP {
             let drop_n = events.len() - CAP;
@@ -76,7 +76,7 @@ impl ActivityLog {
             serde_json::to_string_pretty(&*events)
         };
         if let Ok(json) = json {
-            if let Err(e) = crate::vault::write_atomic(&self.data_dir.join(ACTIVITY_FILE), json.as_bytes()) {
+            if let Err(e) = crate::vault::write_atomic(&crate::paths::activity_path(&self.data_dir), json.as_bytes()) {
                 log::warn!("activity log not saved: {}", e);
             }
         }

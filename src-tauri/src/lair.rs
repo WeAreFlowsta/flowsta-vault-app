@@ -219,7 +219,7 @@ pub fn sweep_old_lair_dirs(data_dir: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if (name.starts_with("lair.old-") || name.starts_with("lair.broken-")) && entry.path().is_dir() {
+        if crate::paths::is_lair_leftover_name(&name) && entry.path().is_dir() {
             match std::fs::remove_dir_all(entry.path()) {
                 Ok(()) => log::info!("Removed leftover keystore {:?}", entry.path()),
                 Err(e) => log::warn!("Could not remove leftover keystore {:?}: {}", entry.path(), e),
@@ -276,7 +276,7 @@ pub fn quarantine_lair_dir(lair_dir: &Path) -> Result<std::path::PathBuf, String
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let parent = lair_dir.parent().ok_or("lair dir has no parent")?;
-    let target = parent.join(format!("lair.broken-{}", ts));
+    let target = crate::paths::lair_broken_dir(parent, ts);
     std::fs::rename(lair_dir, &target)
         .map_err(|e| format!("Could not set the broken key store aside: {}", e))?;
     Ok(target)

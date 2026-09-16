@@ -112,7 +112,7 @@ fn verify_event_hmac(integrity_key: &[u8; 32], event: &MauEvent) -> bool {
 // ── Encrypted persistence ──────────────────────────────────────────
 
 fn mau_store_path(data_dir: &std::path::Path) -> PathBuf {
-    data_dir.join("mau-events.enc")
+    crate::paths::mau_store_path(data_dir)
 }
 
 /// Encrypt and save the MAU store to disk.

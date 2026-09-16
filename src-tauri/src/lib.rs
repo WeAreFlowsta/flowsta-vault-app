@@ -10,6 +10,7 @@ mod ipc_server;
 mod key_derivation;
 mod lair;
 mod mau;
+mod paths;
 mod migration;
 mod process_ext;
 mod quota_cache;
@@ -350,7 +351,7 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             {
                 use tauri_plugin_autostart::ManagerExt;
-                let marker = app_state.data_dir.join("autostart-initialized");
+                let marker = crate::paths::autostart_marker_path(&app_state.data_dir);
                 if !marker.exists() {
                     match app.autolaunch().enable() {
                         Ok(_) => log::info!("Autostart enabled (default-on, first run)"),

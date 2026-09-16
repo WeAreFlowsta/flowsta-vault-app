@@ -365,7 +365,7 @@ pub(crate) fn invalidate_cell_credentials(state: &Arc<AppState>) {
 impl AppState {
     pub fn new(data_dir: std::path::PathBuf) -> Self {
         let activity = crate::activity::ActivityLog::load(&data_dir);
-        let vault_path = data_dir.join("vault.enc");
+        let vault_path = crate::paths::vault_file(&data_dir);
 
         // Load persisted linked apps, verified apps cache, and granted scopes
         let linked_apps = load_linked_apps(&data_dir);
@@ -418,7 +418,7 @@ impl AppState {
             serde_json::to_string_pretty(&*apps)
         };
         if let Ok(json) = json {
-            let _ = crate::vault::write_atomic(&self.data_dir.join("verified-apps.json"), json.as_bytes());
+            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.data_dir, crate::paths::VERIFIED_APPS), json.as_bytes());
         }
     }
 
@@ -434,7 +434,7 @@ impl AppState {
             serde_json::to_string_pretty(&*apps)
         };
         if let Ok(json) = json {
-            let _ = crate::vault::write_atomic(&self.data_dir.join("linked-apps.json"), json.as_bytes());
+            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.data_dir, crate::paths::LINKED_APPS), json.as_bytes());
         }
     }
 
@@ -449,7 +449,7 @@ impl AppState {
             serde_json::to_string_pretty(&*apps)
         };
         if let Ok(json) = json {
-            let _ = crate::vault::write_atomic(&self.data_dir.join("approved-sites.json"), json.as_bytes());
+            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.data_dir, crate::paths::APPROVED_SITES), json.as_bytes());
         }
     }
 
@@ -460,7 +460,7 @@ impl AppState {
             serde_json::to_string_pretty(&*grants)
         };
         if let Ok(json) = json {
-            let _ = crate::vault::write_atomic(&self.data_dir.join("email-grants.json"), json.as_bytes());
+            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.data_dir, crate::paths::EMAIL_GRANTS), json.as_bytes());
         }
     }
 
@@ -471,29 +471,29 @@ impl AppState {
             serde_json::to_string_pretty(&*scopes)
         };
         if let Ok(json) = json {
-            let _ = crate::vault::write_atomic(&self.data_dir.join("linked-app-scopes.json"), json.as_bytes());
+            let _ = crate::vault::write_atomic(&crate::paths::store_path(&self.data_dir, crate::paths::LINKED_APP_SCOPES), json.as_bytes());
         }
     }
 }
 
 fn load_linked_apps(data_dir: &std::path::Path) -> Vec<LinkedThirdPartyApp> {
-    crate::vault::load_json_or_quarantine(&data_dir.join("linked-apps.json"))
+    crate::vault::load_json_or_quarantine(&crate::paths::store_path(data_dir, crate::paths::LINKED_APPS))
 }
 
 fn load_approved_sites(data_dir: &std::path::Path) -> Vec<String> {
-    crate::vault::load_json_or_quarantine(&data_dir.join("approved-sites.json"))
+    crate::vault::load_json_or_quarantine(&crate::paths::store_path(data_dir, crate::paths::APPROVED_SITES))
 }
 
 fn load_linked_app_scopes(data_dir: &std::path::Path) -> HashMap<String, Vec<String>> {
-    crate::vault::load_json_or_quarantine(&data_dir.join("linked-app-scopes.json"))
+    crate::vault::load_json_or_quarantine(&crate::paths::store_path(data_dir, crate::paths::LINKED_APP_SCOPES))
 }
 
 fn load_email_grants(data_dir: &std::path::Path) -> HashMap<String, EmailGrant> {
-    crate::vault::load_json_or_quarantine(&data_dir.join("email-grants.json"))
+    crate::vault::load_json_or_quarantine(&crate::paths::store_path(data_dir, crate::paths::EMAIL_GRANTS))
 }
 
 fn load_verified_apps(data_dir: &std::path::Path) -> HashMap<String, VerifiedAppInfo> {
-    crate::vault::load_json_or_quarantine(&data_dir.join("verified-apps.json"))
+    crate::vault::load_json_or_quarantine(&crate::paths::store_path(data_dir, crate::paths::VERIFIED_APPS))
 }
 
 #[derive(Serialize)]
@@ -901,8 +901,8 @@ pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     lock_vault_inner(state.inner())
 }
 
-/// Filename of the plaintext active-identity marker in the data dir.
-pub(crate) const ACTIVE_IDENTITY_MARKER: &str = "active-identity";
+/// Filename of the plaintext active-identity marker in the data dir (defined in paths.rs).
+pub(crate) use crate::paths::ACTIVE_IDENTITY_MARKER;
 
 /// Marker set when a vault is created by RESTORING an existing identity
 /// (phrase restore, offline restore, or web-account sign-in) - the moment
@@ -913,10 +913,10 @@ pub(crate) const ACTIVE_IDENTITY_MARKER: &str = "active-identity";
 /// about to fill. Cleared by an explicit "start fresh", by a completed
 /// import, and by the full erase. NEVER set by the account-migration
 /// flow - the migration orchestrator is itself a restore and must write.
-pub(crate) const RESTORE_CHOICE_MARKER: &str = "restore-choice-pending";
+pub(crate) use crate::paths::RESTORE_CHOICE_MARKER;
 
 pub(crate) fn restore_choice_pending_path(data_dir: &std::path::Path) -> std::path::PathBuf {
-    data_dir.join(RESTORE_CHOICE_MARKER)
+    crate::paths::restore_choice_path(data_dir)
 }
 
 pub(crate) fn clear_restore_choice(data_dir: &std::path::Path) {
@@ -947,7 +947,7 @@ pub fn resolve_restore_choice(state: State<'_, Arc<AppState>>) {
 /// have nothing else to compare against - the encrypted config is gone.
 /// Written at create and unlock; removed only by the full erase.
 pub(crate) fn write_active_identity_marker(data_dir: &std::path::Path, agent_pub_key: &str) {
-    let path = data_dir.join(ACTIVE_IDENTITY_MARKER);
+    let path = crate::paths::active_identity_path(data_dir);
     if std::fs::read_to_string(&path)
         .map(|s| s.trim() == agent_pub_key)
         .unwrap_or(false)
@@ -1597,7 +1597,7 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     // producing "early eof" failures on lair IPC handshake. The same
     // device seed also gets reused, which silently breaks isolation
     // between what should be different identities on the machine.
-    let lair_dir = state.data_dir.join("lair");
+    let lair_dir = crate::paths::lair_dir(&state.data_dir);
     if lair_dir.exists() {
         std::fs::remove_dir_all(&lair_dir)
             .map_err(|e| format!("Failed to delete lair dir: {}", e))?;
@@ -1607,7 +1607,7 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     // Leaving these behind across a reset produces CellDisabled /
     // agent-key-mismatch errors on the next setup because the cells
     // are keyed to the prior identity.
-    let conductor_dir = state.data_dir.join("conductor");
+    let conductor_dir = crate::paths::conductor_dir(&state.data_dir);
     if conductor_dir.exists() {
         std::fs::remove_dir_all(&conductor_dir)
             .map_err(|e| format!("Failed to delete conductor dir: {}", e))?;
@@ -1618,24 +1618,26 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     // (e.g. a linked app's exported records) and these JSON files list which
     // apps are connected and what they can access - none of it should survive a
     // wipe the user intends as "erase everything from this device".
+    // Phase 2 step 6 widens this to paths::IDENTITY_STORE_FILES (activity.json,
+    // vault.enc.bak, quarantine files); until then the set is unchanged.
     for name in [
-        "linked-apps.json",
-        "verified-apps.json",
-        "linked-app-scopes.json",
-        "mau-events.enc",
-        "quota_cache.json",
-        ".quota.key",
+        crate::paths::LINKED_APPS,
+        crate::paths::VERIFIED_APPS,
+        crate::paths::LINKED_APP_SCOPES,
+        crate::paths::MAU_EVENTS,
+        crate::paths::QUOTA_CACHE,
+        crate::paths::QUOTA_KEY,
         ACTIVE_IDENTITY_MARKER,
         RESTORE_CHOICE_MARKER,
     ] {
-        let p = state.data_dir.join(name);
+        let p = crate::paths::store_path(&state.data_dir, name);
         if p.exists() {
             if let Err(e) = std::fs::remove_file(&p) {
                 log::warn!("reset: failed to remove {}: {}", name, e);
             }
         }
     }
-    let backups_dir = state.data_dir.join("backups");
+    let backups_dir = crate::paths::backups_dir(&state.data_dir);
     if backups_dir.exists() {
         if let Err(e) = std::fs::remove_dir_all(&backups_dir) {
             log::warn!("reset: failed to remove backups dir: {}", e);
@@ -1645,12 +1647,12 @@ pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     // Clear the matching in-memory state so the UI reflects the wipe at once.
     state.connected_sites.lock().unwrap().clear();
     state.approved_apps.lock().unwrap().clear();
-    let _ = std::fs::remove_file(state.data_dir.join("approved-sites.json"));
+    let _ = std::fs::remove_file(crate::paths::store_path(&state.data_dir, crate::paths::APPROVED_SITES));
     state.linked_third_party_apps.lock().unwrap().clear();
     state.verified_apps.lock().unwrap().clear();
     state.linked_app_scopes.lock().unwrap().clear();
     state.email_grants.lock().unwrap().clear();
-    let _ = std::fs::remove_file(state.data_dir.join("email-grants.json"));
+    let _ = std::fs::remove_file(crate::paths::store_path(&state.data_dir, crate::paths::EMAIL_GRANTS));
     *state.linked_web_agent_key.lock().unwrap() = None;
 
     log::info!("Vault fully erased - identity, keys, conductor data, app links, scopes, and backups cleared.");
@@ -2529,8 +2531,8 @@ pub(crate) async fn change_vault_password_inner(
     // From here on every failure must leave the device consistent under
     // the CURRENT password and bring the stack back up.
     let data_dir = state.data_dir.clone();
-    let lair_dir = data_dir.join("lair");
-    let db_key_path = data_dir.join("conductor").join("databases").join("db.key");
+    let lair_dir = crate::paths::lair_dir(&data_dir);
+    let db_key_path = crate::paths::db_key_path(&data_dir);
 
     // 4. Move the lair keystore aside (rename, not delete: atomic, survives
     // the Windows file locks that made a delete fail halfway, and it is
@@ -2541,7 +2543,7 @@ pub(crate) async fn change_vault_password_inner(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let backup = data_dir.join(format!("lair.old-{}", ts));
+        let backup = crate::paths::lair_old_dir(&data_dir, ts);
         match std::fs::rename(&lair_dir, &backup) {
             Ok(()) => Some(backup),
             Err(e) => {
@@ -2696,10 +2698,8 @@ pub(crate) async fn change_vault_password_inner(
 /// Get the auto-lock timeout in minutes (0 = never).
 #[tauri::command]
 pub fn get_auto_lock_minutes(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
-    let settings_path = {
-        let vault_path = state.vault_path.lock().unwrap().clone();
-        vault_path.with_file_name("settings.json")
-    };
+    // Device-level: settings belong to the machine, not to an identity.
+    let settings_path = crate::paths::settings_path(&state.data_dir);
     if settings_path.exists() {
         let data = std::fs::read_to_string(&settings_path)
             .map_err(|e| format!("Failed to read settings: {}", e))?;
@@ -2720,10 +2720,8 @@ pub fn set_auto_lock_minutes(
     minutes: u32,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let settings_path = {
-        let vault_path = state.vault_path.lock().unwrap().clone();
-        vault_path.with_file_name("settings.json")
-    };
+    // Device-level: settings belong to the machine, not to an identity.
+    let settings_path = crate::paths::settings_path(&state.data_dir);
 
     // Read existing settings or start fresh
     let mut settings: serde_json::Value = if settings_path.exists() {
