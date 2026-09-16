@@ -133,8 +133,24 @@ pub fn short_socket_dir() -> PathBuf {
         let b = PathBuf::from(b);
         if b.is_absolute() && b.is_dir() { return b.join("fv"); }
     }
-    // SAFETY: getuid has no preconditions and cannot fail.
-    PathBuf::from(format!("/tmp/fv-{}", unsafe { libc::getuid() }))
+    PathBuf::from(format!("/tmp/fv-{}", current_uid()))
+}
+
+/// The user's id, read off the home directory (no libc on macOS builds);
+/// a hash of $HOME if that cannot be read.
+#[cfg(not(windows))]
+fn current_uid() -> String {
+    use std::os::unix::fs::MetadataExt;
+    match std::env::var_os("HOME") {
+        Some(h) => match std::fs::metadata(&h) {
+            Ok(m) => m.uid().to_string(),
+            Err(_) => {
+                use sha2::{Digest, Sha256};
+                hex::encode(Sha256::digest(h.to_string_lossy().as_bytes()))[..8].to_string()
+            }
+        },
+        None => "u".to_string(),
+    }
 }
 
 /// The short socket path for the key store under `root`: one name per
