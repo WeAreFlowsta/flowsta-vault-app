@@ -111,6 +111,13 @@ pub struct VaultConfig {
     #[serde(default)]
     pub data_key: Option<Vec<u8>>,
 
+    /// Identity-level backup key for third-party app backups (encrypted at
+    /// rest). Derived from the mnemonic (`flowsta-backup-key-v2`) at create /
+    /// restore; vaults created before it exists carry `None` and keep using
+    /// the legacy device-seed key until a restore. Dual-read in backup.rs.
+    #[serde(default)]
+    pub backup_key: Option<Vec<u8>>,
+
     /// Per-user private-DHT network seed (hex) for DNA v2 installs.
     /// Derived from the mnemonic (`flowsta-private-network-v2`) - every
     /// device lands in the same per-user network with zero coordination.
@@ -461,6 +468,7 @@ mod tests {
             conductor_version: Some("0.6.0".to_string()),
             hosting_model: None,
             data_key: None,
+            backup_key: None,
             private_network_seed: None,
             totp_secret: None,
             totp_backup_codes: None,
@@ -511,6 +519,7 @@ mod tests {
             conductor_version: None,
             hosting_model: None,
             data_key: None,
+            backup_key: None,
             private_network_seed: None,
             totp_secret: None,
             totp_backup_codes: None,

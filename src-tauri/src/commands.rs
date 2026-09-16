@@ -240,6 +240,8 @@ pub struct AppState {
     /// can store backups while the vault is locked. Derived from device_seed
     /// via HMAC (cannot recover seed or sign).
     pub backup_key: Mutex<Option<[u8; 32]>>,
+    /// Identity-level backup key (D1); `None` on vaults that predate it.
+    pub backup_key_identity: Mutex<Option<[u8; 32]>>,
     /// Web agent key from auto-link (base64 39-byte AgentPubKey).
     /// Cached here so get_my_signatures can query linked agent's signatures
     /// without waiting for identity DNA gossip.
@@ -397,6 +399,7 @@ impl AppState {
             activity,
             grant_token_cache: Mutex::new(None),
             backup_key: Mutex::new(None),
+            backup_key_identity: Mutex::new(None),
             linked_web_agent_key: Mutex::new(None),
             pending_sign_paths: Mutex::new(Vec::new()),
             pending_relay_code: Mutex::new(None),
@@ -726,6 +729,8 @@ pub(crate) fn setup_vault_inner(
         .map_err(|e| format!("Data key derivation failed: {}", e))?;
     let private_network_seed = crate::key_derivation::derive_private_network_seed(&mnemonic)
         .map_err(|e| format!("Network seed derivation failed: {}", e))?;
+    let backup_identity_key = crate::key_derivation::derive_backup_identity_key(&mnemonic)
+        .map_err(|e| format!("Backup key derivation failed: {}", e))?;
 
     // Create vault config
     let config = VaultConfig {
@@ -752,6 +757,7 @@ pub(crate) fn setup_vault_inner(
         conductor_version: Some("0.6.0".to_string()),
         hosting_model,
         data_key: Some(data_key.to_vec()),
+        backup_key: Some(backup_identity_key.to_vec()),
         private_network_seed: Some(private_network_seed),
         totp_secret: None,
         totp_backup_codes: None,
@@ -777,10 +783,12 @@ pub(crate) fn setup_vault_inner(
         *state_config = Some(config);
     }
 
-    // Derive and cache backup encryption key (persists through lock)
+    // Cache both backup keys (they persist through lock): the identity-level
+    // key that new backups are written with, and the legacy device-seed key
+    // that older backups still decrypt with.
     {
-        let mut bk = state.backup_key.lock().unwrap();
-        *bk = Some(crate::backup::derive_backup_key_from_seed(&device_seed));
+        *state.backup_key.lock().unwrap() = Some(crate::backup::derive_backup_key_from_seed(&device_seed));
+        *state.backup_key_identity.lock().unwrap() = Some(backup_identity_key);
     }
     write_active_identity_marker(&state.data_dir, &agent_pub_key);
 
@@ -866,13 +874,22 @@ pub(crate) fn unlock_vault_inner(
     }
     write_active_identity_marker(&state.data_dir, &agent_key_for_marker);
 
-    // Derive and cache backup encryption key (persists through lock)
+    // Cache both backup keys (they persist through lock). The identity-level
+    // key exists only on vaults created or restored since it was introduced;
+    // older vaults keep `None` here and write with the legacy key.
     if let Some(ref seed_vec) = device_seed {
         if seed_vec.len() == 32 {
             let mut seed_arr = [0u8; 32];
             seed_arr.copy_from_slice(seed_vec);
-            let mut bk = state.backup_key.lock().unwrap();
-            *bk = Some(crate::backup::derive_backup_key_from_seed(&seed_arr));
+            *state.backup_key.lock().unwrap() = Some(crate::backup::derive_backup_key_from_seed(&seed_arr));
+        }
+    }
+    {
+        let identity = state.vault_config.lock().unwrap().as_ref().and_then(|c| c.backup_key.clone());
+        if let Some(k) = identity.filter(|k| k.len() == 32) {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&k);
+            *state.backup_key_identity.lock().unwrap() = Some(arr);
         }
     }
 

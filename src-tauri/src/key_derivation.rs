@@ -45,6 +45,14 @@ pub const DATA_ENCRYPTION_CONSTANT: &str = "flowsta-data-encryption-v1";
 /// JS reference: `recoveryPhrase.js` derivePrivateNetworkSeed.
 pub const PRIVATE_NETWORK_SEED_CONSTANT: &str = "flowsta-private-network-v2";
 
+/// Identity-level key for third-party app backups (`backups/<client_id>/`).
+/// Identical on every one of the user's devices, like `DATA_ENCRYPTION_CONSTANT`
+/// and unlike the per-device agent key - so a backup written by one device
+/// reads on another once devices are paired (per-device keys, decision D1).
+/// Supersedes the legacy key derived from the DEVICE_1 seed, which is still
+/// read (never written) so existing backups keep working.
+pub const BACKUP_KEY_CONSTANT: &str = "flowsta-backup-key-v2";
+
 #[derive(Error, Debug)]
 pub enum KeyDerivationError {
     #[error("Invalid recovery phrase: {0}")]
@@ -115,6 +123,11 @@ pub fn derive_data_encryption_key(mnemonic_str: &str) -> Result<[u8; 32], KeyDer
 }
 
 /// Derive the per-user private-DHT network seed (hex string) for DNA v2 installs.
+/// Identity-level backup key: HMAC-SHA256("flowsta-backup-key-v2", bip39 seed).
+pub fn derive_backup_identity_key(mnemonic_str: &str) -> Result<[u8; 32], KeyDerivationError> {
+    derive_seed(mnemonic_str, BACKUP_KEY_CONSTANT)
+}
+
 pub fn derive_private_network_seed(mnemonic_str: &str) -> Result<String, KeyDerivationError> {
     let seed = derive_seed(mnemonic_str, PRIVATE_NETWORK_SEED_CONSTANT)?;
     Ok(hex::encode(seed))
@@ -508,7 +521,8 @@ mod tests {
         let device_seed = derive_seed(TEST_MNEMONIC, DEVICE_1_CONSTANT).unwrap();
         let web_seed = derive_seed(TEST_MNEMONIC, WEB_IDENTITY_CONSTANT).unwrap();
         let lookup_seed = derive_seed(TEST_MNEMONIC, RECOVERY_LOOKUP_CONSTANT).unwrap();
-        let all = [data_key, device_seed, web_seed, lookup_seed];
+        let backup_key = derive_backup_identity_key(TEST_MNEMONIC).unwrap();
+        let all = [data_key, device_seed, web_seed, lookup_seed, backup_key];
         for (i, a) in all.iter().enumerate() {
             for b in all.iter().skip(i + 1) {
                 assert_ne!(a, b, "derivation constants must yield distinct keys");

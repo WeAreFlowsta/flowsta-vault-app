@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
+#[allow(unused_imports)]
 pub use crate::paths::ACTIVITY_FILE;
 /// Newest entries kept; older ones fall off the end.
 const CAP: usize = 500;

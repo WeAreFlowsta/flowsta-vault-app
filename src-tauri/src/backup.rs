@@ -217,6 +217,52 @@ struct EncryptedBackup {
 
 /// Derive the backup encryption key from a device seed.
 /// Exposed so AppState can cache it across lock/unlock.
+/// The two keys a backup may be under. `legacy` always exists once the vault
+/// has been unlocked in this process; `identity` exists on vaults created or
+/// restored since the identity-level key was introduced (D1).
+pub(crate) struct BackupKeys {
+    pub identity: Option<[u8; 32]>,
+    pub legacy: [u8; 32],
+}
+
+impl BackupKeys {
+    /// New backups are written with the identity key when the vault has one.
+    pub fn write_key(&self) -> [u8; 32] {
+        self.identity.unwrap_or(self.legacy)
+    }
+}
+
+/// Resolve the backup keys: from the decrypted config when unlocked, else
+/// from the caches set by the last unlock (locked-state writes are a feature).
+pub(crate) fn backup_keys(app_state: &AppState) -> Result<BackupKeys, String> {
+    let config = app_state.vault_config.lock().unwrap();
+    let (legacy, identity) = if let Some(ref cfg) = *config {
+        let legacy = match cfg.device_seed {
+            Some(ref seed) if seed.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(seed);
+                derive_backup_key(&arr)
+            }
+            _ => *app_state.backup_key.lock().unwrap().as_ref().ok_or("Vault has never been unlocked")?,
+        };
+        let identity = match cfg.backup_key {
+            Some(ref k) if k.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(k);
+                Some(arr)
+            }
+            _ => *app_state.backup_key_identity.lock().unwrap(),
+        };
+        (legacy, identity)
+    } else {
+        (
+            *app_state.backup_key.lock().unwrap().as_ref().ok_or("Vault has never been unlocked")?,
+            *app_state.backup_key_identity.lock().unwrap(),
+        )
+    };
+    Ok(BackupKeys { identity, legacy })
+}
+
 pub fn derive_backup_key_from_seed(device_seed: &[u8; 32]) -> [u8; 32] {
     derive_backup_key(device_seed)
 }
@@ -321,25 +367,8 @@ pub fn save_backup_with_time(
         ));
     }
 
-    // Use device seed if unlocked, otherwise fall back to cached backup key
-    let backup_key = {
-        let config = app_state.vault_config.lock().unwrap();
-        if let Some(ref cfg) = *config {
-            if let Some(ref seed) = cfg.device_seed {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(seed);
-                derive_backup_key(&arr)
-            } else {
-                *app_state.backup_key.lock().unwrap()
-                    .as_ref()
-                    .ok_or("Vault has never been unlocked")?
-            }
-        } else {
-            *app_state.backup_key.lock().unwrap()
-                .as_ref()
-                .ok_or("Vault has never been unlocked")?
-        }
-    };
+    let keys = backup_keys(app_state)?;
+    let backup_key = keys.write_key();
 
     // Auto-generate a timestamped label when none is provided, so each
     // backup is a separate snapshot rather than overwriting "latest".
@@ -449,25 +478,7 @@ pub fn retrieve_backup(
     client_id: &str,
     label: Option<&str>,
 ) -> Result<(Vec<u8>, BackupMeta), String> {
-    // Use device seed if unlocked, otherwise fall back to cached backup key
-    let backup_key = {
-        let config = app_state.vault_config.lock().unwrap();
-        if let Some(ref cfg) = *config {
-            if let Some(ref seed) = cfg.device_seed {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(seed);
-                derive_backup_key(&arr)
-            } else {
-                *app_state.backup_key.lock().unwrap()
-                    .as_ref()
-                    .ok_or("Vault has never been unlocked")?
-            }
-        } else {
-            *app_state.backup_key.lock().unwrap()
-                .as_ref()
-                .ok_or("Vault has never been unlocked")?
-        }
-    };
+    let keys = backup_keys(app_state)?;
 
     // If no label given, find the most recent backup for this app
     let path = if let Some(l) = label {
@@ -498,7 +509,19 @@ pub fn retrieve_backup(
     let ciphertext = hex::decode(&encrypted.ciphertext)
         .map_err(|_| "Backup bad ciphertext hex".to_string())?;
 
-    let plaintext = decrypt_with_key(&ciphertext, &nonce_bytes, &backup_key)?;
+    // Dual read: the identity-level key first, then the legacy device-seed
+    // key that backups written before it still use. A legacy hit is fine -
+    // the next write of that slot re-encrypts under the identity key.
+    let plaintext = match keys.identity {
+        Some(ref idk) => match decrypt_with_key(&ciphertext, &nonce_bytes, idk) {
+            Ok(p) => p,
+            Err(_) => {
+                log::debug!("backup {}/{:?}: legacy key", client_id, encrypted.meta.label);
+                decrypt_with_key(&ciphertext, &nonce_bytes, &keys.legacy)?
+            }
+        },
+        None => decrypt_with_key(&ciphertext, &nonce_bytes, &keys.legacy)?,
+    };
 
     Ok((plaintext, encrypted.meta))
 }
@@ -995,6 +1018,29 @@ mod rotation_tests {
         let state = AppState::new(dir.to_path_buf());
         *state.backup_key.lock().unwrap() = Some([7u8; 32]);
         state
+    }
+
+    /// D1 dual read: a backup written under the legacy device-seed key still
+    /// reads once the identity-level key exists, and the next write of that
+    /// slot is under the identity key.
+    #[test]
+    fn legacy_backup_reads_and_migrates_under_identity_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_key(dir.path());
+        save_backup(&state, "app-a", "App A", Some("slot"), b"hello legacy", None).unwrap();
+        // The identity key appears (as it would on a restore of this identity).
+        *state.backup_key_identity.lock().unwrap() = Some([9u8; 32]);
+        let (plain, _) = retrieve_backup(&state, "app-a", Some("slot")).unwrap();
+        assert_eq!(plain, b"hello legacy");
+        // A write now uses the identity key: the file no longer decrypts with legacy.
+        save_backup(&state, "app-a", "App A", Some("slot"), b"hello identity", None).unwrap();
+        let raw: EncryptedBackup = serde_json::from_slice(&std::fs::read(backup_file_path(dir.path(), "app-a", "slot")).unwrap()).unwrap();
+        let ct = hex::decode(&raw.ciphertext).unwrap();
+        let nonce = hex::decode(&raw.nonce).unwrap();
+        assert!(decrypt_with_key(&ct, &nonce, &[7u8; 32]).is_err(), "must be under the identity key now");
+        assert_eq!(decrypt_with_key(&ct, &nonce, &[9u8; 32]).unwrap(), b"hello identity");
+        let (plain2, _) = retrieve_backup(&state, "app-a", Some("slot")).unwrap();
+        assert_eq!(plain2, b"hello identity");
     }
 
     #[test]
