@@ -146,6 +146,9 @@ jobs:
           FLOWSTA_AUTH_MATERIAL: ${{ secrets.FLOWSTA_AUTH_MATERIAL_STAGING }}
           VITE_API_URL: ${{ vars.STAGING_API_URL }}
           VITE_WEB_URL: ${{ vars.STAGING_WEB_URL }}
+          # Staging builds never sign Windows binaries (eSigner bills per
+          # signing; sign-windows.ps1 no-ops when this is 1).
+          VAULT_SKIP_WINDOWS_SIGNING: 1
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '-' }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
