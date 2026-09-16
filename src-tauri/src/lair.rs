@@ -154,6 +154,11 @@ pub fn start_lair_process(
         );
     }
 
+    // Lair's default socket sits inside its own directory; where that path
+    // is over the Unix-socket limit, point the config at a short one.
+    #[cfg(not(windows))]
+    ensure_socket_fits(lair_dir, &config_path)?;
+
     // Read connection URL from config file.
     let connection_url = read_connection_url(&config_path)?;
 
@@ -166,6 +171,13 @@ pub fn start_lair_process(
         if path.exists() {
             log::info!("Removing stale lair {}: {:?}", stale, path);
             let _ = std::fs::remove_file(&path);
+        }
+    }
+    #[cfg(not(windows))]
+    if let Ok(sock) = socket_path_from_url(&connection_url) {
+        if sock.exists() && sock != lair_dir.join("socket") {
+            log::info!("Removing stale lair socket: {:?}", sock);
+            let _ = std::fs::remove_file(&sock);
         }
     }
 
@@ -319,6 +331,63 @@ pub fn lair_exited(child: &mut Child, lair_dir: &Path) -> Option<String> {
 }
 
 /// Read the connection URL from lair's config file.
+/// The socket path inside a `unix:///path?k=...` connection URL.
+#[cfg(not(windows))]
+pub(crate) fn socket_path_from_url(connection_url: &str) -> Result<std::path::PathBuf, String> {
+    let url = lair_keystore_api::dependencies::url::Url::parse(connection_url)
+        .map_err(|e| format!("Invalid lair connection URL: {}", e))?;
+    let decoded = percent_decode_str(url.path()).decode_utf8_lossy();
+    Ok(std::path::PathBuf::from(decoded.as_ref()))
+}
+
+/// Lair writes `connectionUrl: unix://<lair dir>/socket?k=...` at init. On
+/// macOS that path is over the Unix-socket limit for every partitioned
+/// Vault (`~/Library/Application Support/<id>/identities/<key>/lair/socket`
+/// is ~103 of 104 bytes) and lair dies with "path must be shorter than
+/// SUN_LEN". When the in-directory socket does not fit, rewrite the URL's
+/// path to a short per-user runtime path; the store, pid file and the
+/// connection key (`?k=`) stay exactly as lair wrote them. Idempotent: a
+/// config already pointing at a fitting path is left alone.
+#[cfg(not(windows))]
+fn ensure_socket_fits(lair_dir: &Path, config_path: &Path) -> Result<(), String> {
+    let url = read_connection_url(config_path)?;
+    let current = socket_path_from_url(&url)?;
+    if crate::paths::socket_fits(&current) {
+        return Ok(());
+    }
+    let root = lair_dir.parent().unwrap_or(lair_dir);
+    let short = crate::paths::short_socket_path(root);
+    if !crate::paths::socket_fits(&short) {
+        return Err(format!("no socket path short enough for the key store ({:?})", short));
+    }
+    if let Some(dir) = short.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create the socket directory {:?}: {}", dir, e))?;
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    const KEEP: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'/').remove(b'.').remove(b'-').remove(b'_');
+    let encoded = percent_encoding::utf8_percent_encode(&short.to_string_lossy(), KEEP).to_string();
+    let query = url.split_once('?').map(|(_, q)| format!("?{}", q)).unwrap_or_default();
+    let new_url = format!("unix://{}{}", encoded, query);
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read lair config at {:?}: {}", config_path, e))?;
+    let rewritten: String = content
+        .lines()
+        .map(|l| if l.trim_start().starts_with("connectionUrl:") { format!("connectionUrl: {}", new_url) } else { l.to_string() })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let tmp = config_path.with_extension("yaml.tmp");
+    std::fs::write(&tmp, rewritten).map_err(|e| format!("Failed to write lair config: {}", e))?;
+    std::fs::rename(&tmp, config_path).map_err(|e| format!("Failed to replace lair config: {}", e))?;
+    log::info!(
+        "[lair] socket moved to the runtime dir: {:?} ({} bytes; the in-directory path was {} bytes)",
+        short, short.as_os_str().len(), current.as_os_str().len()
+    );
+    Ok(())
+}
+
 fn read_connection_url(config_path: &Path) -> Result<String, String> {
     let content = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read lair config at {:?}: {}", config_path, e))?;
@@ -549,5 +618,50 @@ mod tests {
             verifying_key.verify_strict(payload, &sig).is_ok(),
             "Lair-produced signature must be verifiable by ed25519_dalek"
         );
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+mod socket_tests {
+    use super::*;
+
+    #[test]
+    fn a_too_long_default_socket_is_moved_to_the_runtime_dir_and_the_key_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        // a root deep enough that <root>/lair/socket cannot fit
+        let root = tmp.path().join("x".repeat(110));
+        let lair = root.join("lair");
+        std::fs::create_dir_all(&lair).unwrap();
+        let cfg = lair.join("lair-keystore-config.yaml");
+        let original = format!(
+            "---\nconnectionUrl: unix://{0}/socket?k=abc123\npidFile: {0}/pid_file\nstoreFile: {0}/store_file\n",
+            lair.display()
+        );
+        std::fs::write(&cfg, &original).unwrap();
+        ensure_socket_fits(&lair, &cfg).unwrap();
+        let url = read_connection_url(&cfg).unwrap();
+        let sock = socket_path_from_url(&url).unwrap();
+        assert_eq!(sock, crate::paths::short_socket_path(&root));
+        assert!(crate::paths::socket_fits(&sock), "{:?}", sock);
+        assert!(url.ends_with("?k=abc123"), "connection key kept: {}", url);
+        assert!(sock.parent().unwrap().is_dir(), "socket dir created");
+        let after = std::fs::read_to_string(&cfg).unwrap();
+        assert!(after.contains(&format!("pidFile: {}/pid_file", lair.display())), "other paths untouched");
+        assert!(after.contains(&format!("storeFile: {}/store_file", lair.display())));
+        // second call: already fits, nothing changes
+        ensure_socket_fits(&lair, &cfg).unwrap();
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), after);
+    }
+
+    #[test]
+    fn a_fitting_default_socket_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lair = tmp.path().join("lair");
+        std::fs::create_dir_all(&lair).unwrap();
+        let cfg = lair.join("lair-keystore-config.yaml");
+        let original = format!("connectionUrl: unix://{0}/socket?k=zzz\npidFile: {0}/pid_file\n", lair.display());
+        std::fs::write(&cfg, &original).unwrap();
+        ensure_socket_fits(&lair, &cfg).unwrap();
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), original);
     }
 }

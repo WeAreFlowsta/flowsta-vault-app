@@ -220,15 +220,20 @@ mod tests {
     }
 
     #[test]
-    fn a_root_too_deep_for_the_socket_stays_legacy() {
+    #[cfg(not(windows))]
+    fn a_root_too_deep_for_the_default_socket_still_relocates_via_the_runtime_socket() {
+        // The macOS case: <root>/lair/socket is over the limit, so the key
+        // store's socket goes to the short runtime path at start instead
+        // of the move being refused (the 2026-09-16 Mac drive finding).
         let dir = tempfile::tempdir().unwrap();
         let deep = dir.path().join("y".repeat(90));
         std::fs::create_dir_all(&deep).unwrap();
         let key = legacy_install(&deep);
         let state = AppState::new(deep.clone());
-        assert!(matches!(relocate_if_legacy(&state, &key), Outcome::StayedLegacy(_)));
-        assert!(paths::vault_file(&deep).exists() && paths::lair_dir(&deep).exists());
-        assert!(!paths::identities_dir(&deep).exists() || std::fs::read_dir(paths::identities_dir(&deep)).map(|r| r.count() == 0).unwrap_or(true));
+        let Outcome::Relocated(new_root) = relocate_if_legacy(&state, &key) else { panic!("expected a relocation") };
+        assert!(!paths::in_root_socket_fits(&new_root), "the default socket would not fit here");
+        assert!(paths::lair_socket_path_fits(&new_root), "but the runtime socket does");
+        assert!(paths::vault_file(&new_root).exists());
     }
 
     #[test]

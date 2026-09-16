@@ -101,20 +101,61 @@ pub fn partition_key(agent_pub_key: &str) -> Option<String> {
     Some(full[..PARTITION_KEY_LEN].to_string())
 }
 
-/// Whether the key store's socket path under this root fits the platform's
-/// Unix-socket path limit (Linux 108, macOS 104, minus a safety margin).
-/// Windows key stores use named pipes and always fit. A root that does not
-/// fit stays on the legacy layout rather than producing a key store that
+/// Unix-socket path budget for the key store: Linux 108, macOS 104, minus
+/// a safety margin. Windows key stores use named pipes (no limit).
+#[cfg(not(windows))]
+pub fn socket_path_budget() -> usize {
+    let limit: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
+    limit.saturating_sub(4)
+}
+
+#[cfg(not(windows))]
+pub fn socket_fits(path: &Path) -> bool { path.as_os_str().len() + 1 <= socket_path_budget() }
+
+/// Whether lair's default socket (inside its own directory under `root`)
+/// fits. On macOS it does NOT for any partitioned Vault: `~/Library/
+/// Application Support/<id>/identities/<key>/lair/socket` is ~103 bytes
+/// against a 104 limit (found on the 2026-09-16 Mac drive).
+pub fn in_root_socket_fits(root: &Path) -> bool {
+    #[cfg(windows)]
+    { let _ = root; true }
+    #[cfg(not(windows))]
+    { socket_fits(&lair_dir(root).join("socket")) }
+}
+
+/// A short, per-user, private directory for key store sockets whose
+/// in-root path does not fit: macOS `$TMPDIR` (per-user, mode 700), Linux
+/// `$XDG_RUNTIME_DIR`, else `/tmp/fv-<uid>` (created mode 700).
+#[cfg(not(windows))]
+pub fn short_socket_dir() -> PathBuf {
+    let base = if cfg!(target_os = "macos") { std::env::var_os("TMPDIR") } else { std::env::var_os("XDG_RUNTIME_DIR") };
+    if let Some(b) = base {
+        let b = PathBuf::from(b);
+        if b.is_absolute() && b.is_dir() { return b.join("fv"); }
+    }
+    // SAFETY: getuid has no preconditions and cannot fail.
+    PathBuf::from(format!("/tmp/fv-{}", unsafe { libc::getuid() }))
+}
+
+/// The short socket path for the key store under `root`: one name per
+/// root (16 hex of sha256 over the root path), so two instances never
+/// share a socket.
+#[cfg(not(windows))]
+pub fn short_socket_path(root: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let h = hex::encode(Sha256::digest(root.to_string_lossy().as_bytes()));
+    short_socket_dir().join(format!("{}.sock", &h[..16]))
+}
+
+/// Whether a key store under `root` can be started at all: its default
+/// socket fits, or the short runtime socket does. A root where neither
+/// fits stays on the legacy layout rather than producing a key store that
 /// cannot start ("path must be shorter than SUN_LEN").
 pub fn lair_socket_path_fits(root: &Path) -> bool {
     #[cfg(windows)]
     { let _ = root; true }
     #[cfg(not(windows))]
-    {
-        let limit: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
-        let socket = lair_dir(root).join("socket");
-        socket.as_os_str().len() + 1 <= limit.saturating_sub(4)
-    }
+    { in_root_socket_fits(root) || socket_fits(&short_socket_path(root)) }
 }
 
 pub fn identities_dir(device_root: &Path) -> PathBuf { device_root.join(IDENTITIES_DIR) }
@@ -192,10 +233,22 @@ mod tests {
     }
 
     #[test]
-    fn socket_budget_rejects_roots_that_are_too_deep() {
-        assert!(lair_socket_path_fits(Path::new("/home/user/.local/share/com.flowsta.vault/identities/0123456789abcdef")));
+    #[cfg(not(windows))]
+    fn socket_budget_falls_back_to_the_short_runtime_socket() {
+        let shallow = Path::new("/home/user/.local/share/com.flowsta.vault/identities/0123456789abcdef");
+        assert!(in_root_socket_fits(shallow));
+        // the macOS shape: ~/Library/Application Support/<id>/identities/<key>
+        let mac = Path::new("/Users/zoe/Library/Application Support/com.flowsta.vault.staging/identities/0123456789abcdef");
+        assert!(!socket_fits(&lair_dir(mac).join("socket").as_path().to_path_buf()) || cfg!(not(target_os = "macos")));
         let deep = format!("/{}", "x".repeat(120));
-        assert!(!lair_socket_path_fits(Path::new(&deep)));
+        assert!(!in_root_socket_fits(Path::new(&deep)));
+        // the fallback keeps every such root startable
+        assert!(lair_socket_path_fits(Path::new(&deep)));
+        let s = short_socket_path(Path::new(&deep));
+        assert!(socket_fits(&s), "{:?}", s);
+        assert!(s.to_string_lossy().ends_with(".sock"));
+        assert_ne!(s, short_socket_path(mac), "one socket per root");
+        assert_eq!(s, short_socket_path(Path::new(&deep)), "deterministic");
     }
 
     #[test]
