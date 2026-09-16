@@ -275,6 +275,9 @@ pub struct AppState {
     /// both spawn a fresh conductor - the first one wins, the others
     /// observe the recovered state.
     pub conductor_restart_lock: tokio::sync::Mutex<()>,
+    /// True while the one-time relocation into a partition root is moving files;
+    /// backup reads and writes refuse for those milliseconds (see backup.rs).
+    pub relocating: std::sync::atomic::AtomicBool,
     /// Transient: the deferred (offline-create) registration failed with
     /// email_already_registered - surfaced via get_identity so the
     /// Overview can ask for a different address. Cleared on retry.
@@ -426,6 +429,7 @@ impl AppState {
             pending_relay_claim: Mutex::new(None),
             unlock_passphrase: Mutex::new(None),
             conductor_restart_lock: tokio::sync::Mutex::new(()),
+            relocating: std::sync::atomic::AtomicBool::new(false),
             registration_conflict: Mutex::new(false),
             dev_relock_passphrase: Mutex::new(None),
             cell_credentials: Mutex::new(HashMap::new()),
@@ -880,6 +884,12 @@ pub(crate) fn unlock_vault_inner(
         agent_pub_key: config.agent_pub_key.clone(),
         did: config.did.clone(),
     };
+
+    // One-time move of a legacy layout under its partition root. Runs here
+    // because this is the only moment the identity is certain while nothing
+    // is running; it is all-or-nothing and a skip leaves the vault working
+    // exactly as before (relocate.rs).
+    let _ = crate::relocate::relocate_if_legacy(state, &config.agent_pub_key);
 
     // Extract conductor startup params before storing config
     let device_seed = config.device_seed.clone();

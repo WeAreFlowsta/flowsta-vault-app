@@ -14,6 +14,7 @@ mod paths;
 mod migration;
 mod process_ext;
 mod quota_cache;
+mod relocate;
 mod relay_login;
 mod sealed;
 mod vault;

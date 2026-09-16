@@ -35,7 +35,8 @@ pub struct ActivityEvent {
 }
 
 pub struct ActivityLog {
-    data_dir: std::path::PathBuf,
+    /// Identity root the log persists under; switched by a relocation.
+    data_dir: Mutex<std::path::PathBuf>,
     events: Mutex<Vec<ActivityEvent>>,
     /// Set once the Tauri app exists, so a new entry can nudge open pages.
     app_handle: Mutex<Option<tauri::AppHandle>>,
@@ -50,7 +51,12 @@ impl ActivityLog {
             let drop_n = events.len() - CAP;
             events.drain(0..drop_n);
         }
-        Self { data_dir: data_dir.to_path_buf(), events: Mutex::new(events), app_handle: Mutex::new(None) }
+        Self { data_dir: Mutex::new(data_dir.to_path_buf()), events: Mutex::new(events), app_handle: Mutex::new(None) }
+    }
+
+    /// Point the log at a new identity root (the file itself was moved).
+    pub fn set_root(&self, root: &std::path::Path) {
+        *self.data_dir.lock().unwrap() = root.to_path_buf();
     }
 
     pub fn attach(&self, handle: tauri::AppHandle) {
@@ -77,7 +83,7 @@ impl ActivityLog {
             serde_json::to_string_pretty(&*events)
         };
         if let Ok(json) = json {
-            if let Err(e) = crate::vault::write_atomic(&crate::paths::activity_path(&self.data_dir), json.as_bytes()) {
+            if let Err(e) = crate::vault::write_atomic(&crate::paths::activity_path(&self.data_dir.lock().unwrap()), json.as_bytes()) {
                 log::warn!("activity log not saved: {}", e);
             }
         }

@@ -83,15 +83,38 @@ pub fn restore_choice_path(root: &Path) -> PathBuf { root.join(RESTORE_CHOICE_MA
 /// Folder under the device root that holds one sub-folder per identity.
 pub const IDENTITIES_DIR: &str = "identities";
 
-/// Partition key for an identity: lowercase hex sha256 of the 39-byte agent
-/// key (decision D4). A hash, not the key string: agent-key strings are
-/// case-sensitive base64url and would collide on case-insensitive
-/// filesystems (macOS, Windows defaults). `None` when the string is not an
-/// agent key in either known encoding.
+/// Partition key for an identity: the first 16 lowercase hex characters (64
+/// bits) of sha256 over the 39-byte agent key (decision D4). A hash, not the
+/// key string: agent-key strings are case-sensitive base64url and would
+/// collide on case-insensitive filesystems (macOS, Windows defaults). Short,
+/// because the key store's Unix socket lives under this folder and socket
+/// paths are limited to ~104 bytes (the 2026-09-16 drive hit that limit with
+/// the full 64-character hash). 64 bits is ample for the handful of
+/// identities one device holds. `None` when the string is not an agent key
+/// in either known encoding.
+pub const PARTITION_KEY_LEN: usize = 16;
+
 pub fn partition_key(agent_pub_key: &str) -> Option<String> {
     use sha2::{Digest, Sha256};
     let bytes = crate::key_derivation::decode_agent_pub_key_flexible(agent_pub_key.trim())?;
-    Some(hex::encode(Sha256::digest(bytes)))
+    let full = hex::encode(Sha256::digest(bytes));
+    Some(full[..PARTITION_KEY_LEN].to_string())
+}
+
+/// Whether the key store's socket path under this root fits the platform's
+/// Unix-socket path limit (Linux 108, macOS 104, minus a safety margin).
+/// Windows key stores use named pipes and always fit. A root that does not
+/// fit stays on the legacy layout rather than producing a key store that
+/// cannot start ("path must be shorter than SUN_LEN").
+pub fn lair_socket_path_fits(root: &Path) -> bool {
+    #[cfg(windows)]
+    { let _ = root; true }
+    #[cfg(not(windows))]
+    {
+        let limit: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
+        let socket = lair_dir(root).join("socket");
+        socket.as_os_str().len() + 1 <= limit.saturating_sub(4)
+    }
 }
 
 pub fn identities_dir(device_root: &Path) -> PathBuf { device_root.join(IDENTITIES_DIR) }
@@ -158,7 +181,7 @@ mod tests {
         assert_eq!(select_identity_root(root), root);
         // partition folder present → selected
         let pk = partition_key(&key).unwrap();
-        assert_eq!(pk.len(), 64);
+        assert_eq!(pk.len(), PARTITION_KEY_LEN);
         assert_eq!(pk, pk.to_lowercase());
         assert_eq!(partition_key(&format!("  {}\n", key)), Some(pk.clone()), "whitespace-tolerant, deterministic");
         std::fs::create_dir_all(identity_root_for(root, &pk)).unwrap();
@@ -166,6 +189,13 @@ mod tests {
         // a different key never maps to the same folder
         let other = crate::key_derivation::construct_agent_pub_key_string(&[4u8; 32]);
         assert_ne!(partition_key(&other).unwrap(), pk);
+    }
+
+    #[test]
+    fn socket_budget_rejects_roots_that_are_too_deep() {
+        assert!(lair_socket_path_fits(Path::new("/home/user/.local/share/com.flowsta.vault/identities/0123456789abcdef")));
+        let deep = format!("/{}", "x".repeat(120));
+        assert!(!lair_socket_path_fits(Path::new(&deep)));
     }
 
     #[test]

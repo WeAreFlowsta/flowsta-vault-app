@@ -235,6 +235,9 @@ impl BackupKeys {
 /// Resolve the backup keys: from the decrypted config when unlocked, else
 /// from the caches set by the last unlock (locked-state writes are a feature).
 pub(crate) fn backup_keys(app_state: &AppState) -> Result<BackupKeys, String> {
+    if app_state.relocating.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("vault_relocating: the Vault is moving its files, retry in a moment".to_string());
+    }
     let config = app_state.vault_config.lock().unwrap();
     let (legacy, identity) = if let Some(ref cfg) = *config {
         let legacy = match cfg.device_seed {
