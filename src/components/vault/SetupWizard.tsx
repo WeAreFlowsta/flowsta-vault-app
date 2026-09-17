@@ -2009,7 +2009,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                     >
                       Continue without importing
                     </button>
-                    <GlassButton onClick$={importExportNow}>Import my export</GlassButton>
+                    <GlassButton onClick$={importExportNow}>Import</GlassButton>
                   </div>
                 )}
               </div>

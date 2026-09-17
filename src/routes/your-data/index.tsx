@@ -568,10 +568,9 @@ export default component$(() => {
           )}
         </div>
         <p class="mb-4 text-sm text-gray-400">
-          Your profile, activity, and app records - encrypted and stored only
-          in this vault, on this device. Nothing here is on any server, which
-          is the point: no one in control but you. It also means only your
-          export file keeps these safe if this device is lost.
+          Your profile, activity and app records, encrypted and kept only on
+          this device - never on a server. Your export file is what keeps them
+          safe if this device is lost.
         </p>
         {sealedStatus.value === "loading" ? (
           <div class="flex items-center gap-3 rounded-lg border border-gray-800 bg-black/30 p-4">
@@ -862,21 +861,19 @@ export default component$(() => {
 
       {/* Export */}
       <div class="mb-6 rounded-xl border border-gray-700 bg-[#15203a] p-6">
-        <h3 class="mb-2 text-lg font-semibold text-white">Export All Data</h3>
+        <h3 class="mb-2 text-lg font-semibold text-white">Export Data</h3>
         <p class="mb-4 text-sm text-gray-400">
-          Download a complete copy of your vault - your identity keys, private
-          records, connected apps, and your app data backups. Your recovery
-          phrase can restore your <em>identity</em> anywhere; this file is how
-          your <em>data</em> survives losing this device. Everything in it is
-          readable JSON you own outright - no Flowsta needed to use it.
+          Download a complete copy of your Vault: identity keys, private
+          records, connected apps and app backups, as readable JSON you own.
+          Your recovery phrase restores your identity; this file restores
+          your data.
         </p>
 
         <div class="mb-4">
-          <Callout intent="warning" title="This file will contain your private keys">
+          <Callout intent="warning" title="This file contains your private keys">
             <p>
-              Your export includes the cryptographic seed that proves your
-              identity on the network. Store it somewhere safe and never share
-              it - anyone with this file could sign as you.
+              Anyone with it can sign as you. Store it somewhere safe and never
+              share it.
             </p>
           </Callout>
         </div>
@@ -887,12 +884,11 @@ export default component$(() => {
               <p>
                 Export saved
                 {exportResult.value ? ` (${formatBytes(exportResult.value.bytes)})` : ""}.
-                Keep it somewhere safe!
+                Keep it somewhere safe.
                 {exportResult.value && !exportResult.value.signatures_included && (
                   <>
-                    {" "}Your signature history wasn't included this time. It
-                    stays safe on the network and re-syncs on its own; export
-                    again later for a copy that includes it.
+                    {" "}Your signature history wasn't included this time - it
+                    stays safe on the network; export again later to include it.
                   </>
                 )}
               </p>
@@ -912,7 +908,7 @@ export default component$(() => {
           onClick$={handleExport}
           disabled={exporting.value}
         >
-          {exporting.value ? "Exporting..." : "Download Export"}
+          {exporting.value ? "Exporting..." : "Export"}
         </GlassButton>
         {exporting.value && (
           <>
@@ -934,16 +930,12 @@ export default component$(() => {
 
       {/* Restore from export */}
       <div id="restore" class="rounded-xl border border-gray-700 bg-[#15203a] p-6">
-        <h3 class="mb-2 text-lg font-semibold text-white">
-          Restore from an Export
-        </h3>
+        <h3 class="mb-2 text-lg font-semibold text-white">Import Data</h3>
         <p class="mb-4 text-sm text-gray-400">
-          Reset your vault or moved to a new device? After restoring your
-          identity with your recovery phrase, import an export file to bring
-          your private records and app backups home. Your full Vault export
-          and single-app exports both work. Only your own exports work - the
-          file must match this vault's identity. Safe to run more than once:
-          records you already have are skipped, never duplicated.
+          Bring your private records and app backups back from an export
+          file - after a reset, or on a new device once your recovery phrase
+          has restored your identity. Only your own exports work, and records
+          already here are never duplicated.
         </p>
 
         {importError.value && (
@@ -1046,7 +1038,7 @@ export default component$(() => {
           })()}
 
         <GlassButton onClick$={handleImport} disabled={importing.value}>
-          {importing.value ? "Importing..." : "Import Export File"}
+          {importing.value ? "Importing..." : "Import"}
         </GlassButton>
         <label class="mt-3 flex cursor-pointer items-start gap-2 text-xs text-gray-400">
           <input
@@ -1059,10 +1051,8 @@ export default component$(() => {
             <span class="text-gray-300">
               Also replace backups I already have.
             </span>{" "}
-            An import normally only adds what's missing - it never touches
-            backups already in this Vault. Check this to replace them with
-            the file's versions too, for when a backup here is wrong and
-            the file holds the good copy.
+            An import normally only adds what's missing. Check this when a
+            backup here is wrong and the file holds the good copy.
           </span>
         </label>
         {importing.value && (
