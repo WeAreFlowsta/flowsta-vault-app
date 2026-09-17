@@ -5,6 +5,69 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0-beta.1] - 2026-09-17
+
+### Highlights
+- **Your identity has its own folder.** The Vault now keeps everything
+  that belongs to an identity - its vault file, key store, network data,
+  backups and activity - under one folder of its own. An existing Vault
+  moves itself there at the first unlock after upgrading, in one step,
+  with nothing to do and nothing to re-enter. This is the groundwork for
+  switching between identities in a coming release.
+- **Restoring got a straight path.** After a recovery-phrase restore the
+  wizard asks the one question that matters: import your export now, or
+  continue without. Importing brings back your private records, your app
+  backups and now your email, and the Vault lands on the Overview.
+- **A restored Vault says what is happening.** Until the network has
+  returned your signatures, the Overview and Sign It say "Syncing from the
+  network" instead of "Sign your first file".
+- **Your Data reads simpler.** Export Data and Import Data, with Export and
+  Import buttons, and shorter explanations throughout.
+- **Every Mac gets the new layout.** The key store now starts even when the
+  data folder path is longer than macOS allows for its socket, which would
+  otherwise have kept many Macs on the old layout.
+
+### Added
+- **Import restores your email.** A recovery-phrase restore cannot know
+  your email (Flowsta keeps only a fingerprint of it). Your export carries
+  it, and importing confirms it with Flowsta the same way the "Add the
+  email you registered with" card does. A changed address is refused and
+  never stored; offline, the card simply stays for later.
+- **The wizard's import-or-continue choice** after a phrase restore, with
+  the import running right there and a one-line result. The Overview card
+  remains for a Vault closed before answering.
+- **App backups are written with an identity-level key.** Older backups
+  still read; they are re-encrypted the next time they are written.
+
+### Changed
+- **Per-identity folders.** Identity files live under `identities/<id>/`;
+  device-level files (settings, the autostart marker, the active-identity
+  marker) stay at the top of the data folder. Reset Vault erases exactly
+  one identity's folder and never stops early.
+- **The move keeps a safety copy of the old key store** until the unlock
+  after the one that moved it.
+- **Wizard completion always lands on the Overview**, so a reset started
+  from Settings no longer returns you to Settings.
+- **Copy.** Your Data: Export Data / Import Data, Export / Import, two-line
+  explanations. The restore card: two lines and two buttons, Import and
+  Start fresh. An import of a file that holds no records now says so ("Nothing
+  to bring back", or "Your email is back" when that is what came back)
+  instead of suggesting you picked the wrong file.
+
+### Fixed
+- macOS: a data-folder path over the socket limit no longer stops the key
+  store from starting; it uses a short runtime path instead.
+- Reset Vault on the new layout removes the whole identity folder in one
+  go and reports the first error instead of stopping silently.
+- Backup metadata records which identity wrote each backup.
+
+### For developers
+- `import_vault_export` takes `apiUrl` and returns `email_status`
+  (`restored` | `mismatch` | `unreachable` | `already_set` | `absent`).
+  Exports are unchanged: the full export has carried `you.email` since 1.3.0.
+- Debug builds: `/dev/status` reports `layout` (`legacy` | `partitioned`)
+  and `identity_root`; the create leg of the bridge matrix asserts the move.
+
 ## [1.3.0] - 2026-09-14
 
 ### Highlights
