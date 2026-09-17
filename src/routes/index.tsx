@@ -14,7 +14,7 @@ import { connectionStatusContext, signaturesContext } from "~/lib/context";
 import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATCH } from "~/lib/email";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 import { ActivityRow } from "~/components/vault/ActivityRow";
-import { buildFeed, timeAgo, type ActivityLogEntry } from "~/lib/activity";
+import { buildFeed, timeAgo, recentlyRestored, type ActivityLogEntry } from "~/lib/activity";
 
 declare const __API_URL__: string;
 declare const __WEB_URL__: string;
@@ -694,7 +694,9 @@ export default component$(() => {
             {!sigsLoaded
               ? "Syncing - first load takes a few minutes"
               : sigCount === 0
-                ? "Sign your first file"
+                ? recentlyRestored(activityLog.value)
+                  ? "Syncing from the network - your signatures return in a few minutes"
+                  : "Sign your first file"
                 : [
                     `${activeSigs} active`,
                     revokedSigs > 0 ? `${revokedSigs} revoked` : null,

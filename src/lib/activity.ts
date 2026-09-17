@@ -20,6 +20,18 @@ export interface ActivityLogEntry {
   app_name?: string | null;
 }
 
+/** True when this identity was restored from its phrase within `withinSecs`
+ *  (default 30 min). A restored vault's own records come back from the
+ *  network over the first gossip rounds, so "0 signatures" right after a
+ *  restore means "still syncing", not "none". */
+export function recentlyRestored(
+  log: ActivityLogEntry[],
+  withinSecs = 30 * 60,
+  nowSecs = Math.floor(Date.now() / 1000),
+): boolean {
+  return log.some((e) => e.kind === "identity_restored" && nowSecs - e.at <= withinSecs);
+}
+
 export interface BackupRecordSummary {
   counts_by_entry_type: Record<string, number>;
   total_records: number;

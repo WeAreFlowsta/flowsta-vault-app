@@ -11,6 +11,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { GlassButton } from "~/components/common/GlassButton";
+import { recentlyRestored, type ActivityLogEntry } from "~/lib/activity";
 import { LoadingSignatures } from "~/components/sign-it/LoadingSignatures";
 import { SignQuotaMeter, type SignQuotaState } from "~/components/sign-it/SignQuotaMeter";
 import EditThumbnailModal from "~/components/sign-it/EditThumbnailModal";
@@ -282,6 +283,20 @@ export default component$(() => {
     cleanup(() => {
       unlistenPromise.then((fn) => fn());
     });
+  });
+
+  // A vault restored from its phrase in the last half hour: its signatures
+  // are still coming back from the network, so an empty list is "syncing",
+  // not "none yet".
+  const restoredRecently = useSignal(false);
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(async () => {
+    try {
+      const log = await invoke<ActivityLogEntry[]>("get_activity", { limit: 20 });
+      restoredRecently.value = recentlyRestored(log);
+    } catch {
+      restoredRecently.value = false;
+    }
   });
 
   // React to dropped file path - inline the processFile logic
@@ -1513,7 +1528,9 @@ export default component$(() => {
           </div>
         ) : recentSignatures.value.length === 0 ? (
           <p class="rounded-xl border border-gray-700 bg-[#15203a] p-6 text-center text-sm text-gray-500">
-            No signatures yet. Sign a file above to get started.
+            {restoredRecently.value
+              ? "Syncing from the network - your signatures return in a few minutes."
+              : "No signatures yet. Sign a file above to get started."}
           </p>
         ) : (
           <div class="space-y-3">

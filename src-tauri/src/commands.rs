@@ -278,6 +278,11 @@ pub struct AppState {
     /// True while the one-time relocation into a partition root is moving files;
     /// backup reads and writes refuse for those milliseconds (see backup.rs).
     pub relocating: std::sync::atomic::AtomicBool,
+    /// Set by a relocation; the unlock-time conductor start that follows it
+    /// keeps the set-aside `lair.old-<ts>` for one more unlock instead of
+    /// sweeping it in the same second (a failed re-init still has the old
+    /// store on disk). Cleared by that start.
+    pub skip_lair_sweep_once: std::sync::atomic::AtomicBool,
     /// Transient: the deferred (offline-create) registration failed with
     /// email_already_registered - surfaced via get_identity so the
     /// Overview can ask for a different address. Cleared on retry.
@@ -430,6 +435,7 @@ impl AppState {
             unlock_passphrase: Mutex::new(None),
             conductor_restart_lock: tokio::sync::Mutex::new(()),
             relocating: std::sync::atomic::AtomicBool::new(false),
+            skip_lair_sweep_once: std::sync::atomic::AtomicBool::new(false),
             registration_conflict: Mutex::new(false),
             dev_relock_passphrase: Mutex::new(None),
             cell_credentials: Mutex::new(HashMap::new()),
@@ -1273,8 +1279,17 @@ fn spawn_conductor_startup(
             };
 
             // Unlock-time start: no password change is in flight, so any
-            // `lair.old-*` left by an interrupted one is garbage.
-            crate::lair::sweep_old_lair_dirs(&data_dir);
+            // `lair.old-*` left by an interrupted one is garbage - except
+            // right after a relocation, whose set-aside store stays until
+            // the next unlock (relocate.rs).
+            if state
+                .skip_lair_sweep_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                log::info!("Keeping the set-aside key store until the next unlock (identity relocated this unlock)");
+            } else {
+                crate::lair::sweep_old_lair_dirs(&data_dir);
+            }
 
             // Resolve the resource directory where bundled .happ files live
             // (resource_dir with exe-relative and data-dir fallbacks - see

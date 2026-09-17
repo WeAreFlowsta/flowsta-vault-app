@@ -14,7 +14,9 @@
 //!   So `lair/` is never renamed into the new root - it is set aside as
 //!   `lair.old-<ts>` beside the new root and the next start re-initialises a
 //!   fresh key store there from the device seed (the same path a password
-//!   change already uses). The old copy is swept on a later start.
+//!   change already uses). The old copy survives that start (the sweep is
+//!   skipped once via `AppState::skip_lair_sweep_once`) and goes on the
+//!   unlock after it.
 //! - a half-moved tree reads as a fresh identity to every reader, so the
 //!   move is all-or-nothing: same-filesystem renames, backup writes held,
 //!   full rollback on any failure, the marker written last.
@@ -99,6 +101,7 @@ pub fn relocate_if_legacy(state: &AppState, agent_pub_key: &str) -> Outcome {
             state.activity.set_root(&new_root);
             // Marker last: from here on startup selects the partition.
             crate::commands::write_active_identity_marker(&device_root, agent_pub_key);
+            state.skip_lair_sweep_once.store(true, std::sync::atomic::Ordering::SeqCst);
             log::info!("Identity relocated into {:?}", new_root);
             Outcome::Relocated(new_root)
         }
@@ -212,11 +215,14 @@ mod tests {
         assert_eq!(state.identity_root(), new_root);
         assert_eq!(*state.vault_path.lock().unwrap(), paths::vault_file(&new_root));
         assert!(!state.relocating.load(std::sync::atomic::Ordering::SeqCst));
+        // the set-aside key store survives the unlock that relocated
+        assert!(state.skip_lair_sweep_once.load(std::sync::atomic::Ordering::SeqCst));
         // marker written → a fresh AppState selects the partition before unlock
         assert_eq!(paths::read_active_identity(root).as_deref(), Some(key.as_str()));
         let again = AppState::new(root.to_path_buf());
         assert_eq!(again.identity_root(), new_root);
         assert_eq!(relocate_if_legacy(&again, &key), Outcome::AlreadyPartitioned);
+        assert!(!again.skip_lair_sweep_once.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
