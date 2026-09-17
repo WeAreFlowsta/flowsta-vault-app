@@ -2685,6 +2685,11 @@ pub(crate) async fn change_vault_password_inner(
                     log::warn!("previous keystore {:?} not removed yet: {}", backup, e);
                 }
             }
+            // A fresh key store has just carried a whole password change, so
+            // an older set-aside (a relocation's, kept for one unlock) is no
+            // longer a rollback for anything - sweep it now, not at the next
+            // unlock.
+            crate::lair::sweep_old_lair_dirs(&data_dir);
             Ok(())
         }
         Err(e) => {

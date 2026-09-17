@@ -44,8 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   device-level files (settings, the autostart marker, the active-identity
   marker) stay at the top of the data folder. Reset Vault erases exactly
   one identity's folder and never stops early.
-- **The move keeps a safety copy of the old key store** until the unlock
-  after the one that moved it.
+- **The move keeps a safety copy of the old key store** until the next
+  unlock, or until a password change has proven the new store.
 - **Wizard completion always lands on the Overview**, so a reset started
   from Settings no longer returns you to Settings.
 - **Copy.** Your Data: Export Data / Import Data, Export / Import, two-line
