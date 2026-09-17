@@ -991,14 +991,18 @@ export default component$(() => {
               );
             }
             if (restored === 0 && skipped === 0) {
+              const emailBack = r.email_status === "restored";
               return (
                 <div class="mb-4">
-                  <Callout intent="info" title="Nothing to bring back">
+                  <Callout
+                    intent={emailBack ? "success" : "info"}
+                    title={emailBack ? "Your email is back" : "Nothing to bring back"}
+                  >
                     <p>
-                      That export matched this identity but holds no private
-                      records or app backups.
+                      That export holds no private records or app backups
+                      {emailBack ? ", and your email is back on this device." : "."}
                       {unsupportedLine}
-                      {emailLine}
+                      {emailBack ? "" : emailLine}
                     </p>
                   </Callout>
                 </div>

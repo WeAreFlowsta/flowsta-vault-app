@@ -39,9 +39,15 @@ export function summarizeRestoreImport(r: RestoreImportResult): { title: string;
     };
   }
   if (restored === 0 && skipped === 0) {
+    if (r.email_status === "restored") {
+      return {
+        title: "Your email is back",
+        body: "That export holds no private records or app backups, and your email is back on this device.",
+      };
+    }
     return {
       title: "Nothing to bring back",
-      body: `That export matched this identity but holds no private records or app backups.${email}`,
+      body: `That export holds no private records or app backups.${email}`,
     };
   }
   if (restored === 0) {
@@ -117,9 +123,10 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const result = useStore({ agentPubKey: "", did: "" });
   const showTechDetails = useSignal(false);
   // Restore-or-fresh, asked right here after a phrase restore. The import
-  // needs the conductor, which the restore already started; while the
-  // question is open the bridge refuses third-party backup writes, so
-  // "Decide later" is safe and the Overview card asks again.
+  // needs the conductor, which the restore already started. Two paths only
+  // (Eric 2026-09-17); the Overview card remains the fallback if the app is
+  // closed on this screen, because the bridge holds third-party backup
+  // writes until the question is answered.
   const restoreImporting = useSignal(false);
   const restoreImportProgress = useSignal<string | null>(null);
   const restoreImportError = useSignal<string | null>(null);
@@ -1983,13 +1990,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   Bring your data home?
                 </p>
                 <p class="mb-4 text-sm text-gray-300">
-                  Your recovery phrase restored your identity. Your private
-                  records, app backups and email live in your Vault export
-                  file. Import it now, <span class="text-white">before</span>{" "}
-                  you open apps like Your Own AI, so their data is back when
-                  they reconnect. Until you choose, apps keep working but
-                  can't save new backups here, so nothing your export holds
-                  can be overwritten.
+                  If you kept a Vault export file, import it now - your
+                  private records, app backups and email come back before
+                  you open your apps.
                 </p>
                 {restoreImportError.value && (
                   <p class="mb-3 text-sm text-red-300">{restoreImportError.value}</p>
@@ -2008,14 +2011,6 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                     </button>
                     <GlassButton onClick$={importExportNow}>Import my export</GlassButton>
                   </div>
-                )}
-                {!restoreImporting.value && (
-                  <button
-                    class="mt-3 text-xs text-gray-500 hover:text-gray-400"
-                    onClick$={props.onComplete$}
-                  >
-                    Decide later - the Overview will ask again
-                  </button>
                 )}
               </div>
             )}
