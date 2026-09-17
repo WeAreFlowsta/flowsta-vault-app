@@ -4026,6 +4026,7 @@ pub async fn import_vault_export(
     app_handle: tauri::AppHandle,
     path: String,
     overwrite: Option<bool>,
+    api_url: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let overwrite = overwrite.unwrap_or(false);
     emit_your_data_progress(&app_handle, "import", "Reading the export file...".into(), None, None);
@@ -4295,6 +4296,16 @@ pub async fn import_vault_export(
         clear_restore_choice(&state.identity_root());
     }
 
+    // ── Account email ───────────────────────────────────────────────
+    // A phrase restore leaves the vault without its email (Flowsta keeps
+    // only a hash), so the "Add the email you registered with" card came
+    // back even after an import. The full export carries the address the
+    // vault held when it was taken; confirm it against the account exactly
+    // as that card does - the server stays the authority, a stale address
+    // is refused and never stored, and being offline just leaves the card.
+    let email_status =
+        restore_email_from_export(state.inner(), &app_handle, &export, api_url.as_deref()).await;
+
     Ok(serde_json::json!({
         "sealed_restored": sealed_restored,
         "sealed_skipped": sealed_skipped,
@@ -4303,7 +4314,83 @@ pub async fn import_vault_export(
         "backups_failed": backups_failed,
         "backups_unsupported": backups_unsupported,
         "first_failure": first_failure,
+        "email_status": email_status,
     }))
+}
+
+/// The account email a full export carries (`you.email`), if any. Single-app
+/// exports and pre-1.3.0 files have none.
+pub(crate) fn export_email(export: &serde_json::Value) -> Option<String> {
+    export
+        .get("you")
+        .and_then(|y| y.get("email"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Outcome of putting the export's email back: `absent` (the file has
+/// none), `already_set` (this vault has one), `restored` (confirmed and
+/// stored), `mismatch` (the account no longer uses that address - nothing
+/// stored) or `unreachable` (no API URL or Flowsta could not be reached -
+/// the Overview card stays and the person can add it later).
+async fn restore_email_from_export(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+    export: &serde_json::Value,
+    api_url: Option<&str>,
+) -> &'static str {
+    let Some(email) = export_email(export) else { return "absent" };
+    let has_email = state
+        .vault_config
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|c| c.web_email.clone())
+        .is_some();
+    if has_email {
+        return "already_set";
+    }
+    let Some(api_url) = api_url else { return "unreachable" };
+    emit_your_data_progress(
+        app_handle,
+        "import",
+        "Confirming your email with Flowsta...".into(),
+        None,
+        None,
+    );
+    match confirm_account_email_inner(state, api_url, &email).await {
+        Ok(_) => {
+            log::info!("[import] account email restored from the export");
+            "restored"
+        }
+        Err(e) if e == "email_mismatch" => {
+            log::warn!("[import] the export's email no longer matches the account - not stored");
+            "mismatch"
+        }
+        Err(e) => {
+            log::warn!("[import] could not confirm the export's email ({}) - add it later", e);
+            "unreachable"
+        }
+    }
+}
+
+#[cfg(test)]
+mod import_email_tests {
+    use super::export_email;
+    #[test]
+    fn full_export_email_is_read_and_trimmed() {
+        let e = serde_json::json!({ "you": { "email": "  Person@Example.com " } });
+        assert_eq!(export_email(&e).as_deref(), Some("Person@Example.com"));
+    }
+    #[test]
+    fn missing_null_or_blank_email_reads_as_absent() {
+        assert_eq!(export_email(&serde_json::json!({ "you": {} })), None);
+        assert_eq!(export_email(&serde_json::json!({ "you": { "email": null } })), None);
+        assert_eq!(export_email(&serde_json::json!({ "you": { "email": "  " } })), None);
+        assert_eq!(export_email(&serde_json::json!({ "app": {}, "backup": {} })), None);
+    }
 }
 
 /// List individual backup metadata for a specific app.

@@ -7,6 +7,52 @@ import { PasswordStrength } from "~/components/vault/PasswordStrength";
 import { checkVaultPassword } from "~/lib/password-strength";
 import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATCH } from "~/lib/email";
 
+interface RestoreImportResult {
+  sealed_restored: number;
+  sealed_skipped: number;
+  backups_restored: number;
+  backups_skipped: number;
+  backups_failed: number;
+  backups_unsupported: number;
+  first_failure: string | null;
+  email_status?: "absent" | "already_set" | "restored" | "mismatch" | "unreachable";
+}
+
+/** The done screen's one-paragraph account of an import, same outcomes as Your Data. */
+export function summarizeRestoreImport(r: RestoreImportResult): { title: string; body: string } {
+  const restored = r.sealed_restored + r.backups_restored;
+  const skipped = r.sealed_skipped + r.backups_skipped;
+  const email =
+    r.email_status === "restored"
+      ? " Your email is back on this device."
+      : r.email_status === "mismatch"
+        ? " The email in that export no longer matches your account - add your current one from the Overview."
+        : r.email_status === "unreachable"
+          ? " Couldn't reach Flowsta to confirm your email - add it from the Overview when you're online."
+          : "";
+  if (r.backups_failed > 0) {
+    return {
+      title: "Import was incomplete",
+      body: `${r.backups_failed} backup${r.backups_failed === 1 ? "" : "s"} could not be restored${
+        r.first_failure ? ` (${r.first_failure})` : ""
+      }. Restored ${restored}. You can try again from Your Data.${email}`,
+    };
+  }
+  if (restored === 0 && skipped === 0) {
+    return {
+      title: "Nothing to bring back",
+      body: `That export matched this identity but holds no private records or app backups.${email}`,
+    };
+  }
+  if (restored === 0) {
+    return { title: "Everything was already here", body: `Every record in that export already exists in this Vault.${email}` };
+  }
+  return {
+    title: "Your data is home",
+    body: `Restored ${restored} item${restored === 1 ? "" : "s"}${skipped > 0 ? ` (${skipped} already here)` : ""}.${email}`,
+  };
+}
+
 interface SetupWizardProps {
   onComplete$: QRL<() => void>;
 }
@@ -70,6 +116,49 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const progressMessage = useSignal("");
   const result = useStore({ agentPubKey: "", did: "" });
   const showTechDetails = useSignal(false);
+  // Restore-or-fresh, asked right here after a phrase restore. The import
+  // needs the conductor, which the restore already started; while the
+  // question is open the bridge refuses third-party backup writes, so
+  // "Decide later" is safe and the Overview card asks again.
+  const restoreImporting = useSignal(false);
+  const restoreImportProgress = useSignal<string | null>(null);
+  const restoreImportError = useSignal<string | null>(null);
+  const restoreImportResult = useSignal<RestoreImportResult | null>(null);
+  const importExportNow = $(async () => {
+    restoreImportError.value = null;
+    const { open: openFile } = await import("@tauri-apps/plugin-dialog");
+    const path = await openFile({
+      multiple: false,
+      filters: [{ name: "Flowsta export", extensions: ["json"] }],
+    });
+    if (!path || typeof path !== "string") return;
+    restoreImporting.value = true;
+    const { listen } = await import("@tauri-apps/api/event");
+    const unlisten = await listen<{ op: string; stage: string }>("your-data-progress", (ev) => {
+      if (ev.payload.op === "import") restoreImportProgress.value = ev.payload.stage;
+    });
+    try {
+      restoreImportResult.value = await invoke<RestoreImportResult>("import_vault_export", {
+        path,
+        overwrite: false,
+        apiUrl: __API_URL__,
+      });
+    } catch (e) {
+      restoreImportError.value = String(e);
+    } finally {
+      unlisten();
+      restoreImporting.value = false;
+      restoreImportProgress.value = null;
+    }
+  });
+  const continueWithoutImport = $(async () => {
+    try {
+      await invoke("resolve_restore_choice");
+    } catch {
+      // The Overview card keeps asking - nothing is lost.
+    }
+    await props.onComplete$();
+  });
   // True only for the phrase-restore path - the done screen then nudges
   // toward importing an export file, since the phrase brings back identity
   // but not data.
@@ -1888,24 +1977,64 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               </p>
             </div>
           )}
-          {restoredFromPhrase.value && (
+          {restoredFromPhrase.value && !restoreImportResult.value && (
+              <div class="mb-6 rounded-lg border border-amber-700/60 bg-amber-950/30 p-4 text-left">
+                <p class="mb-1 text-sm font-semibold text-amber-200">
+                  Bring your data home?
+                </p>
+                <p class="mb-4 text-sm text-gray-300">
+                  Your recovery phrase restored your identity. Your private
+                  records, app backups and email live in your Vault export
+                  file. Import it now, <span class="text-white">before</span>{" "}
+                  you open apps like Your Own AI, so their data is back when
+                  they reconnect. Until you choose, apps keep working but
+                  can't save new backups here, so nothing your export holds
+                  can be overwritten.
+                </p>
+                {restoreImportError.value && (
+                  <p class="mb-3 text-sm text-red-300">{restoreImportError.value}</p>
+                )}
+                {restoreImporting.value ? (
+                  <p class="text-sm text-sky-300">
+                    {restoreImportProgress.value || "Importing your export..."}
+                  </p>
+                ) : (
+                  <div class="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end">
+                    <button
+                      class="rounded-full border border-gray-600 px-5 py-2 text-sm text-gray-300 hover:border-gray-400 hover:text-white"
+                      onClick$={continueWithoutImport}
+                    >
+                      Continue without importing
+                    </button>
+                    <GlassButton onClick$={importExportNow}>Import my export</GlassButton>
+                  </div>
+                )}
+                {!restoreImporting.value && (
+                  <button
+                    class="mt-3 text-xs text-gray-500 hover:text-gray-400"
+                    onClick$={props.onComplete$}
+                  >
+                    Decide later - the Overview will ask again
+                  </button>
+                )}
+              </div>
+            )}
+            {restoredFromPhrase.value && restoreImportResult.value && (
               <div class="mb-6 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4 text-left">
                 <p class="mb-1 text-sm font-medium text-sky-300">
-                  Now bring your data home
+                  {summarizeRestoreImport(restoreImportResult.value).title}
                 </p>
                 <p class="text-sm text-gray-400">
-                  Your recovery phrase restored your identity. Your private
-                  records and app backups live in your Vault export file -
-                  the next screen asks whether to import it or start fresh.
-                  Import <span class="text-white">before</span> you open your
-                  apps, so everything is back where they expect it.
+                  {summarizeRestoreImport(restoreImportResult.value).body}
                 </p>
               </div>
             )}
 
-            <GlassButton onClick$={props.onComplete$}>
-              Continue
-            </GlassButton>
+            {(!restoredFromPhrase.value || restoreImportResult.value) && (
+              <GlassButton onClick$={props.onComplete$}>
+                Continue
+              </GlassButton>
+            )}
           </div>
         )}
       </div>

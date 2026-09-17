@@ -135,6 +135,8 @@ interface ExportToFileResult {
   sealed_records: number;
 }
 
+declare const __API_URL__: string;
+
 interface ImportResult {
   sealed_restored: number;
   sealed_skipped: number;
@@ -143,6 +145,22 @@ interface ImportResult {
   backups_failed: number;
   backups_unsupported: number;
   first_failure: string | null;
+  /** What happened to the account email the export carried (1.4.0+). */
+  email_status?: "absent" | "already_set" | "restored" | "mismatch" | "unreachable";
+}
+
+/** One sentence on the export's email, or nothing when there is nothing to say. */
+export function importEmailLine(status: ImportResult["email_status"]): string {
+  switch (status) {
+    case "restored":
+      return " Your email is back on this device.";
+    case "mismatch":
+      return " The email in that export no longer matches your account - add your current one from the Overview.";
+    case "unreachable":
+      return " Couldn't reach Flowsta to confirm your email - add it from the Overview when you're online.";
+    default:
+      return "";
+  }
 }
 
 /** "profile" -> "Profile", "app_record" -> "App record",
@@ -326,6 +344,7 @@ export default component$(() => {
       const result = await invoke<ImportResult>("import_vault_export", {
         path,
         overwrite: importOverwrite.value,
+        apiUrl: __API_URL__,
       });
       importResult.value = result;
       await refreshAfterImport();
@@ -956,6 +975,7 @@ export default component$(() => {
                     r.backups_unsupported !== 1 ? "s are" : " is"
                   } from an older export without restore data (still readable in the file).`
                 : "";
+            const emailLine = importEmailLine(r.email_status);
             if (r.backups_failed > 0) {
               return (
                 <div class="mb-4">
@@ -964,6 +984,7 @@ export default component$(() => {
                       {failedLine} Restored {restored}
                       {skipped > 0 ? `, ${skipped} already here.` : "."}
                       {unsupportedLine}
+                      {emailLine}
                     </p>
                   </Callout>
                 </div>
@@ -972,10 +993,12 @@ export default component$(() => {
             if (restored === 0 && skipped === 0) {
               return (
                 <div class="mb-4">
-                  <Callout intent="warning" title="Nothing was restored">
+                  <Callout intent="info" title="Nothing to bring back">
                     <p>
-                      The import completed but nothing in that file could be
-                      restored.{unsupportedLine || " If you expected data here, check that this is the right export file."}
+                      That export matched this identity but holds no private
+                      records or app backups.
+                      {unsupportedLine}
+                      {emailLine}
                     </p>
                   </Callout>
                 </div>
@@ -995,6 +1018,7 @@ export default component$(() => {
                       {unsupportedLine} If an app is still missing data, the
                       copy already here may be the problem - import again
                       with "Also replace backups I already have" checked.
+                      {emailLine}
                     </p>
                   </Callout>
                 </div>
@@ -1010,6 +1034,7 @@ export default component$(() => {
                       r.backups_restored !== 1 ? "s" : ""
                     }${skipped > 0 ? ` (${skipped} already here)` : ""}.`}
                     {unsupportedLine}
+                    {emailLine}
                   </p>
                 </Callout>
               </div>

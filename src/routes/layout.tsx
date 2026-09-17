@@ -1150,6 +1150,11 @@ export default component$(() => {
       <SetupWizard
         onComplete$={async () => {
           screen.value = "dashboard";
+          // The wizard draws over whatever page was open (Reset lives in
+          // Settings), so a restored vault used to land on Settings and
+          // never see the Overview's restore-or-fresh card. Always land
+          // on the Overview after the wizard.
+          await nav("/");
           await fetchProfile();
           checkConnectivity();
           // A brand-new identity learns its email's verified state from a
