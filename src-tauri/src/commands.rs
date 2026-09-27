@@ -236,7 +236,10 @@ pub struct AppState {
     /// A vault-grant JWT reused by the email-change poll and cancel, so a
     /// 60 s poll does not mint a fresh challenge each time (the challenge
     /// endpoint is rate-limited per IP). Cleared on lock.
-    pub grant_token_cache: Mutex<Option<(String, std::time::Instant)>>,
+    /// (token, issued at, agent key it was issued FOR). The key is checked on
+    /// every use: a token from a previous identity on this machine (reset →
+    /// restore, or a switch) must never be presented as the current one.
+    pub grant_token_cache: Mutex<Option<(String, std::time::Instant, String)>>,
     /// Apps the user has allowed to receive their email (client_id → grant).
     /// Persisted to email-grants.json. A remembered site does NOT imply an
     /// email grant: the first request for `email` always shows the dialog.
@@ -1652,6 +1655,8 @@ pub(crate) fn reset_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     }
     *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
     *state.vault_config.lock().unwrap() = None;
+    // Nothing signed in by the identity being erased may outlive it.
+    *state.grant_token_cache.lock().unwrap() = None;
 
     let device_root = state.data_dir.clone();
     let root = state.identity_root();
@@ -6597,17 +6602,21 @@ fn device_hosted_grant_material(state: &Arc<AppState>) -> Result<([u8; 32], Stri
 /// 20 minutes so polling does not burn the per-IP challenge budget. Callers
 /// that need the grant's `emailVerified` flag do a fresh grant instead.
 async fn cached_grant_token(state: &Arc<AppState>, api_url: &str) -> Result<String, String> {
-    if let Some((tok, at)) = state.grant_token_cache.lock().unwrap().clone() {
-        if at.elapsed() < std::time::Duration::from_secs(20 * 60) {
+    let (seed, agent_b64, _) = device_hosted_grant_material(state)?;
+    if let Some((tok, at, for_agent)) = state.grant_token_cache.lock().unwrap().clone() {
+        // Only a token issued for THIS identity counts. Seen 2026-09-28:
+        // Reset Vault, then restore another account within 20 minutes -
+        // the old token confirmed the new account's email against the old
+        // account and the import + the email card both reported a mismatch.
+        if for_agent == agent_b64 && at.elapsed() < std::time::Duration::from_secs(20 * 60) {
             return Ok(tok);
         }
     }
-    let (seed, agent_b64, _) = device_hosted_grant_material(state)?;
     let grant = crate::device_identity::vault_grant_with_seed(api_url, &seed, &agent_b64)
         .await
         .map_err(|e| format!("Sign-in failed: {}", e))?;
     cache_email_verified(state, grant.email_verified);
-    *state.grant_token_cache.lock().unwrap() = Some((grant.token.clone(), std::time::Instant::now()));
+    *state.grant_token_cache.lock().unwrap() = Some((grant.token.clone(), std::time::Instant::now(), agent_b64));
     Ok(grant.token)
 }
 
@@ -6641,7 +6650,7 @@ pub(crate) async fn ensure_email_verified_known(state: &Arc<AppState>) -> Option
     let api_url = option_env!("FLOWSTA_API_URL").unwrap_or("https://auth-api.flowsta.com");
     let grant = crate::device_identity::vault_grant_with_seed(api_url, &seed, &agent_b64).await.ok()?;
     cache_email_verified(state, grant.email_verified);
-    *state.grant_token_cache.lock().unwrap() = Some((grant.token, std::time::Instant::now()));
+    *state.grant_token_cache.lock().unwrap() = Some((grant.token, std::time::Instant::now(), agent_b64));
     grant.email_verified
 }
 
