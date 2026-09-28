@@ -1157,6 +1157,28 @@ async fn link_identity_handler(
         )
     })?;
 
+    // One app agent, one Flowsta identity: refuse an app agent that another
+    // identity on this device already links (identities.rs explains why).
+    // Checked before the API call and the dialog; the same agent under the
+    // CURRENT identity passes (reinstall, restore, changed client_id).
+    {
+        let device_root = state.app_state.data_dir.clone();
+        let current_root = state.app_state.identity_root();
+        if let Some(hit) = crate::identities::app_agent_linked_elsewhere(&device_root, &current_root, &req.app_agent_pub_key) {
+            log::warn!("[link-identity] refused: app agent already linked under {}", hit.identity_name);
+            return Err((
+                StatusCode::CONFLICT,
+                Json(IpcError {
+                    error: "agent_linked_elsewhere".into(),
+                    description: Some(format!(
+                        "This app is already connected to {} in this Vault. Open the app as that identity, or disconnect it there first.",
+                        hit.identity_name
+                    )),
+                }),
+            ));
+        }
+    }
+
     // Validate client_id: check cache first, then API
     if req.client_id.is_empty() {
         return Err((

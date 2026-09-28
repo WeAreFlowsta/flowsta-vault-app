@@ -536,7 +536,7 @@ impl AppState {
     }
 }
 
-fn load_linked_apps(data_dir: &std::path::Path) -> Vec<LinkedThirdPartyApp> {
+pub(crate) fn load_linked_apps(data_dir: &std::path::Path) -> Vec<LinkedThirdPartyApp> {
     crate::vault::load_json_or_quarantine(&crate::paths::store_path(data_dir, crate::paths::LINKED_APPS))
 }
 

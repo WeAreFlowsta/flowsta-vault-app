@@ -106,6 +106,58 @@ fn root_for_key(device_root: &Path, key: &str) -> Option<PathBuf> {
     Some(crate::paths::identity_root_for(device_root, key))
 }
 
+/// An app agent that another identity ON THIS DEVICE already links.
+pub struct LinkedElsewhere {
+    /// How that identity is shown (display name, else @username, else
+    /// "another identity").
+    pub identity_name: String,
+    pub app_name: String,
+}
+
+/// One app agent attests to ONE Flowsta identity. A second `/link-identity`
+/// for the same app agent under a different identity would put an
+/// `IsSamePersonEntry` for each on the app's public DHT - a claim that two
+/// people are one. The Vault keeps linked apps per identity root, so the
+/// rule is checked across every other root on the device (partitions and
+/// the legacy root). The same agent linking again under the CURRENT
+/// identity (reinstall, restore, changed client_id) is not "elsewhere".
+/// Keys are compared by their raw bytes, whatever spelling was stored.
+pub(crate) fn app_agent_linked_elsewhere(
+    device_root: &Path,
+    current_root: &Path,
+    app_agent_pub_key: &str,
+) -> Option<LinkedElsewhere> {
+    let want = crate::key_derivation::decode_agent_pub_key_string(app_agent_pub_key);
+    let same = |stored: &str| -> bool {
+        match (want, crate::key_derivation::decode_agent_pub_key_string(stored)) {
+            (Some(a), Some(b)) => a == b,
+            _ => stored == app_agent_pub_key,
+        }
+    };
+    for entry in list_on_disk(device_root, current_root) {
+        if entry.active {
+            continue;
+        }
+        let hit = crate::commands::load_linked_apps(Path::new(&entry.root))
+            .into_iter()
+            .find(|a| same(&a.app_agent_pub_key));
+        if let Some(app) = hit {
+            let identity_name = entry
+                .label
+                .as_ref()
+                .and_then(|l| {
+                    l.display_name
+                        .clone()
+                        .filter(|n| !n.trim().is_empty())
+                        .or_else(|| l.username.clone().filter(|u| !u.trim().is_empty()).map(|u| format!("@{u}")))
+                })
+                .unwrap_or_else(|| "another identity".to_string());
+            return Some(LinkedElsewhere { identity_name, app_name: app.app_name });
+        }
+    }
+    None
+}
+
 /// Where a NEW identity's files go: its own partition, `identities/<pk>/`,
 /// from birth (1.4.0 relocated at the first re-unlock instead). Adding an
 /// identity to a Vault that already holds one needs the Vault locked with
@@ -180,6 +232,38 @@ mod tests {
         std::fs::write(crate::paths::vault_file(&root), b"not really encrypted").unwrap();
         write_label(&root, &IdentityLabel { agent_pub_key: format!("uhCAk{}", key), display_name: Some(name.into()), ..Default::default() });
         root
+    }
+
+    #[test]
+    fn an_app_agent_linked_under_another_identity_on_this_device_is_found_and_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = fake_identity(dir.path(), "aaaaaaaaaaaaaaaa", "Alice");
+        let b = fake_identity(dir.path(), "bbbbbbbbbbbbbbbb", "Bob");
+        let x = "uhCAkm5MezrFZWbDD79kneFp60cS0a9REzlGDxcFVotCvWSl2thsd";
+        let y = "uhCAk6oBoqygFqkDreZ0V0bH4R9cTN1OkcEG78OLxVptwypbiKzNl";
+        let link = |root: &Path, key: &str| {
+            let apps = vec![crate::commands::LinkedThirdPartyApp {
+                app_name: "ChessChain".into(),
+                app_agent_pub_key: key.into(),
+                linked_at: 1,
+                client_id: Some("flowsta_app_x".into()),
+                origin: None,
+            }];
+            std::fs::write(crate::paths::store_path(root, crate::paths::LINKED_APPS), serde_json::to_vec(&apps).unwrap()).unwrap();
+        };
+        link(&a, x);
+        // current = B: X is Alice's, Y is nobody's
+        let hit = app_agent_linked_elsewhere(dir.path(), &b, x).expect("found under Alice");
+        assert_eq!(hit.identity_name, "Alice");
+        assert_eq!(hit.app_name, "ChessChain");
+        assert!(app_agent_linked_elsewhere(dir.path(), &b, y).is_none());
+        // current = A: X is ours, not elsewhere (re-link allowed)
+        assert!(app_agent_linked_elsewhere(dir.path(), &a, x).is_none());
+        // the legacy root counts as an identity too
+        std::fs::write(crate::paths::vault_file(dir.path()), b"legacy").unwrap();
+        link(dir.path(), y);
+        let hit = app_agent_linked_elsewhere(dir.path(), &b, y).expect("found under the legacy root");
+        assert_eq!(hit.identity_name, "another identity");
     }
 
     #[test]
