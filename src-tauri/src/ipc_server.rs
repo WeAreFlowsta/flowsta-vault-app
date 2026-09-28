@@ -98,6 +98,18 @@ pub struct IpcState {
     pub app_state: Arc<AppState>,
     pub app_handle: tauri::AppHandle,
     pub op_jobs: OpJobs,
+    /// Random per-process id, minted at start. A client that keeps
+    /// polling `/status` can tell "the same Vault, still here" from "a
+    /// different Vault process now answers this port" (a restart, or
+    /// another copy that took the port) without comparing anything else.
+    pub instance_id: String,
+}
+
+fn mint_instance_id() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut b);
+    hex::encode(b)
 }
 
 /// Dev-only: auto-approve all bridge dialogs so the full operation matrix
@@ -211,6 +223,15 @@ fn track_request(state: &AppState, origin: Option<&str>, action: &str) {
 #[derive(Serialize)]
 struct StatusResponse {
     unlocked: bool,
+    /// The identity this Vault holds, unlocked OR locked: the unlocked
+    /// key, else the identity marker in the device root (public material,
+    /// written when an identity is partitioned; absent on a legacy layout
+    /// that has never unlocked on 1.4.0+). Lets an app tell "locked, but
+    /// still my identity" from "locked, someone else" before any unlock.
+    /// `agent_pub_key` stays null while locked for older clients.
+    active_identity: Option<String>,
+    /// Per-process id, see `IpcState::instance_id`.
+    instance_id: String,
     /// Whether a vault (an identity) exists on this device at all. A fresh
     /// install answers on this port before setup - without this flag,
     /// "installed but no identity yet" is indistinguishable from "locked",
@@ -325,9 +346,15 @@ async fn status_handler(
         .unwrap_or(false)
         && email_verified_raw == Some(true);
 
+    let active_identity = agent_pub_key
+        .clone()
+        .or_else(|| crate::paths::read_active_identity(&state.app_state.data_dir));
+
     // Phase 3: return only fields the app was granted at link time.
     Json(StatusResponse {
         unlocked,
+        active_identity,
+        instance_id: state.instance_id.clone(),
         initialized,
         agent_pub_key,
         did,
@@ -4608,6 +4635,7 @@ pub async fn start_ipc_server(
     app_handle: tauri::AppHandle,
 ) -> Result<u16, String> {
     let ipc_state = Arc::new(IpcState {
+        instance_id: mint_instance_id(),
         app_state,
         app_handle,
         op_jobs: OpJobs::default(),
