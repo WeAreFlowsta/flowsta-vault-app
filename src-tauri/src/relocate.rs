@@ -271,7 +271,16 @@ mod tests {
         crate::commands::reset_vault_inner(&state).unwrap();
         let left: Vec<String> = std::fs::read_dir(root).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
         let mut left_sorted = left.clone(); left_sorted.sort();
-        assert_eq!(left_sorted, vec![paths::AUTOSTART_MARKER.to_string(), paths::SETTINGS_FILE.to_string()], "only device-level files remain: {:?}", left);
+        // Device-level files remain: the autostart marker, settings, and the
+        // identity epoch (a reset IS an identity change, and the counter must
+        // outlive it so a poller never mistakes the next identity for this one).
+        assert_eq!(
+            left_sorted,
+            vec![paths::AUTOSTART_MARKER.to_string(), paths::IDENTITY_EPOCH_FILE.to_string(), paths::SETTINGS_FILE.to_string()],
+            "only device-level files remain: {:?}",
+            left
+        );
+        assert!(paths::read_identity_epoch(root) >= 1, "the reset bumped the epoch");
     }
 
     #[test]
