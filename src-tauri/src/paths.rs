@@ -40,6 +40,10 @@ pub const RESTORE_CHOICE_MARKER: &str = "restore-choice-pending";
 /// Plaintext marker with the active identity's agent key; selects the
 /// identity root and answers locked-state identity checks.
 pub const ACTIVE_IDENTITY_MARKER: &str = "active-identity";
+/// Counter in the device root, bumped whenever the identity this device
+/// holds changes (setup, restore, reset, relocation, switch). `/status`
+/// reports it so a client polling every few seconds cannot miss A→B→A.
+pub const IDENTITY_EPOCH_FILE: &str = "identity-epoch";
 pub const SETTINGS_FILE: &str = "settings.json";
 #[allow(dead_code)] // used by the autostart setup, which is compiled only where Tauri autostart is enabled
 pub const AUTOSTART_MARKER: &str = "autostart-initialized";
@@ -203,6 +207,25 @@ pub fn select_identity_root(device_root: &Path) -> PathBuf {
 
 // ---- device-root helpers ---------------------------------------------------
 pub fn active_identity_path(device_root: &Path) -> PathBuf { device_root.join(ACTIVE_IDENTITY_MARKER) }
+pub fn identity_epoch_path(device_root: &Path) -> PathBuf { device_root.join(IDENTITY_EPOCH_FILE) }
+
+/// The current identity epoch; 0 when no change has ever been recorded.
+pub fn read_identity_epoch(device_root: &Path) -> u64 {
+    std::fs::read_to_string(identity_epoch_path(device_root))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Record that the identity this device holds just changed. Returns the
+/// new epoch. Written atomically; a failure is logged, never fatal.
+pub fn bump_identity_epoch(device_root: &Path) -> u64 {
+    let next = read_identity_epoch(device_root) + 1;
+    if let Err(e) = crate::vault::write_atomic(&identity_epoch_path(device_root), next.to_string().as_bytes()) {
+        log::warn!("could not write the identity epoch: {}", e);
+    }
+    next
+}
 pub fn settings_path(device_root: &Path) -> PathBuf { device_root.join(SETTINGS_FILE) }
 #[allow(dead_code)]
 pub fn autostart_marker_path(device_root: &Path) -> PathBuf { device_root.join(AUTOSTART_MARKER) }
@@ -210,6 +233,17 @@ pub fn autostart_marker_path(device_root: &Path) -> PathBuf { device_root.join(A
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn identity_epoch_counts_up_from_zero_and_survives_a_garbled_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_identity_epoch(dir.path()), 0);
+        assert_eq!(bump_identity_epoch(dir.path()), 1);
+        assert_eq!(bump_identity_epoch(dir.path()), 2);
+        assert_eq!(read_identity_epoch(dir.path()), 2);
+        std::fs::write(identity_epoch_path(dir.path()), "not a number").unwrap();
+        assert_eq!(read_identity_epoch(dir.path()), 0);
+        assert_eq!(bump_identity_epoch(dir.path()), 1);
+    }
     #[test]
     fn store_list_has_no_duplicates_and_no_directories() {
         let mut seen = std::collections::HashSet::new();

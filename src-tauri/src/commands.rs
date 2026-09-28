@@ -1011,7 +1011,12 @@ pub(crate) fn write_active_identity_marker(data_dir: &std::path::Path, agent_pub
     // Atomic: a torn marker would select the wrong root or none at startup.
     if let Err(e) = crate::vault::write_atomic(&path, agent_pub_key.as_bytes()) {
         log::warn!("could not write the active-identity marker: {}", e);
+        return;
     }
+    // The identity this device holds changed (first partition, restore of
+    // another account, a switch): tell pollers of /status.
+    let epoch = crate::paths::bump_identity_epoch(data_dir);
+    log::info!("identity epoch {} (marker now {}…)", epoch, &agent_pub_key[..agent_pub_key.len().min(12)]);
 }
 
 pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
@@ -1697,6 +1702,9 @@ pub(crate) fn reset_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     }
     // The marker lives at the device root: it selects the identity root.
     note("active-identity marker", std::fs::remove_file(crate::paths::active_identity_path(&device_root)));
+    // Erasing the identity is a change too: a client that saw "A" must
+    // not read the following empty Vault as still-A.
+    let _ = crate::paths::bump_identity_epoch(&device_root);
 
     // Back to the legacy single-identity layout for whatever is created next;
     // its first unlock partitions it again.

@@ -232,6 +232,11 @@ struct StatusResponse {
     active_identity: Option<String>,
     /// Per-process id, see `IpcState::instance_id`.
     instance_id: String,
+    /// Bumped on every identity change on this device (setup, restore,
+    /// reset, relocation, switch); 0 on an install that never changed.
+    /// A poller compares epochs, not keys: A→B→A between two polls still
+    /// shows as +2.
+    identity_epoch: u64,
     /// Whether a vault (an identity) exists on this device at all. A fresh
     /// install answers on this port before setup - without this flag,
     /// "installed but no identity yet" is indistinguishable from "locked",
@@ -355,6 +360,7 @@ async fn status_handler(
         unlocked,
         active_identity,
         instance_id: state.instance_id.clone(),
+        identity_epoch: crate::paths::read_identity_epoch(&state.app_state.data_dir),
         initialized,
         agent_pub_key,
         did,
