@@ -85,19 +85,33 @@ declare const __API_URL__: string;
 declare const __WEB_URL__: string;
 const WEB_PHRASE_URL = `${__WEB_URL__}/dashboard/settings/password/`;
 
-function stepToCircle(s: Step): number {
-  if (s === "choose" || s === "create-form" || s === "signin" || s === "twofa" || s === "upgrade-offer") return 0;
-  if (
-    s === "create-phrase" || s === "restore-phrase" || s === "no-phrase" || s === "phrase" ||
-    s === "migrate-phrase" || s === "migrate-ceremony" || s === "migrate-confirm"
-  ) return 1;
-  return 2;
-}
+/** Which of the wizard's three journeys the person is on. Chosen on the
+* welcome screen; the phrase-first move sets it when a Restore turns out
+* to be a flowsta.com phrase. Labels and circles follow the journey, so a
+* new person never sees "Connect" or "Verify" for creating an identity. */
+type Flow = "create" | "restore" | "move";
 
-const circleLabels = ["Connect", "Verify Identity", "Ready"];
+const FLOW_LABELS: Record<Flow, string[]> = {
+create: ["Your details", "Recovery phrase", "Ready"],
+restore: ["Recovery phrase", "Ready"],
+move: ["Sign in", "Recovery phrase", "Ready"],
+};
+
+function stepToCircle(s: Step, flow: Flow): number {
+if (flow === "restore") return s === "restore-phrase" || s === "choose" ? 0 : 1;
+if (flow === "create") {
+if (s === "choose" || s === "create-form") return 0;
+if (s === "create-phrase") return 1;
+return 2;
+}
+if (s === "signin" || s === "twofa" || s === "no-phrase" || s === "upgrade-offer" || s === "choose") return 0;
+if (s === "phrase" || s === "migrate-choose" || s === "migrate-phrase" || s === "migrate-ceremony" || s === "migrate-confirm") return 1;
+return 2;
+}
 
 export const SetupWizard = component$<SetupWizardProps>((props) => {
   const step = useSignal<Step>("choose");
+  const flow = useSignal<Flow>("create");
   const email = useSignal("");
   const loginPassword = useSignal("");
   const tfaCode = useSignal("");
@@ -330,7 +344,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
     loading.value = true;
     migrating.value = true;
     step.value = "progress";
-    progressMessage.value = "Starting your account upgrade…";
+    progressMessage.value = "Starting the move...";
 
     const { listen } = await import("@tauri-apps/api/event");
     const unlisten = await listen<{ stage: string; message: string }>(
@@ -547,7 +561,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
 
       // Step 3: Create vault immediately
       step.value = "progress";
-      progressMessage.value = "Deriving keys and encrypting vault...";
+      progressMessage.value = "Creating your keys on this computer...";
 
       const setupResult = await invoke<{ agent_pub_key: string; did: string }>(
         "setup_vault",
@@ -642,7 +656,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         displayName: createDisplayName.value.trim() || null,
       });
 
-      progressMessage.value = "Deriving keys and encrypting vault...";
+      progressMessage.value = "Creating your keys on this computer...";
       const setupResult = await invoke<{ agent_pub_key: string; did: string }>(
         "setup_vault",
         {
@@ -724,6 +738,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   // (jwt, email, password) triple the password sign-in produces, so the
   // standard upgrade continuation runs unchanged from here.
   const handlePhraseUpgrade = $(async () => {
+  flow.value = "move";
     error.value = "";
     // The vault created by the upgrade is encrypted with the password
     // chosen on this screen - the account has no password in this flow.
@@ -742,7 +757,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
     const trimmed = mnemonic.value.trim().toLowerCase().replace(/\s+/g, " ");
     try {
       step.value = "progress";
-      progressMessage.value = "Verifying your recovery phrase with Flowsta...";
+      progressMessage.value = "Checking your recovery phrase with Flowsta...";
       const res = await invoke<{
         token: string;
         email: string;
@@ -844,7 +859,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       }
 
       step.value = "progress";
-      progressMessage.value = "Verifying your identity with Flowsta...";
+      progressMessage.value = "Checking your identity with Flowsta...";
       // Proves key ownership via A4 and fetches the account's public profile.
       const account = await invoke<{
         did: string;
@@ -855,7 +870,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         web_agent_pub_key: string | null;
       }>("restore_device_identity", { apiUrl: __API_URL__, mnemonic: trimmed });
 
-      progressMessage.value = "Rebuilding your vault on this device...";
+      progressMessage.value = "Rebuilding your identity on this computer...";
       const setupResult = await invoke<{ agent_pub_key: string; did: string }>(
         "setup_vault",
         {
@@ -907,7 +922,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
     }
   });
 
-  const currentCircle = stepToCircle(step.value);
+  const currentCircle = stepToCircle(step.value, flow.value);
+  const circleLabels = FLOW_LABELS[flow.value];
 
   return (
     <div class="flex min-h-screen items-center justify-center bg-gray-900 p-8">
@@ -958,17 +974,17 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             <h2 class="mb-6 text-2xl font-bold text-white">Welcome to Flowsta Vault</h2>
 
             <div class="flex flex-col gap-3">
-              <GlassButton onClick$={() => { error.value = ""; step.value = "create-form"; }}>
-                Create a new identity
+              <GlassButton onClick$={() => { error.value = ""; flow.value = "create"; step.value = "create-form"; }}>
+              Create my identity
               </GlassButton>
-              <GlassButton variant="secondary" onClick$={() => { error.value = ""; step.value = "restore-phrase"; }}>
-                Restore from recovery phrase
+              <GlassButton variant="secondary" onClick$={() => { error.value = ""; flow.value = "restore"; step.value = "restore-phrase"; }}>
+              I have a recovery phrase
               </GlassButton>
             </div>
 
             <p class="mt-4 text-sm text-gray-400">
-              New here? "Create a new identity" creates your own self-sovereign Flowsta identity in about a minute.
-              Have a recovery phrase from another device? Restore with it.
+              Your identity is created here and stays on this computer.
+              Nobody else, including Flowsta, can sign in as you.
             </p>
 
             {/* Moving in from the legacy web/phone account is a real path
@@ -977,14 +993,13 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 them as a plain link so the choice above stays a choice of
                 two. Same shape carries to a phone screen. */}
             <div class="mt-6 border-t border-gray-700 pt-4 text-sm text-gray-400">
-              Have a Flowsta account created before July 2026 that you haven't
-              migrated yet?{" "}
+              Have a flowsta.com account from before the Vault?{" "}
               <button
                 type="button"
                 class="text-amber-300 underline decoration-amber-300/40 underline-offset-2 hover:text-amber-200"
-                onClick$={() => { error.value = ""; step.value = "signin"; }}
-              >
-                Migrate it into Vault now
+                onClick$={() => { error.value = ""; flow.value = "move"; step.value = "signin"; }}
+                >
+                Move it into this Vault
               </button>
             </div>
           </div>
@@ -993,10 +1008,10 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Create 1: Account details (B2/B3) ── */}
         {step.value === "create-form" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-2 text-2xl font-bold text-white">Create Your Identity</h2>
+            <h2 class="mb-2 text-2xl font-bold text-white">Your details</h2>
             <p class="mb-6 text-sm text-gray-400">
-              Your keys are generated on this device and never leave it. Flowsta
-              only receives your public key and email.
+              Your keys are made on this computer and never leave it. Flowsta
+              receives only your public key and email.
             </p>
 
             <form preventdefault:submit onSubmit$={handleCreateForm}>
@@ -1040,7 +1055,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               </div>
 
               <div class="mb-4">
-                <label class="mb-1 block text-xs font-medium text-gray-400">Vault password</label>
+                <label class="mb-1 block text-xs font-medium text-gray-400">Password for this Vault</label>
                 <PasswordField
                   class="mb-2"
                   placeholder="At least 10 characters"
@@ -1052,7 +1067,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               </div>
 
               <div class="mb-4">
-                <label class="mb-1 block text-xs font-medium text-gray-400">Confirm vault password</label>
+                <label class="mb-1 block text-xs font-medium text-gray-400">Confirm password</label>
                 <PasswordField
                   placeholder="Repeat your password"
                   autocomplete="new-password"
@@ -1060,7 +1075,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   onInput$={(v) => { createPassword2.value = v; error.value = ""; }}
                 />
                 <p class="mt-1 text-xs text-gray-400">
-                  Unlocks your vault on this device.
+                  Unlocks the Vault on this computer. Not a Flowsta password.
                 </p>
               </div>
 
@@ -1084,15 +1099,14 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Create 2: Recovery phrase (B4) ── */}
         {step.value === "create-phrase" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-2 text-2xl font-bold text-white">Save Your Recovery Phrase</h2>
+            <h2 class="mb-2 text-2xl font-bold text-white">{phraseSaved.value ? "Check your recovery phrase" : "Write down your recovery phrase"}</h2>
             <p class="mb-4 text-sm text-gray-400">
-              These 24 words are your identity. Write them down and store them somewhere safe - on paper, not on this computer.
+            These 24 words are your identity. Write them down and keep them safe - on paper, not on this computer.
             </p>
             <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
               <p class="text-xs text-amber-300">
-                This phrase is currently the <strong>only</strong> way to recover your identity.
-                Flowsta never sees it and cannot recover it for you. Lose the phrase and this
-                device, and your identity is gone.
+                This phrase is the <strong>only</strong> way to recover your identity.
+                Flowsta never sees it. Lose the phrase and this computer, and your identity is gone.
               </p>
             </div>
 
@@ -1146,8 +1160,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             ) : (
               <div>
                 <p class="mb-3 text-sm text-gray-400">
-                  The phrase is hidden now - type these words from what you
-                  wrote down or saved:
+                  Type these words from what you wrote down:
                 </p>
                 <div class="mb-4 flex flex-col gap-3">
                   {verifyIndices.value.map((i) => (
@@ -1189,10 +1202,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Restore from phrase (B6) ── */}
         {step.value === "restore-phrase" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-2 text-2xl font-bold text-white">Restore Your Identity</h2>
+            <h2 class="mb-2 text-2xl font-bold text-white">Restore with your recovery phrase</h2>
             <p class="mb-4 text-sm text-gray-400">
-              Enter the 24-word recovery phrase of an identity created in Vault.
-              Your key is re-derived on this device and proven to Flowsta - no password needed.
+            Enter your 24 words. They rebuild your identity on this computer; your username, records and signatures return from the network. Then choose a password for this Vault.
             </p>
 
             <textarea
@@ -1204,7 +1216,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             />
 
             <div class="mb-4">
-              <label class="mb-1 block text-xs font-medium text-gray-400">New vault password</label>
+              <label class="mb-1 block text-xs font-medium text-gray-400">Password for this Vault</label>
               <PasswordField
                 class="mb-2"
                 placeholder="At least 10 characters"
@@ -1215,7 +1227,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               <PasswordStrength password={restorePassword.value} />
             </div>
             <div class="mb-4">
-              <label class="mb-1 block text-xs font-medium text-gray-400">Confirm vault password</label>
+              <label class="mb-1 block text-xs font-medium text-gray-400">Confirm password</label>
               <PasswordField
                 placeholder="Repeat your password"
                 autocomplete="new-password"
@@ -1232,13 +1244,11 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             {phraseUpgradeOffer.value && (
               <div class="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
                 <p class="mb-1 text-sm font-semibold text-white">
-                  No Vault identity found - but this could be a flowsta.com
-                  recovery phrase
+                  These words belong to a flowsta.com account
                 </p>
                 <p class="mb-3 text-xs text-gray-300">
-                  If you saved this phrase for a flowsta.com account, it can
-                  upgrade that account to this device right now - no password
-                  needed. Your identity and signatures come with you.
+                  That account was made before the Vault. It can move into
+                  this Vault now, and your identity and signatures come with it.
                 </p>
                 <GlassButton
                   class="w-full"
@@ -1268,18 +1278,17 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {step.value === "signin" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">
-              Connect Your Account
-            </h2>
-            <p class="mb-6 text-sm text-gray-400">
-              Sign in with your Flowsta account to set up your desktop vault.
-              Your vault gives you offline access and self-custody of your identity.
-            </p>
+              Sign in to your flowsta.com account
+              </h2>
+              <p class="mb-6 text-sm text-gray-400">
+              Your account moves into this Vault. Afterward you sign in everywhere by approving here.
+              </p>
 
             <form preventdefault:submit onSubmit$={handleSignIn}>
               <div class="mb-4">
                 <label class="mb-1 block text-xs font-medium text-gray-400">
-                  Email or Username
-                </label>
+                  Email or username
+                  </label>
                 <input
                   type="text"
                   class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
@@ -1309,7 +1318,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               </div>
 
               <p class="mb-4 text-xs text-gray-500">
-                This password will also unlock your desktop vault.
+                This password becomes the password for this Vault.
               </p>
 
               {error.value && (
@@ -1350,8 +1359,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {step.value === "twofa" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">
-              Two-Factor Authentication
-            </h2>
+              Enter your 2FA code
+              </h2>
             <p class="mb-6 text-sm text-gray-400">
               Enter the 6-digit code from your authenticator app.
             </p>
@@ -1403,13 +1412,13 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {step.value === "no-phrase" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">
-              Recovery Phrase Needed
-            </h2>
-            <p class="mb-4 text-sm text-gray-400">
-              Your account doesn't have a recovery phrase yet. You need to create one on the web before setting up your desktop vault.
-            </p>
+              Set up a recovery phrase first
+              </h2>
+              <p class="mb-4 text-sm text-gray-400">
+              Your account has no recovery phrase yet. Create one on flowsta.com, then come back.
+              </p>
             <p class="mb-6 text-sm text-gray-400">
-              Your recovery phrase is what generates your cryptographic keys, connects your devices, and lets you recover your account if anything is ever lost.
+              The phrase makes your keys and is the way back in if you ever lose this computer.
             </p>
 
             {error.value && (
@@ -1422,7 +1431,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   open(WEB_PHRASE_URL);
                 }}
               >
-                Set Up Recovery Phrase
+                Set it up on flowsta.com
               </GlassButton>
               <GlassButton
                 variant="secondary"
@@ -1448,14 +1457,14 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {step.value === "phrase" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">
-              Verify Your Identity
-            </h2>
-            <p class="mb-4 text-sm text-gray-400">
-              Enter your 24-word recovery phrase. This proves you own this account and generates your device's cryptographic keys.
-            </p>
-            <p class="mb-4 text-xs text-gray-500">
-              Your phrase stays on this device and is never sent to Flowsta's servers.
-            </p>
+              Enter your recovery phrase
+              </h2>
+              <p class="mb-4 text-sm text-gray-400">
+              The 24 words you saved on flowsta.com. They prove the account is yours and become its key on this computer.
+              </p>
+              <p class="mb-4 text-xs text-gray-500">
+              The words never leave this computer.
+              </p>
 
             <textarea
               class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-none"
@@ -1510,16 +1519,14 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Upgrade offer: shown right after a custodial sign-in ── */}
         {step.value === "upgrade-offer" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-2 text-2xl font-bold text-white">Upgrade Your Account</h2>
+            <h2 class="mb-2 text-2xl font-bold text-white">Move your account into this Vault</h2>
             <p class="mb-4 text-sm text-gray-400">
-              Right now your keys and personal data live on Flowsta's servers.
-              Upgrading moves them into this Vault - your identity and data
-              belong to this device, and only you can unlock them.
+            Today your keys and personal data live on Flowsta's servers. After the move they live here, and only you can unlock them.
             </p>
             <ul class="mb-6 list-disc space-y-1 pl-5 text-xs text-gray-400">
-              <li>Your personal data moves into an encrypted vault on this device.</li>
+              <li>Your personal data moves into this Vault, encrypted.</li>
               <li>You keep the same identity, username, and signatures.</li>
-              <li>You'll sign in with Vault instead of a password.</li>
+              <li>You sign in by approving in the Vault instead of typing a password.</li>
             </ul>
 
             {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
@@ -1558,8 +1565,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </div>
 
             <p class="mt-6 text-xs text-gray-500">
-              Upgrading takes a few minutes. Everything about your account
-              works the same afterward - only the way you sign in changes.
+              The move takes a few minutes. Only the way you sign in changes.
             </p>
           </div>
         )}
@@ -1567,12 +1573,11 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Upgrade: choose how to set up the recovery phrase ── */}
         {step.value === "migrate-choose" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-2 text-2xl font-bold text-white">Set Up Your Recovery Phrase</h2>
+            <h2 class="mb-2 text-2xl font-bold text-white">Do you have your recovery phrase?</h2>
             <p class="mb-6 text-sm text-gray-400">
-              Your recovery phrase becomes the key to your account on this
-              device. {hasWebPhrase.value
-                ? "Enter the one you already have, or create a fresh one now - either way it becomes the only key to your account."
-                : "We'll create one for you to save - it becomes the only key to your account."}
+              It becomes the only key to your account. {hasWebPhrase.value
+              ? "Enter the one you saved, or create a new one."
+              : "We will create one for you to save."}
             </p>
 
             {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
@@ -1587,7 +1592,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                     step.value = "migrate-phrase";
                   }}
                 >
-                  I have my recovery phrase
+                  I have it
                 </GlassButton>
               )}
               <GlassButton
@@ -1608,9 +1613,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
 
             {hasWebPhrase.value && (
               <p class="mt-6 text-xs text-gray-500">
-                Creating a new one replaces the phrase on your account - the
-                old one stops working. Choose this if you don't have your
-                phrase saved.
+                A new phrase replaces the old one, which stops working.
+                Choose this only if you no longer have it.
               </p>
             )}
           </div>
@@ -1619,11 +1623,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Upgrade: enter the existing recovery phrase ── */}
         {step.value === "migrate-phrase" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-2 text-2xl font-bold text-white">Enter Your Recovery Phrase</h2>
+            <h2 class="mb-2 text-2xl font-bold text-white">Enter your recovery phrase</h2>
             <p class="mb-4 text-sm text-gray-400">
-              Your 24-word recovery phrase becomes the seed of your device
-              identity. It stays on this device and is verified against your
-              account before anything changes.
+            Your 24 words become the key to your account in this Vault. They are checked against your account before anything changes.
             </p>
             <textarea
               class="mb-2 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-none"
@@ -1642,7 +1644,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               disabled={loading.value}
               onClick$={startMigrationCeremony}
             >
-              I lost my recovery phrase - create a new one
+              I lost it - make a new one
             </button>
 
             {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
@@ -1667,14 +1669,13 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Upgrade: new-phrase ceremony (no phrase yet / lost phrase) ── */}
         {step.value === "migrate-ceremony" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-2 text-2xl font-bold text-white">Save Your Recovery Phrase</h2>
+            <h2 class="mb-2 text-2xl font-bold text-white">{phraseSaved.value ? "Check your recovery phrase" : "Write down your new recovery phrase"}</h2>
             <p class="mb-4 text-sm text-gray-400">
-              These 24 words are now your identity. Write them down and store
-              them somewhere safe - on paper, not on this computer.
+            These 24 words are now your identity. Write them down and keep them safe - on paper, not on this computer.
             </p>
             <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
               <p class="text-xs text-amber-300">
-                After the upgrade this phrase is the <strong>only</strong> way to
+                After the move this phrase is the <strong>only</strong> way to
                 recover your identity. Flowsta cannot recover it for you.
               </p>
             </div>
@@ -1727,8 +1728,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             ) : (
               <div>
                 <p class="mb-3 text-sm text-gray-400">
-                  The phrase is hidden now - type these words from what you
-                  wrote down or saved:
+                  Type these words from what you wrote down:
                 </p>
                 <div class="mb-4 flex flex-col gap-3">
                   {verifyIndices.value.map((i) => (
@@ -1770,7 +1770,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Upgrade: explicit consent before anything changes ── */}
         {step.value === "migrate-confirm" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-2 text-2xl font-bold text-white">Ready to Upgrade</h2>
+            <h2 class="mb-2 text-2xl font-bold text-white">Ready to move your account</h2>
             <p class="mb-4 text-sm text-gray-400">
               Four steps, in order. Your account doesn't change until the
               last one succeeds:
@@ -1783,15 +1783,13 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </ol>
             <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
               <p class="text-xs text-amber-300">
-                Afterward your password stops signing you in anywhere - it
-                becomes this Vault's unlock password. Every browser and
-                device signs in through this Vault instead.
+                Afterward your password only unlocks this Vault. Every browser
+                and device signs in through the Vault instead.
               </p>
             </div>
             <p class="mb-4 text-xs text-gray-500">
-              If the upgrade is interrupted, nothing is lost - your account
-              stays exactly as it is until the final step completes, and you
-              can simply run it again.
+              If the move is interrupted, nothing is lost. Your account stays
+              as it is until the last step completes, and you can run it again.
             </p>
 
             {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
@@ -1823,7 +1821,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </div>
             <h2 class="mb-2 text-xl font-bold text-white">This Vault Is Your Account Now</h2>
             <p class="mb-3 text-sm text-gray-400">
-              Your identity, your data, and your sign-in all moved here.
+              Your identity, data and sign-in all moved here.
               {usedPhraseDoor.value
                 ? " The vault password you chose unlocks this Vault - sign-ins everywhere else are approved from it."
                 : " Your old password now only unlocks this Vault - sign-ins everywhere else are approved from it."}
@@ -1890,12 +1888,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
               </svg>
             </div>
-            <h2 class="mb-2 text-xl font-bold text-white">Setting Up Your Vault...</h2>
+            <h2 class="mb-2 text-xl font-bold text-white">Setting up your Vault...</h2>
             <p class="text-sm text-gray-400">{progressMessage.value}</p>
             {migrating.value && (
               <p class="mt-4 text-xs text-gray-500">
-                Your account doesn't change until the final step succeeds -
-                if this is interrupted, you can safely run the upgrade again.
+                Your account does not change until the last step succeeds.
+                If this is interrupted, run the move again.
               </p>
             )}
           </div>
@@ -1909,11 +1907,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
               </svg>
             </div>
-            <h2 class="mb-2 text-xl font-bold text-white">Your Vault is Ready</h2>
+            <h2 class="mb-2 text-xl font-bold text-white">Your Vault is ready</h2>
             <p class="mb-6 text-sm text-gray-400">
-              Your identity is secured on this device. Your personal data is now
-              in your Vault and you can now use Flowsta offline without needing
-              the web.
+            Your identity lives on this computer. Sign in to Flowsta apps and websites by approving here.
             </p>
 
             <div class="mb-6 rounded-lg bg-gray-900 p-4 text-left">
@@ -1960,27 +1956,23 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             {createdOffline.value && (
             <div class="mb-4 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4 text-left">
               <p class="mb-1 text-sm font-semibold text-sky-200">
-                Created offline - your identity is already real
+                Created offline
               </p>
               <p class="text-xs text-gray-400">
-                Your keys live on this device and work on the Flowsta network
-                right now. Your Flowsta account attaches automatically when
-                Flowsta is reachable - that's also when your email is checked
-                and confirmed, so it isn't reserved until then. Nothing else
-                to do.
+                Your identity works now. Your Flowsta account and email attach
+                by themselves when Flowsta is reachable. Nothing to do.
               </p>
             </div>
           )}
           {restoredOffline.value && (
             <div class="mb-4 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4 text-left">
               <p class="mb-1 text-sm font-semibold text-sky-200">
-                Restored offline - the network confirms your identity
+                Restored offline
               </p>
               <p class="text-xs text-gray-400">
-                Your records return through Flowsta's community nodes as this
-                device syncs. Your @username, display name, and email
-                reconnect automatically when Flowsta is reachable - nothing
-                else to do.
+                Your records return as this computer syncs. Your username,
+                display name and email reconnect when Flowsta is reachable.
+                Nothing to do.
               </p>
             </div>
           )}
@@ -1990,9 +1982,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   Bring your data home?
                 </p>
                 <p class="mb-4 text-sm text-gray-300">
-                  If you kept a Vault export file, import it now - your
-                  private records, app backups and email come back before
-                  you open your apps.
+                  If you kept a Vault export file, import it now. Your private
+                  records, app backups and email come back.
                 </p>
                 {restoreImportError.value && (
                   <p class="mb-3 text-sm text-red-300">{restoreImportError.value}</p>
