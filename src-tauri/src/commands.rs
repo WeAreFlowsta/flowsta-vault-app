@@ -579,6 +579,11 @@ pub fn get_vault_status(state: State<'_, Arc<AppState>>) -> VaultStatus {
 pub struct SetupResult {
     pub agent_pub_key: String,
     pub did: String,
+    /// Set when this unlock opened a different identity than the device's
+    /// marker held: the previous identity's name, for the page to narrate
+    /// the switch while the conductor comes up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switched_from: Option<String>,
 }
 
 /// Vault-password policy - MUST mirror src/lib/password-strength.ts
@@ -885,6 +890,7 @@ pub(crate) fn setup_vault_inner(
     Ok(SetupResult {
         agent_pub_key,
         did,
+        switched_from: None,
     })
 }
 
@@ -924,9 +930,10 @@ pub(crate) fn unlock_vault_inner(
         other => other.to_string(),
     })?;
 
-    let result = SetupResult {
+    let mut result = SetupResult {
         agent_pub_key: config.agent_pub_key.clone(),
         did: config.did.clone(),
+        switched_from: None,
     };
 
     // One-time move of a legacy layout under its partition root. Runs here
@@ -940,6 +947,30 @@ pub(crate) fn unlock_vault_inner(
     let data_dir = state.identity_root();
     let passphrase = password.clone();
     let agent_key_for_marker = config.agent_pub_key.clone();
+    // A switch = the device's marker named another identity before this
+    // unlock. Narrated in the activity log and to the page; apps see it
+    // through the epoch bump the marker write makes.
+    let switched_from: Option<String> = crate::paths::read_active_identity(&state.data_dir)
+        .filter(|prev| prev != &agent_key_for_marker)
+        .map(|prev| {
+            let prev_label = crate::paths::partition_key(&prev)
+                .map(|pk| crate::paths::identity_root_for(&state.data_dir, &pk))
+                .and_then(|root| crate::identities::read_label(&root));
+            prev_label
+                .and_then(|l| l.display_name.or(l.username.map(|u| format!("@{}", u))).or(l.email))
+                .unwrap_or_else(|| format!("identity …{}", &prev[prev.len().saturating_sub(6)..]))
+        });
+    if let Some(ref from) = switched_from {
+        let to = config
+            .display_name
+            .clone()
+            .or(config.web_username.clone().map(|u| format!("@{}", u)))
+            .or(config.web_email.clone())
+            .unwrap_or_else(|| "another identity".to_string());
+        log::info!("Identity switch on unlock: {} → {}", from, to);
+        state.activity.record("identity_switched", format!("Switched to {} on this device", to), Some(format!("from {}", from)), None, None);
+    }
+    result.switched_from = switched_from;
 
     // Store decrypted config in app state
     {

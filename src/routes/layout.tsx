@@ -34,6 +34,9 @@ export default component$(() => {
   const connectionStatus = useSignal<ConnectionStatus>("offline");
   useContextProvider(connectionStatusContext, connectionStatus);
   const conductorStatus = useSignal<"stopped" | "starting" | "ready" | "error">("stopped");
+  /** Set by an unlock that opened a different identity than the last one:
+   *  the previous identity's name. Shown while the conductor starts. */
+  const switchNotice = useSignal<string | null>(null);
   const conductorMessage = useSignal("");
 
   // Set when the API's dna-versions endpoint reports this build is below
@@ -433,7 +436,9 @@ export default component$(() => {
   });
 
   const handleUnlockPassword = $(async (password: string) => {
-    await invoke("unlock_vault", { password });
+    const unlocked = await invoke<{ switched_from?: string | null }>("unlock_vault", { password });
+    // A different identity than last time: say so while its Vault comes up.
+    switchNotice.value = unlocked?.switched_from || null;
     // Refresh profile data (username, display name, picture) from the API so that
     // changes made on the website are reflected without requiring a vault reset.
     // Awaited so the overview page sees the updated data on first load.
@@ -1417,7 +1422,9 @@ export default component$(() => {
               </span>
               <span class="text-xs text-gray-400 truncate">
                 {conductorStatus.value === "starting"
-                  ? (conductorMessage.value || "Starting...")
+                  ? (switchNotice.value
+                      ? "Switching identity - getting this Vault ready. Apps follow once it is."
+                      : (conductorMessage.value || "Starting..."))
                   : conductorStatus.value === "error"
                     ? "Holochain stopped"
                     : "Holochain"}
