@@ -404,7 +404,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         step.value = "migrate-phrase";
       } else if (msg.includes("lookup_hash_not_found") || msg.includes("export_missing_phrase")) {
         error.value =
-          "This account's recovery phrase needs to be re-created before upgrading. Use \"I lost my recovery phrase\" to get a new one.";
+          "This account's recovery phrase must be made again before the move. Use \"I lost it - make a new one\".";
         step.value = "migrate-phrase";
       } else {
         error.value = msg;
@@ -746,7 +746,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
     if (!upgPw.valid) {
       error.value = restorePassword.value
         ? (upgPw.hint || "Choose a stronger vault password.")
-        : "Choose a vault password first - it will unlock the upgraded vault.";
+        : "Choose a password for this Vault first.";
       return;
     }
     if (restorePassword.value !== restorePassword2.value) {
@@ -1255,7 +1255,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   disabled={loading.value}
                   onClick$={handlePhraseUpgrade}
                 >
-                  {loading.value ? "Verifying phrase..." : "Upgrade my flowsta.com account"}
+                  {loading.value ? "Checking the phrase..." : "Move my account into this Vault"}
                 </GlassButton>
               </div>
             )}
@@ -1550,7 +1550,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   }
                 }}
               >
-                {loading.value ? "Preparing..." : "Upgrade to this device"}
+                {loading.value ? "Preparing..." : "Move my account"}
               </GlassButton>
               <button
                 type="button"
@@ -1805,7 +1805,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 Back
               </GlassButton>
               <GlassButton disabled={loading.value} onClick$={handleRunMigration}>
-                {loading.value ? "Upgrading..." : "Upgrade my account"}
+                {loading.value ? "Moving..." : "Move my account"}
               </GlassButton>
             </div>
           </div>
