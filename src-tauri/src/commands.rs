@@ -3797,6 +3797,44 @@ struct YourDataProgress {
     can_skip: bool,
 }
 
+/// Wait until the conductor is ready, narrating the wait over the given
+/// progress op. Right after a restore the wizard offers the import while
+/// the conductor is still starting; the old path failed at once with
+/// "Could not read current records: Conductor not running" (Eric, 09-28).
+async fn wait_for_conductor_ready(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+    op: &'static str,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    let mut narrated = false;
+    loop {
+        let status = state.conductor_status.lock().unwrap().clone();
+        match status {
+            ConductorStatus::Ready { .. } => return Ok(()),
+            ConductorStatus::Error { message } => {
+                return Err(format!("Your Vault could not finish starting up: {}", message));
+            }
+            _ => {}
+        }
+        if start.elapsed() > timeout {
+            return Err("Your Vault is still starting up. Give it a moment and try the import again.".into());
+        }
+        if !narrated {
+            emit_your_data_progress(
+                app_handle,
+                op,
+                "Warming up - the first start after a restore takes a little longer...".into(),
+                None,
+                None,
+            );
+            narrated = true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
 fn emit_your_data_progress(
     app_handle: &tauri::AppHandle,
     op: &'static str,
@@ -4088,6 +4126,7 @@ pub async fn import_vault_export(
         && export.get("app_data").is_none()
         && export.get("sealed_records").is_none();
     if is_single_app {
+        wait_for_conductor_ready(state.inner(), &app_handle, "import", std::time::Duration::from_secs(180)).await?;
         emit_your_data_progress(
             &app_handle,
             "import",
@@ -4156,6 +4195,7 @@ pub async fn import_vault_export(
     // ── Sealed records ──────────────────────────────────────────────
     // Dedupe on (entry_type, created_at) exactly like the migration
     // importer, so re-running is a no-op for records already present.
+    wait_for_conductor_ready(state.inner(), &app_handle, "import", std::time::Duration::from_secs(180)).await?;
     let existing = crate::sealed::sealed_list_inner(state.inner())
         .await
         .map_err(|e| format!("Could not read current records: {}", e))?;

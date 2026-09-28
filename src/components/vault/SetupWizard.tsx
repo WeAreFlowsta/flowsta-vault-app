@@ -1998,8 +1998,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   <p class="mb-3 text-sm text-red-300">{restoreImportError.value}</p>
                 )}
                 {restoreImporting.value ? (
-                  <p class="text-sm text-sky-300">
-                    {restoreImportProgress.value || "Importing your export..."}
+                  <p class="flex items-center gap-2 text-sm text-sky-300">
+                    <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                    </svg>
+                    <span>{restoreImportProgress.value || "Importing your export..."}</span>
                   </p>
                 ) : (
                   <div class="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end">
