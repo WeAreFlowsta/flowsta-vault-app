@@ -521,7 +521,12 @@ async fn sign_handler(
         let _ = state.app_handle.emit("raw-sign-request", event_payload);
 
         let approved = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => {
+                if result {
+                    recheck_expected_identity(&state)?;
+                }
+                result
+            }
             Ok(Err(_)) => false,
             Err(_) => {
                 let mut pending = state.app_state.pending_raw_sign.lock().unwrap();
@@ -781,6 +786,10 @@ async fn authenticate_handler(
         let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
     }
 
+    // The unlock may have brought a different identity than the request
+    // named - check again before the dialog.
+    recheck_expected_identity(&state)?;
+
     // What the app is asking for beyond the identity proof. `email` is the
     // one scope that changes the dialog and the response.
     let scopes = match req.client_id.as_deref() {
@@ -890,7 +899,12 @@ async fn authenticate_handler(
 
         // Wait for user response with 60s timeout
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => {
+                if result {
+                    recheck_expected_identity(&state)?;
+                }
+                result
+            }
             Ok(Err(_)) => {
                 // Channel closed (sender dropped)
                 return Err((
@@ -1337,6 +1351,9 @@ async fn link_identity_handler(
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
             Ok(Ok(result)) => {
                 restore_window(&state.app_handle, prior);
+                if result {
+                    recheck_expected_identity(&state)?;
+                }
                 result
             }
             Ok(Err(_)) => {
@@ -2373,7 +2390,7 @@ async fn sign_document_handler(
         let op_name = if req.supersedes.is_some() { "amend" } else { "sign" };
         let op_label = req.label.clone();
         let op_origin = origin.clone();
-        tokio::spawn(async move {
+        spawn_with_identity(async move {
             match sign_document_core(
                 task_state.clone(),
                 task_origin,
@@ -2449,6 +2466,8 @@ async fn sign_document_core(
         }
         let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
     }
+
+    recheck_expected_identity(&state)?;
 
     // 2. Validate file_hash is valid hex and 32 bytes
     let hash_bytes = hex::decode(&req.file_hash).map_err(|_| {
@@ -2696,7 +2715,12 @@ async fn sign_document_core(
         !test_deny
     } else {
         match tokio::time::timeout(std::time::Duration::from_secs(approval_budget), rx).await {
-        Ok(Ok(result)) => result,
+        Ok(Ok(result)) => {
+                if result {
+                    recheck_expected_identity(&state)?;
+                }
+                result
+            }
         Ok(Err(_)) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2852,7 +2876,7 @@ async fn sign_document_core(
                 let api_url = option_env!("FLOWSTA_API_URL")
                     .unwrap_or("https://auth-api.flowsta.com")
                     .to_string();
-                tokio::spawn(async move {
+                spawn_with_identity(async move {
                     if let Err(e) = crate::commands::sync_quota_to_server_inner(
                         &sync_state,
                         api_url,
@@ -2880,7 +2904,7 @@ async fn sign_document_core(
                     let bg = state.clone();
                     let bg_hash = hash.clone();
                     let bg_file = req.file_hash.clone();
-                    tokio::spawn(async move {
+                    spawn_with_identity(async move {
                         let _guard = bg.app_state.commit_serial.lock().await;
                         match crate::commands::set_thumbnail_inner(
                             &bg.app_state,
@@ -2991,7 +3015,7 @@ async fn profile_update_handler(
         let task_job = job_id.clone();
         let op_label = req.display_name.clone();
         let op_origin = origin.clone();
-        tokio::spawn(async move {
+        spawn_with_identity(async move {
             match profile_update_core(task_state.clone(), task_origin, req, Some(task_job.clone()), test_deny).await {
                 Ok(v) => {
                     task_state.op_jobs.finish(&task_job, v);
@@ -3060,6 +3084,7 @@ async fn profile_update_core(
             ));
         }
     }
+    recheck_expected_identity(&state)?;
 
     let display_name = req
         .display_name
@@ -3157,7 +3182,12 @@ async fn profile_update_core(
         !test_deny
     } else {
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => {
+                if result {
+                    recheck_expected_identity(&state)?;
+                }
+                result
+            }
             Ok(Err(_)) => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -3293,6 +3323,7 @@ async fn cell_op_approval(
     }
     match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
         Ok(Ok(true)) => {
+            recheck_expected_identity(state)?;
             let _ = state.app_handle.emit(
                 "op-progress",
                 serde_json::json!({ "op": op, "origin": origin, "label": detail }),
@@ -3380,6 +3411,7 @@ async fn cell_op_gate(
                 }),
             ));
         }
+        recheck_expected_identity(state)?;
         set_job_stage(state, job_id, "preparing");
     }
     // The operation commits to the signing cell - wait for the conductor
@@ -3433,7 +3465,7 @@ async fn revoke_signature_handler(
         let task_origin = origin.clone();
         let task_job = job_id.clone();
         let op_origin = origin.clone();
-        tokio::spawn(async move {
+        spawn_with_identity(async move {
             match revoke_signature_core(task_state.clone(), task_origin, req, Some(task_job.clone()), test_deny).await {
                 Ok(v) => {
                     task_state.op_jobs.finish(&task_job, v);
@@ -3540,7 +3572,7 @@ async fn set_thumbnail_handler(
         let task_origin = origin.clone();
         let task_job = job_id.clone();
         let op_origin = origin.clone();
-        tokio::spawn(async move {
+        spawn_with_identity(async move {
             match set_thumbnail_core(task_state.clone(), task_origin, req, Some(task_job.clone()), test_deny).await {
                 Ok(v) => {
                     task_state.op_jobs.finish(&task_job, v);
@@ -4560,6 +4592,52 @@ fn expected_identity_matches(expected: &str, active: &str) -> bool {
     }
 }
 
+tokio::task_local! {
+    /// The `expected_identity` the current request carried (POST body or
+    /// GET query), kept for the request's lifetime so a handler can check
+    /// it AGAIN after a long wait (unlock up to 180 s, approval 60 s): the
+    /// identity can change while the request waits, and a gate that ran
+    /// once at entry would then act as the wrong person.
+    static REQUEST_EXPECTED_IDENTITY: Option<String>;
+}
+
+/// The request's expected identity, if it carried one (None outside a
+/// request or when none was given).
+fn captured_expected_identity() -> Option<String> {
+    REQUEST_EXPECTED_IDENTITY.try_with(|e| e.clone()).ok().flatten()
+}
+
+/// Re-run the entry gate after a wait. No expected identity = nothing to
+/// check (older clients), never a refusal.
+fn recheck_expected_identity(state: &IpcState) -> Result<(), (StatusCode, Json<IpcError>)> {
+    match captured_expected_identity() {
+        Some(expected) => check_expected_identity(state, &expected),
+        None => Ok(()),
+    }
+}
+
+/// Spawn a background job that keeps the spawning request's expected
+/// identity, so its own waits re-check against the same identity.
+fn spawn_with_identity<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let expected = captured_expected_identity();
+    tokio::spawn(REQUEST_EXPECTED_IDENTITY.scope(expected, fut))
+}
+
+/// `expected_identity=<key>` out of a query string (GETs carry no body).
+fn expected_identity_from_query(query: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        if k != "expected_identity" || v.is_empty() {
+            return None;
+        }
+        Some(percent_encoding::percent_decode_str(v).decode_utf8_lossy().to_string())
+    })
+}
+
 fn check_expected_identity(
     state: &IpcState,
     expected: &str,
@@ -4596,6 +4674,7 @@ async fn identity_gate(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    let mut expected: Option<String> = None;
     let req = if req.method() == Method::POST {
         let (parts, body) = req.into_parts();
         // Buffer within the largest route allowance (55 MB on /backup); the
@@ -4609,16 +4688,23 @@ async fn identity_gate(
                 )
             })?;
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            if let Some(expected) = v.get("expected_identity").and_then(|x| x.as_str()) {
-                check_expected_identity(&state, expected)?;
+            if let Some(e) = v.get("expected_identity").and_then(|x| x.as_str()) {
+                check_expected_identity(&state, e)?;
+                expected = Some(e.to_string());
             }
         }
         axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
     } else {
+        // GETs (/link-status, /backup/list, /signatures, /connections, ...)
+        // carry it in the query string.
+        if let Some(e) = req.uri().query().and_then(expected_identity_from_query) {
+            check_expected_identity(&state, &e)?;
+            expected = Some(e);
+        }
         req
     };
 
-    let mut resp = next.run(req).await;
+    let mut resp = REQUEST_EXPECTED_IDENTITY.scope(expected, next.run(req)).await;
 
     // Read AFTER the handler so lock/unlock calls report their new state.
     let identity = state
@@ -4719,7 +4805,7 @@ pub async fn start_ipc_server(
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 log::info!("IPC server listening on http://127.0.0.1:{}", port);
-                tokio::spawn(async move {
+                spawn_with_identity(async move {
                     if let Err(e) = axum::serve(listener, app).await {
                         log::error!("IPC server error: {}", e);
                     }
@@ -4738,6 +4824,15 @@ pub async fn start_ipc_server(
 #[cfg(test)]
 mod tests {
     use super::{expected_identity_matches, is_flowsta_origin, OpJobs};
+
+    #[test]
+    fn expected_identity_comes_out_of_a_query_string() {
+        use super::expected_identity_from_query as q;
+        assert_eq!(q("expected_identity=uhCAkabc").as_deref(), Some("uhCAkabc"));
+        assert_eq!(q("a=1&expected_identity=uhCAk%2Babc&b=2").as_deref(), Some("uhCAk+abc"));
+        assert_eq!(q("expected_identity="), None);
+        assert_eq!(q("other=uhCAkabc"), None);
+    }
 
     #[test]
     fn expected_identity_compares_through_bytes() {
