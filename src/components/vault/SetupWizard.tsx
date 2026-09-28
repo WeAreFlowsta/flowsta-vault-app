@@ -61,6 +61,11 @@ export function summarizeRestoreImport(r: RestoreImportResult): { title: string;
 
 interface SetupWizardProps {
   onComplete$: QRL<() => void>;
+  /** "add": restore another identity beside the ones already here - the
+   *  wizard opens on the recovery-phrase step and Back returns to the
+   *  unlock screen. */
+  mode?: "add";
+  onCancel$?: QRL<() => void>;
 }
 
 type Step =
@@ -110,8 +115,8 @@ return 2;
 }
 
 export const SetupWizard = component$<SetupWizardProps>((props) => {
-  const step = useSignal<Step>("choose");
-  const flow = useSignal<Flow>("create");
+  const step = useSignal<Step>(props.mode === "add" ? "restore-phrase" : "choose");
+  const flow = useSignal<Flow>(props.mode === "add" ? "restore" : "create");
   const email = useSignal("");
   const loginPassword = useSignal("");
   const tfaCode = useSignal("");
@@ -1202,7 +1207,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Restore from phrase (B6) ── */}
         {step.value === "restore-phrase" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-2 text-2xl font-bold text-white">Restore with your recovery phrase</h2>
+            <h2 class="mb-2 text-2xl font-bold text-white">{props.mode === "add" ? "Add an identity with its recovery phrase" : "Restore with your recovery phrase"}</h2>
             <p class="mb-4 text-sm text-gray-400">
             Enter your 24 words. They rebuild your identity on this computer; your username, records and signatures return from the network. Then choose a password for this Vault.
             </p>
@@ -1261,7 +1266,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             )}
 
             <div class="flex justify-between">
-              <GlassButton variant="secondary" onClick$={() => { mnemonic.value = ""; phraseUpgradeOffer.value = false; error.value = ""; step.value = "choose"; }}>
+              <GlassButton variant="secondary" onClick$={async () => { mnemonic.value = ""; phraseUpgradeOffer.value = false; error.value = ""; if (props.mode === "add" && props.onCancel$) { await props.onCancel$(); } else { step.value = "choose"; } }}>
                 Back
               </GlassButton>
               <GlassButton

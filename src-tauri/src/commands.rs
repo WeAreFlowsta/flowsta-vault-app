@@ -745,11 +745,6 @@ pub(crate) fn setup_vault_inner(
         return Err("Invalid recovery phrase".into());
     }
 
-    // Check not already initialized
-    let vault_path = state.vault_path.lock().unwrap().clone();
-    if vault_exists(&vault_path) {
-        return Err("Vault already exists. Use unlock instead.".into());
-    }
 
     // Derive device keypair
     let signing_key =
@@ -761,6 +756,9 @@ pub(crate) fn setup_vault_inner(
     // Proper 39-byte Holochain AgentPubKey (with DHT location)
     let agent_pub_key = construct_agent_pub_key_string(pub_key_bytes);
     let did = format!("did:flowsta:{}", agent_pub_key);
+    // This identity's files go into its own partition from birth (a second
+    // identity is added beside the first; a fresh install lands there too).
+    let vault_path = crate::identities::adopt_partition_before_setup(state, &agent_pub_key)?;
 
     // Full 39-byte key as standard base64 (for API zome calls)
     let agent_pub_key_39 = construct_agent_pub_key_bytes(pub_key_bytes);
@@ -784,6 +782,12 @@ pub(crate) fn setup_vault_inner(
     let backup_identity_key = crate::key_derivation::derive_backup_identity_key(&mnemonic)
         .map_err(|e| format!("Backup key derivation failed: {}", e))?;
 
+    // Kept for the public label written after the save (the config below
+    // takes the originals).
+    let label_display_name = display_name.clone();
+    let label_username = web_username.clone();
+    let label_picture = profile_picture.clone();
+    let label_email = web_email.clone();
     // Create vault config
     let config = VaultConfig {
         agent_pub_key: agent_pub_key.clone(),
@@ -823,6 +827,18 @@ pub(crate) fn setup_vault_inner(
         encrypt_vault(&config, &password).map_err(|e| format!("Encryption failed: {}", e))?;
     encrypted.display_email = config.web_email.clone().or(config.web_username.clone());
     save_vault(&vault_path, &encrypted).map_err(|e| format!("Save failed: {}", e))?;
+    // The public label the unlock screen lists this identity by (the
+    // unlock refreshes it; this is what the picker shows right away).
+    crate::identities::write_label(
+        &state.identity_root(),
+        &crate::identities::IdentityLabel {
+            agent_pub_key: agent_pub_key.clone(),
+            display_name: label_display_name,
+            username: label_username,
+            profile_picture: label_picture,
+            email: label_email,
+        },
+    );
 
     // Extract conductor startup params before storing config
     let conductor_seed = config.device_seed.clone();

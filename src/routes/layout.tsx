@@ -30,7 +30,7 @@ const navItems = [
 ];
 
 export default component$(() => {
-  const screen = useSignal<AppScreen>("loading");
+  const screen = useSignal<AppScreen | "add-identity">("loading");
   const connectionStatus = useSignal<ConnectionStatus>("offline");
   useContextProvider(connectionStatusContext, connectionStatus);
   const conductorStatus = useSignal<"stopped" | "starting" | "ready" | "error">("stopped");
@@ -1145,9 +1145,13 @@ export default component$(() => {
     );
   }
 
-  if (screen.value === "setup") {
+  if (screen.value === "setup" || screen.value === "add-identity") {
     return (
       <SetupWizard
+        mode={screen.value === "add-identity" ? "add" : undefined}
+        onCancel$={$(async () => {
+          screen.value = "unlock";
+        })}
         onComplete$={async () => {
           screen.value = "dashboard";
           // The wizard draws over whatever page was open (Reset lives in
@@ -1195,6 +1199,9 @@ export default component$(() => {
                 : null
           }
           onUnlock$={handleUnlockPassword}
+          onAddIdentity$={$(async () => {
+            screen.value = "add-identity";
+          })}
           onResetVault$={async () => {
             // Must WIPE on disk (vault.enc + lair keystore + conductor), not
             // just navigate - otherwise the next create/restore inherits the

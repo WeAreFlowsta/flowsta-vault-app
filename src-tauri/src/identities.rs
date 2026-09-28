@@ -106,6 +106,42 @@ fn root_for_key(device_root: &Path, key: &str) -> Option<PathBuf> {
     Some(crate::paths::identity_root_for(device_root, key))
 }
 
+/// Where a NEW identity's files go: its own partition, `identities/<pk>/`,
+/// from birth (1.4.0 relocated at the first re-unlock instead). Adding an
+/// identity to a Vault that already holds one needs the Vault locked with
+/// no conductor running - one live vault. An identity already on this
+/// device is refused: it is picked at unlock, never restored twice. A
+/// fresh install whose partition path cannot host a key store socket
+/// stays on the legacy root as before.
+pub(crate) fn adopt_partition_before_setup(state: &Arc<AppState>, agent_pub_key: &str) -> Result<PathBuf, String> {
+    let device_root = state.data_dir.clone();
+    let current_root = state.identity_root();
+    let current_has_vault = crate::vault::vault_exists(&crate::paths::vault_file(&current_root));
+    let pk = crate::paths::partition_key(agent_pub_key).ok_or("agent key not decodable")?;
+    let new_root = crate::paths::identity_root_for(&device_root, &pk);
+    if crate::vault::vault_exists(&crate::paths::vault_file(&new_root)) {
+        return Err("This identity is already in this Vault. Pick it at unlock instead.".into());
+    }
+    if current_has_vault {
+        if state.vault_config.lock().unwrap().is_some() {
+            return Err("Lock the Vault before adding an identity.".into());
+        }
+        if state.conductor_handle.lock().unwrap().is_some() {
+            return Err("The Vault is still shutting down. Try again in a moment.".into());
+        }
+        if !crate::paths::lair_socket_path_fits(&new_root) {
+            return Err("This computer's user folder path is too long to add a second identity.".into());
+        }
+    } else if !crate::paths::lair_socket_path_fits(&new_root) {
+        log::warn!("partition path too long for the key store socket - the first identity stays on the legacy root");
+        return Ok(crate::paths::vault_file(&current_root));
+    }
+    std::fs::create_dir_all(&new_root).map_err(|e| format!("cannot create {:?}: {}", new_root, e))?;
+    state.repoint_root(&new_root);
+    log::info!("New identity born partitioned at {:?}", new_root);
+    Ok(crate::paths::vault_file(&new_root))
+}
+
 #[tauri::command]
 pub fn list_identities(state: tauri::State<'_, Arc<AppState>>) -> Vec<IdentityEntry> {
     list_on_disk(&state.data_dir, &state.identity_root())
@@ -158,6 +194,27 @@ mod tests {
         assert!(list[0].active && !list[1].active && !list[2].active);
         assert_eq!(list[1].label.as_ref().unwrap().display_name.as_deref(), Some("B"));
         assert!(list[2].label.is_none());
+    }
+
+    #[test]
+    fn a_new_identity_is_born_in_its_own_partition_and_a_second_one_needs_a_locked_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf()));
+        let key_a = crate::key_derivation::construct_agent_pub_key_string(&[7u8; 32]);
+        let key_b = crate::key_derivation::construct_agent_pub_key_string(&[9u8; 32]);
+        // fresh install: the first identity lands in identities/<pk>/, not the device root
+        let path_a = adopt_partition_before_setup(&state, &key_a).unwrap();
+        let pk_a = crate::paths::partition_key(&key_a).unwrap();
+        assert_eq!(path_a, crate::paths::vault_file(&crate::paths::identity_root_for(dir.path(), &pk_a)));
+        assert_eq!(state.identity_root(), crate::paths::identity_root_for(dir.path(), &pk_a));
+        std::fs::write(&path_a, b"vault a").unwrap();
+        // the same identity again: refused
+        assert!(adopt_partition_before_setup(&state, &key_a).unwrap_err().contains("already in this Vault"));
+        // a second identity while locked: its own partition
+        let path_b = adopt_partition_before_setup(&state, &key_b).unwrap();
+        assert_ne!(path_b, path_a);
+        assert!(path_b.to_string_lossy().contains(&crate::paths::partition_key(&key_b).unwrap()));
+        assert!(crate::vault::vault_exists(&path_a), "the first identity is untouched");
     }
 
     #[test]

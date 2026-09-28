@@ -46,6 +46,8 @@ function identitySubtitle(e: IdentityEntry): string {
 interface UnlockScreenProps {
   onUnlock$: QRL<(password: string) => void>;
   onResetVault$: QRL<() => void>;
+  /** Restore another identity from its recovery phrase, beside this one. */
+  onAddIdentity$?: QRL<() => void>;
   /** Something is waiting on the unlock (a page's sign-in, a relay code). */
   notice?: { title: string; body: string } | null;
   initialError?: string;
@@ -223,7 +225,7 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
             </GlassButton>
           </form>
 
-          <div class="mt-4 text-center">
+          <div class="mt-4 flex flex-col items-center gap-2 text-center">
             <button
               type="button"
               class="text-xs text-gray-500 hover:text-gray-400 transition-colors"
@@ -231,6 +233,15 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
             >
               Forgot password? Re-enter recovery phrase
             </button>
+            {props.onAddIdentity$ && (
+              <button
+                type="button"
+                class="text-xs text-gray-500 hover:text-gray-400 transition-colors"
+                onClick$={props.onAddIdentity$}
+              >
+                Add another identity from its recovery phrase
+              </button>
+            )}
           </div>
         </div>
       </div>
