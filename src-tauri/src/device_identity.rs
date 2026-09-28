@@ -78,6 +78,36 @@ fn api_error(status: reqwest::StatusCode, body: &ApiEnvelope, context: &str) -> 
     format!("{}: {} ({}) [{}]", context, code, msg, status.as_u16())
 }
 
+/// The API refuses a signed request whose timestamp is more than five
+/// minutes from ITS clock (`stale_timestamp`). Nearly always the person's
+/// computer clock is off, and the raw code helped nobody (field report
+/// 2026-09-26). The server's `Date` response header says what time it
+/// thinks it is; the difference to our clock is the message.
+fn clock_skew_message(server_date: Option<&str>) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let server = server_date.and_then(|date| httpdate::parse_http_date(date).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64));
+    match server {
+        Some(server) if (now - server).abs() >= 60 => {
+            let diff = now - server;
+            let mins = diff.abs() / 60;
+            let amount = if mins >= 120 { format!("{} hours", mins / 60) } else { format!("{} minutes", mins) };
+            format!(
+                "Your computer's clock is about {} {} of the real time. Turn on automatic date and time in your system settings, then try again.",
+                amount,
+                if diff > 0 { "ahead" } else { "behind" }
+            )
+        }
+        _ => "Your computer's clock does not match the real time closely enough. Turn on automatic date and time in your system settings, then try again.".to_string(),
+    }
+}
+
+fn server_date_header(resp: &reqwest::Response) -> Option<String> {
+    resp.headers().get(reqwest::header::DATE).and_then(|v| v.to_str().ok()).map(String::from)
+}
+
 /// Register a Vault-created identity as a new Flowsta account.
 /// Creates NO cells anywhere - the API stores only the pubkey + credential.
 #[tauri::command]
@@ -139,12 +169,18 @@ pub async fn register_device_identity(
         .map_err(|e| format!("api_unreachable: registration request failed: {}", e))?;
 
     let status = resp.status();
+    let server_date = server_date_header(&resp);
     let body: ApiEnvelope = resp
         .json()
         .await
         .map_err(|e| format!("Registration response parse failed: {}", e))?;
 
     if !status.is_success() {
+        if body.error.as_deref() == Some("stale_timestamp") {
+            let msg = clock_skew_message(server_date.as_deref());
+            log::warn!("[register] stale_timestamp - {}", msg);
+            return Err(msg);
+        }
         return Err(api_error(status, &body, "registration_failed"));
     }
 
@@ -526,11 +562,15 @@ async fn register_deferred(state: &Arc<AppState>, api_url: &str) -> Result<(), S
         .map_err(|e| format!("api_unreachable: registration request failed: {}", e))?;
 
     let status = resp.status();
+    let server_date = server_date_header(&resp);
     let body: ApiEnvelope = resp
         .json()
         .await
         .map_err(|e| format!("Registration response parse failed: {}", e))?;
 
+    if body.error.as_deref() == Some("stale_timestamp") {
+        log::warn!("[reconcile] stale_timestamp - {}", clock_skew_message(server_date.as_deref()));
+    }
     if status.is_success() {
         // Seed the identicon the server just generated, matching the
         // online create path - only if the user hasn't set a picture.
@@ -794,5 +834,50 @@ mod tests {
             "reset refusal reason: {:?}",
             reset_body
         );
+    }
+}
+
+#[cfg(test)]
+mod clock_skew_tests {
+    use super::*;
+    fn http_date(secs_from_now: i64) -> String {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + secs_from_now;
+        httpdate_string(t)
+    }
+    fn httpdate_string(unix: i64) -> String {
+        // RFC 7231 IMF-fixdate without a date crate: days since epoch → civil date.
+        let days = unix.div_euclid(86_400);
+        let secs = unix.rem_euclid(86_400);
+        let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+        // civil_from_days (Howard Hinnant)
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let mth = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if mth <= 2 { y + 1 } else { y };
+        let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
+        let mn = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][(mth - 1) as usize];
+        format!("{}, {:02} {} {} {:02}:{:02}:{:02} GMT", wd, d, mn, y, h, m, s)
+    }
+    #[test]
+    fn says_how_far_and_which_way() {
+        // our clock is 12 minutes AHEAD of the server = server date 12 min ago
+        let m = clock_skew_message(Some(&http_date(-12 * 60)));
+        assert!(m.contains("12 minutes ahead"), "{}", m);
+        // 3 hours behind
+        let m = clock_skew_message(Some(&http_date(3 * 3600)));
+        assert!(m.contains("3 hours behind"), "{}", m);
+        // no header or an unparseable one: the plain sentence
+        assert!(clock_skew_message(None).starts_with("Your computer's clock does not match"));
+        assert!(clock_skew_message(Some("garbage")).starts_with("Your computer's clock does not match"));
     }
 }

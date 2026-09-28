@@ -95,6 +95,9 @@ thiserror = "1.0"
 # Process table: the startup sweep of orphaned sidecars (instance_guard.rs)
 sysinfo = "0.33"
 
+# RFC 7231 Date header parsing for the clock-skew message (device_identity.rs)
+httpdate = "1"
+
 [dev-dependencies]
 # TOTP computation in the staging migration tests (otplib-compatible
 # HMAC-SHA1 codes for the two-factor account variant)

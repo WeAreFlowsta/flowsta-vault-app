@@ -1832,6 +1832,7 @@ dependencies = [
  "hmac",
  "holochain_client",
  "holochain_types",
+ "httpdate",
  "image",
  "lair_keystore_api",
  "libc",
