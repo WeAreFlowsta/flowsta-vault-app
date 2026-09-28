@@ -92,6 +92,9 @@ rusty-chromaprint = "0.3"
 # Error handling
 thiserror = "1.0"
 
+# Process table: the startup sweep of orphaned sidecars (instance_guard.rs)
+sysinfo = "0.33"
+
 [dev-dependencies]
 # TOTP computation in the staging migration tests (otplib-compatible
 # HMAC-SHA1 codes for the two-factor account variant)

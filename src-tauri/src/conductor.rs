@@ -70,7 +70,11 @@ fn find_available_admin_port() -> Result<u16, String> {
                 return Ok(port);
             }
             Err(_) => {
-                log::info!("Admin WS port {} in use, trying next", port);
+                // After the startup sweep this is a LIVE holder: another
+                // Vault (staging beside production) - or, if the log shows
+                // no such Vault, a conductor that survived the sweep, which
+                // means two conductors on one agent key. Worth a warning.
+                log::warn!("Admin WS port {} in use, trying next", port);
             }
         }
     }

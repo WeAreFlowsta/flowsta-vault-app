@@ -15,6 +15,7 @@ mod migration;
 mod process_ext;
 mod quota_cache;
 mod relocate;
+mod instance_guard;
 mod relay_login;
 mod sealed;
 mod vault;
@@ -177,6 +178,16 @@ pub fn run() {
             log::info!("Data dir: {:?}", data_dir);
             if let Ok(log_dir) = app.path().app_log_dir() {
                 log::info!("Log dir: {:?}", log_dir);
+            }
+
+            // Sidecars a dead earlier launch left behind (macOS kills a
+            // running app whose bundle was replaced; crashes; forced quits)
+            // would make this launch take the next admin port and run a
+            // SECOND conductor on the same agent key. Stop them first; a
+            // staging Vault beside this one keeps its own.
+            let reaped = instance_guard::reap_orphaned_sidecars();
+            if reaped > 0 {
+                log::warn!("[instance] {} orphaned sidecar(s) from an earlier launch stopped", reaped);
             }
 
             // Initialize app state (shared between Tauri commands and IPC server)
