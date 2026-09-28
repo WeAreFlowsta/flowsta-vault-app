@@ -322,22 +322,61 @@ pub fn parse_relay_code(url_str: &str) -> Option<String> {
     }
 }
 
+/// Extract the claim nonce from a `flowsta://claim/v1?nonce=<8-64 hex>` URL.
+///
+/// Loopback ports are shared by every user account on a computer, and a
+/// page cannot tell which Vault belongs to the person at the keyboard. The
+/// OS can: it routes `flowsta://` to the CURRENT user's handler. So the
+/// login page opens this URL with a fresh nonce, only this user's Vault
+/// records it, and the page then talks to the Vault whose `/status` lists
+/// the nonce (`claims`). Seen needed 2026-09-28: a sign-in request had been
+/// delivered to another account's Vault.
+pub fn parse_claim_nonce(url_str: &str) -> Option<String> {
+    let url = url::Url::parse(url_str).ok()?;
+    if url.scheme() != "flowsta" || url.host_str() != Some("claim") || url.path() != "/v1" {
+        return None;
+    }
+    let nonce = url.query_pairs().find(|(k, _)| k == "nonce").map(|(_, v)| v.to_string())?;
+    let ok = (8..=64).contains(&nonce.len()) && nonce.chars().all(|c| c.is_ascii_hexdigit());
+    ok.then(|| nonce.to_ascii_lowercase())
+}
+
+/// How long a claim is reported in `/status`. The page polls within seconds.
+pub const CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Record a claim nonce on the app state (pruning old ones).
+pub fn record_claim(state: &AppState, nonce: String) {
+    let mut claims = state.recent_claims.lock().unwrap();
+    claims.retain(|(_, at)| at.elapsed() < CLAIM_TTL);
+    claims.retain(|(n, _)| n != &nonce);
+    claims.push((nonce, std::time::Instant::now()));
+    if claims.len() > 8 {
+        let drop = claims.len() - 8;
+        claims.drain(0..drop);
+    }
+}
+
 /// Handle an incoming flowsta:// URL: queue the relay code, surface the
 /// window, and notify the frontend. Works locked or unlocked - the frontend
 /// (or the unlock flow via take_pending_relay_code) picks it up.
 pub fn handle_flowsta_url(app: &tauri::AppHandle, url_str: &str) {
     let state = app.state::<Arc<AppState>>();
-    match parse_relay_code(url_str) {
-        Some(code) => {
-            log::info!("flowsta:// relay code received via deep link");
-            {
-                let mut pending = state.pending_relay_code.lock().unwrap();
-                *pending = Some(code.clone());
+    if let Some(nonce) = parse_claim_nonce(url_str) {
+        log::info!("flowsta:// claim received via deep link");
+        record_claim(&state, nonce);
+    } else {
+        match parse_relay_code(url_str) {
+            Some(code) => {
+                log::info!("flowsta:// relay code received via deep link");
+                {
+                    let mut pending = state.pending_relay_code.lock().unwrap();
+                    *pending = Some(code.clone());
+                }
+                let _ = app.emit("relay-code-received", code);
             }
-            let _ = app.emit("relay-code-received", code);
-        }
-        None => {
-            log::warn!("Unrecognized flowsta:// URL (action/version) - focusing window only");
+            None => {
+                log::warn!("Unrecognized flowsta:// URL (action/version) - focusing window only");
+            }
         }
     }
     if let Some(window) = app.get_webview_window("main") {
@@ -352,6 +391,17 @@ pub fn handle_flowsta_url(app: &tauri::AppHandle, url_str: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_nonce_parses_only_the_claim_action_with_a_hex_nonce() {
+        assert_eq!(parse_claim_nonce("flowsta://claim/v1?nonce=0123456789abcdef").as_deref(), Some("0123456789abcdef"));
+        assert_eq!(parse_claim_nonce("flowsta://claim/v1?nonce=ABCDEF01").as_deref(), Some("abcdef01"));
+        assert_eq!(parse_claim_nonce("flowsta://claim/v1?nonce=short"), None);
+        assert_eq!(parse_claim_nonce("flowsta://claim/v1?nonce=zzzzzzzzzz"), None);
+        assert_eq!(parse_claim_nonce("flowsta://claim/v2?nonce=0123456789abcdef"), None);
+        assert_eq!(parse_claim_nonce("flowsta://relay/v1?nonce=0123456789abcdef"), None);
+        assert_eq!(parse_relay_code("flowsta://claim/v1?nonce=0123456789abcdef"), None, "a claim is not a relay code");
+    }
 
     #[test]
     fn test_parse_relay_code() {

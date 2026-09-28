@@ -210,6 +210,11 @@ pub fn run() {
                     .map(|a| a.to_string_lossy().into_owned())
                     .partition(|a| relay_login::is_flowsta_url(a));
             for u in &startup_urls {
+                if let Some(nonce) = relay_login::parse_claim_nonce(u) {
+                    log::info!("flowsta:// claim received via launch args");
+                    relay_login::record_claim(&app_state, nonce);
+                    continue;
+                }
                 match relay_login::parse_relay_code(u) {
                     Some(code) => {
                         log::info!("flowsta:// relay code received via launch args");

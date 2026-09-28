@@ -237,6 +237,10 @@ struct StatusResponse {
     /// A poller compares epochs, not keys: A→B→A between two polls still
     /// shows as +2.
     identity_epoch: u64,
+    /// Nonces this Vault received through `flowsta://claim/v1` in the last
+    /// two minutes. A page that opened that link with a nonce it made
+    /// finds THIS user's Vault among the loopback ports by it.
+    claims: Vec<String>,
     /// Whether a vault (an identity) exists on this device at all. A fresh
     /// install answers on this port before setup - without this flag,
     /// "installed but no identity yet" is indistinguishable from "locked",
@@ -361,6 +365,11 @@ async fn status_handler(
         active_identity,
         instance_id: state.instance_id.clone(),
         identity_epoch: crate::paths::read_identity_epoch(&state.app_state.data_dir),
+        claims: {
+            let mut c = state.app_state.recent_claims.lock().unwrap();
+            c.retain(|(_, at)| at.elapsed() < crate::relay_login::CLAIM_TTL);
+            c.iter().map(|(n, _)| n.clone()).collect()
+        },
         initialized,
         agent_pub_key,
         did,

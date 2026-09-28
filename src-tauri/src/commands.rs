@@ -264,6 +264,10 @@ pub struct AppState {
     /// locked or before the frontend mounted - drained by
     /// `take_pending_relay_code`.
     pub pending_relay_code: Mutex<Option<String>>,
+    /// Nonces received through `flowsta://claim/v1` (relay_login.rs), with
+    /// when: `/status` lists the fresh ones so a page can find THIS user's
+    /// Vault among the ports.
+    pub recent_claims: Mutex<Vec<(String, std::time::Instant)>>,
     /// The claimed relay session between claim and approve/deny.
     /// Held Rust-side so approve signs the server-issued challenge, never a
     /// frontend-supplied one.
@@ -453,6 +457,7 @@ impl AppState {
             linked_web_agent_key: Mutex::new(None),
             pending_sign_paths: Mutex::new(Vec::new()),
             pending_relay_code: Mutex::new(None),
+            recent_claims: Mutex::new(Vec::new()),
             pending_relay_claim: Mutex::new(None),
             unlock_passphrase: Mutex::new(None),
             conductor_restart_lock: tokio::sync::Mutex::new(()),
