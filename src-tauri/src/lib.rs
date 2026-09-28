@@ -15,6 +15,7 @@ mod migration;
 mod process_ext;
 mod quota_cache;
 mod relocate;
+mod identities;
 mod instance_guard;
 mod relay_login;
 mod sealed;
@@ -418,6 +419,8 @@ pub fn run() {
             commands::respond_profile_update_request,
             commands::respond_cell_op_request,
             commands::unlock_vault,
+            identities::list_identities,
+            identities::select_identity,
             commands::lock_vault,
             commands::reset_vault,
             commands::get_identity,

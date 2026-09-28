@@ -388,6 +388,25 @@ impl AppState {
         self.identity_root.lock().unwrap().clone()
     }
 
+    /// Point a LOCKED state at another identity root: the vault file, the
+    /// activity log and every per-identity store follow. Callers guard the
+    /// locked/no-conductor condition (`identities::select_identity_inner`,
+    /// relocation). The active-identity marker is not touched here - the
+    /// unlock that follows writes it.
+    pub fn repoint_root(&self, root: &std::path::Path) {
+        *self.identity_root.lock().unwrap() = root.to_path_buf();
+        *self.vault_path.lock().unwrap() = crate::paths::vault_file(root);
+        self.activity.set_root(root);
+        *self.linked_third_party_apps.lock().unwrap() = load_linked_apps(root);
+        *self.verified_apps.lock().unwrap() = load_verified_apps(root);
+        *self.linked_app_scopes.lock().unwrap() = load_linked_app_scopes(root);
+        *self.approved_apps.lock().unwrap() = load_approved_sites(root);
+        *self.email_grants.lock().unwrap() = load_email_grants(root);
+        *self.backup_key.lock().unwrap() = None;
+        *self.backup_key_identity.lock().unwrap() = None;
+        *self.grant_token_cache.lock().unwrap() = None;
+    }
+
     pub fn new(data_dir: std::path::PathBuf) -> Self {
         // Before unlock the marker (if any) decides which identity root to
         // open; without a marker or a partition folder this is the legacy
@@ -912,6 +931,22 @@ pub(crate) fn unlock_vault_inner(
         *state_config = Some(config);
     }
     write_active_identity_marker(&state.data_dir, &agent_key_for_marker);
+    // The public label the unlock screen lists this identity by.
+    {
+        let cfg = state.vault_config.lock().unwrap();
+        if let Some(c) = cfg.as_ref() {
+            crate::identities::write_label(
+                &data_dir,
+                &crate::identities::IdentityLabel {
+                    agent_pub_key: c.agent_pub_key.clone(),
+                    display_name: c.display_name.clone(),
+                    username: c.web_username.clone(),
+                    profile_picture: c.profile_picture.clone(),
+                    email: c.web_email.clone(),
+                },
+            );
+        }
+    }
 
     // Cache both backup keys (they persist through lock). The identity-level
     // key exists only on vaults created or restored since it was introduced;
