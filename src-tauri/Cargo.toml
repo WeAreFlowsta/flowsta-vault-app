@@ -99,17 +99,19 @@ sysinfo = "0.33"
 httpdate = "1"
 
 [dev-dependencies]
+# oneshot() for the IPC guard tests (already in the tree via axum).
+tower = { version = "0.5", features = ["util"] }
 # TOTP computation in the staging migration tests (otplib-compatible
 # HMAC-SHA1 codes for the two-factor account variant)
 sha1 = "0.10"
 tempfile = "3"
 
-# Linux-only: PR_SET_PDEATHSIG so child processes (lair-keystore, holochain
-# conductor) get SIGTERM if the parent vault process dies for any reason.
-# (TOML section headers capture all keys until the next header, so anything
-# placed after this becomes Linux-only too — see also the Windows block
-# below.)
-[target.'cfg(target_os = "linux")'.dependencies]
+# Linux + macOS: PR_SET_PDEATHSIG (Linux) so child processes (lair-keystore,
+# holochain conductor) get SIGTERM if the parent vault process dies, and
+# getuid (both) for peer_owner.rs. (TOML section headers capture all keys
+# until the next header, so anything placed after this becomes unix-only
+# too - see also the Windows block below.)
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 # Windows-only: the sidecars (lair-keystore.exe / holochain.exe) are spawned
@@ -131,6 +133,11 @@ windows-sys = { version = "0.59", features = [
     # CreateProcessW + STARTUPINFOW (hidden console) and the stdin pipe.
     "Win32_System_Threading",
     "Win32_System_Pipes",
+    # peer_owner.rs: which process (and Windows session) owns a loopback
+    # connection to the Vault.
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_System_RemoteDesktop",
 ] }
 
 # core2 (transitive dep via libflate → libsodium-sys-stable → sodoken → lair)

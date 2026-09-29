@@ -4854,6 +4854,29 @@ async fn identity_gate(
     Ok(resp)
 }
 
+/// Refuse every request from another account on this computer
+/// (`peer_owner`). Outside the identity gate so a refused caller learns
+/// nothing - not even the identity header; inside CORS so the page can read
+/// the refusal and look for its own Vault instead.
+async fn owner_guard(
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<crate::peer_owner::Peer>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if peer.verdict().await == crate::peer_owner::Verdict::Other {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "other_user".into(),
+                description: Some(
+                    "This Vault belongs to another account on this computer.".into(),
+                ),
+            }),
+        ));
+    }
+    Ok(next.run(req).await)
+}
+
 pub async fn start_ipc_server(
     app_state: Arc<AppState>,
     app_handle: tauri::AppHandle,
@@ -4927,13 +4950,16 @@ pub async fn start_ipc_server(
         // larger limit above. Was axum's implicit 2 MB default (which also
         // silently broke large backups).
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
-        .layer(cors)
-        // Outermost: identity header on every response + the
-        // expected_identity gate on every POST body that carries it.
+        // Identity header on every response + the expected_identity gate on
+        // every request that carries it.
         .layer(axum::middleware::from_fn_with_state(
             ipc_state.clone(),
             identity_gate,
         ))
+        // Only this computer account's own processes get past here.
+        .layer(axum::middleware::from_fn(owner_guard))
+        // Outermost, so every answer (a refusal too) carries CORS headers.
+        .layer(cors)
         .with_state(ipc_state);
 
     // Try ports in sequence
@@ -4943,7 +4969,8 @@ pub async fn start_ipc_server(
             Ok(listener) => {
                 log::info!("IPC server listening on http://127.0.0.1:{}", port);
                 spawn_with_identity(async move {
-                    if let Err(e) = axum::serve(listener, app).await {
+                    let svc = app.into_make_service_with_connect_info::<crate::peer_owner::Peer>();
+                    if let Err(e) = axum::serve(listener, svc).await {
                         log::error!("IPC server error: {}", e);
                     }
                 });
@@ -5046,5 +5073,66 @@ mod tests {
         assert!(!is_flowsta_origin(Some("http://flowsta.com"))); // no plaintext
         assert!(!is_flowsta_origin(Some("tauri://localhost")));
         assert!(!is_flowsta_origin(Some("not a url")));
+    }
+}
+
+#[cfg(test)]
+mod owner_guard_tests {
+    use super::owner_guard;
+    use axum::{routing::get, Router};
+
+    /// Another account's request: 403 `other_user`, CORS headers on it so
+    /// the page can read it, and nothing about this Vault's identity.
+    #[tokio::test]
+    async fn another_accounts_request_is_refused() {
+        use tower::ServiceExt;
+        let app = Router::new()
+            .route("/status", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(owner_guard))
+            .layer(tower_http::cors::CorsLayer::new().allow_origin(tower_http::cors::Any));
+        let mut req = axum::http::Request::builder()
+            .uri("/status")
+            .header("origin", "https://login.flowsta.com")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            crate::peer_owner::Peer::known(crate::peer_owner::Verdict::Other),
+        ));
+        let r = app.oneshot(req).await.unwrap();
+        assert_eq!(r.status(), 403);
+        assert!(r.headers().contains_key("access-control-allow-origin"));
+        assert!(!r.headers().contains_key("x-flowsta-vault-identity"));
+        let body = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "other_user");
+    }
+
+    /// The guard behind the same connection-info setup the server uses: a
+    /// request from this account gets through, with CORS on the answer.
+    #[tokio::test]
+    async fn this_accounts_request_passes_the_guard() {
+        let app = Router::new()
+            .route("/status", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(owner_guard))
+            .layer(tower_http::cors::CorsLayer::new().allow_origin(tower_http::cors::Any));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let svc = app.into_make_service_with_connect_info::<crate::peer_owner::Peer>();
+            axum::serve(listener, svc).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        for _ in 0..3 {
+            // Several requests on one kept-alive connection: looked up once.
+            let r = client
+                .get(format!("http://127.0.0.1:{port}/status"))
+                .header("origin", "https://login.flowsta.com")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            assert!(r.headers().contains_key("access-control-allow-origin"));
+            assert_eq!(r.text().await.unwrap(), "ok");
+        }
     }
 }

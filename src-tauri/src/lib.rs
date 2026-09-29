@@ -12,6 +12,7 @@ mod lair;
 mod mau;
 mod paths;
 mod migration;
+mod peer_owner;
 mod process_ext;
 mod quota_cache;
 mod relocate;
