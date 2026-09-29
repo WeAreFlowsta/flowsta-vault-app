@@ -953,6 +953,19 @@ async function waitConductorReady(port, secs) {
   return false;
 }
 
+/** Cells (not just the admin API) ready: the signing cell answered the
+ *  readiness probe. Returns the seconds it took, or -1 on timeout. */
+async function waitCellsReady(port, secs) {
+  const t0 = Date.now();
+  const deadline = t0 + secs * 1000;
+  while (Date.now() < deadline) {
+    const d = await vaultFetch(port, '/dev/status').catch(() => null);
+    if (d?.data?.cells_ready === true) return Math.round((Date.now() - t0) / 1000);
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return -1;
+}
+
 async function waitFor(port, predicate, secs) {
   const deadline = Date.now() + secs * 1000;
   while (Date.now() < deadline) {
@@ -1109,6 +1122,7 @@ async function switcherLeg() {
   if (a.status !== 200) return;
   const agentA = a.data.agent_pub_key; const phraseA = a.data.phrase;
   record('conductor ready after A', await waitConductorReady(port, 120));
+  { const secs = await waitCellsReady(port, 300); record('cells ready after A is created (budget 300 s)', secs >= 0, `${secs} s`); }
   let st = await status();
   const e0 = Number(st.identity_epoch);
   record('/status carries active_identity (= A), instance_id, identity_epoch, claims[]',
@@ -1134,6 +1148,7 @@ async function switcherLeg() {
   if (b.status !== 200) return;
   const agentB = b.data.agent_pub_key; const phraseB = b.data.phrase;
   record('conductor ready after B', await waitConductorReady(port, 120));
+  { const secs = await waitCellsReady(port, 300); record('cells ready after B is added (budget 300 s)', secs >= 0, `${secs} s`); }
   l = await ids();
   const keyB = (l.identities || []).find((x) => x.active)?.key;
   record('two identities on the device, B active, both partitioned, labels carry the names',
@@ -1166,6 +1181,7 @@ async function switcherLeg() {
   const unA = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: pwA } });
   record("A's password opens A", unA.status === 200 && unA.data?.agent_pub_key === agentA, `${unA.status} ${unA.data?.error || ''}`);
   record('conductor ready after switch to A', await waitConductorReady(port, 120));
+  { const secs = await waitCellsReady(port, 300); record('cells ready after the switch back to A (a returning identity) (budget 300 s)', secs >= 0, `${secs} s`); }
   st = await status();
   record('/status: active_identity = A, epoch +2', st.active_identity === agentA && Number(st.identity_epoch) === e0 + 2, JSON.stringify({ active: st.active_identity === agentA, epoch: st.identity_epoch }));
   const dsA = await devStatus();
@@ -1185,6 +1201,7 @@ async function switcherLeg() {
   const unB = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: pwB } });
   record("B's password opens B again", unB.status === 200 && unB.data?.agent_pub_key === agentB, `${unB.status}`);
   record('conductor ready after switch back to B', await waitConductorReady(port, 120));
+  { const secs = await waitCellsReady(port, 300); record('cells ready after the switch back to B (budget 300 s)', secs >= 0, `${secs} s`); }
   st = await status();
   record('/status: active_identity = B, epoch +3 (A->B->A->B counted, never equal to a past value)', st.active_identity === agentB && Number(st.identity_epoch) === e0 + 3, JSON.stringify({ epoch: st.identity_epoch, want: e0 + 3 }));
   const lsXB = await linkStatus(X);

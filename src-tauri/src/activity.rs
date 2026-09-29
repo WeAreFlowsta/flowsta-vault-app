@@ -59,9 +59,22 @@ impl ActivityLog {
         self.events.lock().unwrap().clear();
     }
 
-    /// Point the log at a new identity root (the file itself was moved).
+    /// Point the log at a new identity root and take up THAT root's
+    /// entries. The activity log is per identity: on a relocation the file
+    /// moved with the identity, and on a switch (1.5.0) the other root has
+    /// its own file. Keeping the old entries in memory wrote identity A's
+    /// activity into identity B's file (seen 2026-09-29: both identities
+    /// showed two "identity_created" lines after one switch).
     pub fn set_root(&self, root: &std::path::Path) {
+        let mut events: Vec<ActivityEvent> =
+            crate::vault::load_json_or_quarantine(&crate::paths::activity_path(root));
+        events.sort_by_key(|e| e.at);
+        if events.len() > CAP {
+            let drop_n = events.len() - CAP;
+            events.drain(0..drop_n);
+        }
         *self.data_dir.lock().unwrap() = root.to_path_buf();
+        *self.events.lock().unwrap() = events;
     }
 
     pub fn attach(&self, handle: tauri::AppHandle) {
@@ -112,6 +125,28 @@ impl ActivityLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switching_root_takes_up_that_roots_entries_and_never_carries_the_old_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let log = ActivityLog::load(&a);
+        log.record("identity_created", "A created", None, None, None);
+        log.set_root(&b);
+        assert!(log.recent(10).is_empty(), "B starts with its own (empty) log");
+        log.record("identity_created", "B created", None, None, None);
+        log.set_root(&a);
+        let kinds_a = log.kinds_newest_first(10);
+        assert_eq!(kinds_a, vec!["identity_created".to_string()], "A has exactly its one entry");
+        assert_eq!(log.recent(1)[0].label, "A created");
+        let on_disk_b: Vec<ActivityEvent> =
+            crate::vault::load_json_or_quarantine(&crate::paths::activity_path(&b));
+        assert_eq!(on_disk_b.len(), 1);
+        assert_eq!(on_disk_b[0].label, "B created", "B's file holds only B's entry");
+    }
 
     #[test]
     fn keeps_newest_within_cap_and_survives_reload() {

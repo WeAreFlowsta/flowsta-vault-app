@@ -3921,6 +3921,11 @@ async fn dev_status_handler(
     // The conductor status lets the matrix wait for "ready" after a
     // password change / relock instead of guessing with sleeps.
     let conductor = state.app_state.conductor_status.lock().unwrap().clone();
+    // "ready" above is the admin API; the cells can lag it by minutes on a
+    // returning identity (CellDisabled until the space joins). The matrix
+    // measures that lag through this flag: set once the readiness probe in
+    // ensure_apps_enabled has stored the signing cell's credentials.
+    let cells_ready = !state.app_state.cell_credentials.lock().unwrap().is_empty();
     let old_keystores = std::fs::read_dir(&state.app_state.identity_root())
         .map(|rd| {
             rd.flatten()
@@ -3935,7 +3940,7 @@ async fn dev_status_handler(
     let activity_last = state.app_state.activity.recent(1).into_iter().next();
     Ok(axum::response::IntoResponse::into_response(Json(
         serde_json::json!({
-            "harness": true, "conductor": conductor, "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity, "activity_last": activity_last,
+            "harness": true, "conductor": conductor, "cells_ready": cells_ready, "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity, "activity_last": activity_last,
             // Phase 2 partitioning: where this identity's files live.
             "layout": if state.app_state.identity_root() == state.app_state.data_dir { "legacy" } else { "partitioned" },
             "identity_root": state.app_state.identity_root().display().to_string(),
