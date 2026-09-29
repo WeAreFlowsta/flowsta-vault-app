@@ -237,6 +237,17 @@ export default component$(() => {
   // Header identity dropdown + plan status (tier from the public quota
   // endpoint; upgrading is a web/Stripe flow, the Vault hands off).
   const profileMenuOpen = useSignal(false);
+  // Identities held on this device (1.5.0 switcher): the menu offers
+  // "Switch identity" when there are two or more, and "Add another" always.
+  // Both lock first - one live vault at a time - and land on the unlock
+  // screen (the picker) or the add-identity wizard.
+  const identityCount = useSignal(1);
+  const refreshIdentityCount = $(async () => {
+    try {
+      const list = await invoke<unknown[]>("list_identities");
+      identityCount.value = Array.isArray(list) ? list.length : 1;
+    } catch { /* keep the last count */ }
+  });
   const planInfo = useSignal<{ tier: string; used: number; limit: number } | null>(null);
   const refreshPlan = $(async () => {
     try {
@@ -1258,6 +1269,7 @@ export default component$(() => {
                 class="flex items-center gap-2 rounded-full py-1 pl-3 pr-1.5 transition-colors hover:bg-gray-800"
                 onClick$={() => {
                   profileMenuOpen.value = !profileMenuOpen.value;
+                  if (profileMenuOpen.value) refreshIdentityCount();
                   // The plan loads once with the identity; if that fetch ran
                   // offline it stayed empty ("Status unavailable offline")
                   // even after connectivity returned. Opening the menu is
@@ -1331,6 +1343,66 @@ export default component$(() => {
                       </p>
                     </div>
 
+                    <div class="mt-3 border-t border-white/10 pt-3">
+                      <p class="px-1 pb-1 text-[11px] font-medium uppercase tracking-wider text-gray-500">
+                        Identities on this device
+                      </p>
+                      {identityCount.value > 1 && (
+                        <button
+                          type="button"
+                          class="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left text-sm text-white transition-colors hover:bg-white/[0.06]"
+                          onClick$={async () => {
+                            profileMenuOpen.value = false;
+                            await invoke("lock_vault");
+                            screen.value = "unlock";
+                          }}
+                        >
+                          <svg class="h-4 w-4 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4" />
+                          </svg>
+                          <span class="flex-1">
+                            Switch identity
+                            <span class="block text-xs font-normal text-gray-400">Locks this Vault, then choose at unlock</span>
+                          </span>
+                          <span class="text-xs text-gray-400">{identityCount.value}</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        class="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left text-sm text-white transition-colors hover:bg-white/[0.06]"
+                        onClick$={async () => {
+                          profileMenuOpen.value = false;
+                          await invoke("lock_vault");
+                          screen.value = "add-identity";
+                        }}
+                      >
+                        <svg class="h-4 w-4 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                          <circle cx="12" cy="12" r="9" />
+                          <path stroke-linecap="round" d="M12 8v8M8 12h8" />
+                        </svg>
+                        <span class="flex-1">
+                          Add another identity
+                          <span class="block text-xs font-normal text-gray-400">From its recovery phrase</span>
+                        </span>
+                      </button>
+                    </div>
+
+                    <div class="mt-2 border-t border-white/10 pt-2">
+                      <button
+                        type="button"
+                        class="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left text-sm text-white transition-colors hover:bg-white/[0.06]"
+                        onClick$={async () => {
+                          profileMenuOpen.value = false;
+                          await invoke("lock_vault");
+                          screen.value = "unlock";
+                        }}
+                      >
+                        <svg class="h-4 w-4 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                        </svg>
+                        Lock Vault
+                      </button>
+                    </div>
                   </div>
                 </>
               )}
