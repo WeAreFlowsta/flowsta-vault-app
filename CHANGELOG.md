@@ -5,6 +5,16 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0-beta.5] - 2026-09-30
+
+Everything in beta.4, plus:
+
+### Changed
+- **Your Vault answers only your own computer account.** On a computer
+  with several user accounts, each account's browsers and apps reach that
+  account's own Vault. A Vault running in another account does not answer
+  them, so signing in always uses the identity in your own Vault.
+
 ## [1.5.0-beta.4] - 2026-09-30
 
 Everything in beta.2, plus two things the drives found.
