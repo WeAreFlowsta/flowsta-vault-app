@@ -5,6 +5,21 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0-beta.3] - 2026-09-30
+
+Everything in beta.2, plus two things the drives found.
+
+### Fixed
+- **Windows: no more terminal windows.** The key store and the conductor
+  used to open a console window each time they started, which the Vault
+  then hid a moment later. On Windows 11 with Windows Terminal as the
+  default terminal that window was never found, so it stayed on screen,
+  and closing it by hand stopped the conductor. Both processes now start
+  with their console window already hidden.
+- **macOS: the Dock icon opens the Vault.** With the Vault hidden to the
+  menu bar, clicking its Dock icon did nothing; only the menu bar's Open
+  item brought it back. The Dock click now shows the window.
+
 ## [1.5.0-beta.2] - 2026-09-29
 
 Everything in beta.1, plus what the first drive found.
