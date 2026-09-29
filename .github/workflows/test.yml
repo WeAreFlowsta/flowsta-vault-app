@@ -31,6 +31,19 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # The Tauri build script refuses to compile unless the sidecar binaries
+      # (externalBin) and the front-end dist exist. Unit tests never spawn the
+      # sidecars and never load the front end, so placeholders are enough
+      # here; the release workflow fetches the real Holochain binaries. This
+      # workflow had been red since August for exactly this reason.
+      - name: Placeholder sidecars and front-end dist for the build script
+        run: |
+          mkdir -p src-tauri/binaries dist
+          for b in vault-holochain vault-lair-keystore; do
+            f="src-tauri/binaries/$b-x86_64-unknown-linux-gnu"
+            [ -f "$f" ] || { printf '#!/bin/sh\nexit 0\n' > "$f"; chmod +x "$f"; }
+          done
+
       - name: Run unit tests
         working-directory: src-tauri
         run: cargo test --lib
