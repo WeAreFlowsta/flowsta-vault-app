@@ -5661,6 +5661,12 @@ pub async fn get_my_own_signatures(
         Ok(sigs) => Ok(sigs),
         Err(e) => {
             if !is_conductor_unreachable_error(&e) { return Err(e); }
+            // A poll that lands during a lock (the conductor is being shut
+            // down on purpose) has nothing to restart - say so quietly.
+            if state.vault_config.lock().unwrap().is_none() {
+                log::info!("[get_my_own_signatures] conductor unreachable while locked - nothing to restart");
+                return Err(e);
+            }
             log::warn!(
                 "[get_my_own_signatures] conductor unreachable ({}) - running watchdog",
                 e,
@@ -5727,6 +5733,12 @@ pub async fn get_my_linked_signatures(
         Ok(r) => Ok(r),
         Err(e) => {
             if !is_conductor_unreachable_error(&e) { return Err(e); }
+            // A poll that lands during a lock (the conductor is being shut
+            // down on purpose) has nothing to restart - say so quietly.
+            if state.vault_config.lock().unwrap().is_none() {
+                log::info!("[get_my_linked_signatures] conductor unreachable while locked - nothing to restart");
+                return Err(e);
+            }
             log::warn!(
                 "[get_my_linked_signatures] conductor unreachable ({}) - running watchdog",
                 e,
@@ -5876,6 +5888,12 @@ pub async fn get_my_signatures(
         Ok(sigs) => Ok(sigs),
         Err(e) => {
             if !is_conductor_unreachable_error(&e) { return Err(e); }
+            // A poll that lands during a lock (the conductor is being shut
+            // down on purpose) has nothing to restart - say so quietly.
+            if state.vault_config.lock().unwrap().is_none() {
+                log::info!("[get_my_signatures] conductor unreachable while locked - nothing to restart");
+                return Err(e);
+            }
             log::warn!(
                 "[get_my_signatures] conductor unreachable ({}) - running watchdog",
                 e,
