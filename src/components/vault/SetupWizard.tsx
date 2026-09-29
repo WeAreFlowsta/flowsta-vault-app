@@ -998,7 +998,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 them as a plain link so the choice above stays a choice of
                 two. Same shape carries to a phone screen. */}
             <div class="mt-6 border-t border-gray-700 pt-4 text-sm text-gray-400">
-              Have a flowsta.com account from before the Vault?{" "}
+              Created your Flowsta account on flowsta.com before July 2026?{" "}
               <button
                 type="button"
                 class="text-amber-300 underline decoration-amber-300/40 underline-offset-2 hover:text-amber-200"
@@ -1106,7 +1106,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">{phraseSaved.value ? "Check your recovery phrase" : "Write down your recovery phrase"}</h2>
             <p class="mb-4 text-sm text-gray-400">
-            These 24 words let you bring your identity to another device, or get it back on this device if it's deleted. Write them down and keep them somewhere safe - please don't keep them only on this device in case it's lost or deleted.
+            These 24 words let you bring your identity to another device, or get it back on this device if it's deleted.
+            <br />
+            Write them down and keep them somewhere safe - please don't keep them only on this device in case it's lost or deleted.
             </p>
             <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
               <p class="text-xs text-amber-300">
@@ -1676,7 +1678,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">{phraseSaved.value ? "Check your recovery phrase" : "Write down your new recovery phrase"}</h2>
             <p class="mb-4 text-sm text-gray-400">
-            These 24 words replace your old recovery phrase. They let you bring your identity to another device, or get it back on this device if it's deleted. Write them down and keep them somewhere safe - please don't keep them only on this device in case it's lost or deleted.
+            These 24 words replace your old recovery phrase. They let you bring your identity to another device, or get it back on this device if it's deleted.
+            <br />
+            Write them down and keep them somewhere safe - please don't keep them only on this device in case it's lost or deleted.
             </p>
             <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
               <p class="text-xs text-amber-300">
