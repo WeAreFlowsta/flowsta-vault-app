@@ -5,6 +5,23 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0-beta.2] - 2026-09-29
+
+Everything in beta.1, plus what the first drive found.
+
+### Fixed
+- **Every page follows the switch.** After switching identity or adding
+  one, the Overview, Your Data and the rest showed the identity you had
+  switched from until a manual refresh. The Vault now rebuilds its pages
+  when the identity it shows changes.
+- **Reset with two identities no longer strands the other one.** Settings
+  now offers two actions: Remove this identity from this device (shown
+  when two or more are here; the others stay and the Vault opens on the
+  unlock screen with them) and Erase everything on this device (every
+  identity; the confirm says how many). The unlock screen's forgot-password
+  path removes only the identity you selected, after a confirm that names
+  it.
+
 ## [1.5.0-beta.1] - 2026-09-29
 
 ### Highlights

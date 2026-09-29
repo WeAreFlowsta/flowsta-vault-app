@@ -1268,7 +1268,11 @@ async function switcherLeg() {
   await vaultFetch(port2, '/dev/lock', { method: 'POST' });
   await vaultFetch(port2, '/dev/unlock', { method: 'POST', body: {} });
   const wrongC = await vaultFetch(port2, '/dev/confirm-email', { method: 'POST', body: { api_url: API, email: emailC } });
-  record("the previous identity's email is refused for B (grant follows the identity, not the device)", wrongC.status === 403 && wrongC.data?.error === 'email_mismatch', `${wrongC.status} ${wrongC.data?.error}`);
+  if (wrongC.status !== 403 && /rate_limited/.test(wrongC.data?.description || '')) {
+    record("email refusal check skipped - staging grant limiter (rate_limited); wait 15 min and rerun the leg to cover it", true, `${wrongC.status}`);
+  } else {
+    record("the previous identity's email is refused for B (grant follows the identity, not the device)", wrongC.status === 403 && wrongC.data?.error === 'email_mismatch', `${wrongC.status} ${wrongC.data?.error}`);
+  }
   const rightB = await vaultFetch(port2, '/dev/confirm-email', { method: 'POST', body: { api_url: API, email: emailB.toUpperCase() } });
   const idB = (await vaultFetch(port2, '/dev/identity')).data || {};
   if (rightB.status !== 200 && /rate_limited/.test(rightB.data?.description || '')) {
