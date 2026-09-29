@@ -37,6 +37,25 @@ export default component$(() => {
   /** Set by an unlock that opened a different identity than the last one:
    *  the previous identity's name. Shown while the conductor starts. */
   const switchNotice = useSignal<string | null>(null);
+  // The agent key this UI session was built for. Every route page keeps
+  // its instance alive while the unlock screen or the add-identity wizard
+  // is showing, so after a switch the Overview, Your Data and the rest
+  // would paint the previous identity until something rebuilt them (seen
+  // 2026-09-29 on the Windows beta: header new, profile card old). A
+  // switch is a new UI session: fetchProfile reloads the webview when the
+  // key changes, carrying the switch notice across.
+  const sessionAgentKey = useSignal("");
+  const SWITCH_NOTICE_KEY = "flowsta_vault_switch_notice";
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(() => {
+    try {
+      const carried = sessionStorage.getItem(SWITCH_NOTICE_KEY);
+      if (carried) {
+        sessionStorage.removeItem(SWITCH_NOTICE_KEY);
+        switchNotice.value = carried;
+      }
+    } catch { /* storage unavailable */ }
+  });
   const conductorMessage = useSignal("");
 
   // Set when the API's dna-versions endpoint reports this build is below
@@ -387,6 +406,15 @@ export default component$(() => {
         web_agent_pub_key: string | null;
         hosting_model: string | null;
       }>("get_identity");
+
+      if (sessionAgentKey.value && sessionAgentKey.value !== identity.agent_pub_key) {
+        try {
+          if (switchNotice.value) sessionStorage.setItem(SWITCH_NOTICE_KEY, switchNotice.value);
+        } catch { /* storage unavailable */ }
+        window.location.reload();
+        return;
+      }
+      sessionAgentKey.value = identity.agent_pub_key;
 
       userProfile.displayName = identity.display_name ?? "";
       userProfile.profilePicture = identity.profile_picture ?? "";
