@@ -988,7 +988,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </div>
 
             <p class="mt-4 text-sm text-gray-400">
-              Your identity is created here and stays on this computer.
+              Your identity is created here and lives on your own device, never on a server.
               Nobody else, including Flowsta, can sign in as you.
             </p>
 
@@ -1080,7 +1080,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   onInput$={(v) => { createPassword2.value = v; error.value = ""; }}
                 />
                 <p class="mt-1 text-xs text-gray-400">
-                  Unlocks the Vault on this computer. Not a Flowsta password.
+                  You use this password to unlock your Vault on this device.
                 </p>
               </div>
 
@@ -1106,12 +1106,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">{phraseSaved.value ? "Check your recovery phrase" : "Write down your recovery phrase"}</h2>
             <p class="mb-4 text-sm text-gray-400">
-            These 24 words are your identity. Write them down and keep them safe - on paper, not on this computer.
+            These 24 words let you bring your identity to another device, or get it back on this device if it's deleted. Write them down and keep them somewhere safe - please don't keep them only on this device in case it's lost or deleted.
             </p>
             <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
               <p class="text-xs text-amber-300">
-                This phrase is the <strong>only</strong> way to recover your identity.
-                Flowsta never sees it. Lose the phrase and this computer, and your identity is gone.
+                Flowsta never sees this phrase and <strong>cannot recover it for you</strong>.
+                Without it, your identity cannot be accessed or restored again.
               </p>
             </div>
 
@@ -1676,7 +1676,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">{phraseSaved.value ? "Check your recovery phrase" : "Write down your new recovery phrase"}</h2>
             <p class="mb-4 text-sm text-gray-400">
-            These 24 words are now your identity. Write them down and keep them safe - on paper, not on this computer.
+            These 24 words replace your old recovery phrase. They let you bring your identity to another device, or get it back on this device if it's deleted. Write them down and keep them somewhere safe - please don't keep them only on this device in case it's lost or deleted.
             </p>
             <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
               <p class="text-xs text-amber-300">
@@ -1914,7 +1914,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </div>
             <h2 class="mb-2 text-xl font-bold text-white">Your Vault is ready</h2>
             <p class="mb-6 text-sm text-gray-400">
-            Your identity lives on this computer. Sign in to Flowsta apps and websites by approving here.
+            Your identity lives on your own device, not on a server. Sign in to Flowsta apps and websites by approving here.
             </p>
 
             <div class="mb-6 rounded-lg bg-gray-900 p-4 text-left">
