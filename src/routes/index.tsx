@@ -850,8 +850,6 @@ export default component$(() => {
         );
         return (
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
-        <p class="mb-4 text-xs font-medium tracking-wide text-gray-400">This is what people see</p>
-
         {/* Who you are: picture + name, both edit in place */}
         <div class="mb-5 flex items-center gap-4">
           <label class="relative h-20 w-20 shrink-0 cursor-pointer" title="Change picture">
