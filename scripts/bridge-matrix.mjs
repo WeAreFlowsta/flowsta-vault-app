@@ -18,6 +18,9 @@
  *   node scripts/bridge-matrix.mjs --phase=create    # create an identity on a FRESH instance (+ restore twin)
  *       needs VAULT_MATRIX_PORT = a fresh test instance (no identity yet), and
  *       optionally VAULT_MATRIX_RESTORE_PORT = a second fresh instance for the twin
+ *   node scripts/bridge-matrix.mjs --phase=switcher  # 1.5.0: two identities in one Vault, switch, one agent
+ *       one identity, the epoch, claims, reset -> restore -> email. Same two fresh instances
+ *       as --phase=create (VAULT_MATRIX_PORT required, VAULT_MATRIX_RESTORE_PORT optional).
  *   node scripts/bridge-matrix.mjs                   # all legs
  *
  * Env:
@@ -1058,10 +1061,191 @@ async function createLeg() {
     `${rightEmail.status} web_email=${idE.web_email} activity=${JSON.stringify((devE.data?.activity || []).slice(0, 3))}`);
 }
 
+
+// ───────────────────────── 1.5.0 switcher leg ─────────────────────────
+//
+// One fresh instance holds TWO identities (A created, B added while locked),
+// the harness switches between them the way the unlock picker does, and
+// asserts what apps see: /status.active_identity + identity_epoch, the
+// per-identity link lists, the one-agent-one-identity refusal, GET
+// expected_identity, the claim nonce. A second fresh instance (optional)
+// proves claims never cross instances and runs reset -> restore -> email.
+const SWITCHER_CLIENT_ID = process.env.VAULT_MATRIX_APP_CLIENT_ID
+  || 'flowsta_app_2f0660aa9c7afdda85e8e8fc88e59cbcce79921cdecf9c81a2cbba8e34420a9b'; // staging fixture app
+const SWITCHER_APP_ORIGIN = 'https://switcher-matrix.example';
+function fakeAgentKey() {
+  // 39 bytes: 0x84 0x20 0x24 prefix + 32 random + 4 - the Vault only needs it to decode.
+  const raw = Buffer.concat([Buffer.from([0x84, 0x20, 0x24]), crypto.randomBytes(36)]);
+  return 'u' + raw.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+async function switcherLeg() {
+  console.log('\n── 1.5.0 switcher leg');
+  const port = Number(process.env.VAULT_MATRIX_PORT || 0);
+  if (!port) { record('switcher leg skipped - set VAULT_MATRIX_PORT to a FRESH test instance', true); return; }
+  const port2 = Number(process.env.VAULT_MATRIX_RESTORE_PORT || 0);
+  const dev0 = await vaultFetch(port, '/dev/status');
+  if (dev0.status !== 200) { record('switcher leg skipped - not a harness build (/dev/status 404)', true); return; }
+  const fresh = await vaultFetch(port, '/status');
+  if (fresh.data?.initialized !== false) { record('switcher leg skipped - instance already holds an identity', true); return; }
+  const stamp = Date.now();
+  const pwA = `Matrix-A-${randomHash().slice(0, 10)}!`;
+  const pwB = `Matrix-B-${randomHash().slice(0, 10)}!`;
+  const emailA = `matrix-sw-a-${stamp}@example.com`;
+  const emailB = `matrix-sw-b-${stamp}@example.com`;
+  const ids = async (p = port) => (await vaultFetch(p, '/dev/identities')).data || {};
+  const status = async (p = port) => (await vaultFetch(p, '/status')).data || {};
+  const devStatus = async (p = port) => (await vaultFetch(p, '/dev/status')).data || {};
+  const link = async (agent, opts = {}) => vaultFetch(port, '/link-identity', {
+    method: 'POST', origin: SWITCHER_APP_ORIGIN,
+    body: { app_name: 'Matrix switcher app', client_id: SWITCHER_CLIENT_ID, app_agent_pub_key: agent, ...opts },
+  });
+  const linkStatus = async (agent, expected) => vaultFetch(port,
+    `/link-status?client_id=${encodeURIComponent(SWITCHER_CLIENT_ID)}&app_agent_pub_key=${encodeURIComponent(agent)}${expected ? `&expected_identity=${encodeURIComponent(expected)}` : ''}`,
+    { origin: SWITCHER_APP_ORIGIN });
+
+  // 1. A is created; born in its own partition; the status fields exist.
+  const a = await vaultFetch(port, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password: pwA, email: emailA, display_name: 'Matrix A' } });
+  record('A created (registered with Flowsta, vault built)', a.status === 200 && !!a.data?.agent_pub_key, `${a.status} ${a.data?.error || ''} ${a.data?.description || ''}`);
+  if (a.status !== 200) return;
+  const agentA = a.data.agent_pub_key; const phraseA = a.data.phrase;
+  record('conductor ready after A', await waitConductorReady(port, 120));
+  let st = await status();
+  const e0 = Number(st.identity_epoch);
+  record('/status carries active_identity (= A), instance_id, identity_epoch, claims[]',
+    st.active_identity === agentA && typeof st.instance_id === 'string' && st.instance_id.length > 0 && Number.isInteger(e0) && Array.isArray(st.claims),
+    JSON.stringify({ active: st.active_identity === agentA, instance: !!st.instance_id, epoch: st.identity_epoch, claims: st.claims }));
+  const instanceId = st.instance_id;
+  let l = await ids();
+  const keyA = (l.identities || []).find((x) => x.active)?.key;
+  record('one identity on the device, A active, born partitioned (16-hex key, no legacy root)',
+    (l.identities || []).length === 1 && /^[0-9a-f]{16}$/.test(keyA || ''), JSON.stringify((l.identities || []).map((x) => [x.key, x.active])));
+  record('/dev/status layout: partitioned', (await devStatus()).layout === 'partitioned');
+
+  // 2. One live vault: adding while UNLOCKED is refused.
+  const addUnlocked = await vaultFetch(port, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password: pwB, email: emailB, display_name: 'Matrix B' } });
+  record('adding an identity while unlocked is refused (one live vault)', addUnlocked.status === 409 && addUnlocked.data?.error === 'already_set_up', `${addUnlocked.status} ${addUnlocked.data?.error}`);
+
+  // 3. Lock, add B beside A.
+  await vaultFetch(port, '/dev/lock', { method: 'POST' });
+  st = await status();
+  record('locked: /status still names the identity it holds (active_identity = A while locked)', st.unlocked === false && st.active_identity === agentA, JSON.stringify({ unlocked: st.unlocked, active: st.active_identity === agentA }));
+  const b = await vaultFetch(port, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password: pwB, email: emailB, display_name: 'Matrix B' } });
+  record('B added while locked (second partition, its own keys)', b.status === 200 && !!b.data?.agent_pub_key && b.data.agent_pub_key !== agentA, `${b.status} ${b.data?.error || ''} ${b.data?.description || ''}`);
+  if (b.status !== 200) return;
+  const agentB = b.data.agent_pub_key; const phraseB = b.data.phrase;
+  record('conductor ready after B', await waitConductorReady(port, 120));
+  l = await ids();
+  const keyB = (l.identities || []).find((x) => x.active)?.key;
+  record('two identities on the device, B active, both partitioned, labels carry the names',
+    (l.identities || []).length === 2 && keyB && keyB !== keyA && (l.identities || []).every((x) => /^[0-9a-f]{16}$/.test(x.key)) &&
+      (l.identities || []).some((x) => x.label?.display_name === 'Matrix A') && (l.identities || []).some((x) => x.label?.display_name === 'Matrix B'),
+    JSON.stringify((l.identities || []).map((x) => [x.key, x.active, x.label?.display_name])));
+  st = await status();
+  record('/status: active_identity = B, epoch +1, same instance_id', st.active_identity === agentB && Number(st.identity_epoch) === e0 + 1 && st.instance_id === instanceId,
+    JSON.stringify({ active: st.active_identity === agentB, epoch: st.identity_epoch, want: e0 + 1, sameInstance: st.instance_id === instanceId }));
+
+  // 4. An app links its agent X under B.
+  const X = fakeAgentKey(); const Y = fakeAgentKey();
+  const lx = await link(X);
+  record('app agent X links under B', lx.status === 200 && lx.data?.vault_agent_pub_key === agentB, `${lx.status} ${lx.data?.error || ''} ${lx.data?.description || ''}`);
+  const lsB = await linkStatus(X);
+  record('link-status: X is linked under B', lsB.status === 200 && (lsB.data?.linked === true || lsB.data?.state === 'linked'), `${lsB.status} ${JSON.stringify(lsB.data)}`);
+  const lsWrong = await linkStatus(X, agentA);
+  record('GET link-status with expected_identity = A while B is active -> 409 identity_mismatch', lsWrong.status === 409 && lsWrong.data?.error === 'identity_mismatch', `${lsWrong.status} ${lsWrong.data?.error}`);
+  const lsRight = await linkStatus(X, agentB);
+  record('GET link-status with expected_identity = B -> 200', lsRight.status === 200, `${lsRight.status}`);
+
+  // 5. Switch to A the picker's way: lock, select, unlock with A's password.
+  const selUnlocked = await vaultFetch(port, '/dev/select-identity', { method: 'POST', body: { key: keyA } });
+  record('select while unlocked is refused', selUnlocked.status === 409, `${selUnlocked.status} ${selUnlocked.data?.description || ''}`);
+  await vaultFetch(port, '/dev/lock', { method: 'POST' });
+  const selA = await vaultFetch(port, '/dev/select-identity', { method: 'POST', body: { key: keyA } });
+  record('locked: select A', selA.status === 200 && selA.data?.selected?.key === keyA, `${selA.status} ${selA.data?.description || ''}`);
+  const wrongPw = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: pwB } });
+  record("B's password does not open A", wrongPw.status !== 200 || wrongPw.data?.success !== true, `${wrongPw.status}`);
+  const unA = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: pwA } });
+  record("A's password opens A", unA.status === 200 && unA.data?.agent_pub_key === agentA, `${unA.status} ${unA.data?.error || ''}`);
+  record('conductor ready after switch to A', await waitConductorReady(port, 120));
+  st = await status();
+  record('/status: active_identity = A, epoch +2', st.active_identity === agentA && Number(st.identity_epoch) === e0 + 2, JSON.stringify({ active: st.active_identity === agentA, epoch: st.identity_epoch }));
+  const dsA = await devStatus();
+  record('activity narrates the switch (identity_switched)', (dsA.activity || []).includes('identity_switched'), JSON.stringify((dsA.activity || []).slice(0, 4)));
+
+  // 6. One agent, one identity: X cannot link under A; Y can.
+  const lxA = await link(X);
+  record('X asks to link under A -> 409 agent_linked_elsewhere, naming B', lxA.status === 409 && lxA.data?.error === 'agent_linked_elsewhere' && /Matrix B/.test(lxA.data?.description || ''), `${lxA.status} ${lxA.data?.error} ${lxA.data?.description || ''}`);
+  const lyA = await link(Y);
+  record('a different agent Y links under A (many agents to one identity is fine)', lyA.status === 200 && lyA.data?.vault_agent_pub_key === agentA, `${lyA.status} ${lyA.data?.error || ''}`);
+  const lsXA = await linkStatus(X);
+  record('link lists are per identity: X is not linked under A', lsXA.status === 200 && !(lsXA.data?.linked === true || lsXA.data?.state === 'linked'), `${lsXA.status} ${JSON.stringify(lsXA.data)}`);
+
+  // 7. Back to B: the epoch keeps counting; B still holds X.
+  await vaultFetch(port, '/dev/lock', { method: 'POST' });
+  await vaultFetch(port, '/dev/select-identity', { method: 'POST', body: { key: keyB } });
+  const unB = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: pwB } });
+  record("B's password opens B again", unB.status === 200 && unB.data?.agent_pub_key === agentB, `${unB.status}`);
+  record('conductor ready after switch back to B', await waitConductorReady(port, 120));
+  st = await status();
+  record('/status: active_identity = B, epoch +3 (A->B->A->B counted, never equal to a past value)', st.active_identity === agentB && Number(st.identity_epoch) === e0 + 3, JSON.stringify({ epoch: st.identity_epoch, want: e0 + 3 }));
+  const lsXB = await linkStatus(X);
+  record('X is still linked under B', lsXB.status === 200 && (lsXB.data?.linked === true || lsXB.data?.state === 'linked'));
+  const lsYB = await linkStatus(Y);
+  record('Y is not linked under B', lsYB.status === 200 && !(lsYB.data?.linked === true || lsYB.data?.state === 'linked'));
+
+  // 8. Claims: this instance lists its nonce; junk is refused; another instance never lists it.
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const cl = await vaultFetch(port, '/dev/claim', { method: 'POST', body: { url: `flowsta://claim/v1?nonce=${nonce}` } });
+  st = await status();
+  record('flowsta://claim/v1?nonce= is recorded and listed in /status.claims', cl.status === 200 && Array.isArray(st.claims) && st.claims.includes(nonce), `${cl.status} claims=${JSON.stringify(st.claims)}`);
+  const badClaim = await vaultFetch(port, '/dev/claim', { method: 'POST', body: { url: 'flowsta://claim/v1?nonce=zzzz' } });
+  const relayNotClaim = await vaultFetch(port, '/dev/claim', { method: 'POST', body: { url: 'flowsta://relay/v1?code=ABCD-EFGH' } });
+  record('a bad nonce and a relay URL are not claims', badClaim.status === 400 && relayNotClaim.status === 400, `${badClaim.status} ${relayNotClaim.status}`);
+  if (port2) {
+    const st2 = await status(port2);
+    record('the second instance never lists the first instance\'s nonce', Array.isArray(st2.claims) && !st2.claims.includes(nonce), JSON.stringify(st2.claims));
+  } else {
+    record('claims isolation across instances skipped - set VAULT_MATRIX_RESTORE_PORT', true);
+  }
+
+  // 9. Reset -> restore B -> the email is checked against B, not the identity that was there before.
+  if (!port2) { record('reset -> restore -> email leg skipped - set VAULT_MATRIX_RESTORE_PORT to a second FRESH instance', true); return; }
+  const fresh2 = await status(port2);
+  if (fresh2.initialized !== false) { record('reset -> restore -> email leg skipped - second instance already holds an identity', true); return; }
+  const emailC = `matrix-sw-c-${stamp}@example.com`;
+  const c = await vaultFetch(port2, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password: pwA, email: emailC, display_name: 'Matrix C' } });
+  record('second instance: C created', c.status === 200 && !!c.data?.agent_pub_key, `${c.status} ${c.data?.error || ''}`);
+  if (c.status !== 200) return;
+  record('conductor ready after C', await waitConductorReady(port2, 120));
+  // Warm the grant cache under C (the 2026-09-28 bug: a token issued for C confirmed B's email against C).
+  await vaultFetch(port2, '/dev/confirm-email', { method: 'POST', body: { api_url: API, email: emailC } });
+  const rs = await vaultFetch(port2, '/dev/reset', { method: 'POST' });
+  const afterReset = await status(port2);
+  record('Reset Vault wipes the device: /status reports no identity', rs.status === 200 && afterReset.initialized === false, `${rs.status} ${JSON.stringify({ initialized: afterReset.initialized })}`);
+  const rb = await vaultFetch(port2, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password: pwB, phrase: phraseB, restore: true } });
+  record('restore B from its phrase on the reset device', rb.status === 200 && rb.data?.agent_pub_key === agentB, `${rb.status} ${rb.data?.error || ''} ${rb.data?.description || ''}`);
+  if (rb.status !== 200) return;
+  record('conductor ready after restoring B', await waitConductorReady(port2, 120));
+  await vaultFetch(port2, '/dev/lock', { method: 'POST' });
+  await vaultFetch(port2, '/dev/unlock', { method: 'POST', body: {} });
+  const wrongC = await vaultFetch(port2, '/dev/confirm-email', { method: 'POST', body: { api_url: API, email: emailC } });
+  record("the previous identity's email is refused for B (grant follows the identity, not the device)", wrongC.status === 403 && wrongC.data?.error === 'email_mismatch', `${wrongC.status} ${wrongC.data?.error}`);
+  const rightB = await vaultFetch(port2, '/dev/confirm-email', { method: 'POST', body: { api_url: API, email: emailB.toUpperCase() } });
+  const idB = (await vaultFetch(port2, '/dev/identity')).data || {};
+  record("B's own email is confirmed and stored on the restored device", rightB.status === 200 && idB.web_email === emailB, `${rightB.status} web_email=${idB.web_email}`);
+  void phraseA;
+}
+
 // ───────────────────────── main ─────────────────────────
 
 (async () => {
   console.log(`Bridge matrix — phase: ${PHASE}, origin: ${ORIGIN}`);
+  if (PHASE === 'switcher') {
+    await switcherLeg();
+    const passedS = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedS}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
+    process.exit(failures ? 1 : 0);
+  }
   if (PHASE === 'create') {
     // A fresh instance has nothing for preflight to check yet.
     await createLeg();

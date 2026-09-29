@@ -4136,10 +4136,13 @@ async fn dev_setup_identity_handler(
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(IpcError { error: code.into(), description: Some(e) }),
     );
+    // Unlocked = refuse (one live vault). LOCKED with a vault on disk = the
+    // 1.5.0 "add another identity" path: setup_vault_inner adopts a new
+    // partition beside the existing one (identities.rs).
     if state.app_state.vault_config.lock().unwrap().is_some() {
         return Err((
             StatusCode::CONFLICT,
-            Json(IpcError { error: "already_set_up".into(), description: Some("this instance already holds an identity".into()) }),
+            Json(IpcError { error: "already_set_up".into(), description: Some("this instance is unlocked; lock it to add another identity".into()) }),
         ));
     }
     let app_state = state.app_state.clone();
@@ -4181,6 +4184,79 @@ async fn dev_setup_identity_handler(
         "phrase": phrase,
         "restored": body.restore,
     }))))
+}
+
+/// Dev-only: the identities on this device as the unlock picker sees them.
+async fn dev_identities_handler(
+    State(state): State<Arc<IpcState>>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((StatusCode::NOT_FOUND, Json(IpcError { error: "not_found".into(), description: None })));
+    }
+    let device_root = state.app_state.data_dir.clone();
+    let current = state.app_state.identity_root();
+    let list = crate::identities::list_on_disk(&device_root, &current);
+    let epoch = crate::paths::read_identity_epoch(&device_root);
+    Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({
+        "identities": list,
+        "identity_epoch": epoch,
+        "active_identity": crate::paths::read_active_identity(&device_root),
+    }))))
+}
+
+/// Dev-only: the picker's choice. Refused while unlocked (as in the UI).
+async fn dev_select_identity_handler(
+    State(state): State<Arc<IpcState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((StatusCode::NOT_FOUND, Json(IpcError { error: "not_found".into(), description: None })));
+    }
+    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    match crate::identities::select_identity_inner(&state.app_state, &key) {
+        Ok(entry) => Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({ "success": true, "selected": entry })))),
+        Err(e) => Err((StatusCode::CONFLICT, Json(IpcError { error: "select_refused".into(), description: Some(e) }))),
+    }
+}
+
+/// Dev-only: a `flowsta://claim/v1?nonce=` URL as the OS would hand it to
+/// the running instance (the deep-link path minus the window raise).
+async fn dev_claim_handler(
+    State(state): State<Arc<IpcState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((StatusCode::NOT_FOUND, Json(IpcError { error: "not_found".into(), description: None })));
+    }
+    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+    match crate::relay_login::parse_claim_nonce(url) {
+        Some(nonce) => {
+            crate::relay_login::record_claim(&state.app_state, nonce.clone());
+            Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({ "success": true, "nonce": nonce }))))
+        }
+        None => Err((StatusCode::BAD_REQUEST, Json(IpcError { error: "not_a_claim".into(), description: Some("not a flowsta://claim/v1?nonce=<8-64 hex> URL".into()) }))),
+    }
+}
+
+/// Dev-only: Reset Vault (wipe this device's identity data), as the unlock
+/// screen's reset does.
+async fn dev_reset_handler(
+    State(state): State<Arc<IpcState>>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((StatusCode::NOT_FOUND, Json(IpcError { error: "not_found".into(), description: None })));
+    }
+    let app_state = state.app_state.clone();
+    let result = tokio::task::spawn_blocking(move || crate::commands::reset_vault_inner(&app_state))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(IpcError { error: "internal_error".into(), description: Some(e.to_string()) })))?;
+    match result {
+        Ok(()) => {
+            log::warn!("DEV: vault reset via /dev/reset");
+            Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({ "success": true }))))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(IpcError { error: "reset_failed".into(), description: Some(e) }))),
+    }
 }
 
 async fn dev_setup_legacy_handler(
@@ -4816,6 +4892,10 @@ pub async fn start_ipc_server(
         .route("/dev/run-upgrade", post(dev_run_upgrade_handler))
         .route("/dev/unlock-with-password", post(dev_unlock_pw_handler))
         .route("/dev/change-password", post(dev_change_password_handler))
+        .route("/dev/identities", get(dev_identities_handler))
+        .route("/dev/select-identity", post(dev_select_identity_handler))
+        .route("/dev/claim", post(dev_claim_handler))
+        .route("/dev/reset", post(dev_reset_handler))
         // Global body cap (8 MB) - generous for base64 images/thumbnails/sign
         // payloads, bounds loopback-DoS amplification. /backup opts into a
         // larger limit above. Was axum's implicit 2 MB default (which also
