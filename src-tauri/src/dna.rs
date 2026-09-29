@@ -11,7 +11,7 @@ use holochain_client::{AdminWebsocket, AllowedOrigins, AppStatusFilter, InstallA
 use holochain_types::app::AppBundleSource;
 use holochain_types::prelude::AgentPubKey;
 use std::path::Path;
-use std::process::Child;
+use crate::process_ext::SidecarChild;
 
 /// Default DNA versions bundled with this app build.
 /// Used for first-time installs and as fallback when VaultConfig has no version info.
@@ -244,7 +244,7 @@ async fn reconnect_admin(admin_port: u16) -> Result<AdminWebsocket, String> {
 async fn install_app_resilient<F>(
     admin_ws: &mut AdminWebsocket,
     admin_port: u16,
-    conductor_child: &mut Child,
+    conductor_child: &mut SidecarChild,
     app_id: &str,
     mut make_payload: F,
 ) -> Result<(), String>
@@ -365,7 +365,7 @@ where
 async fn enable_app_resilient(
     admin_ws: &mut AdminWebsocket,
     admin_port: u16,
-    conductor_child: &mut Child,
+    conductor_child: &mut SidecarChild,
     app_id: &str,
 ) -> Result<(), String> {
     if admin_ws.enable_app(app_id.to_string()).await.is_ok() {
@@ -474,7 +474,7 @@ pub async fn install_dnas(
     // Some(per-user seed) = also install the encrypted private DNA v2 with
     // this network-seed override (device-hosted vaults). None = skip v2.
     private_v2_seed: Option<&str>,
-    conductor_child: &mut Child,
+    conductor_child: &mut SidecarChild,
 ) -> Result<InstalledDnas, String> {
     let private_app_id = make_app_id("private", private_version);
     let identity_app_id = make_app_id("identity", identity_version);
