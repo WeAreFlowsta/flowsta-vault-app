@@ -61,9 +61,10 @@ export function summarizeRestoreImport(r: RestoreImportResult): { title: string;
 
 interface SetupWizardProps {
   onComplete$: QRL<() => void>;
-  /** "add": restore another identity beside the ones already here - the
-   *  wizard opens on the recovery-phrase step and Back returns to the
-   *  unlock screen. */
+  /** "add": another identity beside the ones already here - created new
+   *  or brought with its recovery phrase. The wizard opens on the choice
+   *  (without the legacy move, which needs an empty device) and Back from
+   *  the choice returns to the unlock screen. */
   mode?: "add";
   onCancel$?: QRL<() => void>;
 }
@@ -115,8 +116,8 @@ return 2;
 }
 
 export const SetupWizard = component$<SetupWizardProps>((props) => {
-  const step = useSignal<Step>(props.mode === "add" ? "restore-phrase" : "choose");
-  const flow = useSignal<Flow>(props.mode === "add" ? "restore" : "create");
+  const step = useSignal<Step>("choose");
+  const flow = useSignal<Flow>("create");
   const email = useSignal("");
   const loginPassword = useSignal("");
   const tfaCode = useSignal("");
@@ -976,11 +977,11 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Step 0: Choose path ── */}
         {step.value === "choose" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-6 text-2xl font-bold text-white">Welcome to Flowsta Vault</h2>
+            <h2 class="mb-6 text-2xl font-bold text-white">{props.mode === "add" ? "Add another identity" : "Welcome to Flowsta Vault"}</h2>
 
             <div class="flex flex-col gap-3">
               <GlassButton onClick$={() => { error.value = ""; flow.value = "create"; step.value = "create-form"; }}>
-              Create my identity
+              {props.mode === "add" ? "Create a new identity" : "Create my identity"}
               </GlassButton>
               <GlassButton variant="secondary" onClick$={() => { error.value = ""; flow.value = "restore"; step.value = "restore-phrase"; }}>
               I have a recovery phrase
@@ -988,15 +989,25 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </div>
 
             <p class="mt-4 text-sm text-gray-400">
-              Your identity is created here and lives on your own device, never on a server.
-              Nobody else, including Flowsta, can sign in as you.
+              {props.mode === "add"
+                ? "A second identity gets its own keys, records and apps on this device. One is unlocked at a time; you choose which at unlock."
+                : "Your identity is created here and lives on your own device, never on a server. Nobody else, including Flowsta, can sign in as you."}
             </p>
+
+            {props.mode === "add" && props.onCancel$ && (
+              <div class="mt-6">
+                <GlassButton variant="secondary" onClick$={async () => { error.value = ""; await props.onCancel$!(); }}>
+                  Back
+                </GlassButton>
+              </div>
+            )}
 
             {/* Moving in from the legacy web/phone account is a real path
                 for a long time yet (many phone-only users have not moved),
                 but it is not one of the two ways to START - it sits below
                 them as a plain link so the choice above stays a choice of
                 two. Same shape carries to a phone screen. */}
+            {props.mode !== "add" && (
             <div class="mt-6 border-t border-gray-700 pt-4 text-sm text-gray-400">
               Created your Flowsta account on flowsta.com before July 2026?{" "}
               <button
@@ -1007,6 +1018,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 Move it into this Vault
               </button>
             </div>
+            )}
           </div>
         )}
 
@@ -1269,7 +1281,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             )}
 
             <div class="flex justify-between">
-              <GlassButton variant="secondary" onClick$={async () => { mnemonic.value = ""; phraseUpgradeOffer.value = false; error.value = ""; if (props.mode === "add" && props.onCancel$) { await props.onCancel$(); } else { step.value = "choose"; } }}>
+              <GlassButton variant="secondary" onClick$={async () => { mnemonic.value = ""; phraseUpgradeOffer.value = false; error.value = ""; step.value = "choose"; }}>
                 Back
               </GlassButton>
               <GlassButton

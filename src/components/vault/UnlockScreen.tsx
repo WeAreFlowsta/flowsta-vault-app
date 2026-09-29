@@ -239,7 +239,7 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
                 class="text-xs text-gray-500 hover:text-gray-400 transition-colors"
                 onClick$={props.onAddIdentity$}
               >
-                Add another identity from its recovery phrase
+                Add another identity
               </button>
             )}
           </div>

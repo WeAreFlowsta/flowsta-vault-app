@@ -1394,7 +1394,7 @@ export default component$(() => {
                         </svg>
                         <span class="flex-1">
                           Add another identity
-                          <span class="block text-xs font-normal text-gray-400">From its recovery phrase</span>
+                          <span class="block text-xs font-normal text-gray-400">New, or from its recovery phrase</span>
                         </span>
                       </button>
                     </div>
