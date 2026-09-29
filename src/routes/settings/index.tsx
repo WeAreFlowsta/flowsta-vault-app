@@ -1,5 +1,6 @@
 import { component$, useSignal, useContext, useVisibleTask$, $ } from "@builder.io/qwik";
 import Callout from "~/components/dashboard/Callout";
+import { ContactCard } from "~/components/vault/ContactCard";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
@@ -457,6 +458,9 @@ export default component$(() => {
               </div>
             </div>
           )}
+
+          {/* Messages through the public profile page - device-hosted only */}
+          {identityHosting.value === "device-hosted" && <ContactCard />}
 
           {/* Privacy: who knocked */}
           <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">

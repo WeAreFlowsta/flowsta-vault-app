@@ -1105,9 +1105,10 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {step.value === "create-phrase" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">{phraseSaved.value ? "Check your recovery phrase" : "Write down your recovery phrase"}</h2>
-            <p class="mb-4 text-sm text-gray-400">
+            <p class="mb-2 text-sm text-gray-400">
             These 24 words let you bring your identity to another device, or get it back on this device if it's deleted.
-            <br />
+            </p>
+            <p class="mb-4 text-sm text-gray-400">
             Write them down and keep them somewhere safe - please don't keep them only on this device in case it's lost or deleted.
             </p>
             <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
@@ -1677,9 +1678,10 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {step.value === "migrate-ceremony" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">{phraseSaved.value ? "Check your recovery phrase" : "Write down your new recovery phrase"}</h2>
-            <p class="mb-4 text-sm text-gray-400">
+            <p class="mb-2 text-sm text-gray-400">
             These 24 words replace your old recovery phrase. They let you bring your identity to another device, or get it back on this device if it's deleted.
-            <br />
+            </p>
+            <p class="mb-4 text-sm text-gray-400">
             Write them down and keep them somewhere safe - please don't keep them only on this device in case it's lost or deleted.
             </p>
             <div class="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">

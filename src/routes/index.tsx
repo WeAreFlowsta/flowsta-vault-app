@@ -10,7 +10,6 @@ import { GlassButton } from "~/components/common/GlassButton";
 import Callout from "~/components/dashboard/Callout";
 import ImageCropper from "~/components/sign-it/ImageCropper";
 import { UpgradeAccountCard } from "~/components/vault/UpgradeAccountCard";
-import { ContactCard } from "~/components/vault/ContactCard";
 import { connectionStatusContext, signaturesContext } from "~/lib/context";
 import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATCH } from "~/lib/email";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
@@ -1095,9 +1094,6 @@ export default component$(() => {
       </div>
         );
       })()}
-      {/* Messages through the profile page - optional, off by default. */}
-      {id.hosting_model === "device-hosted" && <ContactCard />}
-
       {/* Avatar cropper - opens when a picture is picked */}
       {avatarImage.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">

@@ -1,9 +1,10 @@
 /**
  * ContactCard - "Let people contact me through Flowsta". Off by default.
- * The public profile page shows a Contact button only when this is on AND
- * Flowsta holds an address it can relay to (an email grant to flowsta.com);
- * the relay never reveals the address. Mirrors the Website Overview's card.
- * Device-hosted identities only (the setting lives on the account).
+ * Lives in Settings (the Overview keeps its space); the public profile
+ * page offers "Turn on" to the owner while it is off. The page shows a
+ * Contact button only when this is on AND Flowsta holds an address it can
+ * relay to (an email grant to flowsta.com); the relay never reveals the
+ * address. Device-hosted identities only (the setting lives on the account).
  */
 import { component$, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
 import { invoke } from "@tauri-apps/api/core";
@@ -47,7 +48,7 @@ export const ContactCard = component$(() => {
 
   const off = busy.value || !loaded.value || (!enabled.value && !deliverable.value);
   return (
-    <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
+    <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
       <div class="flex items-start justify-between gap-4">
         <div class="min-w-0">
           <h3 class="text-lg font-semibold text-white">Messages through your page</h3>
