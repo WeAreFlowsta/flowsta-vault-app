@@ -267,6 +267,37 @@ mod tests {
     }
 
     #[test]
+    fn removing_one_of_two_identities_selects_the_other_and_erase_clears_the_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf()));
+        // Real agent keys: the marker is read back through the key parser.
+        let agent_a = crate::key_derivation::construct_agent_pub_key_string(&[7u8; 32]);
+        let agent_b = crate::key_derivation::construct_agent_pub_key_string(&[9u8; 32]);
+        let pk_a = crate::paths::partition_key(&agent_a).unwrap();
+        let pk_b = crate::paths::partition_key(&agent_b).unwrap();
+        let a = fake_identity(dir.path(), &pk_a, "Alice");
+        let b = fake_identity(dir.path(), &pk_b, "Bob");
+        write_label(&a, &IdentityLabel { agent_pub_key: agent_a.clone(), display_name: Some("Alice".into()), ..Default::default() });
+        write_label(&b, &IdentityLabel { agent_pub_key: agent_b.clone(), display_name: Some("Bob".into()), ..Default::default() });
+        // B is the selected identity; its marker names B's agent key.
+        state.repoint_root(&b);
+        crate::commands::write_active_identity_marker(dir.path(), &agent_b);
+        let remaining = crate::commands::remove_identity_inner(&state).unwrap();
+        assert_eq!(remaining, 1);
+        assert!(!b.exists(), "B's folder is gone");
+        assert!(a.exists(), "A stays");
+        assert_eq!(state.identity_root(), a, "A is selected for this session");
+        assert_eq!(crate::paths::read_active_identity(dir.path()).as_deref(), Some(agent_a.as_str()), "the marker points at A for the next launch");
+        assert_eq!(crate::paths::select_identity_root(dir.path()), a);
+        // Erase everything: nothing left, layout back to the device root.
+        crate::commands::erase_device_inner(&state).unwrap();
+        assert!(!a.exists());
+        assert!(crate::paths::read_active_identity(dir.path()).is_none());
+        assert!(list_on_disk(dir.path(), dir.path()).is_empty());
+        assert_eq!(state.identity_root(), dir.path());
+    }
+
+    #[test]
     fn lists_partitions_and_a_legacy_root_and_marks_the_current_one() {
         let dir = tempfile::tempdir().unwrap();
         let a = fake_identity(dir.path(), "aaaaaaaaaaaaaaaa", "A");

@@ -1227,6 +1227,26 @@ async function switcherLeg() {
     record('claims isolation across instances skipped - set VAULT_MATRIX_RESTORE_PORT', true);
   }
 
+  // 8b. Two identities: removing the selected one selects the other (the
+  // next launch lands on the picker, not an empty wizard); erasing the
+  // device clears both.
+  await vaultFetch(port, '/dev/lock', { method: 'POST' });
+  const rm = await vaultFetch(port, '/dev/reset', { method: 'POST' });
+  const afterRm = await ids();
+  const stRm = await status();
+  record('remove the selected identity (B): one remains and A is selected, marker and all',
+    rm.status === 200 && rm.data?.remaining === 1 && (afterRm.identities || []).length === 1 && afterRm.identities?.[0]?.key === keyA && afterRm.identities?.[0]?.active === true && stRm.active_identity === agentA && stRm.initialized === true && stRm.unlocked === false,
+    `${rm.status} remaining=${rm.data?.remaining} ids=${JSON.stringify((afterRm.identities || []).map((x) => [x.key, x.active]))} active=${stRm.active_identity === agentA}`);
+  const unAgain = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: pwA } });
+  record("A's password opens the remaining identity", unAgain.status === 200 && unAgain.data?.agent_pub_key === agentA, `${unAgain.status}`);
+  await vaultFetch(port, '/dev/lock', { method: 'POST' });
+  const er = await vaultFetch(port, '/dev/erase-device', { method: 'POST' });
+  const afterEr = await ids();
+  const stEr = await status();
+  record('erase everything: no identities on the device, /status reports none',
+    er.status === 200 && (afterEr.identities || []).length === 0 && stEr.initialized === false && !stEr.active_identity,
+    `${er.status} ids=${(afterEr.identities || []).length} initialized=${stEr.initialized}`);
+
   // 9. Reset -> restore B -> the email is checked against B, not the identity that was there before.
   if (!port2) { record('reset -> restore -> email leg skipped - set VAULT_MATRIX_RESTORE_PORT to a second FRESH instance', true); return; }
   const fresh2 = await status(port2);

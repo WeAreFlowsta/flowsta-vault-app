@@ -4252,15 +4252,35 @@ async fn dev_reset_handler(
         return Err((StatusCode::NOT_FOUND, Json(IpcError { error: "not_found".into(), description: None })));
     }
     let app_state = state.app_state.clone();
-    let result = tokio::task::spawn_blocking(move || crate::commands::reset_vault_inner(&app_state))
+    let result = tokio::task::spawn_blocking(move || crate::commands::remove_identity_inner(&app_state))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(IpcError { error: "internal_error".into(), description: Some(e.to_string()) })))?;
+    match result {
+        Ok(remaining) => {
+            log::warn!("DEV: identity removed via /dev/reset ({} remaining)", remaining);
+            Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({ "success": true, "remaining": remaining }))))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(IpcError { error: "reset_failed".into(), description: Some(e) }))),
+    }
+}
+
+/// Dev-only: erase every identity on this device (Settings "Erase everything").
+async fn dev_erase_device_handler(
+    State(state): State<Arc<IpcState>>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((StatusCode::NOT_FOUND, Json(IpcError { error: "not_found".into(), description: None })));
+    }
+    let app_state = state.app_state.clone();
+    let result = tokio::task::spawn_blocking(move || crate::commands::erase_device_inner(&app_state))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(IpcError { error: "internal_error".into(), description: Some(e.to_string()) })))?;
     match result {
         Ok(()) => {
-            log::warn!("DEV: vault reset via /dev/reset");
+            log::warn!("DEV: device erased via /dev/erase-device");
             Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({ "success": true }))))
         }
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(IpcError { error: "reset_failed".into(), description: Some(e) }))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(IpcError { error: "erase_failed".into(), description: Some(e) }))),
     }
 }
 
@@ -4901,6 +4921,7 @@ pub async fn start_ipc_server(
         .route("/dev/select-identity", post(dev_select_identity_handler))
         .route("/dev/claim", post(dev_claim_handler))
         .route("/dev/reset", post(dev_reset_handler))
+        .route("/dev/erase-device", post(dev_erase_device_handler))
         // Global body cap (8 MB) - generous for base64 images/thumbnails/sign
         // payloads, bounds loopback-DoS amplification. /backup opts into a
         // larger limit above. Was axum's implicit 2 MB default (which also

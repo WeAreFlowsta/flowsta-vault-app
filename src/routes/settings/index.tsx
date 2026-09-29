@@ -72,6 +72,24 @@ export default component$(() => {
 
   const showResetConfirm = useSignal(false);
   const resetting = useSignal(false);
+  // How many identities this device holds: two or more offers "Remove this
+  // identity" beside "Erase everything".
+  const identityCount = useSignal(1);
+  const showRemoveConfirm = useSignal(false);
+  const removing = useSignal(false);
+  const handleRemoveIdentity = $(async () => {
+    removing.value = true;
+    try {
+      clearSignaturesCache();
+      await invoke("reset_vault");
+      // The Vault is locked and pointed at one of the remaining identities:
+      // a reload lands on the unlock picker.
+      window.location.reload();
+    } catch (e) {
+      removing.value = false;
+      console.error("Failed to remove the identity:", e);
+    }
+  });
 
   // Change email (device-hosted identities only - the Vault IS the account).
   const identityHosting = useSignal<string | null>(null);
@@ -82,6 +100,13 @@ export default component$(() => {
   const emailBusy = useSignal(false);
   const emailError = useSignal("");
   const emailNotice = useSignal("");
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(async () => {
+    try {
+      const list = await invoke<unknown[]>("list_identities");
+      identityCount.value = Array.isArray(list) ? list.length : 1;
+    } catch { /* keep 1 */ }
+  });
   const loadEmailState = $(async () => {
     try {
       const id = await invoke<{ hosting_model: string | null; web_email: string | null; pending_email: string | null }>("get_identity");
@@ -244,11 +269,11 @@ export default component$(() => {
       // without the explicit clear, but reset is the right moment to be
       // belt-and-suspenders).
       clearSignaturesCache();
-      await invoke("reset_vault");
+      await invoke("erase_device");
       window.location.reload();
     } catch (e) {
       resetting.value = false;
-      console.error("Failed to reset vault:", e);
+      console.error("Failed to erase the device:", e);
     }
   });
 
@@ -565,12 +590,45 @@ export default component$(() => {
             </div>
           </div>
 
-          {/* Reset Vault */}
+          {/* Remove this identity - only when others remain on the device */}
+          {identityCount.value > 1 && (
+            <div class="rounded-lg border border-red-900/50 bg-red-950/20 p-6">
+              <h3 class="mb-2 text-lg font-semibold text-white">Remove this identity from this device</h3>
+              <p class="mb-4 text-sm text-gray-400">
+                Removes this identity's keys, private data, app links and saved backups
+                from this device. Your other {identityCount.value - 1 === 1 ? "identity stays" : `${identityCount.value - 1} identities stay`}, and the Vault opens on the unlock screen
+                with them. Its recovery phrase brings this identity back; its private data and
+                app backups come back only from a data export.
+              </p>
+              {!showRemoveConfirm.value ? (
+                <GlassButton variant="danger" onClick$={() => { showRemoveConfirm.value = true; }}>
+                  Remove this identity
+                </GlassButton>
+              ) : (
+                <div>
+                  <p class="mb-3 text-sm font-medium text-red-400">
+                    This removes the identity you are signed in as from this device. It cannot be
+                    undone here; the recovery phrase and a data export bring it back.
+                  </p>
+                  <div class="flex gap-3">
+                    <GlassButton variant="danger" disabled={removing.value} onClick$={handleRemoveIdentity}>
+                      {removing.value ? "Removing..." : "Yes, remove this identity"}
+                    </GlassButton>
+                    <GlassButton variant="secondary" onClick$={() => { showRemoveConfirm.value = false; }}>
+                      Cancel
+                    </GlassButton>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Erase everything on this device */}
           <div class="rounded-lg border border-red-900/50 bg-red-950/20 p-6">
-            <h3 class="mb-2 text-lg font-semibold text-white">Reset Vault</h3>
+            <h3 class="mb-2 text-lg font-semibold text-white">Erase everything on this device</h3>
             <p class="mb-3 text-sm text-gray-400">
-              Erases everything stored on this device - your identity keys,
-              conductor data, your private data, and every connected app's
+              Erases {identityCount.value > 1 ? `all ${identityCount.value} identities` : "everything"} stored on this device - identity keys,
+              network data, private data, and every connected app's
               links and saved backups. Your Flowsta account is not affected.
             </p>
             <p class="mb-4 text-sm text-gray-400">
@@ -592,12 +650,12 @@ export default component$(() => {
                   showResetConfirm.value = true;
                 }}
               >
-                Reset Vault
+                Erase everything
               </GlassButton>
             ) : (
               <div>
                 <p class="mb-3 text-sm font-medium text-red-400">
-                  This permanently erases this device - your private data,
+                  This permanently erases {identityCount.value > 1 ? `all ${identityCount.value} identities on this device` : "this device"} - private data,
                   connected apps, and their backups - and cannot be undone.
                   Your recovery phrase restores your identity and signatures;
                   your private data and app backups come back only from a data

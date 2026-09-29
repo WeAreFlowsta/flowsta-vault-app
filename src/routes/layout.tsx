@@ -1252,12 +1252,16 @@ export default component$(() => {
             // old lair keystore under a mismatched passphrase and the conductor
             // crashes on connect (ConnectionReset → "Connection refused"). The
             // Settings reset already does this; the lock-screen path must too.
+            // Per identity (1.5.0): only the identity selected in the picker
+            // is removed. Others stay, and the wizard opens in add mode so
+            // the phrase brings this one back beside them.
+            let remaining = 0;
             try {
-              await invoke("reset_vault");
+              remaining = await invoke<number>("reset_vault");
             } catch (e) {
               console.error("reset_vault failed:", e);
             }
-            screen.value = "setup";
+            screen.value = remaining > 0 ? "add-identity" : "setup";
           }}
         />
       </>

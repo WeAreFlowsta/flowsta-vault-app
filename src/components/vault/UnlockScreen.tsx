@@ -62,6 +62,10 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
   // more. Choosing one repoints the locked Vault, the password then unlocks
   // that one.
   const identities = useSignal<IdentityEntry[]>([]);
+  // "Forgot password?" removes the SELECTED identity from this device and
+  // restores it from its phrase; a confirm names it, because with two or
+  // more identities the wrong one must never go.
+  const showForgotConfirm = useSignal(false);
   const switching = useSignal(false);
 
   const loadDisplayInfo = $(async () => {
@@ -225,11 +229,28 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
             </GlassButton>
           </form>
 
+          {showForgotConfirm.value && (
+            <div class="mt-4 rounded-md border border-red-900/50 bg-red-950/20 p-4 text-left">
+              <p class="text-sm text-gray-200">
+                {identities.value.length > 1
+                  ? `This removes ${identityTitle(identities.value.find((e) => e.active) || identities.value[0])} from this device. Its recovery phrase brings it back. Your other identities stay.`
+                  : "This removes your identity from this device. Your recovery phrase brings back your identity and signatures; your private data and app backups come back only from a data export."}
+              </p>
+              <div class="mt-3 flex gap-3">
+                <GlassButton variant="danger" onClick$={props.onResetVault$}>
+                  Remove and re-enter the phrase
+                </GlassButton>
+                <GlassButton variant="secondary" onClick$={() => { showForgotConfirm.value = false; }}>
+                  Cancel
+                </GlassButton>
+              </div>
+            </div>
+          )}
           <div class="mt-4 flex flex-col items-center gap-2 text-center">
             <button
               type="button"
               class="text-xs text-gray-500 hover:text-gray-400 transition-colors"
-              onClick$={props.onResetVault$}
+              onClick$={() => { showForgotConfirm.value = true; }}
             >
               Forgot password? Re-enter recovery phrase
             </button>

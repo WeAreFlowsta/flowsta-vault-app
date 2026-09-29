@@ -428,6 +428,7 @@ pub fn run() {
             identities::select_identity,
             commands::lock_vault,
             commands::reset_vault,
+            commands::erase_device,
             commands::get_identity,
             commands::validate_recovery_phrase,
             commands::phrase_matches_vault,
