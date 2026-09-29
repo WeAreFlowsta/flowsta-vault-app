@@ -1845,6 +1845,7 @@ pub fn get_identity(state: State<'_, Arc<AppState>>) -> Result<VaultIdentity, St
         display_name: config.display_name.clone(),
         profile_picture: config.profile_picture.clone(),
         web_email: config.web_email.clone(),
+        email_verified: config.email_verified,
         pending_email: config.pending_email.clone(),
         web_username: config.web_username.clone(),
         web_agent_pub_key,
@@ -1864,6 +1865,10 @@ pub struct VaultIdentity {
     pub display_name: Option<String>,
     pub profile_picture: Option<String>,
     pub web_email: Option<String>,
+    /// Whether Flowsta has confirmed that address (None = not learned yet).
+    /// The Overview shows the verify-first step from this instead of letting
+    /// a username claim fail and explain afterwards.
+    pub email_verified: Option<bool>,
     /// Email change requested from this Vault, awaiting the user's click
     /// on the verification link.
     pub pending_email: Option<String>,
@@ -6771,6 +6776,25 @@ fn cache_email_verified(state: &Arc<AppState>, verified: Option<bool>) {
     if changed {
         let _ = persist_config_now(state);
     }
+}
+
+/// The Overview asks this while the card shows an unverified email: the
+/// person may have clicked the verification link since the last grant, so
+/// anything but a cached `true` is re-learned with one vault-grant.
+/// Device-hosted only; the cached value when offline or not applicable.
+#[tauri::command]
+pub async fn refresh_email_verified(state: State<'_, Arc<AppState>>) -> Result<Option<bool>, String> {
+    let state = state.inner().clone();
+    let known = state.vault_config.lock().unwrap().as_ref().and_then(|c| c.email_verified);
+    if known == Some(true) {
+        return Ok(known);
+    }
+    let Ok((seed, agent_b64, _)) = device_hosted_grant_material(&state) else { return Ok(known) };
+    let api_url = option_env!("FLOWSTA_API_URL").unwrap_or("https://auth-api.flowsta.com");
+    let Ok(grant) = crate::device_identity::vault_grant_with_seed(api_url, &seed, &agent_b64).await else { return Ok(known) };
+    cache_email_verified(&state, grant.email_verified);
+    *state.grant_token_cache.lock().unwrap() = Some((grant.token, std::time::Instant::now(), agent_b64));
+    Ok(grant.email_verified.or(known))
 }
 
 /// Learn whether the email is verified when the Vault does not know yet

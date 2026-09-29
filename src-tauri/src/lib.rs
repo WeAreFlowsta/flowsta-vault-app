@@ -473,6 +473,7 @@ pub fn run() {
             commands::increment_quota_used,
             commands::sync_quota_to_server,
             commands::claim_web_username,
+            commands::refresh_email_verified,
             commands::set_web_email,
             commands::check_vault_update,
             commands::get_email_grants,

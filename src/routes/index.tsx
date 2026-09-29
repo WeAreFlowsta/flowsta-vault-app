@@ -27,6 +27,8 @@ interface VaultIdentity {
   display_name: string | null;
   profile_picture: string | null;
   web_email: string | null;
+  /** Flowsta's confirmation of that address; null = not learned yet. */
+  email_verified: boolean | null;
   web_username: string | null;
   web_agent_pub_key: string | null;
   hosting_model: string | null;
@@ -193,6 +195,44 @@ export default component$(() => {
   // the hash, and we remember it on success.
   const resendEmailInput = useSignal("");
   const resendEmailInput2 = useSignal("");
+
+  // Copy-link feedback on the profile link row.
+  const copiedLink = useSignal(false);
+  const copyProfileLink = $(async () => {
+    const u = identity.value?.web_username;
+    if (!u) return;
+    try {
+      await navigator.clipboard.writeText(`${__WEB_URL__}/${u}`);
+      copiedLink.value = true;
+      setTimeout(() => (copiedLink.value = false), 1800);
+    } catch { /* clipboard unavailable - the link itself still opens */ }
+  });
+  // The verify-first step reads the Vault's cached flag; while it says
+  // "not verified" the person may have clicked the emailed link since, so
+  // ask once on arrival and again on "check again".
+  const verifyChecking = useSignal(false);
+  const verifyChecked = useSignal(false);
+  const checkVerified = $(async () => {
+    if (verifyChecking.value) return;
+    verifyChecking.value = true;
+    try {
+      const v = await invoke<boolean | null>("refresh_email_verified");
+      if (identity.value && v !== null) {
+        identity.value = { ...identity.value, email_verified: v };
+        if (v) usernameNeedsVerify.value = false;
+      }
+    } catch { /* offline - the cached state stands */ }
+    finally { verifyChecking.value = false; }
+  });
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track }) => {
+    const id = track(() => identity.value);
+    if (!id || verifyChecked.value) return;
+    if (id.hosting_model === "device-hosted" && id.email_verified !== true && !id.web_username) {
+      verifyChecked.value = true;
+      checkVerified();
+    }
+  });
 
   // In-app profile edits - name inline, picture via the cropper modal.
   const nameEditing = useSignal(false);
@@ -785,45 +825,58 @@ export default component$(() => {
         </button>
       </div>
 
-      {/* Public profile - the identity hero: your link front and center,
-          Change lives on the link itself, DID shown in full as the quiet
-          technical line (copy / document). */}
+      {/* Public profile - a miniature of the public page: what you edit is
+          what people see. Three things (picture, name, link) edit in place;
+          the only pills are Copy link and Change. Email lives in Settings and
+          shows here only while it blocks the username. The permanent ID is
+          one quiet footer line, in full - the length of the identity key is
+          the argument for a username, never something to hide. */}
+      {(() => {
+        const web = __WEB_URL__.replace(/^https?:\/\//, "");
+        const deviceHosted = id.hosting_model === "device-hosted";
+        const needsVerify = deviceHosted && (id.email_verified === false || usernameNeedsVerify.value);
+        const createdMs = id.created_at > 1e12 ? id.created_at : id.created_at * 1000;
+        const since = deviceHosted
+          ? new Date(createdMs).toLocaleDateString("en-US", { month: "long", year: "numeric" })
+          : null;
+        const sigCount = sigStore.loaded.value
+          ? sigStore.signatures.value.filter((sg: any) => !sg.superseded_by).length
+          : 0;
+        const pencil = (
+          <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897l12.682-12.682z" />
+          </svg>
+        );
+        return (
       <div class="mb-6 rounded-lg border border-gray-700 bg-[#15203a] p-6">
-        <div class="mb-3 flex items-center justify-between">
-          <h3 class="text-lg font-semibold text-white">Public Profile</h3>
-          <PillButton onClick$={() => open(`${__WEB_URL__}/${id.web_username || id.agent_pub_key}`)}>
-            <span class="relative flex h-1.5 w-1.5">
-              <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-60" />
-              <span class="relative inline-flex h-1.5 w-1.5 rounded-full bg-green-400" />
-            </span>
-            View live page
-            <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-              <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
-            </svg>
-          </PillButton>
-        </div>
+        <p class="mb-4 text-xs font-medium tracking-wide text-gray-400">This is what people see</p>
 
-        {/* Who you are: picture + name + email */}
-        <div class="mb-4 flex items-center gap-4">
-          <label class="group relative h-14 w-14 shrink-0 cursor-pointer" title="Change picture">
+        {/* Who you are: picture + name, both edit in place */}
+        <div class="mb-5 flex items-center gap-4">
+          <label class="relative h-20 w-20 shrink-0 cursor-pointer" title="Change picture">
             <input type="file" accept="image/*" class="hidden" onChange$={handleAvatarChosen} />
             {id.profile_picture ? (
               <img
                 src={id.profile_picture}
                 alt="Profile"
-                width={56}
-                height={56}
-                class="h-14 w-14 rounded-full border border-gray-600 object-cover"
+                width={80}
+                height={80}
+                class="h-20 w-20 rounded-full border border-gray-600 object-cover"
               />
-            ) : (
-              <div class="flex h-14 w-14 items-center justify-center rounded-full bg-blue-600 text-xl font-medium text-white">
+            ) : id.display_name || id.web_username ? (
+              <div class="flex h-20 w-20 items-center justify-center rounded-full bg-blue-600 text-3xl font-medium text-white">
                 {(id.display_name || id.web_username || "U").charAt(0).toUpperCase()}
               </div>
+            ) : (
+              <div class="flex h-20 w-20 items-center justify-center rounded-full border border-dashed border-gray-500 bg-black/30 text-gray-400">
+                <svg class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={1.6}>
+                  <circle cx="12" cy="8" r="4" />
+                  <path stroke-linecap="round" d="M4 21c0-4 3.6-7 8-7s8 3 8 7" />
+                </svg>
+              </div>
             )}
-            <span class="absolute inset-0 hidden items-center justify-center rounded-full bg-black/60 group-hover:flex">
-              <svg class="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-                <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z" />
-              </svg>
+            <span class="absolute -bottom-0.5 -right-0.5 flex h-6 w-6 items-center justify-center rounded-full border-2 border-[#15203a] bg-white text-gray-900">
+              {pencil}
             </span>
           </label>
           <div class="min-w-0 flex-1">
@@ -862,81 +915,86 @@ export default component$(() => {
                 </GlassButton>
               </div>
             ) : (
-              <div class="flex items-center gap-3">
-                <p class={`truncate text-xl font-semibold ${id.display_name ? "text-white" : "text-gray-500"}`}>
+              <button
+                type="button"
+                class="group flex max-w-full items-center gap-2 text-left"
+                title={id.display_name ? "Edit your name" : "Add your name"}
+                onClick$={() => {
+                  nameInput.value = id.display_name || "";
+                  nameError.value = "";
+                  nameEditing.value = true;
+                }}
+              >
+                <span class={`truncate text-2xl font-semibold ${id.display_name ? "text-white" : "text-gray-500"}`}>
                   {id.display_name || "Add your name"}
-                </p>
-                <PillButton
-                  accent="amber"
-                  class="shrink-0"
-                  onClick$={() => {
-                    nameInput.value = id.display_name || "";
-                    nameError.value = "";
-                    nameEditing.value = true;
-                  }}
-                >
-                  <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z" />
-                  </svg>
-                  Edit
-                </PillButton>
-              </div>
+                </span>
+                <span class="shrink-0 text-gray-500 opacity-70 transition-opacity group-hover:opacity-100">{pencil}</span>
+              </button>
             )}
             {nameError.value && (
               <p class="mt-1 text-xs text-red-400">{nameError.value}</p>
             )}
-            {id.web_email && !nameEditing.value && (
-              <p class="mt-0.5 truncate text-sm text-gray-400">{id.web_email}</p>
+            {id.web_username && !nameEditing.value && (
+              <p class="mt-0.5 truncate text-base text-gray-400">@{id.web_username}</p>
+            )}
+            {since && !nameEditing.value && (
+              <p class="mt-0.5 text-sm text-gray-400">
+                On Flowsta since {since}
+                {sigCount > 0 ? ` · ${sigCount} signature${sigCount === 1 ? "" : "s"}` : ""}
+              </p>
             )}
           </div>
         </div>
 
-        {usernameEditing.value ? (
-          /* Claim / change form - Website input treatment. */
-          <div>
-            <div class="flex items-center gap-2">
-              <span class="hidden shrink-0 font-mono text-sm text-gray-500 sm:inline">
-                {__WEB_URL__.replace(/^https?:\/\//, "")}/
+        {/* Your link: the hero once a username exists; before that, one
+            callout for both remaining steps (verify the email, then pick). */}
+        {id.web_username && !usernameEditing.value ? (
+          <div class="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-black/30 px-4 py-3">
+            <button
+              type="button"
+              class="group flex min-w-0 items-center gap-2 text-left font-mono text-lg"
+              title="Open your page"
+              onClick$={() => open(`${__WEB_URL__}/${id.web_username}`)}
+            >
+              <span class="truncate">
+                <span class="text-gray-500">{web}/</span>
+                <span class="font-semibold text-white group-hover:underline">{id.web_username}</span>
               </span>
-              <input
-                type="text"
-                value={usernameInput.value}
-                placeholder="yourname (8+ characters on the free plan)"
-                maxLength={30}
-                autoFocus
-                class="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-4 py-2 font-mono text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                onInput$={(_, el) => {
-                  usernameInput.value = el.value;
-                }}
-                onKeyDown$={(e) => {
-                  if ((e as KeyboardEvent).key === "Enter") claimUsername();
-                }}
-              />
-              <button
-                type="button"
-                class="px-3 py-2 text-sm text-gray-400 transition-colors hover:text-gray-200"
-                disabled={usernameBusy.value}
+              <svg class="h-3.5 w-3.5 shrink-0 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+              </svg>
+            </button>
+            <div class="flex shrink-0 gap-2">
+              <PillButton accent="sky" onClick$={copyProfileLink}>
+                {copiedLink.value ? "Copied" : "Copy link"}
+              </PillButton>
+              <PillButton
+                accent="amber"
                 onClick$={() => {
-                  usernameEditing.value = false;
+                  usernameInput.value = id.web_username || "";
                   usernameError.value = "";
+                  usernameEditing.value = true;
                 }}
               >
-                Cancel
-              </button>
-              <GlassButton
-                disabled={usernameBusy.value || usernameInput.value.trim().length === 0}
-                onClick$={claimUsername}
-              >
-                {usernameBusy.value ? "Saving…" : "Save"}
-              </GlassButton>
+                {pencil}
+                Change
+              </PillButton>
             </div>
-            {usernameError.value && (
-              <p class="mt-2 text-sm text-red-400">{usernameError.value}</p>
-            )}
-            {usernameNeedsVerify.value && (
-              <div class="mt-2 space-y-2">
-                {!id.web_email && (
+          </div>
+        ) : (
+          <>
+            {needsVerify && !usernameEditing.value ? (
+              <Callout
+                intent="info"
+                title="Verify your email to pick a username"
+                actionLabel={resendBusy.value ? "Sending…" : "Resend email"}
+                onAction$={resendVerification}
+              >
+                {id.web_email ? (
+                  <p>We sent a link to {id.web_email}. Open it, then come back here.</p>
+                ) : (
                   <div class="space-y-2">
+                    <p>Enter your account email and we will send the link again.</p>
                     <input
                       type="email"
                       autocomplete="email"
@@ -956,89 +1014,88 @@ export default component$(() => {
                     />
                   </div>
                 )}
-                <div class="flex items-center gap-2">
-                  <PillButton disabled={resendBusy.value} onClick$={resendVerification}>
-                    {resendBusy.value ? "Sending…" : "Resend verification email"}
-                  </PillButton>
-                  {resendNote.value && (
-                    <p class="text-xs text-gray-400">{resendNote.value}</p>
+                {resendNote.value && <p class="mt-2 text-xs text-gray-400">{resendNote.value}</p>}
+                <p class="mt-2 text-xs text-gray-400">
+                  Already clicked it?{" "}
+                  <button type="button" class="text-sky-400 hover:text-sky-300" disabled={verifyChecking.value} onClick$={checkVerified}>
+                    {verifyChecking.value ? "Checking…" : "Check again"}
+                  </button>
+                  {" "}· Wrong address?{" "}
+                  <Link href="/settings/" class="text-sky-400 hover:text-sky-300">Change it in Settings</Link>
+                </p>
+              </Callout>
+            ) : (
+              <Callout intent="info" title={id.web_username ? "Change your username" : "Pick your username"}>
+                <p>Your page lives at {web}/yourname. Choose it once; change it anytime.</p>
+                <div class="mt-3 flex items-center gap-2">
+                  <div class="flex min-w-0 flex-1 items-center rounded-md border border-white/10 bg-black/30 pl-3 focus-within:ring-2 focus-within:ring-blue-500">
+                    <span class="shrink-0 font-mono text-sm text-gray-500">{web}/</span>
+                    <input
+                      type="text"
+                      value={usernameInput.value}
+                      placeholder="yourname"
+                      maxLength={30}
+                      autoFocus={usernameEditing.value}
+                      class="min-w-0 flex-1 bg-transparent px-2 py-2 font-mono text-sm text-white placeholder-gray-500 focus:outline-none"
+                      onInput$={(_, el) => {
+                        usernameInput.value = el.value;
+                      }}
+                      onKeyDown$={(e) => {
+                        if ((e as KeyboardEvent).key === "Enter") claimUsername();
+                      }}
+                    />
+                  </div>
+                  {usernameEditing.value && (
+                    <button
+                      type="button"
+                      class="px-3 py-2 text-sm text-gray-400 transition-colors hover:text-gray-200"
+                      disabled={usernameBusy.value}
+                      onClick$={() => {
+                        usernameEditing.value = false;
+                        usernameError.value = "";
+                      }}
+                    >
+                      Cancel
+                    </button>
                   )}
+                  <GlassButton
+                    disabled={usernameBusy.value || usernameInput.value.trim().length === 0}
+                    onClick$={claimUsername}
+                  >
+                    {usernameBusy.value ? "Saving…" : "Save"}
+                  </GlassButton>
                 </div>
-              </div>
+                <p class="mt-2 text-xs text-gray-400">8 characters or more on the free plan. Shorter names come with Pro.</p>
+                {usernameError.value && <p class="mt-2 text-sm text-red-400">{usernameError.value}</p>}
+              </Callout>
             )}
-          </div>
-        ) : id.web_username ? (
-          /* Hero: the profile link, with Change living on the link itself */
-          <div class="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-black/30 px-4 py-3">
-            <div class="min-w-0 flex-1 truncate font-mono text-lg">
-              <span class="text-gray-500">{__WEB_URL__.replace(/^https?:\/\//, "")}/</span>
-              <span class="font-semibold text-white">{id.web_username}</span>
-            </div>
-            <PillButton
-              accent="amber"
-              class="shrink-0"
-              onClick$={() => {
-                usernameInput.value = id.web_username || "";
-                usernameError.value = "";
-                usernameEditing.value = true;
-              }}
-            >
-              <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-                <path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487z" />
-              </svg>
-              Change
-            </PillButton>
-          </div>
-        ) : (
-          /* No username yet - show what the link looks like today and why
-             a name beats it. One emphasized action. */
-          <div class="rounded-lg border border-sky-500/30 bg-sky-500/10 px-4 py-3.5 text-sm text-sky-100">
-            <p class="mb-1">Your profile link right now:</p>
-            <p class="mb-3 break-all font-mono text-xs text-sky-200/80">
-              {`${__WEB_URL__.replace(/^https?:\/\//, "")}/${id.agent_pub_key}`}
-            </p>
-            <p class="mb-3">
-              Claim a username for a short, memorable profile - {" "}
-              <span class="font-mono text-sky-300">
-                {`${__WEB_URL__.replace(/^https?:\/\//, "")}/yourname`}
-              </span>{" "}
-              - and one identity people recognize everywhere. Change it anytime.
-            </p>
-            <GlassButton
-              onClick$={() => {
-                usernameInput.value = "";
-                usernameError.value = "";
-                usernameEditing.value = true;
-              }}
-            >
-              Claim a username
-            </GlassButton>
-          </div>
+            {!id.web_username && (
+              <p class="mt-3 text-sm leading-relaxed text-gray-400">
+                Until you pick one, your page is{" "}
+                <span class="break-all font-mono text-gray-300">{web}/{id.agent_pub_key}</span>
+                {" "}- your identity's key. It works, but nobody will remember it.
+              </p>
+            )}
+          </>
         )}
 
-        {/* DID - the permanent identifier, shown in full. No collapse. */}
-        <div class="mt-3 flex items-start gap-2 px-1">
-          <span class="mt-1.5 shrink-0 text-xs font-medium text-gray-500">DID</span>
-          <code class="mt-1 min-w-0 flex-1 break-all font-mono text-[11px] leading-relaxed text-gray-400">
-            {id.did}
-          </code>
-          <div class="flex shrink-0 items-center gap-1.5">
-            <CopyButton text={id.did} label="Copy DID" />
-            <PillButton
-              accent="sky"
-              title="Open the machine-readable DID document"
-              onClick$={() => open(`${__API_URL__}/did/${id.agent_pub_key}`)}
-            >
-              <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
-                <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
-              </svg>
-              Document
-            </PillButton>
+        {/* Permanent ID - in full, one quiet line. Copy takes the whole
+            thing; the DID document link lives on Your Data. */}
+        <div class="mt-4 border-t border-gray-700/60 pt-3">
+          <div class="flex items-start gap-2">
+            <span class="mt-1 shrink-0 text-xs font-medium text-gray-400">Permanent ID</span>
+            <code class="mt-0.5 min-w-0 flex-1 break-all font-mono text-[11px] leading-relaxed text-gray-300">
+              {id.did}
+            </code>
+            <CopyButton text={id.did} label="Copy your permanent ID" />
           </div>
+          <p class="mt-1.5 text-xs leading-relaxed text-gray-400">
+            Your username is how people find you. Your permanent ID is how your signatures and sign-ins prove they came from you. It never changes, and anyone can check it without asking Flowsta.
+          </p>
         </div>
-
       </div>
-
+        );
+      })()}
       {/* Avatar cropper - opens when a picture is picked */}
       {avatarImage.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">

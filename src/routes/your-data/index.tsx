@@ -1,6 +1,7 @@
 import { component$, useSignal, useVisibleTask$, $ } from "@builder.io/qwik";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-shell";
 import { CopyButton } from "~/components/ui/CopyButton";
 import { GlassButton } from "~/components/common/GlassButton";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
@@ -532,18 +533,19 @@ export default component$(() => {
               </div>
             )}
             <div class="flex items-center justify-between gap-4">
-              <span class="shrink-0 text-gray-400">DID</span>
+              <span class="shrink-0 text-gray-400">Permanent ID (DID)</span>
               <div class="flex items-center gap-2 min-w-0">
                 <span class="truncate font-mono text-xs text-white">
                   {id.did}
                 </span>
                 <CopyButton text={id.did} />
+                <PillButton accent="sky" title="Open the machine-readable DID document" onClick$={() => open(`${__API_URL__}/did/${id.agent_pub_key}`)}>
+                  Document
+                </PillButton>
               </div>
             </div>
             <p class="rounded-lg border border-gray-700/60 bg-black/20 px-3 py-2 text-xs leading-relaxed text-gray-400">
-              {id.web_username
-                ? "Your username and your DID are two ways people can find you. Your username is short and memorable; your DID is the longer, permanent identifier behind it - an open standard that stays the same even if your username changes."
-                : "Your DID is your permanent identifier - an open standard others can use to find and verify you. Claim a username on your Overview for a short, memorable address that points to the same identity."}
+              Your username is how people find you. Your permanent ID is how your signatures and sign-ins prove they came from you. It never changes, and anyone can check it without asking Flowsta.
             </p>
             <div class="flex items-center justify-between">
               <span class="text-gray-400">Vault Created</span>
