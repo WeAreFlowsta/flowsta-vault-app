@@ -6623,6 +6623,77 @@ pub async fn confirm_account_email(api_url: String, email: String, state: State<
     confirm_account_email_inner(state.inner(), &api_url, &email).await
 }
 
+/// One vault-grant token for the account endpoints the Overview calls
+/// directly (contact preference). Same material as the username claim.
+async fn account_grant_token(api_url: &str, state: &Arc<AppState>) -> Result<String, String> {
+    let (seed, agent_b64, _) = device_hosted_grant_material(state)?;
+    let grant = crate::device_identity::vault_grant_with_seed(api_url, &seed, &agent_b64)
+        .await
+        .map_err(|e| format!("Sign-in for the account service failed: {}", e))?;
+    cache_email_verified(state, grant.email_verified);
+    Ok(grant.token)
+}
+
+#[derive(Serialize)]
+pub struct ContactPreference {
+    pub enabled: bool,
+    /// Flowsta holds an address it can relay to (an email grant to flowsta.com).
+    pub deliverable: bool,
+}
+
+/// "Let people contact me through Flowsta" - read.
+#[tauri::command]
+pub async fn get_contact_preference(api_url: String, state: State<'_, Arc<AppState>>) -> Result<ContactPreference, String> {
+    let state = state.inner().clone();
+    let token = account_grant_token(&api_url, &state).await?;
+    let resp = reqwest::Client::new()
+        .get(format!("{}/auth/contact-preference", api_url.trim_end_matches('/')))
+        .bearer_auth(&token)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach the API: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Could not read the contact setting ({})", resp.status().as_u16()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("Invalid response: {}", e))?;
+    Ok(ContactPreference {
+        enabled: body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+        deliverable: body.get("deliverable").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+/// "Let people contact me through Flowsta" - write. The API refuses to turn
+/// it on without a deliverable address (`email_not_shared`).
+#[tauri::command]
+pub async fn set_contact_preference(api_url: String, enabled: bool, state: State<'_, Arc<AppState>>) -> Result<ContactPreference, String> {
+    let state = state.inner().clone();
+    let token = account_grant_token(&api_url, &state).await?;
+    let resp = reqwest::Client::new()
+        .put(format!("{}/auth/contact-preference", api_url.trim_end_matches('/')))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "enabled": enabled }))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach the API: {}", e))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        let msg = body.get("message").or(body.get("error")).and_then(|e| e.as_str()).unwrap_or("Could not update the contact setting").to_string();
+        return Err(msg);
+    }
+    state.activity.record(
+        if enabled { "contact_enabled" } else { "contact_disabled" },
+        if enabled { "Turned on messages through your profile page" } else { "Turned off messages through your profile page" },
+        None, None, None,
+    );
+    Ok(ContactPreference {
+        enabled: body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(enabled),
+        deliverable: body.get("deliverable").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
 #[tauri::command]
 pub async fn claim_web_username(
     api_url: String,
