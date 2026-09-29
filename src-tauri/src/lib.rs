@@ -98,6 +98,21 @@ fn enqueue_sign_paths(app: &tauri::AppHandle, paths: Vec<PathBuf>) {
     }
 }
 
+/// Show, unminimize and focus the main window: the tray's Open item, the
+/// macOS dock click while hidden, and anything else that brings the Vault
+/// back from the tray.
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        // On Linux, set_focus alone may not raise the window.
+        // Briefly setting always-on-top forces it to the foreground.
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_focus();
+        let _ = window.set_always_on_top(false);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -324,17 +339,7 @@ pub fn run() {
                 .tooltip("Flowsta Vault")
                 .menu(&tray_menu)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
-                    "open" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            // On Linux, set_focus alone may not raise the window.
-                            // Briefly setting always-on-top forces it to the foreground.
-                            let _ = window.set_always_on_top(true);
-                            let _ = window.set_focus();
-                            let _ = window.set_always_on_top(false);
-                        }
-                    }
+                    "open" => show_main_window(app),
                     "lock" => {
                         // Emit lock event to frontend - it handles the actual lock logic
                         let _ = app.emit("vault-lock-requested", ());
@@ -524,6 +529,16 @@ pub fn run() {
                 // app via Apple Events (Services menu, Open With, drag onto
                 // dock icon). Linux + Windows route through CLI args instead,
                 // handled in the setup hook + single-instance callback.
+                // macOS: the dock icon was clicked while the window was
+                // hidden to the tray (close button, Lock, launch at login).
+                // Without this the click does nothing and only the tray's
+                // Open item brings the Vault back.
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { has_visible_windows, .. } => {
+                    if !has_visible_windows {
+                        show_main_window(app_handle);
+                    }
+                }
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 tauri::RunEvent::Opened { urls } => {
                     // flowsta:// first - see the single-instance

@@ -1,6 +1,6 @@
 [package]
 name = "flowsta-vault"
-version = "1.5.0-beta.2"
+version = "1.5.0-beta.3"
 description = "Flowsta Vault - The home of your Flowsta identity, powered by Holochain"
 authors = ["Flowsta"]
 license = ""
@@ -112,15 +112,15 @@ tempfile = "3"
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
-# Windows-only: EnumWindows + ShowWindow(SW_HIDE) so the spawned
-# lair-keystore.exe / holochain.exe console windows are hidden post-spawn
-# without using CREATE_NO_WINDOW (which crashed holochain in v0.5.0 by
-# preventing console-handle allocation — see process_ext.rs).
+# Windows-only: the sidecars (lair-keystore.exe / holochain.exe) are spawned
+# through CreateProcessW with their console window created hidden, tied to a
+# kill-on-close Job Object, with a post-spawn EnumWindows + ShowWindow(SW_HIDE)
+# sweep as the second line - see process_ext.rs.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
-    # ToolHelp32 for parent-PID lookup — hide thread uses it to find
+    # ToolHelp32 for parent-PID lookup - hide thread uses it to find
     # conhost.exe children of our spawned binaries on Windows.
     "Win32_System_Diagnostics_ToolHelp",
     # Kill-on-close Job Object so sidecars die with the app (see process_ext.rs).
@@ -128,7 +128,9 @@ windows-sys = { version = "0.59", features = [
     # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds Threading::IO_COUNTERS.
     "Win32_System_JobObjects",
     "Win32_Security",
+    # CreateProcessW + STARTUPINFOW (hidden console) and the stdin pipe.
     "Win32_System_Threading",
+    "Win32_System_Pipes",
 ] }
 
 # core2 (transitive dep via libflate → libsodium-sys-stable → sodoken → lair)

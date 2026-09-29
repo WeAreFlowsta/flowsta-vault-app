@@ -8,13 +8,12 @@
 //! handles this wrapping transparently, following the pattern from lair's official
 //! `deterministic-keys.rs` example.
 
-use crate::process_ext::CommandExt;
+use crate::process_ext::{SidecarChild, SidecarCommand};
 use lair_keystore_api::dependencies::sodoken;
 use lair_keystore_api::prelude::*;
 use percent_encoding::percent_decode_str;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
 /// Import a 32-byte seed into a running lair keystore.
@@ -111,7 +110,7 @@ pub async fn import_seed_to_lair(
 pub fn start_lair_process(
     lair_dir: &Path,
     passphrase: &str,
-) -> Result<(Child, String), String> {
+) -> Result<(SidecarChild, String), String> {
     std::fs::create_dir_all(lair_dir)
         .map_err(|e| format!("Failed to create lair directory: {}", e))?;
 
@@ -124,15 +123,19 @@ pub fn start_lair_process(
     if is_first_run {
         log::info!("[lair:init] first run - initializing lair-keystore");
         let init_start = std::time::Instant::now();
-        let mut child = Command::new(&lair_bin)
+        // Init's output goes to log files next to the store, like the
+        // server's below; a failed init says why in lair-init-stderr.log.
+        let init_stdout = std::fs::File::create(lair_dir.join("lair-init-stdout.log"))
+            .map_err(|e| format!("Failed to create lair init stdout log: {}", e))?;
+        let init_stderr = std::fs::File::create(lair_dir.join("lair-init-stderr.log"))
+            .map_err(|e| format!("Failed to create lair init stderr log: {}", e))?;
+        let mut child = SidecarCommand::new(&lair_bin)
             .arg("init")
             .arg("--piped")
             .current_dir(lair_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .tie_to_parent()
-            .spawn_hidden()
+            .stdout(init_stdout)
+            .stderr(init_stderr)
+            .spawn()
             .map_err(|e| format!("Failed to spawn lair-keystore init: {}", e))?;
         log::info!("[lair:init] spawned pid {}", child.id());
 
@@ -146,7 +149,13 @@ pub fn start_lair_process(
             .wait()
             .map_err(|e| format!("Failed to wait for lair init: {}", e))?;
         if !status.success() {
-            return Err(format!("lair-keystore init failed with status: {}", status));
+            let stderr = std::fs::read_to_string(lair_dir.join("lair-init-stderr.log"))
+                .unwrap_or_default();
+            return Err(format!(
+                "lair-keystore init failed with status: {} {}",
+                status,
+                stderr.trim()
+            ));
         }
         log::info!(
             "[lair:init] completed in {}ms",
@@ -193,15 +202,13 @@ pub fn start_lair_process(
     // Start the lair server.
     log::info!("[lair:server] starting lair-keystore server");
     let spawn_start = std::time::Instant::now();
-    let mut child = Command::new(&lair_bin)
+    let mut child = SidecarCommand::new(&lair_bin)
         .arg("server")
         .arg("--piped")
         .current_dir(lair_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        .tie_to_parent()
-        .spawn_hidden()
+        .stdout(stdout_file)
+        .stderr(stderr_file)
+        .spawn()
         .map_err(|e| format!("Failed to spawn lair-keystore server: {}", e))?;
 
     // Pipe passphrase to stdin.
@@ -322,7 +329,7 @@ pub fn quarantine_lair_dir(lair_dir: &Path) -> Result<std::path::PathBuf, String
 }
 
 /// If the lair child has exited, the error to fail the start with.
-pub fn lair_exited(child: &mut Child, lair_dir: &Path) -> Option<String> {
+pub fn lair_exited(child: &mut SidecarChild, lair_dir: &Path) -> Option<String> {
     match child.try_wait() {
         Ok(Some(status)) => Some(lair_exit_error(status, lair_dir)),
         Ok(None) => None,
@@ -450,7 +457,7 @@ pub async fn connect_to_lair(
 pub async fn wait_for_lair_socket(
     connection_url: &str,
     timeout_secs: u64,
-    child: &mut Child,
+    child: &mut SidecarChild,
     lair_dir: &Path,
 ) -> Result<(), String> {
     let tick = std::time::Duration::from_millis(200);

@@ -6,8 +6,7 @@
 use crate::{dna, lair};
 use lair_keystore_api::prelude::*;
 use std::path::{Path, PathBuf};
-use crate::process_ext::CommandExt;
-use std::process::{Child, Stdio};
+use crate::process_ext::{SidecarChild, SidecarCommand};
 use tauri::{Emitter, Manager};
 use crate::commands::AppState;
 use std::sync::Arc;
@@ -19,8 +18,8 @@ const ADMIN_WS_PORTS: &[u16] = &[4455, 4456, 4457];
 /// Handle to a running conductor + lair-keystore pair.
 /// Drop this to stop both processes.
 pub struct ConductorHandle {
-    pub lair_child: Child,
-    pub conductor_child: Child,
+    pub lair_child: SidecarChild,
+    pub conductor_child: SidecarChild,
     pub lair_client: LairClient,
     pub admin_port: u16,
     pub app_port: u16,
@@ -337,7 +336,7 @@ pub fn start_conductor_process(
     config_path: &Path,
     conductor_dir: &Path,
     passphrase: &str,
-) -> Result<Child, String> {
+) -> Result<SidecarChild, String> {
     log::info!("Starting holochain conductor...");
 
     let stdout_path = conductor_dir.join("holochain-stdout.log");
@@ -351,25 +350,19 @@ pub fn start_conductor_process(
     let holochain_bin = crate::resolve_sidecar_bin("vault-holochain");
     log::info!("Using holochain binary: {:?}", holochain_bin);
 
-    // Hide the conductor's console window on Windows via post-spawn
-    // ShowWindow(SW_HIDE). Earlier RCs avoided this on the theory that
-    // hiding caused the `0xc0000005` access violation we saw on first
-    // install of signing DNA. The diagnostic logging added in beta1 and
-    // the conductor exit-code captured in beta5 proved that crash
-    // happens *regardless* of window state - it's an upstream holochain
-    // bug in the WASM compile path, not anything to do with the console.
-    // Now that the start_holochain auto-restart catches that crash and
-    // recovers transparently, the window can be hidden safely.
+    // On Windows the conductor's console is created hidden (process_ext).
+    // The `0xc0000005` access violation seen on first install of the
+    // signing DNA happens regardless of window state - an upstream
+    // holochain bug in the WASM compile path - and the start_holochain
+    // auto-restart recovers from it.
     let spawn_start = std::time::Instant::now();
-    let mut child = std::process::Command::new(&holochain_bin)
+    let mut child = SidecarCommand::new(&holochain_bin)
         .arg("-c")
         .arg(config_path)
         .arg("--piped")
-        .stdin(Stdio::piped())
         .stdout(stdout_file)
         .stderr(stderr_file)
-        .tie_to_parent()
-        .spawn_hidden()
+        .spawn()
         .map_err(|e| format!("Failed to spawn holochain conductor: {}", e))?;
 
     let pid = child.id();
@@ -436,7 +429,7 @@ fn read_conductor_logs(conductor_dir: &Path) -> String {
 async fn wait_for_admin_ws(
     port: u16,
     timeout_secs: u64,
-    conductor_child: &mut Child,
+    conductor_child: &mut SidecarChild,
     conductor_dir: &Path,
 ) -> Result<(), String> {
     let url = format!("ws://localhost:{}", port);
