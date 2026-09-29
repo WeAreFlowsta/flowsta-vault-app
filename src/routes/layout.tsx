@@ -1341,6 +1341,18 @@ export default component$(() => {
                           ? `${planInfo.value.used} of ${planInfo.value.limit} signs used this month`
                           : "Status unavailable offline"}
                       </p>
+                      {planInfo.value && planInfo.value.tier !== "free" && (
+                        <button
+                          type="button"
+                          class="mt-1.5 text-xs text-sky-300 hover:text-sky-200"
+                          onClick$={() => {
+                            profileMenuOpen.value = false;
+                            open(`${__WEB_URL__}/support/?ticket=1`);
+                          }}
+                        >
+                          Priority support · Create a ticket
+                        </button>
+                      )}
                     </div>
 
                     <div class="mt-3 border-t border-white/10 pt-3">
