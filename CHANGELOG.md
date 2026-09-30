@@ -5,6 +5,91 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-09-30
+
+### Highlights
+- **More than one identity in your Vault.** Add another identity beside the
+  one you have, created new or brought with its recovery phrase, and choose
+  which one to unlock. One is open at a time: switching locks the Vault and
+  unlocks the other, and the apps you use follow the identity you unlock.
+  The identity menu at the top gains Switch identity and Add another
+  identity.
+- **Made for shared computers.** Your Vault answers only your own computer
+  account, so on a family or shared computer each account's browsers and
+  apps reach that account's own Vault, and sign-in always uses the identity
+  in your Vault.
+- **The Overview shows what people see.** The profile card is a miniature of
+  your public page: picture and name edit in place, the link opens the page,
+  and Copy link and Change are the only buttons. Before a username, one
+  panel carries the two remaining steps, verify your email and then pick the
+  name. The permanent ID is shown in full, with one sentence on what it is
+  for.
+- **Messages through your page.** In Settings, let people write to you from
+  your profile page. Messages reach you by email and your address is never
+  shown. Off unless you turn it on.
+- **Quiet on Windows, easy to reopen on the Mac.** The key store and the
+  network start with no terminal window on Windows, and on the Mac the Dock
+  icon brings the Vault back from the menu bar.
+- **A clearer setup.** Step labels per journey, headings that say what to
+  do, the recovery phrase explained as the key to your identity rather than
+  the identity itself, and the phrase pages in two short paragraphs.
+
+### Added
+- Identity picker at unlock, with each identity's picture, name and
+  username.
+- Add another identity: create a new one, or bring one with its recovery
+  phrase. Every new identity is born in its own folder.
+- Settings offers Remove this identity from this device (when two or more
+  are here; the others stay) and Erase everything on this device (every
+  identity; the confirm says how many). The unlock screen's
+  forgot-password path removes only the identity you selected.
+- The Vault names the identity it holds even while locked, counts every
+  identity change on this device, and carries a per-process id, so apps can
+  tell a switch from a restart (bridge `/status`: `active_identity`,
+  `identity_epoch`, `instance_id`).
+- Sign-in pages find the right Vault on shared computers: the page opens a
+  `flowsta://claim` link that only the current user's Vault receives, and
+  the Vault lists the claim in its status.
+- An app that asks to link an agent already linked to another identity on
+  this device is refused, naming that identity: one app agent, one
+  identity.
+- Priority support link under the plan in the identity menu, for paid
+  plans.
+- When a sign-in is refused for a stale timestamp, the message says how far
+  the computer's clock is off and how to fix it.
+
+### Changed
+- The Vault answers only processes of its own computer account; a request
+  from another account is refused with `other_user`.
+- Windows: the key store and the network start with their console window
+  already hidden.
+- Every page rebuilds when the identity the Vault shows changes.
+- Unlocking a different identity than last time is written to the Activity
+  page ("Switched to … on this device"), and the dashboard says the Vault is
+  switching while its network starts.
+- Requests that name an expected identity are checked on reads as well as
+  writes, and checked again after any unlock or approval wait.
+- The email verification step shows before a username can be picked, with
+  Resend and Check again.
+- Info notices use the primary button for their action.
+- Import after a restore waits for the network with a narrated spinner
+  instead of failing while it starts.
+- The build type-checks before it bundles.
+
+### Fixed
+- macOS: clicking the Dock icon while the Vault is hidden to the menu bar
+  shows the window.
+- The activity log is per identity: switching no longer carries one
+  identity's entries into another's file.
+- A cached sign-in token is tied to the identity that obtained it and
+  dropped on reset.
+- Key store or network processes left by an earlier launch are stopped at
+  start; those of another running Vault, and their threads, are left
+  alone.
+- Signature polls that land on a locked Vault no longer try to restart the
+  network.
+- Setup wizard: the flowsta.com move line names the date again.
+
 ## [1.5.0-beta.5] - 2026-09-30
 
 Everything in beta.4, plus:
