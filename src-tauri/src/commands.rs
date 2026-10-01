@@ -3983,7 +3983,7 @@ struct YourDataProgress {
 /// Wait until the conductor is ready, narrating the wait over the given
 /// progress op. Right after a restore the wizard offers the import while
 /// the conductor is still starting; the old path failed at once with
-/// "Could not read current records: Conductor not running" (Eric, 09-28).
+/// "Could not read current records: Conductor not running" (field, 2026-09-28).
 async fn wait_for_conductor_ready(
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
@@ -7812,7 +7812,7 @@ mod email_normalization_tests {
 
     #[test]
     fn same_address_different_case_normalizes_equal() {
-        assert_eq!(normalize_email("Eric@Flowsta.com").unwrap(), normalize_email("eric@flowsta.com").unwrap());
+        assert_eq!(normalize_email("Ada@Example.com").unwrap(), normalize_email("ada@example.com").unwrap());
     }
 }
 

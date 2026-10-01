@@ -144,7 +144,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const showTechDetails = useSignal(false);
   // Restore-or-fresh, asked right here after a phrase restore. The import
   // needs the conductor, which the restore already started. Two paths only
-  // (Eric 2026-09-17); the Overview card remains the fallback if the app is
+  // (field, 2026-09-17); the Overview card remains the fallback if the app is
   // closed on this screen, because the bridge holds third-party backup
   // writes until the question is answered.
   const restoreImporting = useSignal(false);

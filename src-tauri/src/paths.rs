@@ -7,7 +7,7 @@
 //! app-link stores, activity, MAU and quota state.
 //!
 //! Today the identity root IS the device root. Phase 2 of the identity
-//! switcher (build-docs current/VAULT_1_4_0_PHASE2_BUILD.md) moves it to
+//! switcher (the 1.4.0 phase 2 build notes) moves it to
 //! `<device root>/identities/<partition key>/`; every caller already goes
 //! through these helpers so that change lands here and nowhere else.
 //!

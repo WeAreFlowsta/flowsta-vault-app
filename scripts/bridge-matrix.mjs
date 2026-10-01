@@ -815,7 +815,7 @@ async function passwordLeg() {
 // /authenticate with `scopes: ["email"]` answers without an address when
 // nothing can be granted (unregistered client_id, or an unverified email -
 // the harness vault is never verified). The positive path (dialog → grant
-// → email in the response) is Eric's eyeball item: it needs a registered
+// → email in the response) is a by-eye item: it needs a registered
 // app and a verified staging identity.
 
 async function grantsLeg() {
@@ -844,7 +844,7 @@ async function grantsLeg() {
   record('still no `email` on /status afterwards', after.status === 200 && !('email' in (after.data || {})));
 
   // A grant belongs to the page that asked. With a registered app that has
-  // the email scope and a vault whose email is verified (Eric's staging
+  // the email scope and a vault whose email is verified (a staging
   // identity), an origin that is neither a Flowsta page nor the app's linked
   // page gets the dialog (auto-approved here) and may be handed the address
   // for that one answer, but files NO grant under the app's client_id; a
