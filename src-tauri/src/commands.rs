@@ -1548,7 +1548,7 @@ async fn check_dna_updates(
     download_dir: &std::path::Path,
 ) -> bool {
     // Extract needed values from VaultConfig.
-    let (recovery_lookup_hash, current_private_ver, current_identity_ver, agent_key_raw_b64) = {
+    let (recovery_lookup_hash, current_private_ver, current_identity_ver) = {
         let config = state.vault_config.lock().unwrap();
         let cfg = match config.as_ref() {
             Some(c) => c,
@@ -1579,8 +1579,7 @@ async fn check_dna_updates(
             .identity_dna_version
             .clone()
             .unwrap_or_else(|| crate::dna::BUNDLED_IDENTITY_VERSION.to_string());
-        let agent_b64 = cfg.agent_pub_key_raw_b64.clone();
-        (rlh, priv_ver, id_ver, agent_b64)
+        (rlh, priv_ver, id_ver)
     };
 
     // Prefer the AgentPubKey that lair actually has for the device seed.
@@ -1600,25 +1599,19 @@ async fn check_dna_updates(
     let agent_key = if let Some(k) = lair_agent_key {
         k
     } else {
-        // Fallback to config value if conductor handle not available for some
-        // reason. Shouldn't happen in practice because DNA update runs after
-        // conductor startup succeeds.
-        match agent_key_raw_b64 {
-            Some(b64) => match base64_standard_decode(&b64) {
-                Ok(bytes) if bytes.len() == 39 => {
-                    holochain_types::prelude::AgentPubKey::from_raw_39(bytes)
-                }
-                Ok(bytes) => {
-                    log::warn!("Agent key is {} bytes, expected 39", bytes.len());
-                    return false;
-                }
-                Err(_) => {
-                    log::warn!("Failed to decode agent_pub_key_raw_b64");
-                    return false;
-                }
-            },
+        // Fallback when the conductor handle is not available (should not
+        // happen: the update check runs after conductor startup): the key
+        // the conductor is started as, never the identity's key as stored.
+        let seed = {
+            let cfg = state.vault_config.lock().unwrap();
+            cfg.as_ref().and_then(|c| c.conductor_seed_bytes())
+        };
+        match seed {
+            Some(seed) => holochain_types::prelude::AgentPubKey::from_raw_32(
+                crate::key_derivation::public_key_of_seed(&seed).to_vec(),
+            ),
             None => {
-                log::info!("No agent_pub_key_raw_b64 - skipping DNA update check");
+                log::warn!("No conductor seed available - skipping DNA update check");
                 return false;
             }
         }
@@ -4976,17 +4969,15 @@ pub async fn sign_file(
         return Err("file_hash must be exactly 64 hex characters (32 bytes)".to_string());
     }
 
-    // 2. Sign with device seed
+    // 2. Sign with the key this device's conductor runs as: the signing
+    //    network accepts a record only when its signer is the agent that
+    //    commits it.
     let (signature_bytes, agent_pub_key_str) = {
         let config = state.vault_config.lock().unwrap();
         let config = config.as_ref().ok_or("Vault is locked")?;
-        let device_seed = config
-            .device_seed
-            .as_ref()
+        let seed_arr = config
+            .conductor_seed_bytes()
             .ok_or("No device seed available")?;
-
-        let mut seed_arr = [0u8; 32];
-        seed_arr.copy_from_slice(device_seed);
 
         let signature =
             crate::key_derivation::sign_with_device_seed(&seed_arr, &hash_bytes);
@@ -5029,7 +5020,6 @@ pub async fn sign_file(
             admin_port,
             app_port,
             &hash_bytes,
-            &signature_bytes,
             now_ms,
             intent.as_deref(),
             ai_generation.as_deref(),
@@ -5443,6 +5433,11 @@ async fn fetch_linked_agent_keys(
     };
 
     let my_agent_key = identity_cell_id.agent_pubkey().clone();
+    // Links hang from the IDENTITY's key. On a device whose conductor runs a
+    // key of its own that is a different key from the cell's agent, so the
+    // walk starts at the identity (in the form the network uses) and the
+    // identity itself counts as one of this person's agents.
+    let identity_key = identity_agent_key(state).unwrap_or_else(|| my_agent_key.clone());
 
     let creds = match cell_credentials_cached(state, admin_ws, &identity_cell_id).await {
         Ok(c) => c,
@@ -5468,7 +5463,7 @@ async fn fetch_linked_agent_keys(
         Err(e) => { log::warn!("identity app WS: {}", e); return (Vec::new(), false); }
     };
 
-    let payload_mp = match rmp_serde::to_vec_named(&my_agent_key) {
+    let payload_mp = match rmp_serde::to_vec_named(&identity_key) {
         Ok(p) => p,
         Err(_) => return (Vec::new(), false),
     };
@@ -5534,7 +5529,15 @@ async fn fetch_linked_agent_keys(
             }
         };
         if device_hosted && config_key_missing {
-            if let Some(found) = linked_keys.iter().find(|k| **k != my_agent_key) {
+            // The earlier web key is the one linked key that is neither the
+            // identity nor this device. With more than one candidate the
+            // walk cannot tell a web key from another device, so nothing is
+            // recorded (the DID-based recovery covers that case).
+            let others: Vec<&AgentPubKey> = linked_keys
+                .iter()
+                .filter(|k| k.get_raw_32() != identity_key.get_raw_32() && k.get_raw_32() != my_agent_key.get_raw_32())
+                .collect();
+            if let [found] = others.as_slice() {
                 let key_b64 = base64_standard_encode(found.get_raw_39());
                 log::info!("Persisting web agent key discovered via the DHT link graph");
                 persist_web_agent_pub_key(state, &key_b64);
@@ -5542,10 +5545,27 @@ async fn fetch_linked_agent_keys(
         }
     }
 
+    // On a device with its own conductor key, what the identity key itself
+    // authored belongs to this person too.
+    if identity_key.get_raw_32() != my_agent_key.get_raw_32() && !linked_keys.contains(&identity_key) {
+        linked_keys.push(identity_key.clone());
+    }
+
     if linked_keys.is_empty() {
         log::info!("No linked agents found (no cache, no DHT result)");
     }
     (linked_keys, dht_settled)
+}
+
+/// The identity's agent key in the form the network uses, from the unlocked
+/// config. `None` while locked or when the config carries no raw key.
+pub(crate) fn identity_agent_key(state: &AppState) -> Option<holochain_types::prelude::AgentPubKey> {
+    let config = state.vault_config.lock().unwrap();
+    let raw = base64_standard_decode(config.as_ref()?.agent_pub_key_raw_b64.as_deref()?).ok()?;
+    if raw.len() != 39 {
+        return None;
+    }
+    Some(holochain_types::prelude::AgentPubKey::from_raw_32(raw[3..35].to_vec()))
 }
 
 /// Store a freshly discovered web agent key in the in-memory cache AND the
@@ -6330,7 +6350,6 @@ pub(crate) async fn commit_signature_to_dht(
     admin_port: u16,
     app_port: u16,
     file_hash: &[u8],
-    signature: &[u8],
     signed_at: i64,
     intent: Option<&str>,
     ai_generation: Option<&str>,
@@ -6416,6 +6435,20 @@ pub(crate) async fn commit_signature_to_dht(
     // We use holochain_types::prelude::SerializedBytes to properly encode
     // the AgentPubKey and other Holochain types.
     let agent_key = signing_app.agent_pub_key.clone();
+
+    // The published signature is made here, by the key the conductor runs
+    // as - the record's signer must be the agent that commits it. (On an
+    // install whose conductor runs the identity seed this is the identity's
+    // own signature, as it always was.)
+    let signature = {
+        let config = state.vault_config.lock().unwrap();
+        let config = config.as_ref().ok_or("Vault is locked")?;
+        let seed = config.conductor_seed_bytes().ok_or("No device seed available")?;
+        if crate::key_derivation::public_key_of_seed(&seed)[..] != agent_key.get_raw_32()[..] {
+            return Err("The signing cell runs as a different key than this device's conductor key".to_string());
+        }
+        crate::key_derivation::sign_with_device_seed(&seed, file_hash)
+    };
 
     // Build a struct that mirrors the DNA's SignatureRecord
     // Mirror structs matching the signing DNA's types exactly (PascalCase enum variants)

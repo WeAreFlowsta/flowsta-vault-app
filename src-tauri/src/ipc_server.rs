@@ -2879,7 +2879,6 @@ async fn sign_document_core(
             admin_port,
             app_port,
             &hash_bytes,
-            &signature_bytes,
             now_ms,
             req.intent.as_deref(),
             req.ai_generation.as_deref(),
