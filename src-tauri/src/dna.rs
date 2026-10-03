@@ -571,11 +571,13 @@ pub async fn install_dnas(
             if key_matches {
                 private_v2_installed = true;
             } else {
-                log::warn!("Private v2 app installed with wrong agent key, reinstalling...");
-                admin_ws
-                    .uninstall_app(private_v2_app_id.clone(), false)
-                    .await
-                    .map_err(|e| format!("Failed to uninstall private v2 app: {}", e))?;
+                // This cell can hold records that exist nowhere else. A
+                // different agent key means the conductor was started as the
+                // wrong key: stop here and leave the cell exactly as it is.
+                return Err(format!(
+                    "The private data cell on this device belongs to a different conductor key ({}). Nothing was changed.",
+                    app.agent_pub_key
+                ));
             }
         } else if app.installed_app_id.starts_with(&private_v2_stale_prefix) {
             // A v2 cell from an older bundle revision (different DNA hash

@@ -13,7 +13,7 @@
 //! - `flowsta-private-network-v2` - per-user private-DHT network seed
 
 use bip39::Mnemonic;
-use blake2::digest::{consts::U32, Digest};
+use blake2::digest::{consts::{U16, U32}, Digest};
 use blake2::Blake2b;
 use ed25519_dalek::{Signer, SigningKey};
 use hmac::{Hmac, Mac};
@@ -140,23 +140,26 @@ pub fn validate_mnemonic(mnemonic_str: &str) -> bool {
 
 // ── Holochain AgentPubKey Construction ──────────────────────────────
 //
-// Holochain's AgentPubKey is 39 bytes:
+// An agent key is 39 bytes:
 //   [0x84, 0x20, 0x24]  - 3-byte HoloHash type prefix (AgentPubKey)
 //   [... 32 bytes ...]   - Ed25519 public key
-//   [... 4 bytes ...]    - DHT location (blake2b-256 XOR-folded to 4 bytes)
+//   [... 4 bytes ...]    - location bytes, computed from the 32
 //
-// The DHT location is computed the same way as in the `holo_hash` crate:
-//   1. blake2b-256(32-byte ed25519 key) → 32 bytes
-//   2. XOR-fold 32 bytes → 4 bytes
+// TWO forms of the last four bytes exist, and they never agree:
+//   - the IDENTIFIER form below (`construct_agent_pub_key_*`): blake2b-256
+//     of the key, XOR-folded. It is what the account, the DID string and the
+//     local bridge have always carried, so it stays the identifier.
+//   - the NETWORK form (`holo_agent_pub_key_bytes`): blake2b-128 of the key,
+//     XOR-folded - what the `holo_hash` crate and the conductor produce.
+// Anything written to or asked of a network (entries, link bases, signed
+// agent pairs) uses the network form. Compare two keys by their 32 bytes
+// (`same_agent_key`), never by all 39.
 
 /// Holochain AgentPubKey type prefix bytes.
 const AGENT_PUB_KEY_PREFIX: [u8; 3] = [0x84, 0x20, 0x24];
 
-/// Compute the Holochain DHT location from a 32-byte ed25519 public key.
-///
-/// Algorithm (from holo_hash crate):
-/// 1. blake2b-256 hash of the 32-byte key → 32 bytes
-/// 2. XOR-fold the 32 bytes into 4 bytes (byte[i] ^= hash[i] for i % 4)
+/// Location bytes of the IDENTIFIER form: blake2b-256 of the key, XOR-folded
+/// into 4 bytes. Not what the conductor computes - see the note above.
 pub fn compute_dht_location(ed25519_pub_key: &[u8; 32]) -> [u8; 4] {
     let mut hasher = Blake2b::<U32>::new();
     hasher.update(ed25519_pub_key);
@@ -169,7 +172,54 @@ pub fn compute_dht_location(ed25519_pub_key: &[u8; 32]) -> [u8; 4] {
     loc
 }
 
-/// Construct a full 39-byte Holochain AgentPubKey from a 32-byte ed25519 public key.
+/// Location bytes of the NETWORK form, as `holo_hash` computes them:
+/// blake2b with a 16-byte digest, XOR-folded into 4 bytes.
+pub fn holo_dht_location(ed25519_pub_key: &[u8; 32]) -> [u8; 4] {
+    let mut hasher = Blake2b::<U16>::new();
+    hasher.update(ed25519_pub_key);
+    let hash = hasher.finalize();
+
+    let mut loc = [0u8; 4];
+    for (i, &byte) in hash.iter().enumerate() {
+        loc[i % 4] ^= byte;
+    }
+    loc
+}
+
+/// The 39-byte agent key in the NETWORK form (equal to
+/// `AgentPubKey::from_raw_32`). Use it for anything a conductor or a zome
+/// will see.
+pub fn holo_agent_pub_key_bytes(ed25519_pub_key: &[u8; 32]) -> [u8; 39] {
+    let loc = holo_dht_location(ed25519_pub_key);
+
+    let mut key = [0u8; 39];
+    key[..3].copy_from_slice(&AGENT_PUB_KEY_PREFIX);
+    key[3..35].copy_from_slice(ed25519_pub_key);
+    key[35..39].copy_from_slice(&loc);
+    key
+}
+
+/// Whether two 39-byte agent keys are the same key, whichever form each is in.
+pub fn same_agent_key(a: &[u8], b: &[u8]) -> bool {
+    a.len() == 39 && b.len() == 39 && a[..3] == AGENT_PUB_KEY_PREFIX && a[..35] == b[..35]
+}
+
+/// A fresh random seed for a device's own conductor agent. Generated here,
+/// not inside the key store, so it can be exported with the rest of what
+/// the device runs on.
+pub fn new_conductor_seed() -> [u8; 32] {
+    use rand::RngCore;
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    seed
+}
+
+/// The 32-byte Ed25519 public key of a seed.
+pub fn public_key_of_seed(seed: &[u8; 32]) -> [u8; 32] {
+    SigningKey::from_bytes(seed).verifying_key().to_bytes()
+}
+
+/// Construct the 39-byte agent key in the IDENTIFIER form from a 32-byte ed25519 public key.
 pub fn construct_agent_pub_key_bytes(ed25519_pub_key: &[u8; 32]) -> [u8; 39] {
     let loc = compute_dht_location(ed25519_pub_key);
 
@@ -358,6 +408,38 @@ pub fn base64_standard_encode(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_network_form_is_what_the_conductor_builds() {
+        for fill in [0u8, 1, 7, 200, 255] {
+            let seed = [fill; 32];
+            let public = super::public_key_of_seed(&seed);
+            let ours = super::holo_agent_pub_key_bytes(&public);
+            let theirs = holochain_types::prelude::AgentPubKey::from_raw_32(public.to_vec());
+            assert_eq!(&ours[..], theirs.get_raw_39());
+        }
+    }
+
+    #[test]
+    fn the_two_forms_differ_in_the_last_four_bytes_only() {
+        let public = super::public_key_of_seed(&[9u8; 32]);
+        let identifier = super::construct_agent_pub_key_bytes(&public);
+        let network = super::holo_agent_pub_key_bytes(&public);
+        assert_eq!(identifier[..35], network[..35]);
+        assert_ne!(identifier[35..], network[35..]);
+        assert!(super::same_agent_key(&identifier, &network));
+        let other = super::holo_agent_pub_key_bytes(&super::public_key_of_seed(&[10u8; 32]));
+        assert!(!super::same_agent_key(&identifier, &other));
+        assert!(!super::same_agent_key(&identifier[..38], &network));
+    }
+
+    #[test]
+    fn a_conductor_seed_is_random() {
+        let a = super::new_conductor_seed();
+        let b = super::new_conductor_seed();
+        assert_ne!(a, b);
+        assert_ne!(a, [0u8; 32]);
+    }
+
     use super::*;
 
     // Test mnemonic (DO NOT use in production)

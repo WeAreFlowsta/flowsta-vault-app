@@ -45,6 +45,10 @@ pub const ACTIVE_IDENTITY_MARKER: &str = "active-identity";
 /// reports it so a client polling every few seconds cannot miss A→B→A.
 pub const IDENTITY_EPOCH_FILE: &str = "identity-epoch";
 pub const SETTINGS_FILE: &str = "settings.json";
+/// A random id for THIS install, made once and kept at the device root. It
+/// lets the device registry tell "the same device again" from "another
+/// device". It is not a secret and not an identity.
+pub const INSTALL_ID_FILE: &str = "install-id";
 #[allow(dead_code)] // used by the autostart setup, which is compiled only where Tauri autostart is enabled
 pub const AUTOSTART_MARKER: &str = "autostart-initialized";
 
@@ -227,11 +231,45 @@ pub fn bump_identity_epoch(device_root: &Path) -> u64 {
     next
 }
 pub fn settings_path(device_root: &Path) -> PathBuf { device_root.join(SETTINGS_FILE) }
+pub fn install_id_path(device_root: &Path) -> PathBuf { device_root.join(INSTALL_ID_FILE) }
+
+/// This install's id (32 hex characters), created on first use.
+pub fn install_id(device_root: &Path) -> Option<String> {
+    let path = install_id_path(device_root);
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let id = existing.trim();
+        if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Some(id.to_string());
+        }
+    }
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let id = hex::encode(bytes);
+    let _ = std::fs::create_dir_all(device_root);
+    crate::vault::write_atomic(&path, id.as_bytes()).ok()?;
+    Some(id)
+}
 #[allow(dead_code)]
 pub fn autostart_marker_path(device_root: &Path) -> PathBuf { device_root.join(AUTOSTART_MARKER) }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_install_id_is_made_once_and_kept() {
+        let dir = std::env::temp_dir().join(format!("fv-install-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = super::install_id(&dir).expect("an id");
+        assert_eq!(first.len(), 32);
+        assert_eq!(super::install_id(&dir).as_deref(), Some(first.as_str()));
+        // A damaged file is replaced, not trusted.
+        std::fs::write(super::install_id_path(&dir), "not an id").unwrap();
+        let replaced = super::install_id(&dir).expect("an id");
+        assert_ne!(replaced, "not an id");
+        assert_eq!(replaced.len(), 32);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     #[test]
     fn identity_epoch_counts_up_from_zero_and_survives_a_garbled_file() {

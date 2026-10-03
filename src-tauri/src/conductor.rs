@@ -507,7 +507,10 @@ pub async fn start_holochain(
     data_dir: PathBuf,
     resource_dir: PathBuf,
     passphrase: String,
-    device_seed: [u8; 32],
+    // The seed the conductor's agent runs as, and its key-store tag
+    // (`vault::conductor_lair_tag`).
+    conductor_seed: [u8; 32],
+    conductor_tag: String,
 ) -> Result<ConductorHandle, String> {
     // A fresh conductor session gets fresh cap grants - drop any cached
     // credentials so the readiness probe re-verifies (and re-fills) them.
@@ -520,7 +523,8 @@ pub async fn start_holochain(
         data_dir.clone(),
         resource_dir.clone(),
         passphrase.clone(),
-        device_seed,
+        conductor_seed,
+        conductor_tag.clone(),
     )
     .await
     {
@@ -558,7 +562,7 @@ pub async fn start_holochain(
         }
     }
 
-    start_holochain_attempt(app_handle, data_dir, resource_dir, passphrase, device_seed).await
+    start_holochain_attempt(app_handle, data_dir, resource_dir, passphrase, conductor_seed, conductor_tag).await
 }
 
 /// One full startup attempt: lair → seed import → conductor → connect → install DNAs.
@@ -570,7 +574,8 @@ async fn start_holochain_attempt(
     data_dir: PathBuf,
     resource_dir: PathBuf,
     passphrase: String,
-    device_seed: [u8; 32],
+    conductor_seed: [u8; 32],
+    conductor_tag: String,
 ) -> Result<ConductorHandle, String> {
     // Emit status: starting lair
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
@@ -646,18 +651,19 @@ async fn start_holochain_attempt(
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
         message: "Importing device key...".into(),
     });
-    let seed_info = match lair::import_seed_to_lair(&lair_client, &device_seed, "flowsta-device-1")
+    let seed_info = match lair::import_seed_to_lair(&lair_client, &conductor_seed, &conductor_tag)
         .await
     {
         Ok(s) => s,
         Err(e) => fail_with_lair_cleanup!(format!("Failed to import device seed into lair: {}", e)),
     };
     let pub_key_hex = hex::encode(&*seed_info.ed25519_pub_key.0);
-    log::info!("Device seed imported, pub key: {}", pub_key_hex);
+    log::info!("Conductor seed imported under '{}', pub key: {}", conductor_tag, pub_key_hex);
 
     // Convert lair Ed25519 pub key → Holochain AgentPubKey for DNA installation.
-    // This ensures the conductor uses our deterministic identity (from the mnemonic)
-    // rather than a random key from generate_agent_pub_key().
+    // The conductor runs as the key the Vault gave it (the identity seed on an
+    // install made before devices had their own, else this device's own
+    // seed), never a key from generate_agent_pub_key().
     let agent_pub_key = holochain_types::prelude::AgentPubKey::from_raw_32(
         seed_info.ed25519_pub_key.0.to_vec(),
     );

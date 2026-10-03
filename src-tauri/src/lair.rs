@@ -35,6 +35,15 @@ pub async fn import_seed_to_lair(
     // If so, just return the existing seed info.
     match client.get_entry(tag.into()).await {
         Ok(LairEntryInfo::Seed { seed_info, .. }) => {
+            // The entry is reused only when it holds THIS seed: a tag that
+            // stands for another key would start the conductor as that key.
+            let expected = crate::key_derivation::public_key_of_seed(seed_bytes);
+            if *seed_info.ed25519_pub_key.0 != expected {
+                return Err(lair_keystore_api::dependencies::one_err::OneErr::new(&format!(
+                    "the key store already holds a different key under '{}'",
+                    tag
+                )));
+            }
             log::info!("Seed '{}' already exists in lair, reusing", tag);
             return Ok(seed_info);
         }
@@ -597,6 +606,17 @@ mod tests {
     }
 
     /// Bonus: sign a payload via lair and verify with ed25519_dalek.
+    #[tokio::test]
+    async fn a_tag_is_never_reused_for_a_different_seed() {
+        let (_keystore, client) = create_test_keystore().await;
+        let first = [3u8; 32];
+        let again = import_seed_to_lair(&client, &first, "flowsta-conductor-test").await.expect("first import");
+        let same = import_seed_to_lair(&client, &first, "flowsta-conductor-test").await.expect("the same seed is reused");
+        assert_eq!(*again.ed25519_pub_key.0, *same.ed25519_pub_key.0);
+        let other = import_seed_to_lair(&client, &[4u8; 32], "flowsta-conductor-test").await;
+        assert!(other.is_err(), "a different seed under the same tag must be refused");
+    }
+
     #[tokio::test]
     async fn test_lair_sign_verified_by_ed25519_dalek() {
         let (_keystore, client) = create_test_keystore().await;

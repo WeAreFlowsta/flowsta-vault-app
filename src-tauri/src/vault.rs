@@ -38,6 +38,13 @@ pub struct VaultConfig {
     #[serde(default)]
     pub device_seed: Option<Vec<u8>>,
 
+    /// 32-byte seed of this DEVICE's own conductor agent (encrypted at rest).
+    /// Random, made on this device, never derived from the phrase. `None` on
+    /// an install made before devices had their own: there the conductor
+    /// runs the identity seed (`device_seed`), as it always has.
+    #[serde(default)]
+    pub conductor_seed: Option<Vec<u8>>,
+
     /// Recovery lookup hash (hex string) for agent key discovery via API.
     /// Derived from HMAC-SHA256(mnemonic, "flowsta-recovery-lookup").
     #[serde(default)]
@@ -153,6 +160,34 @@ pub struct VaultConfig {
     /// deferred to the reconcile task. Identity-first, account-later.
     #[serde(default)]
     pub pending_registration: bool,
+}
+
+/// The key-store tag of an install whose conductor runs the identity seed.
+pub const IDENTITY_CONDUCTOR_TAG: &str = "flowsta-device-1";
+
+impl VaultConfig {
+    /// The seed this device's conductor runs as: its own when it has one,
+    /// else the identity seed. `None` when the config holds neither.
+    pub fn conductor_seed_bytes(&self) -> Option<[u8; 32]> {
+        let seed = self.conductor_seed.as_ref().or(self.device_seed.as_ref())?;
+        <[u8; 32]>::try_from(seed.as_slice()).ok()
+    }
+
+    /// Whether this device's conductor has a key of its own.
+    pub fn has_own_conductor_key(&self) -> bool {
+        self.conductor_seed.is_some()
+    }
+}
+
+/// The key-store tag for a conductor seed. An install running the identity
+/// seed keeps the tag it always had; a device with its own key gets a tag
+/// named after that key, so one tag can never stand for two keys.
+pub fn conductor_lair_tag(conductor_seed: &[u8; 32], identity_seed: Option<&[u8]>) -> String {
+    if identity_seed == Some(&conductor_seed[..]) {
+        return IDENTITY_CONDUCTOR_TAG.to_string();
+    }
+    let public = crate::key_derivation::public_key_of_seed(conductor_seed);
+    format!("flowsta-conductor-{}", hex::encode(&public[..6]))
 }
 
 /// Encrypted vault on disk (serialized as JSON).
@@ -444,6 +479,46 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, ()> {
 
 #[cfg(test)]
 mod tests {
+    fn config_with(device_seed: Option<Vec<u8>>, conductor_seed: Option<Vec<u8>>) -> super::VaultConfig {
+        let mut config: super::VaultConfig = serde_json::from_str(
+            r#"{"agent_pub_key":"uhCAkTest","did":"did:flowsta:uhCAkTest","installed_app_ids":[],"created_at":1}"#,
+        )
+        .expect("a config written before devices had their own key still reads");
+        assert!(config.conductor_seed.is_none());
+        config.device_seed = device_seed;
+        config.conductor_seed = conductor_seed;
+        config
+    }
+
+    #[test]
+    fn an_install_without_its_own_key_runs_the_identity_seed_under_the_old_tag() {
+        let config = config_with(Some(vec![5u8; 32]), None);
+        let seed = config.conductor_seed_bytes().expect("a seed");
+        assert_eq!(seed, [5u8; 32]);
+        assert!(!config.has_own_conductor_key());
+        assert_eq!(super::conductor_lair_tag(&seed, config.device_seed.as_deref()), super::IDENTITY_CONDUCTOR_TAG);
+    }
+
+    #[test]
+    fn a_device_with_its_own_key_runs_it_under_a_tag_named_after_that_key() {
+        let config = config_with(Some(vec![5u8; 32]), Some(vec![6u8; 32]));
+        let seed = config.conductor_seed_bytes().expect("a seed");
+        assert_eq!(seed, [6u8; 32]);
+        assert!(config.has_own_conductor_key());
+        let tag = super::conductor_lair_tag(&seed, config.device_seed.as_deref());
+        assert_ne!(tag, super::IDENTITY_CONDUCTOR_TAG);
+        assert!(tag.starts_with("flowsta-conductor-"));
+        assert_eq!(tag, super::conductor_lair_tag(&seed, config.device_seed.as_deref()));
+        let other = super::conductor_lair_tag(&[7u8; 32], config.device_seed.as_deref());
+        assert_ne!(tag, other);
+    }
+
+    #[test]
+    fn a_seed_of_the_wrong_length_is_no_seed() {
+        assert!(config_with(Some(vec![5u8; 31]), None).conductor_seed_bytes().is_none());
+        assert!(config_with(None, None).conductor_seed_bytes().is_none());
+    }
+
     use super::*;
 
     #[test]
@@ -454,6 +529,7 @@ mod tests {
             installed_app_ids: vec!["flowsta_identity_v1_3".to_string()],
             created_at: 1708905600,
             device_seed: Some(vec![1u8; 32]),
+            conductor_seed: None,
             recovery_lookup_hash: Some("abcd1234".repeat(8)),
             agent_pub_key_raw_b64: Some("dGVzdA==".to_string()),
             web_agent_pub_key: Some("uhCAkWebKey456".to_string()),
@@ -505,6 +581,7 @@ mod tests {
             installed_app_ids: vec![],
             created_at: 1708905600,
             device_seed: None,
+            conductor_seed: None,
             recovery_lookup_hash: None,
             agent_pub_key_raw_b64: None,
             web_agent_pub_key: None,

@@ -808,6 +808,9 @@ pub(crate) fn setup_vault_inner(
             .unwrap()
             .as_secs() as i64,
         device_seed: Some(device_seed.to_vec()),
+        // Devices get a conductor key of their own when they are added to an
+        // identity; an identity created here runs its own seed.
+        conductor_seed: None,
         recovery_lookup_hash: Some(lookup_hash),
         agent_pub_key_raw_b64: Some(agent_pub_key_raw_b64),
         web_agent_pub_key,
@@ -851,7 +854,7 @@ pub(crate) fn setup_vault_inner(
     );
 
     // Extract conductor startup params before storing config
-    let conductor_seed = config.device_seed.clone();
+    let conductor_seed = conductor_start_params(&config);
     let conductor_data_dir = state.identity_root();
     let conductor_passphrase = password.clone();
 
@@ -948,6 +951,7 @@ pub(crate) fn unlock_vault_inner(
     let _ = crate::relocate::relocate_if_legacy(state, &config.agent_pub_key);
 
     // Extract conductor startup params before storing config
+    let conductor_seed = conductor_start_params(&config);
     let device_seed = config.device_seed.clone();
     let data_dir = state.identity_root();
     let passphrase = password.clone();
@@ -1033,7 +1037,7 @@ pub(crate) fn unlock_vault_inner(
     );
 
     // Spawn conductor startup in background (if device seed is available)
-    spawn_conductor_startup(device_seed, data_dir, passphrase, app_handle, state.clone());
+    spawn_conductor_startup(conductor_seed, data_dir, passphrase, app_handle, state.clone());
 
     Ok(result)
 }
@@ -1245,25 +1249,13 @@ pub(crate) async fn ensure_conductor_alive(
             .map_err(|_| "[watchdog] cached passphrase is not valid UTF-8".to_string())?
     };
 
-    // Pull device_seed out of vault_config.
-    let device_seed: [u8; 32] = {
+    // The conductor's own seed and key-store tag, from vault_config.
+    let (conductor_seed, conductor_tag) = {
         let cfg_guard = state.vault_config.lock().unwrap();
         let cfg = cfg_guard
             .as_ref()
             .ok_or("[watchdog] vault config not available")?;
-        let seed_vec = cfg
-            .device_seed
-            .as_ref()
-            .ok_or("[watchdog] no device seed in vault config")?;
-        if seed_vec.len() != 32 {
-            return Err(format!(
-                "[watchdog] device seed wrong length ({} bytes)",
-                seed_vec.len()
-            ));
-        }
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(seed_vec);
-        seed
+        conductor_start_params(cfg).ok_or("[watchdog] no conductor seed in vault config")?
     };
 
     let data_dir = state.identity_root();
@@ -1275,7 +1267,8 @@ pub(crate) async fn ensure_conductor_alive(
         data_dir,
         resource_dir,
         passphrase,
-        device_seed,
+        conductor_seed,
+        conductor_tag,
     )
     .await
     {
@@ -1355,19 +1348,26 @@ pub(crate) fn resolve_resource_dir(
     data_dir.to_path_buf()
 }
 
+/// The seed this device's conductor runs as and its key-store tag: the
+/// device's own key when it has one, else the identity seed under the tag
+/// it has always had.
+pub(crate) fn conductor_start_params(config: &VaultConfig) -> Option<([u8; 32], String)> {
+    let seed = config.conductor_seed_bytes()?;
+    let tag = crate::vault::conductor_lair_tag(&seed, config.device_seed.as_deref());
+    Some((seed, tag))
+}
+
 /// Spawn the conductor startup sequence in a background task.
 /// Called after vault unlock or setup.
 fn spawn_conductor_startup(
-    device_seed: Option<Vec<u8>>,
+    conductor: Option<([u8; 32], String)>,
     data_dir: std::path::PathBuf,
     passphrase: String,
     app_handle: tauri::AppHandle,
     state: Arc<AppState>,
 ) {
-    if let Some(seed_vec) = device_seed {
-        if seed_vec.len() == 32 {
-            let mut seed = [0u8; 32];
-            seed.copy_from_slice(&seed_vec);
+    if let Some((seed, tag)) = conductor {
+        {
 
             *state.conductor_status.lock().unwrap() = ConductorStatus::Starting {
                 message: "Initializing...".into(),
@@ -1400,6 +1400,7 @@ fn spawn_conductor_startup(
                     resource_dir,
                     passphrase,
                     seed,
+                    tag,
                 )
                 .await
                 {
@@ -1529,11 +1530,9 @@ fn spawn_conductor_startup(
                     }
                 }
             });
-        } else {
-            log::warn!("Device seed is {} bytes, expected 32 - skipping conductor", seed_vec.len());
         }
     } else {
-        log::info!("No device seed in vault - conductor not started");
+        log::info!("No usable conductor seed in vault - conductor not started");
     }
 }
 
