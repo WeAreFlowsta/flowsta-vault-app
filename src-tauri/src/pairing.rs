@@ -541,6 +541,15 @@ pub async fn pair_begin(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<String, String> {
+    pair_begin_inner(api_url, password, app_handle, state.inner().clone()).await
+}
+
+pub(crate) async fn pair_begin_inner(
+    api_url: String,
+    password: String,
+    app_handle: tauri::AppHandle,
+    state: Arc<AppState>,
+) -> Result<String, String> {
     crate::commands::validate_vault_password(&password)?;
     if state.vault_config.lock().unwrap().is_some() {
         return Err("Lock this Vault before adding another identity.".into());
@@ -559,7 +568,6 @@ pub async fn pair_begin(
     let code_password = new_password().map_err(|e| e.to_string())?;
     let code = format_code(&mailbox_id, &code_password);
 
-    let state = state.inner().clone();
     let task = tauri::async_runtime::spawn(async move {
         let met_handle = app_handle.clone();
         let handover = run_new_device(&mut mailbox, &mailbox_id, &code_password, &intro, move || {
@@ -630,6 +638,10 @@ pub async fn pair_cancel() -> Result<(), String> {
 /// Returns who is asking, for the approve question.
 #[tauri::command]
 pub async fn pair_claim(api_url: String, code: String, state: State<'_, Arc<AppState>>) -> Result<DeviceIntro, String> {
+    pair_claim_inner(api_url, code, state.inner()).await
+}
+
+pub(crate) async fn pair_claim_inner(api_url: String, code: String, state: &Arc<AppState>) -> Result<DeviceIntro, String> {
     let (mailbox_id, code_password) = parse_code(&code).ok_or("invalid_code")?;
     {
         let config = state.vault_config.lock().unwrap();
@@ -651,6 +663,10 @@ pub async fn pair_claim(api_url: String, code: String, state: State<'_, Arc<AppS
 /// Existing device: the person approved. Hands the identity over.
 #[tauri::command]
 pub async fn pair_approve(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    pair_approve_inner(state.inner()).await
+}
+
+pub(crate) async fn pair_approve_inner(state: &Arc<AppState>) -> Result<(), String> {
     let mut met = MET.lock().await.take().ok_or("pair_closed")?;
     let handover = {
         let config = state.vault_config.lock().unwrap();

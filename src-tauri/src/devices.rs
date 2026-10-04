@@ -327,7 +327,11 @@ pub struct DeviceRow {
 /// The identity's devices, this one first, as this device knows them.
 #[tauri::command]
 pub async fn devices_list(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<DeviceRow>, String> {
-    let records = crate::sealed::sealed_list_inner(&state).await?;
+    devices_list_inner(state.inner()).await
+}
+
+pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<DeviceRow>, String> {
+    let records = crate::sealed::sealed_list_inner(state).await?;
     let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
     let mine = latest_change(&records);
     let now = now_ms();
@@ -355,7 +359,11 @@ fn key32_of(conductor_key: &str) -> Option<String> {
 /// record says so to every device (itself included, which then stands down).
 #[tauri::command]
 pub async fn device_remove(api_url: String, install_id: String, state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
-    let records = crate::sealed::sealed_list_inner(&state).await?;
+    device_remove_inner(api_url, install_id, state.inner()).await
+}
+
+pub(crate) async fn device_remove_inner(api_url: String, install_id: String, state: &Arc<AppState>) -> Result<(), String> {
+    let records = crate::sealed::sealed_list_inner(state).await?;
     let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
     let device = devices_in(&records)
         .into_iter()
@@ -366,7 +374,7 @@ pub async fn device_remove(api_url: String, install_id: String, state: tauri::St
     }
     // Flowsta's servers first: without them the device could still sign in.
     let target = key32_of(&device.conductor_key).ok_or("unknown_device")?;
-    match crate::device_registry::remove_device(&state, &api_url, &target).await {
+    match crate::device_registry::remove_device(state, &api_url, &target).await {
         Ok(()) => {}
         // A device that never reached the servers has nothing to remove there.
         Err(e) if e.starts_with("unknown_device") => {}
@@ -375,7 +383,7 @@ pub async fn device_remove(api_url: String, install_id: String, state: tauri::St
     let now = now_ms();
     let removed = DeviceRecord { removed_at: Some(now), removed_by: Some(me), seen_at: device.seen_at, ..device.clone() };
     crate::sealed::sealed_store_spec(
-        &state,
+        state,
         StoreSpec {
             entry_type: DEVICE_ENTRY_TYPE.to_string(),
             body: serde_json::to_value(&removed).map_err(|e| e.to_string())?,

@@ -4059,6 +4059,88 @@ async fn dev_sealed_handler(
     }))))
 }
 
+/// Dev-only: the multi-device commands, run headlessly so the harness can
+/// drive two instances: add a device with a code, list and remove devices,
+/// lock with or without syncing, write a test record.
+async fn dev_devices_handler(
+    State(state): State<Arc<IpcState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError { error: "not_found".into(), description: None }),
+        ));
+    }
+    let app = &state.app_state;
+    let api_url = option_env!("FLOWSTA_API_URL").unwrap_or("https://auth-api.flowsta.com").to_string();
+    let text = |key: &str| body.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let result: Result<serde_json::Value, String> = match text("op").as_str() {
+        "pair-begin" => crate::pairing::pair_begin_inner(api_url, text("password"), state.app_handle.clone(), app.clone())
+            .await
+            .map(|code| serde_json::json!({ "code": code })),
+        "pair-claim" => crate::pairing::pair_claim_inner(api_url, text("code"), app)
+            .await
+            .map(|intro| serde_json::json!({ "intro": intro })),
+        "pair-approve" => crate::pairing::pair_approve_inner(app).await.map(|_| serde_json::json!({ "approved": true })),
+        "list" => crate::devices::devices_list_inner(app).await.map(|rows| serde_json::json!({ "devices": rows })),
+        "remove" => crate::devices::device_remove_inner(api_url, text("install_id"), app)
+            .await
+            .map(|_| serde_json::json!({ "removed": true })),
+        "lock" => {
+            // Stash the passphrase so /dev/unlock can re-unlock, as /dev/lock does.
+            let pass = app.unlock_passphrase.lock().unwrap().as_mut().map(|locked| locked.lock().to_vec());
+            if let Some(p) = pass {
+                *app.dev_relock_passphrase.lock().unwrap() = Some(lair_keystore_api::dependencies::sodoken::LockedArray::from(p));
+            }
+            crate::commands::lock_and_keep_syncing(app, state.app_handle.clone()).map(|_| serde_json::json!({ "locked": true }))
+        }
+        "stop-syncing" => {
+            crate::commands::stop_syncing_while_locked(app);
+            Ok(serde_json::json!({ "stopped": true }))
+        }
+        "status" => {
+            let config = app.vault_config.lock().unwrap();
+            Ok(serde_json::json!({
+                "unlocked": config.is_some(),
+                "agent_pub_key": config.as_ref().map(|c| c.agent_pub_key.clone()),
+                "own_conductor_key": config.as_ref().map(|c| c.conductor_seed.is_some()),
+                "joined_existing": config.as_ref().map(|c| c.joined_existing),
+                "display_name": config.as_ref().and_then(|c| c.display_name.clone()),
+                "syncing_while_locked": config.is_none() && app.kept_conductor.lock().unwrap().is_some(),
+                "removed": crate::paths::removed_marker_path(&app.identity_root()).exists(),
+                "install_id": crate::paths::install_id(&app.data_dir),
+                "conductor": app.conductor_status.lock().unwrap().clone(),
+            }))
+        }
+        "write" => crate::sealed::sealed_store_inner(
+            app,
+            "harness_note".into(),
+            serde_json::json!({ "text": text("text") }),
+            Vec::new(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+        )
+        .await
+        .map(|hash| serde_json::json!({ "action_hash": hash })),
+        "notes" => crate::sealed::sealed_list_inner(app).await.map(|records| {
+            let notes: Vec<serde_json::Value> = records
+                .iter()
+                .filter(|r| r.entry_type == "harness_note")
+                .map(|r| r.body.clone())
+                .collect();
+            serde_json::json!({ "notes": notes })
+        }),
+        other => Err(format!("unknown op {:?}", other)),
+    };
+    match result {
+        Ok(value) => Ok(axum::response::IntoResponse::into_response(Json(value))),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(IpcError { error: "failed".into(), description: Some(e) }),
+        )),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct DevLegacyBody {
     phrase: String,
@@ -4950,6 +5032,7 @@ pub async fn start_ipc_server(
         .route("/dev/status", get(dev_status_handler))
         .route("/dev/identity", get(dev_identity_handler))
         .route("/dev/sealed", get(dev_sealed_handler))
+        .route("/dev/devices", post(dev_devices_handler))
         .route("/dev/lock", post(dev_lock_handler))
         .route("/dev/unlock", post(dev_unlock_handler))
         .route("/dev/setup-legacy-vault", post(dev_setup_legacy_handler))
