@@ -443,6 +443,7 @@ pub fn run() {
             identities::list_identities,
             identities::select_identity,
             commands::lock_vault,
+            commands::stop_syncing,
             commands::reset_vault,
             commands::erase_device,
             commands::get_identity,

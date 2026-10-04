@@ -178,6 +178,8 @@ pub(crate) fn adopt_partition_before_setup(state: &Arc<AppState>, agent_pub_key:
         if state.vault_config.lock().unwrap().is_some() {
             return Err("Lock the Vault before adding an identity.".into());
         }
+        // One conductor per Vault: the locked identity stops syncing.
+        crate::commands::stop_syncing_while_locked(state);
         if state.conductor_handle.lock().unwrap().is_some() {
             return Err("The Vault is still shutting down. Try again in a moment.".into());
         }
@@ -210,7 +212,11 @@ pub(crate) fn select_identity_inner(state: &Arc<AppState>, key: &str) -> Result<
     if state.vault_config.lock().unwrap().is_some() {
         return Err("Lock the Vault before switching identity.".into());
     }
-    if state.conductor_handle.lock().unwrap().is_some() {
+    // One conductor per Vault: the locked identity stops syncing.
+    if root_for_key(&state.data_dir, key).as_deref() != Some(state.identity_root().as_path()) {
+        crate::commands::stop_syncing_while_locked(state);
+    }
+    if state.conductor_handle.lock().unwrap().is_some() && state.kept_conductor.lock().unwrap().is_none() {
         return Err("The Vault is still shutting down. Try again in a moment.".into());
     }
     let root = root_for_key(&state.data_dir, key).ok_or("No such identity on this device.")?;

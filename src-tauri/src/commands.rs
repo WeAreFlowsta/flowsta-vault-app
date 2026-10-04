@@ -224,6 +224,10 @@ pub struct AppState {
     pub linked_third_party_apps: Mutex<Vec<LinkedThirdPartyApp>>,
     /// Handle to the running conductor + lair processes (None = not running).
     pub conductor_handle: Mutex<Option<ConductorHandle>>,
+    /// Set while the Vault is locked but its conductor keeps running, so
+    /// the identity's devices keep syncing: whose conductor it is and what
+    /// it runs as (to bring it back if it stops).
+    pub kept_conductor: Mutex<Option<KeptConductor>>,
     /// Live tests point the record layer at a conductor they started themselves.
     #[cfg(test)]
     pub test_conductor_ports: Mutex<Option<(u16, u16)>>,
@@ -448,6 +452,7 @@ impl AppState {
             approved_apps: Mutex::new(approved_sites),
             linked_third_party_apps: Mutex::new(linked_apps),
             conductor_handle: Mutex::new(None),
+            kept_conductor: Mutex::new(None),
             #[cfg(test)]
             test_conductor_ports: Mutex::new(None),
             conductor_status: Mutex::new(ConductorStatus::Stopped),
@@ -568,6 +573,8 @@ pub struct VaultStatus {
     pub version: String,
     pub agent_pub_key: Option<String>,
     pub did: Option<String>,
+    /// Locked, and this identity's devices are still syncing.
+    pub syncing_while_locked: bool,
 }
 
 /// Get the current vault status.
@@ -582,7 +589,38 @@ pub fn get_vault_status(state: State<'_, Arc<AppState>>) -> VaultStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         agent_pub_key: config.as_ref().map(|c| c.agent_pub_key.clone()),
         did: config.as_ref().map(|c| c.did.clone()),
+        syncing_while_locked: config.is_none() && state.kept_conductor.lock().unwrap().is_some(),
     }
+}
+
+/// The conductor of a locked Vault that keeps syncing.
+pub struct KeptConductor {
+    pub agent_pub_key: String,
+    pub seed: [u8; 32],
+    pub tag: String,
+}
+
+impl Drop for KeptConductor {
+    fn drop(&mut self) {
+        self.seed.fill(0);
+    }
+}
+
+/// A locked Vault that kept syncing stops: another identity is about to be
+/// opened, added or moved on this device. Does nothing while unlocked.
+pub(crate) fn stop_syncing_while_locked(state: &AppState) {
+    if state.vault_config.lock().unwrap().is_some() {
+        return;
+    }
+    if state.kept_conductor.lock().unwrap().take().is_none() {
+        return;
+    }
+    if let Some(handle) = state.conductor_handle.lock().unwrap().take() {
+        handle.shutdown();
+    }
+    *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
+    *state.unlock_passphrase.lock().unwrap() = None;
+    log::info!("Stopped syncing while locked.");
 }
 
 #[derive(Serialize)]
@@ -1106,16 +1144,97 @@ pub(crate) fn unlock_vault_inner(
         ),
     );
 
+    // This identity's conductor kept running while locked: attach to it.
+    let kept = state.kept_conductor.lock().unwrap().take();
+    let was_kept = kept.is_some();
+    let kept_for_this_identity = kept.map(|k| k.agent_pub_key == agent_key_for_marker).unwrap_or(false);
+    let still_running = matches!(
+        state.conductor_handle.lock().unwrap().as_mut().map(|h| h.conductor_child.try_wait()),
+        Some(Ok(None))
+    );
+    if kept_for_this_identity && still_running {
+        log::info!("Unlocked onto the running conductor.");
+        this_device_comes_online(conductor_seed.as_ref().map(|(seed, _)| *seed), state);
+        let ready = state.conductor_status.lock().unwrap().clone();
+        let _ = app_handle.emit("conductor-status", ready);
+        spawn_after_ready(state.clone(), app_handle);
+        return Ok(result);
+    }
+    if was_kept {
+        // It stopped, or it was another identity's: start afresh.
+        if let Some(stale) = state.conductor_handle.lock().unwrap().take() {
+            stale.shutdown();
+        }
+    }
+
     // Spawn conductor startup in background (if device seed is available)
     spawn_conductor_startup(conductor_seed, data_dir, passphrase, app_handle, state.clone());
 
     Ok(result)
 }
 
-/// Lock the vault (clear in-memory config and stop conductor).
+/// Lock the vault: nothing can be approved, signed or read until it is
+/// unlocked again. The identity's devices keep syncing unless
+/// `stop_syncing` is set.
 #[tauri::command(async)]
-pub fn lock_vault(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    lock_vault_inner(state.inner())
+pub fn lock_vault(
+    stop_syncing: Option<bool>,
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if stop_syncing.unwrap_or(false) {
+        return lock_vault_inner(state.inner());
+    }
+    lock_and_keep_syncing(state.inner(), app_handle)
+}
+
+/// Stop syncing on a Vault that is already locked.
+#[tauri::command(async)]
+pub fn stop_syncing(state: State<'_, Arc<AppState>>) {
+    stop_syncing_while_locked(state.inner());
+}
+
+/// How often a locked Vault that keeps syncing checks its conductor.
+const KEPT_CONDUCTOR_CHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Lock, leaving the conductor running where the identity has devices to
+/// sync with (its private network). The unlock that follows attaches to it.
+pub(crate) fn lock_and_keep_syncing(state: &Arc<AppState>, app_handle: tauri::AppHandle) -> Result<(), String> {
+    let kept = {
+        let config = state.vault_config.lock().unwrap();
+        let running = matches!(*state.conductor_status.lock().unwrap(), ConductorStatus::Ready { .. });
+        config
+            .as_ref()
+            .filter(|c| running && c.data_key.is_some() && c.hosting_model.as_deref() == Some("device-hosted"))
+            .and_then(|c| conductor_start_params(c).map(|(seed, tag)| KeptConductor { agent_pub_key: c.agent_pub_key.clone(), seed, tag }))
+    };
+    let Some(kept) = kept else {
+        return lock_vault_inner(state);
+    };
+    lock_secrets(state);
+    *state.kept_conductor.lock().unwrap() = Some(kept);
+    log::info!("Vault locked. Still syncing.");
+
+    // Bring the conductor back if it stops while nobody is looking.
+    let state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(KEPT_CONDUCTOR_CHECK).await;
+            if state.vault_config.lock().unwrap().is_some() || state.kept_conductor.lock().unwrap().is_none() {
+                break;
+            }
+            let stopped = match state.conductor_handle.lock().unwrap().as_mut() {
+                Some(handle) => !matches!(handle.conductor_child.try_wait(), Ok(None)),
+                None => true,
+            };
+            if stopped {
+                if let Err(e) = ensure_conductor_alive(&state, &app_handle).await {
+                    log::warn!("[locked] conductor not restarted: {}", e);
+                }
+            }
+        }
+    });
+    Ok(())
 }
 
 
@@ -1180,7 +1299,28 @@ pub(crate) fn write_active_identity_marker(data_dir: &std::path::Path, agent_pub
     log::info!("identity epoch {} (marker now {}…)", epoch, &agent_pub_key[..agent_pub_key.len().min(12)]);
 }
 
+/// Lock and stop everything (the conductor too).
 pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
+    lock_secrets(state);
+    *state.kept_conductor.lock().unwrap() = None;
+
+    // Shutdown conductor + lair if running
+    if let Some(handle) = state.conductor_handle.lock().unwrap().take() {
+        handle.shutdown();
+    }
+    *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
+
+    // Drop the cached passphrase. `LockedArray::Drop` zeroes the bytes
+    // and unlocks the memory pages.
+    *state.unlock_passphrase.lock().unwrap() = None;
+
+    log::info!("Vault locked.");
+    Ok(())
+}
+
+/// What every lock does: the decrypted vault leaves memory and whatever was
+/// waiting for an answer is refused.
+fn lock_secrets(state: &Arc<AppState>) {
     // Decrypted records read a moment ago do not outlive the lock.
     crate::sealed::forget_recent_versions();
     crate::device_registry::set_device_signer(None);
@@ -1218,22 +1358,8 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     // Clear MAU state before clearing vault config (needs device_seed)
     crate::mau::clear_mau_state(&state);
 
-    let mut config = state.vault_config.lock().unwrap();
-    *config = None;
-
-    // Shutdown conductor + lair if running
-    if let Some(handle) = state.conductor_handle.lock().unwrap().take() {
-        handle.shutdown();
-    }
-    *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
-
-    // Drop the cached passphrase. `LockedArray::Drop` zeroes the bytes
-    // and unlocks the memory pages.
-    *state.unlock_passphrase.lock().unwrap() = None;
+    *state.vault_config.lock().unwrap() = None;
     *state.grant_token_cache.lock().unwrap() = None;
-
-    log::info!("Vault locked.");
-    Ok(())
 }
 
 /// Get the current conductor status (for frontend polling).
@@ -1325,12 +1451,17 @@ pub(crate) async fn ensure_conductor_alive(
     };
 
     // The conductor's own seed and key-store tag, from vault_config.
-    let (conductor_seed, conductor_tag) = {
-        let cfg_guard = state.vault_config.lock().unwrap();
-        let cfg = cfg_guard
+    let from_config = state.vault_config.lock().unwrap().as_ref().map(conductor_start_params);
+    let (conductor_seed, conductor_tag) = match from_config {
+        Some(params) => params.ok_or("[watchdog] no conductor seed in vault config")?,
+        // Locked and still syncing: what the conductor ran as was kept.
+        None => state
+            .kept_conductor
+            .lock()
+            .unwrap()
             .as_ref()
-            .ok_or("[watchdog] vault config not available")?;
-        conductor_start_params(cfg).ok_or("[watchdog] no conductor seed in vault config")?
+            .map(|k| (k.seed, k.tag.clone()))
+            .ok_or("[watchdog] vault config not available")?,
     };
 
     let data_dir = state.identity_root();
@@ -1441,10 +1572,47 @@ fn spawn_conductor_startup(
     app_handle: tauri::AppHandle,
     state: Arc<AppState>,
 ) {
-    // From here this device signs beside the identity key at sign-in, and
-    // makes itself known to the identity's account (repeating is harmless;
-    // offline it is tried again at the next unlock).
-    crate::device_registry::set_device_signer(conductor.as_ref().map(|(seed, _)| *seed));
+    this_device_comes_online(conductor.as_ref().map(|(seed, _)| *seed), &state);
+    spawn_conductor_startup_inner(conductor, data_dir, passphrase, app_handle, state)
+}
+
+/// What a device does about its siblings once its conductor is ready, at
+/// start and at every unlock: its own entry among the identity's devices
+/// (written when missing, changed or a day old) and the profile another
+/// device may have edited. Only where the encrypted private cell exists.
+fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle) {
+    let has_private_cell = devices_state
+        .vault_config
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.data_key.is_some() && c.hosting_model.as_deref() == Some("device-hosted"))
+        .unwrap_or(false);
+    if !has_private_cell {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        match crate::devices::publish_own(&devices_state).await {
+            Ok(true) => log::info!("This device's record was written"),
+            Ok(false) => {}
+            Err(e) => log::info!("This device's record was not written: {}", e),
+        }
+        match apply_profile_from_other_devices(&devices_state).await {
+            Ok(true) => {
+                log::info!("Profile updated from another device");
+                let _ = devices_app.emit("profile-changed", serde_json::json!({}));
+            }
+            Ok(false) => {}
+            Err(e) => log::info!("Profile not checked against other devices: {}", e),
+        }
+    });
+}
+
+/// From here this device signs beside the identity key at sign-in, and
+/// makes itself known to the identity's account (repeating is harmless;
+/// offline it is tried again at the next unlock).
+fn this_device_comes_online(conductor_seed: Option<[u8; 32]>, state: &Arc<AppState>) {
+    crate::device_registry::set_device_signer(conductor_seed);
     {
         let registry_state = state.clone();
         tauri::async_runtime::spawn(async move {
@@ -1463,6 +1631,15 @@ fn spawn_conductor_startup(
             }
         });
     }
+}
+
+fn spawn_conductor_startup_inner(
+    conductor: Option<([u8; 32], String)>,
+    data_dir: std::path::PathBuf,
+    passphrase: String,
+    app_handle: tauri::AppHandle,
+    state: Arc<AppState>,
+) {
     if let Some((seed, tag)) = conductor {
         {
 
@@ -1513,37 +1690,7 @@ fn spawn_conductor_startup(
                         // frontend listener may not be registered yet if startup is fast.
                         let _ = app_handle_ref.emit("conductor-status", ready_status);
 
-                        // This device's own entry among the identity's devices
-                        // (written when missing, changed or a day old). Only
-                        // where the encrypted private cell exists.
-                        {
-                            let devices_state = state.clone();
-                            let devices_app = app_handle_ref.clone();
-                            let has_private_cell = devices_state
-                                .vault_config
-                                .lock()
-                                .unwrap()
-                                .as_ref()
-                                .map(|c| c.data_key.is_some() && c.hosting_model.as_deref() == Some("device-hosted"))
-                                .unwrap_or(false);
-                            if has_private_cell {
-                                tauri::async_runtime::spawn(async move {
-                                    match crate::devices::publish_own(&devices_state).await {
-                                        Ok(true) => log::info!("This device's record was written"),
-                                        Ok(false) => {}
-                                        Err(e) => log::info!("This device's record was not written: {}", e),
-                                    }
-                                    match apply_profile_from_other_devices(&devices_state).await {
-                                        Ok(true) => {
-                                            log::info!("Profile updated from another device");
-                                            let _ = devices_app.emit("profile-changed", serde_json::json!({}));
-                                        }
-                                        Ok(false) => {}
-                                        Err(e) => log::info!("Profile not checked against other devices: {}", e),
-                                    }
-                                });
-                            }
-                        }
+                        spawn_after_ready(state.clone(), app_handle_ref.clone());
 
                         // Check for DNA updates from the server.
                         // Non-fatal - if offline or update fails, continue with current DNAs.
@@ -1867,6 +2014,7 @@ pub fn erase_device(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 /// (on Windows) the dir delete would fail on the still-open lair socket /
 /// conductor files.
 fn shutdown_for_erase(state: &Arc<AppState>) {
+    *state.kept_conductor.lock().unwrap() = None;
     if let Some(h) = state.conductor_handle.lock().unwrap().take() {
         h.shutdown();
     }

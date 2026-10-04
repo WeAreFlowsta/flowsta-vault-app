@@ -67,6 +67,20 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
   // more identities the wrong one must never go.
   const showForgotConfirm = useSignal(false);
   const switching = useSignal(false);
+  // Locked, with this identity's devices still syncing.
+  const stillSyncing = useSignal(false);
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ cleanup }) => {
+    const check = async () => {
+      try {
+        const status = await invoke<{ syncing_while_locked?: boolean }>("get_vault_status");
+        stillSyncing.value = !!status.syncing_while_locked;
+      } catch { /* the page is closing */ }
+    };
+    check();
+    const id = setInterval(check, 5_000);
+    cleanup(() => clearInterval(id));
+  });
 
   const loadDisplayInfo = $(async () => {
     try {
@@ -244,6 +258,21 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
                   Cancel
                 </GlassButton>
               </div>
+            </div>
+          )}
+          {stillSyncing.value && (
+            <div class="mt-4 flex items-center justify-between gap-3 rounded-md border border-gray-700 bg-gray-900/40 px-3 py-2">
+              <p class="flex items-center gap-2 text-xs text-gray-300">
+                <span class="h-2 w-2 shrink-0 rounded-full bg-green-400" />
+                Locked - still syncing
+              </p>
+              <button
+                type="button"
+                class="text-xs text-gray-400 underline decoration-gray-600 underline-offset-2 hover:text-gray-200"
+                onClick$={async () => { await invoke("stop_syncing").catch(() => {}); stillSyncing.value = false; }}
+              >
+                Lock and stop syncing
+              </button>
             </div>
           )}
           <div class="mt-4 flex flex-col items-center gap-2 text-center">
