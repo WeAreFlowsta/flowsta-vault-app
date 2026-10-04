@@ -1598,23 +1598,45 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
     if !has_private_cell {
         return;
     }
+    // One round now, then one every few minutes while this identity stays
+    // unlocked. A newer unlock replaces this loop.
+    let round = DEVICES_ROUND.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
+        loop {
+            if devices_round(&devices_state, &devices_app).await {
+                break;
+            }
+            tokio::time::sleep(DEVICES_ROUND_EVERY).await;
+            let current = DEVICES_ROUND.load(std::sync::atomic::Ordering::SeqCst) == round;
+            if !current || devices_state.vault_config.lock().unwrap().is_none() {
+                break;
+            }
+        }
+    });
+}
+
+static DEVICES_ROUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const DEVICES_ROUND_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// One round. Returns true when this device stood down.
+async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHandle) -> bool {
+    {
         // Removed by another device of the identity: stand down. Nothing is
         // erased; the lock screen offers what comes next.
-        if let Ok(true) = crate::devices::removed_here_now(&devices_state).await {
+        if let Ok(true) = crate::devices::removed_here_now(devices_state).await {
             log::info!("This device was removed from the identity. Standing down.");
             let _ = std::fs::write(crate::paths::removed_marker_path(&devices_state.identity_root()), b"");
             devices_state.activity.record("device_stood_down", "This device was removed from your identity", None, None, None);
-            let _ = lock_vault_inner(&devices_state);
+            let _ = lock_vault_inner(devices_state);
             let _ = devices_app.emit("device-removed", serde_json::json!({}));
-            return;
+            return true;
         }
-        match crate::devices::publish_own(&devices_state).await {
+        match crate::devices::publish_own(devices_state).await {
             Ok(true) => log::info!("This device's record was written"),
             Ok(false) => {}
             Err(e) => log::info!("This device's record was not written: {}", e),
         }
-        match apply_profile_from_other_devices(&devices_state).await {
+        match apply_profile_from_other_devices(devices_state).await {
             Ok(true) => {
                 log::info!("Profile updated from another device");
                 let _ = devices_app.emit("profile-changed", serde_json::json!({}));
@@ -1622,7 +1644,23 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
             Ok(false) => {}
             Err(e) => log::info!("Profile not checked against other devices: {}", e),
         }
-    });
+        // Every device is told when another one is added or removed.
+        match crate::devices::notice_changes(devices_state).await {
+            Ok(changes) if !changes.is_empty() => {
+                let added: Vec<String> = changes
+                    .iter()
+                    .filter_map(|c| match c {
+                        crate::devices::DeviceChange::Added(d) => Some(d.name.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let _ = devices_app.emit("devices-changed", serde_json::json!({ "added": added }));
+            }
+            Ok(_) => {}
+            Err(e) => log::info!("Devices not checked: {}", e),
+        }
+    }
+    false
 }
 
 /// From here this device signs beside the identity key at sign-in, and

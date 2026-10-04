@@ -189,6 +189,81 @@ fn own_record(state: &AppState, existing: Option<&DeviceRecord>, latest_change: 
     })
 }
 
+/// A device as this one last saw it. Kept on this device only.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct KnownDevice {
+    pub install_id: String,
+    pub conductor_key: String,
+    pub removed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeviceChange {
+    Added(DeviceRecord),
+    Removed(DeviceRecord),
+}
+
+fn known(devices: &[DeviceRecord]) -> Vec<KnownDevice> {
+    devices
+        .iter()
+        .map(|d| KnownDevice { install_id: d.install_id.clone(), conductor_key: d.conductor_key.clone(), removed: d.removed_at.is_some() })
+        .collect()
+}
+
+/// What changed among the identity's OTHER devices since this one last
+/// looked: a device it had not seen, or one removed by another device.
+/// `before` is `None` the first time (nothing to compare with).
+pub fn changes_since(before: Option<&[KnownDevice]>, devices: &[DeviceRecord], me: &str) -> Vec<DeviceChange> {
+    let Some(before) = before else {
+        return Vec::new();
+    };
+    let mut changes = Vec::new();
+    for device in devices.iter().filter(|d| d.install_id != me) {
+        let seen = before
+            .iter()
+            .find(|k| k.install_id == device.install_id && k.conductor_key == device.conductor_key);
+        match (seen, device.removed_at.is_some()) {
+            (None, false) => changes.push(DeviceChange::Added(device.clone())),
+            (Some(k), true) if !k.removed && device.removed_by.as_deref() != Some(me) => {
+                changes.push(DeviceChange::Removed(device.clone()))
+            }
+            _ => {}
+        }
+    }
+    changes
+}
+
+/// Notice devices added or removed elsewhere: one Activity line each and a
+/// `devices-changed` event for the page. Returns the changes.
+pub async fn notice_changes(state: &Arc<AppState>) -> Result<Vec<DeviceChange>, String> {
+    let devices = list(state).await?;
+    let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    let path = crate::paths::known_devices_path(&state.identity_root());
+    let before: Option<Vec<KnownDevice>> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    let changes = changes_since(before.as_deref(), &devices, &me);
+    for change in &changes {
+        match change {
+            DeviceChange::Added(d) => state.activity.record(
+                "device_added_elsewhere",
+                format!("{} was added to your identity", d.name),
+                Some("Not you? Remove it in Settings, Devices.".into()),
+                None,
+                None,
+            ),
+            DeviceChange::Removed(d) => {
+                state.activity.record("device_removed_elsewhere", format!("{} was removed from your devices", d.name), None, None, None)
+            }
+        }
+    }
+    let now = known(&devices);
+    if before.as_deref() != Some(now.as_slice()) {
+        if let Ok(bytes) = serde_json::to_vec(&now) {
+            let _ = std::fs::write(&path, bytes);
+        }
+    }
+    Ok(changes)
+}
+
 /// Whether this device reads itself as removed, from the records it holds now.
 pub async fn removed_here_now(state: &Arc<AppState>) -> Result<bool, String> {
     let records = crate::sealed::sealed_list_inner(state).await?;
@@ -395,6 +470,30 @@ mod tests {
         // Added again, the same install runs a new key: a new device.
         current.conductor_key = "new key".into();
         assert!(needs_refresh(Some(&existing), &current));
+    }
+
+    #[test]
+    fn a_device_notices_one_added_or_removed_elsewhere_once() {
+        let mine = device("me");
+        let mut other = device("other");
+        other.conductor_key = "other key".into();
+        // The first look has nothing to compare with.
+        assert!(changes_since(None, &[mine.clone(), other.clone()], "me").is_empty());
+        // A device this one had not seen.
+        let before = known(&[mine.clone()]);
+        assert_eq!(changes_since(Some(&before), &[mine.clone(), other.clone()], "me"), vec![DeviceChange::Added(other.clone())]);
+        // Seen once, it is not news again.
+        let before = known(&[mine.clone(), other.clone()]);
+        assert!(changes_since(Some(&before), &[mine.clone(), other.clone()], "me").is_empty());
+        // Removed by a third device: news. Removed by this one: not.
+        let mut removed = other.clone();
+        removed.removed_at = Some(5);
+        removed.removed_by = Some("third".into());
+        assert_eq!(changes_since(Some(&before), &[mine.clone(), removed.clone()], "me"), vec![DeviceChange::Removed(removed.clone())]);
+        removed.removed_by = Some("me".into());
+        assert!(changes_since(Some(&before), &[mine.clone(), removed.clone()], "me").is_empty());
+        // Its own record is never news; a device first seen already removed is not either.
+        assert!(changes_since(Some(&[]), &[mine.clone(), removed], "me").is_empty());
     }
 
     #[test]
