@@ -701,6 +701,8 @@ pub fn setup_vault(
         .filter(|e| !e.trim().is_empty())
         .map(|e| normalize_email(&e))
         .transpose()?;
+    // An account still on the web runs its phrase key here, as before.
+    let joining = is_restore.unwrap_or(false) && hosting_model.as_deref() == Some("device-hosted");
     let result = setup_vault_inner(
         mnemonic,
         password,
@@ -713,7 +715,7 @@ pub fn setup_vault(
         pending_reconcile.unwrap_or(false),
         pending_registration.unwrap_or(false),
         // Restoring = the identity already exists: this device is added to it.
-        is_restore.unwrap_or(false),
+        joining,
         app_handle,
         &state,
     )?;

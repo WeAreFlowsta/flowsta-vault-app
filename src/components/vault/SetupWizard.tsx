@@ -74,6 +74,9 @@ type Step =
   | "create-form"
   | "create-phrase"
   | "restore-phrase"
+  | "existing"
+  | "pair-password"
+  | "pair-code"
   | "signin"
   | "twofa"
   | "no-phrase"
@@ -95,16 +98,18 @@ const WEB_PHRASE_URL = `${__WEB_URL__}/dashboard/settings/password/`;
 * welcome screen; the phrase-first move sets it when a Restore turns out
 * to be a flowsta.com phrase. Labels and circles follow the journey, so a
 * new person never sees "Connect" or "Verify" for creating an identity. */
-type Flow = "create" | "restore" | "move";
+type Flow = "create" | "restore" | "move" | "pair";
 
 const FLOW_LABELS: Record<Flow, string[]> = {
 create: ["Your details", "Recovery phrase", "Ready"],
 restore: ["Recovery phrase", "Ready"],
+pair: ["Password", "Code", "Ready"],
 move: ["Sign in", "Recovery phrase", "Ready"],
 };
 
 function stepToCircle(s: Step, flow: Flow): number {
-if (flow === "restore") return s === "restore-phrase" || s === "choose" ? 0 : 1;
+if (flow === "pair") return s === "pair-password" ? 0 : s === "pair-code" ? 1 : 2;
+if (flow === "restore") return s === "restore-phrase" || s === "choose" || s === "existing" ? 0 : 1;
 if (flow === "create") {
 if (s === "choose" || s === "create-form") return 0;
 if (s === "create-phrase") return 1;
@@ -190,6 +195,83 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   // toward importing an export file, since the phrase brings back identity
   // but not data.
   const restoredFromPhrase = useSignal(false);
+
+  // Adding this device with a code typed on another device.
+  const pairPassword = useSignal("");
+  const pairPassword2 = useSignal("");
+  const pairCode = useSignal("");
+  const pairWaitingApproval = useSignal(false);
+  const pairedFromDevice = useSignal(false);
+
+  const showPairCode = $(async () => {
+    error.value = "";
+    const pw = checkVaultPassword(pairPassword.value);
+    if (!pw.valid) {
+      error.value = pw.hint || "Choose a stronger vault password.";
+      return;
+    }
+    if (pairPassword.value !== pairPassword2.value) {
+      error.value = "Passwords don't match.";
+      return;
+    }
+    loading.value = true;
+    pairWaitingApproval.value = false;
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      const unlisten = await listen<{ state: string; reason?: string; agent_pub_key?: string; did?: string }>(
+        "pair-status",
+        (ev) => {
+          const status = ev.payload;
+          if (status.state === "waiting_for_approval") {
+            pairWaitingApproval.value = true;
+            return;
+          }
+          unlisten();
+          if (status.state === "done") {
+            result.agentPubKey = status.agent_pub_key || "";
+            result.did = status.did || "";
+            pairPassword.value = "";
+            pairPassword2.value = "";
+            pairedFromDevice.value = true;
+            step.value = "done";
+            return;
+          }
+          // Failed: say why in one line and offer a new code.
+          pairCode.value = "";
+          pairWaitingApproval.value = false;
+          const reason = status.reason || "";
+          error.value = reason.includes("code_mismatch")
+            ? "That code didn't match. Get a new one and try again."
+            : reason.includes("pair_closed")
+              ? "It was cancelled on your other device."
+              : reason.includes("pair_timeout") || reason.includes("mailbox_gone")
+                ? "That code expired."
+                : reason.includes("api_unreachable")
+                  ? "Couldn't reach Flowsta. Check your connection, or use your recovery phrase."
+                  : reason.includes("already in this Vault")
+                    ? "That identity is already in this Vault."
+                    : "That didn't work. Get a new code and try again.";
+        },
+      );
+      pairCode.value = await invoke<string>("pair_begin", { apiUrl: __API_URL__, password: pairPassword.value });
+      step.value = "pair-code";
+    } catch (e) {
+      const msg = String(e);
+      error.value = msg.includes("api_unreachable")
+        ? "Couldn't reach Flowsta. Check your connection, or use your recovery phrase."
+        : msg;
+    } finally {
+      loading.value = false;
+    }
+  });
+
+  const cancelPairing = $(async () => {
+    await invoke("pair_cancel").catch(() => {});
+    pairCode.value = "";
+    pairWaitingApproval.value = false;
+    error.value = "";
+    step.value = "existing";
+  });
 
   // Create-new-identity state (device-hosted identity)
   const createEmail = useSignal("");
@@ -983,8 +1065,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               <GlassButton onClick$={() => { error.value = ""; flow.value = "create"; step.value = "create-form"; }}>
               {props.mode === "add" ? "Create a new identity" : "Create my identity"}
               </GlassButton>
-              <GlassButton variant="secondary" onClick$={() => { error.value = ""; flow.value = "restore"; step.value = "restore-phrase"; }}>
-              I have a recovery phrase
+              <GlassButton variant="secondary" onClick$={() => { error.value = ""; flow.value = "restore"; step.value = "existing"; }}>
+              I already have an identity
               </GlassButton>
             </div>
 
@@ -1019,6 +1101,114 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               </button>
             </div>
             )}
+          </div>
+        )}
+
+        {/* ── An identity that already exists: two ways in, same result ── */}
+        {step.value === "existing" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="text-2xl font-bold text-white">Set up this device</h2>
+            <p class="mb-6 text-sm text-gray-400">with your Flowsta identity</p>
+
+            <div class="flex flex-col gap-4">
+              <div>
+                <GlassButton class="w-full" onClick$={() => { error.value = ""; flow.value = "restore"; step.value = "restore-phrase"; }}>
+                  Use my recovery phrase
+                </GlassButton>
+                <p class="mt-1 text-center text-xs text-gray-400">Your 24 words</p>
+              </div>
+              <div>
+                <GlassButton class="w-full" variant="secondary" onClick$={() => { error.value = ""; flow.value = "pair"; step.value = "pair-password"; }}>
+                  Use another device
+                </GlassButton>
+                <p class="mt-1 text-center text-xs text-gray-400">One that already has your Vault</p>
+              </div>
+            </div>
+
+            <div class="mt-6">
+              <GlassButton variant="secondary" onClick$={() => { error.value = ""; flow.value = "create"; step.value = "choose"; }}>
+                Back
+              </GlassButton>
+            </div>
+          </div>
+        )}
+
+        {step.value === "pair-password" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="mb-2 text-2xl font-bold text-white">Choose a password for this Vault</h2>
+            <p class="mb-4 text-sm text-gray-400">It unlocks your Vault on this device.</p>
+
+            <div class="mb-4">
+              <label class="mb-1 block text-xs font-medium text-gray-400">Password for this Vault</label>
+              <PasswordField
+                class="mb-2"
+                placeholder="At least 10 characters"
+                autocomplete="new-password"
+                value={pairPassword.value}
+                onInput$={(v) => { pairPassword.value = v; error.value = ""; }}
+              />
+              <PasswordStrength password={pairPassword.value} />
+            </div>
+            <div class="mb-4">
+              <label class="mb-1 block text-xs font-medium text-gray-400">Confirm password</label>
+              <PasswordField
+                placeholder="Repeat your password"
+                autocomplete="new-password"
+                value={pairPassword2.value}
+                onInput$={(v) => { pairPassword2.value = v; error.value = ""; }}
+              />
+            </div>
+
+            {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
+
+            <div class="flex justify-between">
+              <GlassButton variant="secondary" onClick$={() => { error.value = ""; step.value = "existing"; }}>
+                Back
+              </GlassButton>
+              <GlassButton
+                disabled={loading.value || !pairPassword.value || !pairPassword2.value}
+                onClick$={showPairCode}
+              >
+                {loading.value ? "Getting a code..." : "Show my code"}
+              </GlassButton>
+            </div>
+          </div>
+        )}
+
+        {step.value === "pair-code" && (
+          <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
+            <h2 class="mb-2 text-2xl font-bold text-white">Type this code on your other device</h2>
+            <p class="mb-6 text-sm text-gray-400">
+              In its Vault: Settings, Devices, Add a device.
+            </p>
+
+            {pairCode.value ? (
+              <>
+                <p class="mb-4 select-all rounded-lg bg-gray-900 py-5 text-center font-mono text-3xl tracking-widest text-white">
+                  {pairCode.value}
+                </p>
+                <p class="mb-6 flex items-center justify-center gap-2 text-sm text-sky-300">
+                  <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                  </svg>
+                  <span>{pairWaitingApproval.value ? "Now choose Add device there." : "Waiting for your other device..."}</span>
+                </p>
+              </>
+            ) : (
+              <p class="mb-6 text-sm text-red-400">{error.value}</p>
+            )}
+
+            <div class="flex justify-between">
+              <GlassButton variant="secondary" onClick$={cancelPairing}>
+                Back
+              </GlassButton>
+              {!pairCode.value && (
+                <GlassButton disabled={loading.value} onClick$={showPairCode}>
+                  {loading.value ? "Getting a code..." : "Get a new code"}
+                </GlassButton>
+              )}
+            </div>
           </div>
         )}
 
@@ -1224,7 +1414,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">{props.mode === "add" ? "Add an identity with its recovery phrase" : "Restore with your recovery phrase"}</h2>
             <p class="mb-4 text-sm text-gray-400">
-            Enter your 24 words. They rebuild your identity on this computer; your username, records and signatures return from the network. Then choose a password for this Vault.
+            Enter your 24 words. They set up your identity on this device; your username, records and signatures return from the network. Then choose a password for this Vault.
             </p>
 
             <textarea
@@ -1281,7 +1471,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             )}
 
             <div class="flex justify-between">
-              <GlassButton variant="secondary" onClick$={async () => { mnemonic.value = ""; phraseUpgradeOffer.value = false; error.value = ""; step.value = "choose"; }}>
+              <GlassButton variant="secondary" onClick$={async () => { mnemonic.value = ""; phraseUpgradeOffer.value = false; error.value = ""; step.value = "existing"; }}>
                 Back
               </GlassButton>
               <GlassButton
@@ -1996,6 +2186,16 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 Your records return as this computer syncs. Your username,
                 display name and email reconnect when Flowsta is reachable.
                 Nothing to do.
+              </p>
+            </div>
+          )}
+          {pairedFromDevice.value && (
+            <div class="mb-4 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4 text-left">
+              <p class="mb-1 text-sm font-semibold text-sky-200">
+                This device is now one of your devices
+              </p>
+              <p class="text-xs text-gray-400">
+                Your private data arrives from your other device while both are on. Nothing to do.
               </p>
             </div>
           )}

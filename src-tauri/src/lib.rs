@@ -424,6 +424,8 @@ pub fn run() {
             pairing::pair_claim,
             pairing::pair_approve,
             pairing::pair_decline,
+            devices::devices_list,
+            devices::device_remove,
             device_identity::attempt_account_reconcile,
             device_identity::update_pending_registration_email,
             relay_login::relay_claim,

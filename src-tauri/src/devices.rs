@@ -221,6 +221,85 @@ pub async fn publish_own(state: &Arc<AppState>) -> Result<bool, String> {
     Ok(true)
 }
 
+/// One row of Settings → Devices.
+#[derive(Serialize)]
+pub struct DeviceRow {
+    pub install_id: String,
+    pub name: String,
+    pub platform: String,
+    pub added_at: u64,
+    #[serde(flatten)]
+    pub state: DeviceState,
+}
+
+/// The identity's devices, this one first, as this device knows them.
+#[tauri::command]
+pub async fn devices_list(state: tauri::State<'_, Arc<AppState>>) -> Result<Vec<DeviceRow>, String> {
+    let records = crate::sealed::sealed_list_inner(&state).await?;
+    let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    let mine = latest_change(&records);
+    let now = now_ms();
+    let mut rows: Vec<DeviceRow> = devices_in(&records)
+        .into_iter()
+        .map(|d| DeviceRow {
+            state: device_state(&d, &me, mine, now),
+            install_id: d.install_id,
+            name: d.name,
+            platform: d.platform,
+            added_at: d.added_at,
+        })
+        .collect();
+    rows.sort_by_key(|r| (r.state != DeviceState::ThisDevice, r.state == DeviceState::Removed));
+    Ok(rows)
+}
+
+/// The 32-byte key (standard base64) inside a device record's conductor key.
+fn key32_of(conductor_key: &str) -> Option<String> {
+    let raw = crate::commands::base64_standard_decode(conductor_key).ok()?;
+    (raw.len() == 39).then(|| crate::key_derivation::base64_standard_encode(&raw[3..35]))
+}
+
+/// Remove a device of this identity: it can no longer sign in, and its
+/// record says so to every device (itself included, which then stands down).
+#[tauri::command]
+pub async fn device_remove(api_url: String, install_id: String, state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    let records = crate::sealed::sealed_list_inner(&state).await?;
+    let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    let device = devices_in(&records)
+        .into_iter()
+        .find(|d| d.install_id == install_id)
+        .ok_or("unknown_device")?;
+    if device.removed_at.is_some() {
+        return Ok(());
+    }
+    // Flowsta's servers first: without them the device could still sign in.
+    let target = key32_of(&device.conductor_key).ok_or("unknown_device")?;
+    match crate::device_registry::remove_device(&state, &api_url, &target).await {
+        Ok(()) => {}
+        // A device that never reached the servers has nothing to remove there.
+        Err(e) if e.starts_with("unknown_device") => {}
+        Err(e) => return Err(e),
+    }
+    let now = now_ms();
+    let removed = DeviceRecord { removed_at: Some(now), removed_by: Some(me), seen_at: device.seen_at, ..device.clone() };
+    crate::sealed::sealed_store_spec(
+        &state,
+        StoreSpec {
+            entry_type: DEVICE_ENTRY_TYPE.to_string(),
+            body: serde_json::to_value(&removed).map_err(|e| e.to_string())?,
+            refs: Vec::new(),
+            created_at: removed.added_at,
+            id: Some(device_logical_id(&removed.install_id)),
+            updated_at: Some(now),
+            deleted: false,
+        },
+        None,
+    )
+    .await?;
+    state.activity.record("device_removed", format!("Removed {} from your devices", device.name), None, None, None);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +375,14 @@ mod tests {
         current.seen_at = existing.seen_at + 10 * DAY;
         current.vault_version = "9.9.9".into();
         assert!(!needs_refresh(Some(&existing), &current));
+    }
+
+    #[test]
+    fn the_key_to_remove_is_the_32_bytes_inside_the_devices_conductor_key() {
+        let public = [9u8; 32];
+        let conductor_key = crate::key_derivation::base64_standard_encode(&crate::key_derivation::holo_agent_pub_key_bytes(&public));
+        assert_eq!(key32_of(&conductor_key), Some(crate::key_derivation::base64_standard_encode(&public)));
+        assert_eq!(key32_of("AAAA"), None);
     }
 
     #[test]

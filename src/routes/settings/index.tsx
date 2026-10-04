@@ -1,6 +1,7 @@
 import { component$, useSignal, useContext, useVisibleTask$, $ } from "@builder.io/qwik";
 import Callout from "~/components/dashboard/Callout";
 import { ContactCard } from "~/components/vault/ContactCard";
+import { DevicesTab } from "~/components/vault/DevicesTab";
 import type { DocumentHead } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
@@ -35,7 +36,7 @@ declare const __APP_VERSION__: string;
 export default component$(() => {
   const autoLockMinutes = useContext(autoLockContext);
 
-  const activeTab = useSignal<"general" | "about">("general");
+  const activeTab = useSignal<"general" | "devices" | "about">("general");
 
   // Privacy: sites that reached this Vault's local port without holding any
   // permission. Traffic, not access - kept so nothing can talk to the Vault
@@ -279,6 +280,7 @@ export default component$(() => {
 
   const TAB_LABELS: Record<string, string> = {
     general: "General",
+    devices: "Devices",
     about: "About",
   };
 
@@ -289,7 +291,7 @@ export default component$(() => {
       {/* Tabs */}
       <div class="mb-6 border-b border-gray-700">
         <div class="flex gap-6">
-          {(["general", "about"] as const).map((tab) => (
+          {(["general", "devices", "about"] as const).map((tab) => (
             <button
               key={tab}
               type="button"
@@ -683,6 +685,8 @@ export default component$(() => {
           </div>
         </div>
       )}
+
+      {activeTab.value === "devices" && <DevicesTab />}
 
       {/* About tab */}
       {activeTab.value === "about" && (
