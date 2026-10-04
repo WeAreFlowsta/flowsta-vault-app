@@ -1010,11 +1010,11 @@ pub fn export_all_data_with_progress(
         // - CAL-readable AND what import_vault_export re-stores.
         "sealed_records": {
             "_readme": concat!(
-                "Your private records, decrypted. These live only on your ",
-                "device (they do not gossip to Flowsta or anyone else), so ",
-                "this export - or a premium encrypted backup - is how they ",
-                "survive losing this machine. Import restores them after a ",
-                "recovery-phrase reinstall.",
+                "Your private records, decrypted. They are kept on your own ",
+                "devices only, encrypted, and never reach Flowsta or anyone ",
+                "else. Each record has an id and the time it was last ",
+                "changed; a record you deleted is listed with deleted: true ",
+                "so it stays deleted wherever this file is imported.",
             ),
             "count": sealed_records.as_ref().map(|r| r.len()).unwrap_or(0),
             "records": sealed_records.unwrap_or_default(),

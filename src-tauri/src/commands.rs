@@ -4182,21 +4182,8 @@ pub async fn export_all_data_to_file(
         None,
         None,
     );
-    let sealed = match crate::sealed::sealed_list_inner(state.inner()).await {
-        Ok(items) => Some(
-            items
-                .into_iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "entry_type": r.entry_type,
-                        "action_hash": r.action_hash,
-                        "created_at": r.created_at,
-                        "body": r.body,
-                        "refs": r.refs,
-                    })
-                })
-                .collect::<Vec<_>>(),
-        ),
+    let sealed = match crate::sealed::sealed_export_records(state.inner()).await {
+        Ok(records) => Some(records),
         Err(e) => {
             log::warn!("export_all_data_to_file: failed to list sealed records: {}", e);
             None
@@ -4269,21 +4256,8 @@ pub async fn export_all_data(
     };
     // Sealed private records - the canonical private data, decrypted for
     // the export (they live only on this device). Non-fatal on failure.
-    let sealed = match crate::sealed::sealed_list_inner(state.inner()).await {
-        Ok(items) => Some(
-            items
-                .into_iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "entry_type": r.entry_type,
-                        "action_hash": r.action_hash,
-                        "created_at": r.created_at,
-                        "body": r.body,
-                        "refs": r.refs,
-                    })
-                })
-                .collect::<Vec<_>>(),
-        ),
+    let sealed = match crate::sealed::sealed_export_records(state.inner()).await {
+        Ok(records) => Some(records),
         Err(e) => {
             log::warn!("export_all_data: failed to list sealed records: {}", e);
             None
@@ -4407,16 +4381,15 @@ pub async fn import_vault_export(
     }
 
     // ── Sealed records ──────────────────────────────────────────────
-    // Dedupe on (entry_type, created_at) exactly like the migration
-    // importer, so re-running is a no-op for records already present.
+    // A record is stored only when it is newer than the version of it this
+    // device holds (by logical id; a record from before ids existed is
+    // matched on its type and creation time). Re-running is a no-op, an
+    // older export never replaces newer data, and a deletion in the export
+    // is kept.
     wait_for_conductor_ready(state.inner(), &app_handle, "import", std::time::Duration::from_secs(180)).await?;
-    let existing = crate::sealed::sealed_list_inner(state.inner())
+    let mut held = crate::sealed::sealed_held(state.inner())
         .await
         .map_err(|e| format!("Could not read current records: {}", e))?;
-    let already: std::collections::HashSet<(String, u64)> = existing
-        .iter()
-        .map(|r| (r.entry_type.clone(), r.created_at))
-        .collect();
 
     let records = export
         .get("sealed_records")
@@ -4437,31 +4410,47 @@ pub async fn import_vault_export(
             Some(rec_index + 1),
             Some(sealed_total),
         );
-        let entry_type = rec.get("entry_type").and_then(|v| v.as_str()).unwrap_or("");
-        let created_at = rec.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
-        let body = rec.get("body").cloned().unwrap_or(serde_json::Value::Null);
-        let refs: Vec<String> = rec
-            .get("refs")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-        if entry_type.is_empty() || body.is_null() {
-            continue;
+        let entry_type = rec.get("entry_type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        match crate::sealed::import_decision(&held, rec) {
+            crate::sealed::ImportDecision::Skip => {
+                if !entry_type.is_empty() {
+                    sealed_skipped += 1;
+                }
+            }
+            crate::sealed::ImportDecision::Store { spec, supersedes } => {
+                let id = spec.id.clone().unwrap_or_default();
+                let payload_time = spec.updated_at.unwrap_or(spec.created_at);
+                let (created_at, deleted) = (spec.created_at, spec.deleted);
+                let stored = crate::sealed::sealed_store_spec(
+                    state.inner(),
+                    spec,
+                    supersedes
+                        .filter(|h| h.len() == 39)
+                        .map(holochain_types::prelude::ActionHash::from_raw_39),
+                )
+                .await
+                .map_err(|e| format!("Failed to restore a {} record: {}", entry_type, e))?;
+                // The same record twice in one file is stored once.
+                held.insert(
+                    id.clone(),
+                    crate::sealed::StoredVersion {
+                        action_hash: hex::decode(&stored).unwrap_or_default(),
+                        payload: crate::sealed::SealedPayload {
+                            v: crate::sealed::SEALED_PAYLOAD_V2,
+                            entry_type: entry_type.clone(),
+                            created_at,
+                            body: Vec::new(),
+                            refs: Vec::new(),
+                            id: Some(id),
+                            updated_at: Some(payload_time),
+                            device: None,
+                            deleted,
+                        },
+                    },
+                );
+                sealed_restored += 1;
+            }
         }
-        if already.contains(&(entry_type.to_string(), created_at)) {
-            sealed_skipped += 1;
-            continue;
-        }
-        crate::sealed::sealed_store_inner(
-            state.inner(),
-            entry_type.to_string(),
-            body,
-            refs,
-            created_at,
-        )
-        .await
-        .map_err(|e| format!("Failed to restore a {} record: {}", entry_type, e))?;
-        sealed_restored += 1;
     }
     drop(_guard);
 

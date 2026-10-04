@@ -411,6 +411,7 @@ fn now_ms() -> Result<u64, String> {
 
 /// What to store. `id` / `updated_at` default to a fresh record's; an
 /// import passes the values the record already had.
+#[derive(Debug)]
 pub(crate) struct StoreSpec {
     pub entry_type: String,
     pub body: serde_json::Value,
@@ -695,6 +696,94 @@ pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredV
     Ok(versions)
 }
 
+/// The identity's records for an export: the newest version of each logical
+/// id, deletions included (as `deleted: true` with no body), so an import
+/// elsewhere keeps a deleted record deleted.
+pub(crate) async fn sealed_export_records(state: &Arc<AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let (mut winners, _superseded) = latest_versions(sealed_versions(state).await?);
+    winners.sort_by(|a, b| b.payload.created_at.cmp(&a.payload.created_at).then_with(|| b.action_hash.cmp(&a.action_hash)));
+    Ok(winners.into_iter().map(|v| export_record(&v)).collect())
+}
+
+fn export_record(version: &StoredVersion) -> serde_json::Value {
+    let p = &version.payload;
+    let mut record = serde_json::json!({
+        "entry_type": p.entry_type,
+        "action_hash": hex::encode(&version.action_hash),
+        "created_at": p.created_at,
+        "id": p.logical_id(),
+        "updated_at": p.version_time(),
+        "refs": p.refs,
+    });
+    if let Some(device) = &p.device {
+        record["device"] = serde_json::json!(device);
+    }
+    if p.deleted {
+        record["deleted"] = serde_json::json!(true);
+    } else {
+        record["body"] = rmp_serde::from_slice(&p.body).unwrap_or(serde_json::Value::Null);
+    }
+    record
+}
+
+/// What an import does with one exported record, given what this device
+/// already holds.
+#[derive(Debug)]
+pub(crate) enum ImportDecision {
+    /// Nothing to do: malformed, or this device holds the same or a newer
+    /// version of that record.
+    Skip,
+    /// Store it; `supersedes` is the older version it replaces here.
+    Store { spec: StoreSpec, supersedes: Option<Vec<u8>> },
+}
+
+/// `held` = this device's newest version per logical id.
+pub(crate) fn import_decision(
+    held: &std::collections::HashMap<String, StoredVersion>,
+    record: &serde_json::Value,
+) -> ImportDecision {
+    let entry_type = record.get("entry_type").and_then(|v| v.as_str()).unwrap_or("");
+    let created_at = record.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+    let deleted = record.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false);
+    let body = record.get("body").cloned().unwrap_or(serde_json::Value::Null);
+    if entry_type.is_empty() || (body.is_null() && !deleted) {
+        return ImportDecision::Skip;
+    }
+    let id = record
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| derived_logical_id(entry_type, created_at));
+    let updated_at = record.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(created_at);
+    let current = held.get(&id);
+    if current.map(|c| c.payload.version_time() >= updated_at).unwrap_or(false) {
+        return ImportDecision::Skip;
+    }
+    let refs = record
+        .get("refs")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    ImportDecision::Store {
+        spec: StoreSpec {
+            entry_type: entry_type.to_string(),
+            body: if deleted { serde_json::Value::Null } else { body },
+            refs,
+            created_at,
+            id: Some(id),
+            updated_at: Some(updated_at),
+            deleted,
+        },
+        supersedes: current.map(|c| c.action_hash.clone()),
+    }
+}
+
+/// This device's newest version per logical id, for `import_decision`.
+pub(crate) async fn sealed_held(state: &Arc<AppState>) -> Result<std::collections::HashMap<String, StoredVersion>, String> {
+    let (winners, _superseded) = latest_versions(sealed_versions(state).await?);
+    Ok(winners.into_iter().map(|v| (v.payload.logical_id(), v)).collect())
+}
+
 /// The identity's records as every device sees them: the newest version of
 /// each logical id, deletions left out. Newest first.
 pub(crate) async fn sealed_list_inner(
@@ -848,6 +937,61 @@ mod tests {
         assert!(result.contains(&3));
         // Every device picks the same one of the two.
         assert_eq!(live(vec![on_b, other, on_a]), result);
+    }
+
+    fn held(versions: Vec<StoredVersion>) -> std::collections::HashMap<String, StoredVersion> {
+        latest_versions(versions).0.into_iter().map(|v| (v.payload.logical_id(), v)).collect()
+    }
+
+    #[test]
+    fn an_export_made_before_ids_existed_imports_once_however_often_it_is_run() {
+        // A 2.0 export record: no id, no update time.
+        let record = serde_json::json!({ "entry_type": "login_activity", "created_at": 5000, "body": { "n": 1 }, "refs": [] });
+        let ImportDecision::Store { spec, supersedes } = import_decision(&held(vec![]), &record) else { panic!("stored on an empty device") };
+        assert_eq!(spec.id.as_deref(), Some("login_activity:5000"));
+        assert_eq!(spec.updated_at, Some(5000));
+        assert!(supersedes.is_none());
+        // The same file again, here or after it reached this device from another.
+        let here = held(vec![version(1, "login_activity", 5000, Some("login_activity:5000"), Some(5000), false)]);
+        assert!(matches!(import_decision(&here, &record), ImportDecision::Skip));
+        // A device still holding the record as 1.5.0 wrote it.
+        let legacy = held(vec![version(1, "login_activity", 5000, None, None, false)]);
+        assert!(matches!(import_decision(&legacy, &record), ImportDecision::Skip));
+    }
+
+    #[test]
+    fn an_older_export_never_replaces_what_a_device_holds() {
+        let here = held(vec![version(7, "user_profile", 100, Some("user_profile"), Some(9000), false)]);
+        let old = serde_json::json!({ "entry_type": "user_profile", "created_at": 100, "body": { "display_name": "old" }, "refs": [] });
+        assert!(matches!(import_decision(&here, &old), ImportDecision::Skip));
+        // A newer one does, and retires the version held.
+        let newer = serde_json::json!({ "entry_type": "user_profile", "created_at": 100, "id": "user_profile", "updated_at": 9500, "body": { "display_name": "new" }, "refs": [] });
+        let ImportDecision::Store { spec, supersedes } = import_decision(&here, &newer) else { panic!("the newer version is stored") };
+        assert_eq!(spec.updated_at, Some(9500));
+        assert_eq!(supersedes, Some(vec![7u8; 39]));
+    }
+
+    #[test]
+    fn a_deletion_travels_in_an_export_and_an_import_keeps_it() {
+        let deletion = version(2, "email_permission", 100, Some("email_permission:100"), Some(900), true);
+        let exported = export_record(&deletion);
+        assert_eq!(exported["deleted"], true);
+        assert!(exported.get("body").is_none());
+        // On a device that still shows the record: the deletion is stored.
+        let here = held(vec![version(1, "email_permission", 100, None, None, false)]);
+        let ImportDecision::Store { spec, .. } = import_decision(&here, &exported) else { panic!("the deletion is stored") };
+        assert!(spec.deleted);
+        assert_eq!(spec.id.as_deref(), Some("email_permission:100"));
+        // The other way round: an old export of the live record on a device that deleted it.
+        let deleted_here = held(vec![deletion]);
+        let old = serde_json::json!({ "entry_type": "email_permission", "created_at": 100, "body": { "app": "x" }, "refs": [] });
+        assert!(matches!(import_decision(&deleted_here, &old), ImportDecision::Skip));
+    }
+
+    #[test]
+    fn a_record_with_no_body_that_is_not_a_deletion_is_ignored() {
+        assert!(matches!(import_decision(&held(vec![]), &serde_json::json!({ "entry_type": "x", "created_at": 1 })), ImportDecision::Skip));
+        assert!(matches!(import_decision(&held(vec![]), &serde_json::json!({ "created_at": 1, "body": {} })), ImportDecision::Skip));
     }
 
     #[test]
