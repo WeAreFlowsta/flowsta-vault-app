@@ -452,6 +452,33 @@ pub(crate) async fn sealed_store_inner(
     .await
 }
 
+/// Create a once-per-identity record because none is visible on this
+/// device. On a device that was added to an existing identity the real
+/// record may simply not have arrived yet, so the version written here
+/// carries the lowest update time: it stands in until then, and any
+/// version another device wrote wins over it.
+pub(crate) async fn sealed_store_first(
+    state: &Arc<AppState>,
+    entry_type: String,
+    body: serde_json::Value,
+    refs: Vec<String>,
+    created_at: u64,
+) -> Result<String, String> {
+    let joined = state
+        .vault_config
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.joined_existing)
+        .unwrap_or(false);
+    sealed_store_spec(
+        state,
+        StoreSpec { entry_type, body, refs, created_at, id: None, updated_at: if joined { Some(0) } else { None }, deleted: false },
+        None,
+    )
+    .await
+}
+
 /// Seal one version and write it at the shared base; `supersedes` retires
 /// that earlier version in the same call.
 pub(crate) async fn sealed_store_spec(
@@ -1003,6 +1030,23 @@ mod tests {
         }
     }
 
+    async fn c_joins_and_fills_in(seed: &str, config: &crate::vault::VaultConfig, a: &LiveDevice) {
+        let mut joined = config.clone();
+        joined.joined_existing = true;
+        let c = live_device("j", 46054, seed, &joined, true).await;
+        // Straight away, before anything has arrived.
+        sealed_store_first(&c.state, "privacy_settings".into(), serde_json::json!({ "from": "the new device" }), vec![], 9_000_000_000_000).await.unwrap();
+        // A, which holds the real settings, wrote them long before.
+        sealed_store_inner(&a.state, "privacy_settings".into(), serde_json::json!({ "from": "the first device" }), vec![], 5000).await.unwrap();
+        eventually("both keep the settings the first device wrote", 300, || async {
+            let on = |l: Vec<SealedListItem>| l.iter().filter(|r| r.entry_type == "privacy_settings").map(|r| r.body["from"].clone()).collect::<Vec<_>>();
+            let on_a = sealed_list_inner(&a.state).await.map(on).unwrap_or_default();
+            let on_c = sealed_list_inner(&c.state).await.map(on).unwrap_or_default();
+            on_a == vec![serde_json::json!("the first device")] && on_c == on_a
+        })
+        .await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "starts real conductors and uses the staging rendezvous"]
     async fn live_devices_share_one_set_of_records() {
@@ -1056,6 +1100,16 @@ mod tests {
             on_a == 2 && on_b == 2
         })
         .await;
+
+        // The edit B made is copied into A's own config; B does not copy its own.
+        assert!(crate::commands::apply_profile_from_other_devices(&a.state).await.unwrap());
+        assert_eq!(a.state.vault_config.lock().unwrap().as_ref().unwrap().display_name, None, "the test profile carries `name`, not `display_name`");
+        assert!(!crate::commands::apply_profile_from_other_devices(&a.state).await.unwrap(), "applied once");
+        assert!(!crate::commands::apply_profile_from_other_devices(&b.state).await.unwrap(), "its own edit");
+
+        // A device added to an existing identity writes a profile before the
+        // real one has reached it: the real one still wins everywhere.
+        c_joins_and_fills_in(&seed, &config, &a).await;
 
         // A deletes the log entry; it goes on B too and stays gone.
         let log = sealed_list_inner(&a.state).await.unwrap().into_iter().find(|r| r.entry_type == "login_activity").unwrap();

@@ -816,6 +816,8 @@ pub(crate) fn setup_vault_inner(
         // Devices get a conductor key of their own when they are added to an
         // identity; an identity created here runs its own seed.
         conductor_seed: None,
+        joined_existing: false,
+        profile_applied_at: None,
         recovery_lookup_hash: Some(lookup_hash),
         agent_pub_key_raw_b64: Some(agent_pub_key_raw_b64),
         web_agent_pub_key,
@@ -1426,6 +1428,7 @@ fn spawn_conductor_startup(
                         // where the encrypted private cell exists.
                         {
                             let devices_state = state.clone();
+                            let devices_app = app_handle_ref.clone();
                             let has_private_cell = devices_state
                                 .vault_config
                                 .lock()
@@ -1439,6 +1442,14 @@ fn spawn_conductor_startup(
                                         Ok(true) => log::info!("This device's record was written"),
                                         Ok(false) => {}
                                         Err(e) => log::info!("This device's record was not written: {}", e),
+                                    }
+                                    match apply_profile_from_other_devices(&devices_state).await {
+                                        Ok(true) => {
+                                            log::info!("Profile updated from another device");
+                                            let _ = devices_app.emit("profile-changed", serde_json::json!({}));
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => log::info!("Profile not checked against other devices: {}", e),
                                     }
                                 });
                             }
@@ -7329,7 +7340,7 @@ async fn mirror_username_into_sealed_profile(
                     .unwrap_or_default()
             };
             let now_ms = (now_us / 1000) as u64;
-            crate::sealed::sealed_store_inner(
+            crate::sealed::sealed_store_first(
                 state,
                 "user_profile".into(),
                 serde_json::json!({
@@ -7634,7 +7645,7 @@ pub(crate) async fn write_profile_records(
                         .and_then(|c| c.web_email.clone())
                         .unwrap_or_default()
                 };
-                crate::sealed::sealed_store_inner(
+                crate::sealed::sealed_store_first(
                     state,
                     "user_profile".into(),
                     serde_json::json!({
@@ -7674,7 +7685,7 @@ pub(crate) async fn write_profile_records(
                 .map_err(store_err)?;
             }
             None => {
-                crate::sealed::sealed_store_inner(
+                crate::sealed::sealed_store_first(
                     state,
                     "profile_picture".into(),
                     body,
@@ -7718,6 +7729,79 @@ pub(crate) async fn write_profile_records(
 
 
     Ok(())
+}
+
+/// Copy a profile edit made on ANOTHER of the identity's devices into this
+/// device's config, so its own screens and its label show it. Returns
+/// whether anything changed. The records are the truth; the config is this
+/// device's working copy.
+pub(crate) async fn apply_profile_from_other_devices(state: &Arc<AppState>) -> Result<bool, String> {
+    let records = crate::sealed::sealed_list_inner(state).await?;
+    let mine = crate::paths::install_id(&state.data_dir);
+    let from_elsewhere = |entry_type: &str| {
+        records
+            .iter()
+            .find(|r| r.entry_type == entry_type)
+            .filter(|r| r.device.is_some() && r.device != mine)
+    };
+    let profile = from_elsewhere("user_profile");
+    let picture = from_elsewhere("profile_picture");
+    let newest = profile.map(|r| r.updated_at).max(picture.map(|r| r.updated_at));
+    let Some(newest) = newest else {
+        return Ok(false);
+    };
+
+    let label = {
+        let mut config = state.vault_config.lock().unwrap();
+        let passphrase = live_passphrase(state); // under the config lock - see check_dna_updates
+        let Some(cfg) = config.as_mut() else {
+            return Ok(false);
+        };
+        if cfg.profile_applied_at.map(|t| t >= newest).unwrap_or(false) {
+            return Ok(false);
+        }
+        let text = |body: &serde_json::Value, key: &str| {
+            body.get(key).and_then(|v| v.as_str()).map(str::to_string).filter(|s| !s.is_empty())
+        };
+        if let Some(record) = profile {
+            if let Some(name) = text(&record.body, "display_name") {
+                cfg.display_name = Some(name);
+            }
+            if let Some(username) = text(&record.body, "username") {
+                cfg.web_username = Some(username);
+            }
+            if let Some(email) = text(&record.body, "email") {
+                cfg.web_email = Some(email);
+            }
+        }
+        if let Some(record) = picture {
+            if let Some(pic) = text(&record.body, "profile_picture") {
+                cfg.profile_picture = Some(pic);
+            }
+        }
+        cfg.profile_applied_at = Some(newest);
+        if let Some(pw) = passphrase {
+            let vault_path = state.vault_path.lock().unwrap().clone();
+            match crate::vault::encrypt_vault(cfg, &pw) {
+                Ok(mut encrypted) => {
+                    encrypted.display_email = cfg.web_email.clone().or(cfg.web_username.clone());
+                    if let Err(e) = crate::vault::save_vault(&vault_path, &encrypted) {
+                        log::warn!("Profile config persist failed (non-fatal): {}", e);
+                    }
+                }
+                Err(e) => log::warn!("Profile config encrypt failed (non-fatal): {}", e),
+            }
+        }
+        crate::identities::IdentityLabel {
+            agent_pub_key: cfg.agent_pub_key.clone(),
+            display_name: cfg.display_name.clone(),
+            username: cfg.web_username.clone(),
+            profile_picture: cfg.profile_picture.clone(),
+            email: cfg.web_email.clone(),
+        }
+    };
+    crate::identities::write_label(&state.identity_root(), &label);
+    Ok(true)
 }
 
 /// In-app profile edit: display name and/or picture. Same writes as the

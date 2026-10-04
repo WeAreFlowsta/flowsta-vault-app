@@ -45,6 +45,18 @@ pub struct VaultConfig {
     #[serde(default)]
     pub conductor_seed: Option<Vec<u8>>,
 
+    /// True on a device that was ADDED to an identity that already existed
+    /// (by recovery phrase or from another device). Such a device fills in
+    /// a once-per-identity record only until the real one arrives from the
+    /// identity's other devices.
+    #[serde(default)]
+    pub joined_existing: bool,
+
+    /// The update time of the newest profile version from ANOTHER device
+    /// that has been copied into this config (ms).
+    #[serde(default)]
+    pub profile_applied_at: Option<u64>,
+
     /// Recovery lookup hash (hex string) for agent key discovery via API.
     /// Derived from HMAC-SHA256(mnemonic, "flowsta-recovery-lookup").
     #[serde(default)]
@@ -530,6 +542,8 @@ mod tests {
             created_at: 1708905600,
             device_seed: Some(vec![1u8; 32]),
             conductor_seed: None,
+            joined_existing: false,
+            profile_applied_at: None,
             recovery_lookup_hash: Some("abcd1234".repeat(8)),
             agent_pub_key_raw_b64: Some("dGVzdA==".to_string()),
             web_agent_pub_key: Some("uhCAkWebKey456".to_string()),
@@ -582,6 +596,8 @@ mod tests {
             created_at: 1708905600,
             device_seed: None,
             conductor_seed: None,
+            joined_existing: false,
+            profile_applied_at: None,
             recovery_lookup_hash: None,
             agent_pub_key_raw_b64: None,
             web_agent_pub_key: None,
