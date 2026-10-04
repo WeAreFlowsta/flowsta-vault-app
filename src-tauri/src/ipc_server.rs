@@ -693,6 +693,13 @@ struct AuthenticateResponse {
     email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     email_verified: Option<bool>,
+    /// For Flowsta's own sign-in challenge only: this device's key and its
+    /// signature over the challenge under the device prefix, which the
+    /// sign-in page sends on with the signature above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_signature: Option<String>,
 }
 
 /// Resolve what an /authenticate caller may ask for: the registered app's
@@ -977,6 +984,7 @@ async fn authenticate_handler(
     };
 
     // Sign the challenge if provided
+    let mut device_cosign: Option<(String, String)> = None;
     let signature = if let Some(ref challenge_b64) = req.challenge {
         let device_seed = device_seed.as_ref().ok_or_else(|| {
             (
@@ -1033,9 +1041,18 @@ async fn authenticate_handler(
         let mut seed_arr = [0u8; 32];
         seed_arr.copy_from_slice(device_seed);
         let sig = sign_with_device_seed(&seed_arr, &challenge_bytes);
+        if challenge_bytes.starts_with(b"flowsta-auth-challenge:v1:") {
+            if let Ok(challenge) = std::str::from_utf8(&challenge_bytes) {
+                device_cosign = crate::device_registry::cosign(challenge);
+            }
+        }
         Some(base64_standard_encode(&sig))
     } else {
         None
+    };
+    let (device_key, device_signature) = match device_cosign {
+        Some((key, signature)) => (Some(key), Some(signature)),
+        None => (None, None),
     };
 
     // Record MAU event if client_id was provided (vault_config lock released)
@@ -1091,6 +1108,8 @@ async fn authenticate_handler(
         signed_at: chrono_now_iso(),
         email,
         email_verified,
+        device_key,
+        device_signature,
     };
 
     Ok(axum::response::IntoResponse::into_response(Json(resp)))

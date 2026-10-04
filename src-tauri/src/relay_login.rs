@@ -143,14 +143,21 @@ pub async fn relay_approve_core(
         claim.challenge.as_bytes(),
     ));
 
+    let mut approval = serde_json::json!({
+        "claim_token": claim.claim_token,
+        "agent_pub_key": agent_b64,
+        "signature": signature,
+    });
+    // This device signs beside the identity key (see device_registry.rs).
+    if let Some((device_key, device_signature)) = crate::device_registry::cosign(&claim.challenge) {
+        approval["device_key"] = serde_json::json!(device_key);
+        approval["device_signature"] = serde_json::json!(device_signature);
+    }
+
     let base = api_url.trim_end_matches('/');
     let resp = relay_http()
         .post(format!("{}/auth/relay/approve", base))
-        .json(&serde_json::json!({
-            "claim_token": claim.claim_token,
-            "agent_pub_key": agent_b64,
-            "signature": signature,
-        }))
+        .json(&approval)
         .send()
         .await
         .map_err(|e| format!("Approve request failed: {}", e))?;

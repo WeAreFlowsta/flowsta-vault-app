@@ -1120,6 +1120,7 @@ pub(crate) fn write_active_identity_marker(data_dir: &std::path::Path, agent_pub
 pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     // Decrypted records read a moment ago do not outlive the lock.
     crate::sealed::forget_recent_versions();
+    crate::device_registry::set_device_signer(None);
     // Cancel any open approval dialog: deny the waiting IPC request so it
     // returns immediately instead of hanging (and can never be approved
     // against a now-locked vault). The calling app sees a clean denial.
@@ -1375,6 +1376,28 @@ fn spawn_conductor_startup(
     app_handle: tauri::AppHandle,
     state: Arc<AppState>,
 ) {
+    // From here this device signs beside the identity key at sign-in, and
+    // makes itself known to the identity's account (repeating is harmless;
+    // offline it is tried again at the next unlock).
+    crate::device_registry::set_device_signer(conductor.as_ref().map(|(seed, _)| *seed));
+    {
+        let registry_state = state.clone();
+        tauri::async_runtime::spawn(async move {
+            let api_url = option_env!("FLOWSTA_API_URL").unwrap_or("https://auth-api.flowsta.com");
+            // A new identity's account may still be on its way: try again shortly.
+            for wait_secs in [0u64, 30, 300] {
+                tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                match crate::device_registry::register_this_device(&registry_state, api_url).await {
+                    Ok(true) => {
+                        log::info!("This device is registered with the account");
+                        break;
+                    }
+                    Ok(false) => break,
+                    Err(e) => log::info!("This device was not registered this time: {}", e),
+                }
+            }
+        });
+    }
     if let Some((seed, tag)) = conductor {
         {
 
@@ -1819,6 +1842,7 @@ fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, 
 /// state at `root`.
 fn clear_identity_memory(state: &Arc<AppState>, root: &std::path::Path) {
     crate::sealed::forget_recent_versions();
+    crate::device_registry::set_device_signer(None);
     *state.identity_root.lock().unwrap() = root.to_path_buf();
     *state.vault_path.lock().unwrap() = crate::paths::vault_file(root);
     state.connected_sites.lock().unwrap().clear();

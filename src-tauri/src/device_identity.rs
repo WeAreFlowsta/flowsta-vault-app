@@ -266,13 +266,20 @@ async fn vault_grant(
         challenge.as_bytes(),
     ));
 
+    let mut token_request = serde_json::json!({
+        "challenge": challenge,
+        "agent_pub_key": agent_b64,
+        "signature": signature,
+    });
+    // This device signs beside the identity key (see device_registry.rs).
+    if let Some((device_key, device_signature)) = crate::device_registry::cosign(&challenge) {
+        token_request["device_key"] = serde_json::json!(device_key);
+        token_request["device_signature"] = serde_json::json!(device_signature);
+    }
+
     let resp = client
         .post(format!("{}/auth/vault/token", base))
-        .json(&serde_json::json!({
-            "challenge": challenge,
-            "agent_pub_key": agent_b64,
-            "signature": signature,
-        }))
+        .json(&token_request)
         .send()
         .await
         .map_err(|e| format!("api_unreachable: token request failed: {}", e))?;

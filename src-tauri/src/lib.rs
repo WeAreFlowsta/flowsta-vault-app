@@ -3,6 +3,7 @@ mod backup;
 mod commands;
 mod conductor;
 mod device_identity;
+mod device_registry;
 mod devices;
 mod dna;
 mod dna_updater;
