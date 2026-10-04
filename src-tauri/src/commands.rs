@@ -836,7 +836,7 @@ pub(crate) fn setup_vault_inner(
         hosting_model,
         pending_reconcile,
         pending_registration,
-        joining.then(crate::key_derivation::new_conductor_seed),
+        joining.then(|| crate::device_registry::take_joining_seed().unwrap_or_else(crate::key_derivation::new_conductor_seed)),
         app_handle,
         state,
     );

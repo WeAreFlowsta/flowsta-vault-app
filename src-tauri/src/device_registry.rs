@@ -311,6 +311,59 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("HTTP client build failed: {}", e))
 }
 
+/// The conductor seed made for a device that is being set up for an
+/// identity that already exists (the phrase door registers the device
+/// before its vault is written). Taken by setup.
+static JOINING_SEED: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+pub(crate) fn hold_joining_seed(seed: [u8; 32]) {
+    *JOINING_SEED.lock().unwrap() = Some(seed);
+}
+
+pub(crate) fn take_joining_seed() -> Option<[u8; 32]> {
+    JOINING_SEED.lock().unwrap().take()
+}
+
+/// Register a device whose vault does not exist yet: the phrase door, where
+/// the recovery phrase is in hand. Registers the enrollment key as well.
+/// Errors carry the server's word (`unknown_agent_key`, `not_device_hosted`,
+/// `api_unreachable`, ...) for the wizard to act on.
+pub(crate) async fn register_new_device(
+    api_url: &str,
+    identity_agent_b64: &str,
+    identity_seed: &[u8; 32],
+    device_seed: &[u8; 32],
+    install_id: &str,
+    enrollment_seed: &[u8; 32],
+) -> Result<(), String> {
+    let base = api_url.trim_end_matches('/');
+    let body = enrollment_body(identity_agent_b64, identity_seed, enrollment_seed, now_ms());
+    let _ = client()?.post(format!("{}/auth/devices/enrollment", base)).json(&body).send().await;
+    let body = registration_body(identity_agent_b64, identity_seed, device_seed, install_id, now_ms(), Some(enrollment_seed));
+    send_registration(base, &body).await.map(|_| ())
+}
+
+/// Post a registration and read the answer. Ok(true) = the server knows the
+/// device now.
+async fn send_registration(base: &str, body: &serde_json::Value) -> Result<bool, String> {
+    let resp = client()?
+        .post(format!("{}/auth/devices/register", base))
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("api_unreachable: {}", e))?;
+    let status = resp.status();
+    let answer = resp.json::<serde_json::Value>().await.unwrap_or_default();
+    if let Some(standing) = standing_from(status.as_u16(), &answer) {
+        *STANDING.lock().unwrap() = standing;
+    }
+    if status.is_success() {
+        return Ok(true);
+    }
+    let error = answer.get("error").and_then(|e| e.as_str()).unwrap_or_default();
+    Err(format!("{} [{}]", error, status.as_u16()))
+}
+
 /// Register this device with the identity's account. Safe to repeat: the
 /// server answers the same for a device it already knows. Returns whether
 /// the server knows this device now.
@@ -345,28 +398,21 @@ pub async fn register_this_device(state: &Arc<AppState>, api_url: &str) -> Resul
             enrollment_seed.as_ref(),
         ),
     };
-    let resp = client()?
-        .post(format!("{}/auth/devices/register", base))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("api_unreachable: {}", e))?;
-    let status = resp.status();
-    let answer = resp.json::<serde_json::Value>().await.unwrap_or_default();
-    if let Some(standing) = standing_from(status.as_u16(), &answer) {
-        *STANDING.lock().unwrap() = standing;
+    let sent = send_registration(base, &body).await;
+    match sent {
+        Ok(known) => {
+            forget_enrollment_seed();
+            hold_approval(None);
+            Ok(known)
+        }
+        Err(e) => {
+            if approval.is_some() {
+                // An approval that was not accepted is not tried again.
+                hold_approval(None);
+            }
+            Err(e)
+        }
     }
-    if status.is_success() {
-        forget_enrollment_seed();
-        hold_approval(None);
-        return Ok(true);
-    }
-    if approval.is_some() {
-        // An approval that was not accepted is not tried again.
-        hold_approval(None);
-    }
-    let error = answer.get("error").and_then(|e| e.as_str()).unwrap_or_default();
-    Err(format!("{} [{}]", error, status.as_u16()))
 }
 
 /// What typing the recovery phrase once did.

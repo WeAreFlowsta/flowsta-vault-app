@@ -732,6 +732,22 @@ pub(crate) async fn heal_web_agent_key_from_did(
 pub async fn restore_device_identity(
     api_url: String,
     mnemonic: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<VaultGrantResult, String> {
+    let install_id = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    restore_device_identity_inner(api_url, mnemonic, &install_id).await
+}
+
+/// The phrase door. This device is added to the identity's account BEFORE
+/// it signs in: an account that has removed a device accepts a sign-in
+/// only from a device it knows. The phrase holder may add a device (the
+/// enrollment key is derived from the phrase), so: make this device's own
+/// key, register it with the enrollment key's signature, then sign in as
+/// that device. Setup takes the same key.
+pub(crate) async fn restore_device_identity_inner(
+    api_url: String,
+    mnemonic: String,
+    install_id: &str,
 ) -> Result<VaultGrantResult, String> {
     if !validate_mnemonic(&mnemonic) {
         return Err("Invalid recovery phrase".into());
@@ -743,8 +759,19 @@ pub async fn restore_device_identity(
     let agent_b64 = base64_standard_encode(&device_39);
     let device_seed = derive_seed(&mnemonic, DEVICE_1_CONSTANT)
         .map_err(|e| format!("Device seed derivation failed: {}", e))?;
+    let enrollment_seed = derive_seed(&mnemonic, crate::key_derivation::ENROLLMENT_CONSTANT)
+        .map_err(|e| format!("Enrollment key derivation failed: {}", e))?;
 
-    let mut result = vault_grant(&api_url, &device_seed, &agent_b64).await?;
+    let conductor_seed = crate::key_derivation::new_conductor_seed();
+    crate::device_registry::register_new_device(&api_url, &agent_b64, &device_seed, &conductor_seed, install_id, &enrollment_seed)
+        .await?;
+    crate::device_registry::set_device_signer(Some(conductor_seed));
+    let granted = vault_grant(&api_url, &device_seed, &agent_b64).await;
+    if granted.is_err() {
+        crate::device_registry::set_device_signer(None);
+    }
+    let mut result = granted?;
+    crate::device_registry::hold_joining_seed(conductor_seed);
 
     // A migrated account keeps the DID minted for its ORIGINAL web agent
     // key; a born-device-hosted account's DID embeds the device key. When
@@ -765,6 +792,10 @@ mod tests {
     use super::*;
 
     const STAGING: &str = "https://auth-api-staging.flowsta.com";
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+    }
 
     /// Full register + restore contract test against the live STAGING API using the real
     /// derivation + signing code. Ignored by default - run explicitly:
@@ -810,17 +841,51 @@ mod tests {
             dup.as_ref().err()
         );
 
-        // Restore from phrase alone (challenge-response)
-        let restored = restore_device_identity(STAGING.into(), mnemonic.clone())
+        // Restore from phrase alone (challenge-response). The phrase door
+        // registers this device first, then signs in as it.
+        let first_install = hex::encode(&crate::key_derivation::new_conductor_seed()[..16]);
+        let restored = restore_device_identity_inner(STAGING.into(), mnemonic.clone(), &first_install)
             .await
             .expect("restore should succeed");
         assert_eq!(restored.did, reg.did, "restore must recover the SAME identity");
         assert_eq!(restored.display_name.as_deref(), Some("Device Test"));
         assert!(!restored.token.is_empty(), "restore must yield a session token");
+        let first_device = crate::device_registry::take_joining_seed().expect("the key setup would take");
+        crate::device_registry::set_device_signer(None);
+
+        // That device removes itself. From here the account accepts a
+        // sign-in only from a device it knows (the 2026-10-05 session bug).
+        let identity_seed = derive_seed(&mnemonic, DEVICE_1_CONSTANT).unwrap();
+        let agent_b64 = base64_standard_encode(&construct_agent_pub_key_bytes(
+            &crate::key_derivation::public_key_of_seed(&identity_seed),
+        ));
+        let target = base64_standard_encode(&crate::key_derivation::public_key_of_seed(&first_device));
+        let removal = crate::device_registry::removal_body(&agent_b64, &identity_seed, &first_device, &target, now_ms()).unwrap();
+        let removed = reqwest::Client::new()
+            .post(format!("{}/auth/devices/remove", STAGING))
+            .json(&removal)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(removed.status().as_u16(), 200, "the first device removes itself");
+        let plain = vault_grant(STAGING, &identity_seed, &agent_b64).await;
+        assert!(
+            plain.as_ref().err().map(|e| e.contains("vault_update_required")).unwrap_or(false),
+            "a sign-in naming no device is now told to update: {:?}",
+            plain.as_ref().err()
+        );
+        // The phrase door still works: it adds the new device before signing in.
+        let second_install = hex::encode(&crate::key_derivation::new_conductor_seed()[..16]);
+        let again = restore_device_identity_inner(STAGING.into(), mnemonic.clone(), &second_install)
+            .await
+            .expect("restore after a removal should succeed");
+        assert_eq!(again.did, reg.did);
+        assert!(crate::device_registry::take_joining_seed().is_some());
+        crate::device_registry::set_device_signer(None);
 
         // A wrong phrase must NOT find an account
         let other = generate_new_mnemonic().unwrap();
-        let miss = restore_device_identity(STAGING.into(), other).await;
+        let miss = restore_device_identity_inner(STAGING.into(), other, &first_install).await;
         assert!(
             miss.as_ref().err().map(|e| e.contains("unknown_agent_key")).unwrap_or(false),
             "unknown phrase must be rejected: {:?}",
