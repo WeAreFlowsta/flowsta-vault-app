@@ -1044,6 +1044,19 @@ mod tests {
         })
         .await;
 
+        // Each device writes its own entry and learns of the other.
+        for (device, seed) in [(&a, [41u8; 32]), (&b, [42u8; 32])] {
+            device.state.vault_config.lock().unwrap().as_mut().unwrap().conductor_seed = Some(seed.to_vec());
+            assert!(crate::devices::publish_own(&device.state).await.unwrap());
+            assert!(!crate::devices::publish_own(&device.state).await.unwrap(), "nothing changed: not written again");
+        }
+        eventually("each device lists both devices", 300, || async {
+            let on_a = crate::devices::list(&a.state).await.map(|d| d.len()).unwrap_or(0);
+            let on_b = crate::devices::list(&b.state).await.map(|d| d.len()).unwrap_or(0);
+            on_a == 2 && on_b == 2
+        })
+        .await;
+
         // A deletes the log entry; it goes on B too and stays gone.
         let log = sealed_list_inner(&a.state).await.unwrap().into_iter().find(|r| r.entry_type == "login_activity").unwrap();
         sealed_delete_inner(&a.state, &log.action_hash).await.unwrap();

@@ -1421,6 +1421,29 @@ fn spawn_conductor_startup(
                         // frontend listener may not be registered yet if startup is fast.
                         let _ = app_handle_ref.emit("conductor-status", ready_status);
 
+                        // This device's own entry among the identity's devices
+                        // (written when missing, changed or a day old). Only
+                        // where the encrypted private cell exists.
+                        {
+                            let devices_state = state.clone();
+                            let has_private_cell = devices_state
+                                .vault_config
+                                .lock()
+                                .unwrap()
+                                .as_ref()
+                                .map(|c| c.data_key.is_some() && c.hosting_model.as_deref() == Some("device-hosted"))
+                                .unwrap_or(false);
+                            if has_private_cell {
+                                tauri::async_runtime::spawn(async move {
+                                    match crate::devices::publish_own(&devices_state).await {
+                                        Ok(true) => log::info!("This device's record was written"),
+                                        Ok(false) => {}
+                                        Err(e) => log::info!("This device's record was not written: {}", e),
+                                    }
+                                });
+                            }
+                        }
+
                         // Check for DNA updates from the server.
                         // Non-fatal - if offline or update fails, continue with current DNAs.
                         // Downloads go to data_dir (not resource_dir) to avoid triggering

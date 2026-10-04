@@ -259,7 +259,11 @@ export default component$(() => {
     const attempts = 8;
     for (let i = 0; i < attempts; i++) {
       try {
-        const records = await invoke<SealedListItem[]>("sealed_list");
+        // Each device keeps an entry about itself among these records;
+        // those are shown under Settings, not counted as private records.
+        const records = (await invoke<SealedListItem[]>("sealed_list")).filter(
+          (r) => r.entry_type !== "device",
+        );
         const counts: Record<string, number> = {};
         for (const r of records) {
           counts[r.entry_type] = (counts[r.entry_type] || 0) + 1;
