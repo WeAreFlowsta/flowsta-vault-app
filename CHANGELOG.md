@@ -5,6 +5,17 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 1.6.0
+
+### Added
+- Your identity on several devices. Add a device with your recovery phrase or with a code typed on a device you already have; your private records, connections, remembered sites and app backups follow. Settings → Devices lists your devices and removes one.
+- A locked Vault keeps syncing with your other devices. "Lock and stop syncing" stops it.
+- Apps can ask for the newest backup on any of your devices (`across: "devices"`).
+- Exports carry every key this device holds and the copies of your other devices' app backups.
+
+### Changed
+- The Vault's font ships inside the app; nothing is fetched to show it.
+
 ## [1.5.0] - 2026-09-30
 
 ### Highlights
