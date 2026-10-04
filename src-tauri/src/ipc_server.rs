@@ -2036,7 +2036,27 @@ async fn backup_list_handler(
     stats.total_backups = stats.apps.iter().map(|a| a.backup_count).sum();
     stats.total_size = stats.apps.iter().map(|a| a.total_size).sum();
 
-    Ok(axum::response::IntoResponse::into_response(Json(stats)))
+    // What the person's other devices hold for this app (copies kept here).
+    // Omitted when there is none, so the shape is the same as before.
+    let mut resp = serde_json::to_value(&stats).unwrap_or_else(|_| serde_json::json!({}));
+    let mut by_device: std::collections::BTreeMap<String, Vec<serde_json::Value>> = std::collections::BTreeMap::new();
+    for held in crate::backup_sync::held_across_devices(&state.app_state.identity_root(), &caller_client_id) {
+        if let Some(device) = held.from_install {
+            by_device.entry(device).or_default().push(serde_json::json!({
+                "label": held.meta.label,
+                "created_at": held.meta.created_at,
+                "data_size": held.meta.data_size,
+            }));
+        }
+    }
+    if !by_device.is_empty() {
+        resp["other_devices"] = serde_json::json!(by_device
+            .into_iter()
+            .map(|(device, backups)| serde_json::json!({ "device": device, "backups": backups }))
+            .collect::<Vec<_>>());
+    }
+
+    Ok(axum::response::IntoResponse::into_response(Json(resp)))
 }
 
 // ── POST /backup/retrieve ──────────────────────────────────────────
@@ -2045,6 +2065,10 @@ async fn backup_list_handler(
 struct BackupRetrieveRequest {
     client_id: String,
     label: Option<String>,
+    /// "devices": the newest backup with this label on any of the person's
+    /// devices (a label is required). Omitted: this device's own, as always.
+    #[serde(default)]
+    across: Option<String>,
 }
 
 async fn backup_retrieve_handler(
@@ -2108,11 +2132,27 @@ async fn backup_retrieve_handler(
     //                           design, and equally unsafe to overwrite)
     //   500 backup_unreadable - present but damaged before decryption
     //                           (unparseable file, bad hex, I/O error)
-    let (data, meta) = crate::backup::retrieve_backup(
-        &state.app_state,
-        &req.client_id,
-        req.label.as_deref(),
-    )
+    let across_devices = req.across.as_deref() == Some("devices");
+    if across_devices && req.label.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(IpcError { error: "label_required".into(), description: Some("across: \"devices\" needs a label.".into()) }),
+        ));
+    }
+    let mut from_device: Option<String> = None;
+    let retrieved = if across_devices {
+        let label = req.label.as_deref().unwrap_or_default();
+        match crate::backup_sync::newest_across_devices(&state.app_state.identity_root(), &req.client_id, label) {
+            Some(held) => {
+                from_device = held.from_install.clone();
+                crate::backup::backup_keys(&state.app_state).and_then(|keys| crate::backup::open_backup_file(&held.path, &keys))
+            }
+            None => Err(format!("No backup found for label '{}'", label)),
+        }
+    } else {
+        crate::backup::retrieve_backup(&state.app_state, &req.client_id, req.label.as_deref())
+    };
+    let (data, meta) = retrieved
     .map_err(|e| {
         if e.starts_with("No backup found") || e.starts_with("No backups found") {
             (
@@ -2155,6 +2195,10 @@ async fn backup_retrieve_handler(
         "data_size": meta.data_size,
         "content_type": meta.content_type,
     });
+    if across_devices {
+        // Which device wrote it: null for this one.
+        resp["from_device"] = serde_json::json!(from_device);
+    }
 
     // Compressed/binary payloads return verbatim bytes as data_base64;
     // plain JSON returns as `data` (hex-string fallback preserved for
