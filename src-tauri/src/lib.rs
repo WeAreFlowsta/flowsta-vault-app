@@ -1,5 +1,6 @@
 mod activity;
 mod backup;
+mod backup_sync;
 mod commands;
 mod conductor;
 mod device_identity;

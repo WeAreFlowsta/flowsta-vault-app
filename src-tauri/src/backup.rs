@@ -288,7 +288,7 @@ fn derive_backup_key(device_seed: &[u8; 32]) -> [u8; 32] {
 // ── Path helpers ───────────────────────────────────────────────────
 
 /// Sanitize client_id for use as a directory name.
-fn sanitize_id(client_id: &str) -> String {
+pub(crate) fn sanitize_id(client_id: &str) -> String {
     client_id
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
@@ -514,10 +514,22 @@ pub fn retrieve_backup(
         }
     };
 
-    let json = std::fs::read_to_string(&path)
+    open_backup_file(&path, &keys)
+}
+
+/// The label, time and app name stored beside an encrypted backup file.
+pub(crate) fn read_backup_meta(path: &Path) -> Option<BackupMeta> {
+    let json = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<EncryptedBackup>(&json).ok().map(|e| e.meta)
+}
+
+/// Decrypt one backup file (this device's, or a copy of another device's).
+pub(crate) fn open_backup_file(path: &Path, keys: &BackupKeys) -> Result<(Vec<u8>, BackupMeta), String> {
+    let json = std::fs::read_to_string(path)
         .map_err(|e| format!("Backup read failed: {}", e))?;
     let encrypted: EncryptedBackup = serde_json::from_str(&json)
         .map_err(|e| format!("Backup parse failed: {}", e))?;
+    let client_id = encrypted.meta.client_id.as_str();
 
     let nonce_bytes = hex::decode(&encrypted.nonce)
         .map_err(|_| "Backup bad nonce hex".to_string())?;

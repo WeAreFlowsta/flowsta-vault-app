@@ -2127,7 +2127,12 @@ fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, 
         note(name, std::fs::remove_file(crate::paths::store_path(root, name)));
         note(name, std::fs::remove_file(root.join(format!("{}.bak", name))));
     }
-    for dir in [crate::paths::lair_dir(root), crate::paths::conductor_dir(root), crate::paths::backups_dir(root)] {
+    for dir in [
+        crate::paths::lair_dir(root),
+        crate::paths::conductor_dir(root),
+        crate::paths::backups_dir(root),
+        crate::paths::backup_copies_dir(root),
+    ] {
         note(&dir.display().to_string(), std::fs::remove_dir_all(&dir));
     }
     if let Ok(rd) = std::fs::read_dir(root) {

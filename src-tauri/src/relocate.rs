@@ -47,6 +47,8 @@ fn movable_entries(root: &Path) -> Vec<PathBuf> {
     }
     let backups = paths::backups_dir(root);
     if backups.exists() { out.push(backups); }
+    let copies = paths::backup_copies_dir(root);
+    if copies.exists() { out.push(copies); }
     // quarantine files (`<name>.corrupt-<ts>`) belong to this identity's stores
     if let Ok(rd) = std::fs::read_dir(root) {
         for e in rd.flatten() {

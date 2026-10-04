@@ -89,6 +89,8 @@ pub fn is_lair_leftover_name(name: &str) -> bool { name.starts_with(LAIR_OLD_PRE
 pub fn conductor_dir(root: &Path) -> PathBuf { root.join(CONDUCTOR_DIR) }
 pub fn db_key_path(root: &Path) -> PathBuf { conductor_dir(root).join("databases").join("db.key") }
 pub fn backups_dir(root: &Path) -> PathBuf { root.join(BACKUPS_DIR) }
+/// Copies of the app backups the identity's other devices hold, one folder per device.
+pub fn backup_copies_dir(root: &Path) -> PathBuf { root.join("backups-from") }
 /// One of the JSON/enc stores by its constant name.
 pub fn store_path(root: &Path, name: &str) -> PathBuf { root.join(name) }
 pub fn mau_store_path(root: &Path) -> PathBuf { root.join(MAU_EVENTS) }
