@@ -1118,6 +1118,8 @@ pub(crate) fn write_active_identity_marker(data_dir: &std::path::Path, agent_pub
 }
 
 pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
+    // Decrypted records read a moment ago do not outlive the lock.
+    crate::sealed::forget_recent_versions();
     // Cancel any open approval dialog: deny the waiting IPC request so it
     // returns immediately instead of hanging (and can never be approved
     // against a now-locked vault). The calling app sees a clean denial.
@@ -1816,6 +1818,7 @@ fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, 
 /// Clear every in-memory value that belonged to an identity and point the
 /// state at `root`.
 fn clear_identity_memory(state: &Arc<AppState>, root: &std::path::Path) {
+    crate::sealed::forget_recent_versions();
     *state.identity_root.lock().unwrap() = root.to_path_buf();
     *state.vault_path.lock().unwrap() = crate::paths::vault_file(root);
     state.connected_sites.lock().unwrap().clear();

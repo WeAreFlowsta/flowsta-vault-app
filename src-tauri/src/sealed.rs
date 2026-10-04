@@ -547,6 +547,7 @@ pub(crate) async fn sealed_store_spec(
         Err(e) => return Err(e),
     };
 
+    forget_recent_versions();
     let record: Record = rmp_serde::from_slice(result.as_bytes())
         .map_err(|e| format!("Record decode failed: {}", e))?;
     Ok(hex::encode(record.action_address().get_raw_39()))
@@ -624,6 +625,23 @@ pub(crate) async fn sealed_delete_inner(state: &Arc<AppState>, action_hash_hex: 
     .map(|_| ())
 }
 
+/// The versions read a moment ago, kept so that one operation which lists
+/// and then writes does not read the whole cell twice. Dropped after any
+/// write here, after a few seconds (another device may have written), and
+/// on lock: it holds decrypted records.
+struct RecentVersions {
+    root: std::path::PathBuf,
+    read_at: std::time::Instant,
+    versions: Vec<StoredVersion>,
+}
+static RECENT_VERSIONS: std::sync::Mutex<Option<RecentVersions>> = std::sync::Mutex::new(None);
+const RECENT_FOR: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Forget the versions kept in memory (lock, identity change, any write).
+pub(crate) fn forget_recent_versions() {
+    *RECENT_VERSIONS.lock().unwrap() = None;
+}
+
 /// Every stored version this device holds for the identity, decrypted.
 /// Versions that fail to decrypt (foreign, corrupt, or a plaintext marker)
 /// are skipped with a warning, never fatal.
@@ -633,6 +651,12 @@ pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredV
     let (admin_port, app_port) = conductor_ports(state)?;
     let data_key = vault_data_key(state)?;
     let base = sealed_base(state)?;
+    let root = state.identity_root();
+    if let Some(recent) = RECENT_VERSIONS.lock().unwrap().as_ref() {
+        if recent.root == root && recent.read_at.elapsed() < RECENT_FOR {
+            return Ok(recent.versions.clone());
+        }
+    }
 
     let input = rmp_serde::to_vec_named(&ListAtWire { base, tag_prefix: Vec::new(), network: false })
         .map_err(|e| e.to_string())?;
@@ -693,6 +717,11 @@ pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredV
             payload,
         });
     }
+    *RECENT_VERSIONS.lock().unwrap() = Some(RecentVersions {
+        root,
+        read_at: std::time::Instant::now(),
+        versions: versions.clone(),
+    });
     Ok(versions)
 }
 
