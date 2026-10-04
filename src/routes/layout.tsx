@@ -839,9 +839,9 @@ export default component$(() => {
   // Listen for vault-lock-requested from system tray
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ cleanup }) => {
-    const unlistenPromise = listen("vault-lock-requested", async () => {
+    const unlistenPromise = listen<{ stopSyncing?: boolean } | null>("vault-lock-requested", async (event) => {
       try {
-        await invoke("lock_vault");
+        await invoke("lock_vault", { stopSyncing: !!event.payload?.stopSyncing });
         screen.value = "unlock";
       } catch {
         // ignore - vault may already be locked

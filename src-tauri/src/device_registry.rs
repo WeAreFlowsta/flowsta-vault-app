@@ -27,7 +27,46 @@ const VAULT_CAPABILITIES: [&str; 4] = ["approve", "login", "read", "sign"];
 /// runs) while a vault is unlocked. Cleared on lock.
 static DEVICE_SIGNER: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 
+/// How this device stands with the identity's account, as the last
+/// registration answered.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Default)]
+pub struct Standing {
+    /// "unknown" (not asked yet, or offline), "registered", or
+    /// "needs_confirming" (the account wants the recovery phrase or another
+    /// device's approval before it counts this device).
+    pub device: &'static str,
+    /// The account's enrollment key: "none", "waiting" (registered, not in
+    /// force yet) or "in_force". `None` until the account has answered.
+    pub enrollment: Option<&'static str>,
+}
+
+static STANDING: Mutex<Standing> = Mutex::new(Standing { device: "unknown", enrollment: None });
+
+/// What a registration answer says about this device.
+pub(crate) fn standing_from(http_status: u16, body: &serde_json::Value) -> Option<Standing> {
+    if (200..300).contains(&http_status) {
+        let enrollment = match body.get("enrollment") {
+            Some(e) if e.is_object() => {
+                if e.get("in_force").and_then(|v| v.as_bool()) == Some(true) { "in_force" } else { "waiting" }
+            }
+            _ => "none",
+        };
+        return Some(Standing { device: "registered", enrollment: Some(enrollment) });
+    }
+    (body.get("error").and_then(|e| e.as_str()) == Some("approval_required"))
+        .then_some(Standing { device: "needs_confirming", enrollment: Some("in_force") })
+}
+
+/// For Settings → Devices.
+#[tauri::command]
+pub fn device_standing() -> Standing {
+    STANDING.lock().unwrap().clone()
+}
+
 pub(crate) fn set_device_signer(seed: Option<[u8; 32]>) {
+    if seed.is_none() {
+        *STANDING.lock().unwrap() = Standing { device: "unknown", enrollment: None };
+    }
     let mut slot = DEVICE_SIGNER.lock().unwrap();
     if let Some(old) = slot.as_mut() {
         old.fill(0);
@@ -313,6 +352,10 @@ pub async fn register_this_device(state: &Arc<AppState>, api_url: &str) -> Resul
         .await
         .map_err(|e| format!("api_unreachable: {}", e))?;
     let status = resp.status();
+    let answer = resp.json::<serde_json::Value>().await.unwrap_or_default();
+    if let Some(standing) = standing_from(status.as_u16(), &answer) {
+        *STANDING.lock().unwrap() = standing;
+    }
     if status.is_success() {
         forget_enrollment_seed();
         hold_approval(None);
@@ -322,13 +365,73 @@ pub async fn register_this_device(state: &Arc<AppState>, api_url: &str) -> Resul
         // An approval that was not accepted is not tried again.
         hold_approval(None);
     }
-    let error = resp
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-        .unwrap_or_default();
+    let error = answer.get("error").and_then(|e| e.as_str()).unwrap_or_default();
     Err(format!("{} [{}]", error, status.as_u16()))
+}
+
+/// What typing the recovery phrase once did.
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct PhraseOnce {
+    /// This device now holds keys it was missing (an older setup).
+    pub keys_added: bool,
+    pub standing: Standing,
+}
+
+/// The recovery phrase, typed once on a device that already holds the
+/// identity: registers the identity's enrollment key (so only the phrase or
+/// one of its devices can add a device), confirms this device with it, and
+/// fills in keys an older setup did not keep. The phrase is not stored.
+#[tauri::command]
+pub async fn use_recovery_phrase_once(
+    api_url: String,
+    mnemonic: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<PhraseOnce, String> {
+    use_recovery_phrase_once_inner(api_url, mnemonic, state.inner()).await
+}
+
+pub(crate) async fn use_recovery_phrase_once_inner(api_url: String, mnemonic: String, state: &Arc<AppState>) -> Result<PhraseOnce, String> {
+    let mnemonic = crate::migration::normalize_mnemonic(&mnemonic);
+    let keys = crate::commands::IdentityKeys::from_phrase(&mnemonic).map_err(|_| "Invalid recovery phrase. Please check your words.".to_string())?;
+    let keys_added = {
+        let mut config = state.vault_config.lock().unwrap();
+        let cfg = config.as_mut().ok_or("Vault is locked")?;
+        if cfg.device_seed.as_deref() != Some(keys.identity_seed.as_slice()) {
+            return Err("That recovery phrase belongs to a different identity.".into());
+        }
+        let mut added = false;
+        if cfg.hosting_model.as_deref() == Some("device-hosted") {
+            if cfg.backup_key.is_none() {
+                cfg.backup_key = Some(keys.backup_key.to_vec());
+                added = true;
+            }
+            if cfg.data_key.is_none() {
+                cfg.data_key = Some(keys.data_key.to_vec());
+                added = true;
+            }
+            if cfg.private_network_seed.is_none() {
+                cfg.private_network_seed = Some(keys.private_network_seed.clone());
+                added = true;
+            }
+            if cfg.recovery_lookup_hash.is_none() {
+                cfg.recovery_lookup_hash = keys.recovery_lookup_hash.clone();
+                added = true;
+            }
+        }
+        added
+    };
+    if keys_added {
+        crate::commands::persist_config_now(state)?;
+        *state.backup_key_identity.lock().unwrap() = Some(keys.backup_key);
+    }
+    hold_enrollment_from_phrase(&mnemonic);
+    let registered = register_this_device(state, &api_url).await;
+    forget_enrollment_seed();
+    match registered {
+        Ok(_) => Ok(PhraseOnce { keys_added, standing: device_standing() }),
+        Err(e) if e.starts_with("api_unreachable") => Err("Couldn't reach Flowsta. Check your connection and try again.".into()),
+        Err(e) => Err(format!("That did not work ({}). Try again.", e)),
+    }
 }
 
 /// Remove a device of this identity. `target_key` as the server lists it.
@@ -422,6 +525,21 @@ mod tests {
         let message = registration_message(&public_key_of_seed(&IDENTITY), &public_key_of_seed(&DEVICE), INSTALL, 1_790_000_000_000);
         assert!(verifies(&approver, &message, body["approver_signature"].as_str().unwrap()));
         assert!(verifies(&DEVICE, &message, body["device_signature"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn a_registration_answer_says_how_this_device_stands() {
+        let registered = |enrollment: serde_json::Value| standing_from(200, &serde_json::json!({ "device": {}, "enrollment": enrollment }));
+        assert_eq!(registered(serde_json::Value::Null), Some(Standing { device: "registered", enrollment: Some("none") }));
+        assert_eq!(registered(serde_json::json!({ "in_force": false })), Some(Standing { device: "registered", enrollment: Some("waiting") }));
+        assert_eq!(registered(serde_json::json!({ "in_force": true })), Some(Standing { device: "registered", enrollment: Some("in_force") }));
+        assert_eq!(
+            standing_from(403, &serde_json::json!({ "error": "approval_required" })),
+            Some(Standing { device: "needs_confirming", enrollment: Some("in_force") })
+        );
+        // Anything else (a limit, an outage, an older server) changes nothing.
+        assert_eq!(standing_from(429, &serde_json::json!({ "error": "Too many requests" })), None);
+        assert_eq!(standing_from(404, &serde_json::Value::Null), None);
     }
 
     #[test]

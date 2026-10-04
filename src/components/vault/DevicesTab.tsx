@@ -18,6 +18,11 @@ export interface DeviceRow {
   at?: number;
 }
 
+interface Standing {
+  device: "unknown" | "registered" | "needs_confirming";
+  enrollment: "none" | "waiting" | "in_force" | null;
+}
+
 interface NewDevice {
   name: string;
   platform: string;
@@ -51,7 +56,7 @@ function claimError(e: unknown): string {
   if (msg.includes("code_not_found") || msg.includes("already_claimed") || msg.includes("pair_timeout"))
     return "That code wasn't found. Get a new one on the new device.";
   if (msg.includes("code_mismatch") || msg.includes("pair_closed")) return "That code didn't match. Get a new one on the new device.";
-  if (msg.includes("needs_phrase_once")) return "Enter your recovery phrase on this device once, then add the device.";
+  if (msg.includes("needs_phrase_once")) return "Enter your recovery phrase once (below), then add the device.";
   if (msg.includes("api_unreachable")) return "Couldn't reach Flowsta. Check your connection, or use your recovery phrase on the new device.";
   return "That didn't work. Get a new code on the new device.";
 }
@@ -65,12 +70,74 @@ export const DevicesTab = component$(() => {
   const asking = useSignal<NewDevice | null>(null);
   const added = useSignal("");
   const removing = useSignal<DeviceRow | null>(null);
+  // How the account sees this device, and the one-time recovery phrase step.
+  const standing = useSignal<Standing>({ device: "unknown", enrollment: null });
+  const phraseOpen = useSignal(false);
+  const phrase = useSignal("");
+  const phraseError = useSignal("");
+  const phraseDone = useSignal("");
+  // Confirming this device from another one: the code to type there.
+  const confirmCode = useSignal("");
+  const confirmWaiting = useSignal(false);
+
+  const confirmWithDevice = $(async () => {
+    phraseError.value = "";
+    busy.value = true;
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      const unlisten = await listen<{ state: string; reason?: string }>("pair-status", (ev) => {
+        if (ev.payload.state === "waiting_for_approval") {
+          confirmWaiting.value = true;
+          return;
+        }
+        unlisten();
+        confirmCode.value = "";
+        confirmWaiting.value = false;
+        if (ev.payload.state === "done") {
+          phraseDone.value = "Done. This device is confirmed.";
+          load();
+        } else {
+          error.value = claimError(ev.payload.reason || "");
+        }
+      });
+      confirmCode.value = await invoke<string>("pair_confirm_begin", { apiUrl: __API_URL__ });
+    } catch (e) {
+      error.value = claimError(e);
+    } finally {
+      busy.value = false;
+    }
+  });
 
   const load = $(async () => {
     try {
       devices.value = await invoke<DeviceRow[]>("devices_list");
     } catch {
       /* the network is still starting: the list fills in on the next pass */
+    }
+    try {
+      standing.value = await invoke<Standing>("device_standing");
+    } catch { /* locked */ }
+  });
+
+  const submitPhrase = $(async () => {
+    phraseError.value = "";
+    busy.value = true;
+    try {
+      const done = await invoke<{ keys_added: boolean; standing: Standing }>("use_recovery_phrase_once", {
+        apiUrl: __API_URL__,
+        mnemonic: phrase.value,
+      });
+      standing.value = done.standing;
+      phrase.value = "";
+      phraseOpen.value = false;
+      phraseDone.value =
+        done.standing.enrollment === "waiting"
+          ? "Done. From 7 days from now, only your recovery phrase or one of your devices can add a device."
+          : "Done. Only your recovery phrase or one of your devices can add a device.";
+    } catch (e) {
+      phraseError.value = String(e);
+    } finally {
+      busy.value = false;
     }
   });
   // eslint-disable-next-line qwik/no-use-visible-task
@@ -88,6 +155,9 @@ export const DevicesTab = component$(() => {
       asking.value = await invoke<NewDevice>("pair_claim", { apiUrl: __API_URL__, code: code.value });
     } catch (e) {
       error.value = claimError(e);
+      // This device was set up before it kept the keys a new device needs:
+      // the phrase fills them in.
+      if (String(e).includes("needs_phrase_once")) phraseOpen.value = true;
     } finally {
       busy.value = false;
     }
@@ -167,6 +237,60 @@ export const DevicesTab = component$(() => {
 
         {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
         {added.value && <p class="mb-4 text-sm text-sky-300">{added.value}</p>}
+        {phraseDone.value && <p class="mb-4 text-sm text-sky-300">{phraseDone.value}</p>}
+
+        {/* The account does not count this device yet: one question fixes it. */}
+        {standing.value.device === "needs_confirming" && !phraseOpen.value && (
+          <div class="mb-5 rounded-lg border border-amber-700/60 bg-amber-950/30 p-4">
+            <p class="mb-1 text-sm font-semibold text-amber-200">Confirm this device</p>
+            {confirmCode.value ? (
+              <>
+                <p class="mb-2 text-sm text-gray-300">
+                  Type this code on your other device: Settings, Devices, Add a device.
+                </p>
+                <p class="mb-2 select-all rounded-lg bg-gray-900 py-3 text-center font-mono text-2xl tracking-widest text-white">{confirmCode.value}</p>
+                <p class="text-xs text-sky-300">{confirmWaiting.value ? "Now choose Add device there." : "Waiting for your other device..."}</p>
+              </>
+            ) : (
+              <>
+                <p class="mb-3 text-sm text-gray-300">Your account does not count this device yet. Confirm it once:</p>
+                <div class="flex flex-col gap-2 sm:flex-row">
+                  <GlassButton disabled={busy.value} onClick$={() => { phraseOpen.value = true; phraseError.value = ""; }}>Use my recovery phrase</GlassButton>
+                  <GlassButton variant="secondary" disabled={busy.value} onClick$={confirmWithDevice}>Use another device</GlassButton>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+        {standing.value.device === "registered" && standing.value.enrollment === "none" && !phraseOpen.value && (
+          <p class="mb-5 text-sm text-gray-300">
+            <button
+              type="button"
+              class="text-amber-300 underline decoration-amber-300/40 underline-offset-2 hover:text-amber-200"
+              onClick$={() => { phraseOpen.value = true; phraseError.value = ""; }}
+            >
+              Enter your recovery phrase once
+            </button>{" "}
+            so only you can add devices.
+          </p>
+        )}
+        {phraseOpen.value && (
+          <div class="mb-5 rounded-lg border border-gray-700 bg-gray-900/40 p-4">
+            <p class="mb-3 text-sm text-gray-300">Your 24 words. They are used now and not kept.</p>
+            <textarea
+              class="mb-3 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-none"
+              rows={3}
+              placeholder="word1 word2 word3 ... word24"
+              value={phrase.value}
+              onInput$={(e) => { phrase.value = (e.target as HTMLTextAreaElement).value; phraseError.value = ""; }}
+            />
+            {phraseError.value && <p class="mb-3 text-sm text-red-400">{phraseError.value}</p>}
+            <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <GlassButton variant="secondary" disabled={busy.value} onClick$={() => { phraseOpen.value = false; phrase.value = ""; phraseError.value = ""; }}>Cancel</GlassButton>
+              <GlassButton disabled={busy.value || !phrase.value.trim()} onClick$={submitPhrase}>{busy.value ? "Checking..." : "Confirm"}</GlassButton>
+            </div>
+          </div>
+        )}
 
         {devices.value === null ? (
           <p class="text-sm text-gray-400">Loading your devices...</p>

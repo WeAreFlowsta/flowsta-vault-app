@@ -125,6 +125,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         // ⚠️ ORDER MATTERS: single-instance MUST be registered before deep-link
         // on Linux/Windows - deep-link forwards flowsta:// URLs through the
         // single-instance callback. Registering deep-link first wedges startup.
@@ -325,14 +326,19 @@ pub fn run() {
             });
 
             // --- System tray ---
+            // The first line says which state the Vault is in (not clickable).
+            let state_item = MenuItemBuilder::with_id("state", "Locked").enabled(false).build(app)?;
             let open_item = MenuItemBuilder::with_id("open", "Open Flowsta Vault").build(app)?;
             let lock_item = MenuItemBuilder::with_id("lock", "Lock Vault").build(app)?;
+            let lock_stop_item = MenuItemBuilder::with_id("lock-stop", "Lock and stop syncing").build(app)?;
             let separator = PredefinedMenuItem::separator(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
 
             let tray_menu = MenuBuilder::new(app)
+                .item(&state_item)
                 .item(&open_item)
                 .item(&lock_item)
+                .item(&lock_stop_item)
                 .item(&separator)
                 .item(&quit_item)
                 .build()?;
@@ -351,6 +357,14 @@ pub fn run() {
                         // Emit lock event to frontend - it handles the actual lock logic
                         let _ = app.emit("vault-lock-requested", ());
                     }
+                    "lock-stop" => {
+                        let state: Arc<AppState> = app.state::<Arc<AppState>>().inner().clone();
+                        if state.vault_config.lock().unwrap().is_some() {
+                            let _ = app.emit("vault-lock-requested", serde_json::json!({ "stopSyncing": true }));
+                        } else {
+                            commands::stop_syncing_while_locked(&state);
+                        }
+                    }
                     "quit" => {
                         app.exit(0);
                     }
@@ -368,6 +382,26 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Keep the tray's first line and tooltip saying the state.
+            {
+                let tray = _tray.clone();
+                let state: Arc<AppState> = app.state::<Arc<AppState>>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut shown = "";
+                    loop {
+                        let label = commands::tray_state_label(&state);
+                        if label != shown {
+                            let _ = state_item.set_text(label);
+                            let _ = lock_stop_item.set_enabled(label != "Locked");
+                            let _ = lock_item.set_enabled(label == "Unlocked");
+                            let _ = tray.set_tooltip(Some(format!("Flowsta Vault - {}", label)));
+                            shown = label;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                });
+            }
 
             // Window starts visible (required for Tauri #11856 - decoration buttons
             // are unresponsive on Linux Wayland when starting with visible:false).
@@ -424,11 +458,14 @@ pub fn run() {
             device_identity::restore_device_identity,
             pairing::pair_begin,
             pairing::pair_cancel,
+            pairing::pair_confirm_begin,
             pairing::pair_claim,
             pairing::pair_approve,
             pairing::pair_decline,
             devices::devices_list,
             devices::device_remove,
+            device_registry::device_standing,
+            device_registry::use_recovery_phrase_once,
             backup_sync::backups_kept_from_devices,
             connections_sync::connection_known_elsewhere,
             device_identity::attempt_account_reconcile,

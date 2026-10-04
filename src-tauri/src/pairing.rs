@@ -351,6 +351,7 @@ pub(crate) trait Transport {
 
 /// A mailbox on Flowsta's API: it stores the messages for a few minutes
 /// and cannot read them. It is not told which identity is involved.
+#[derive(Clone)]
 pub struct Mailbox {
     base: String,
     token: String,
@@ -507,7 +508,7 @@ enum PairStatus {
 }
 
 /// The new device's running ceremony (one at a time).
-static NEW_SIDE: Mutex<Option<tauri::async_runtime::JoinHandle<()>>> = Mutex::new(None);
+static NEW_SIDE: Mutex<Option<(tauri::async_runtime::JoinHandle<()>, Mailbox)>> = Mutex::new(None);
 
 /// The existing device, between the typed code and the person's answer.
 struct Met {
@@ -567,6 +568,7 @@ pub(crate) async fn pair_begin_inner(
     let (mut mailbox, mailbox_id) = Mailbox::open(&api_url).await?;
     let code_password = new_password().map_err(|e| e.to_string())?;
     let code = format_code(&mailbox_id, &code_password);
+    let closer = mailbox.clone();
 
     let task = tauri::async_runtime::spawn(async move {
         let met_handle = app_handle.clone();
@@ -580,7 +582,66 @@ pub(crate) async fn pair_begin_inner(
         };
         let _ = app_handle.emit("pair-status", status);
     });
-    *NEW_SIDE.lock().unwrap() = Some(task);
+    *NEW_SIDE.lock().unwrap() = Some((task, closer));
+    Ok(code)
+}
+
+/// A device that already holds the identity but that the account does not
+/// count yet: show a code, and register with the approval of the device it
+/// is typed into. Nothing else of what that device hands over is used.
+#[tauri::command]
+pub async fn pair_confirm_begin(
+    api_url: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    pair_confirm_begin_inner(api_url, app_handle, state.inner().clone()).await
+}
+
+pub(crate) async fn pair_confirm_begin_inner(api_url: String, app_handle: tauri::AppHandle, state: Arc<AppState>) -> Result<String, String> {
+    let (identity_seed, conductor_seed, agent_pub_key, did) = {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config.as_ref().ok_or("vault_locked")?;
+        (
+            cfg.device_seed.clone().ok_or("vault_locked")?,
+            cfg.conductor_seed_bytes().ok_or("vault_locked")?,
+            cfg.agent_pub_key.clone(),
+            cfg.did.clone(),
+        )
+    };
+    pair_cancel().await?;
+    let intro = DeviceIntro {
+        name: device_name(),
+        platform: std::env::consts::OS.to_string(),
+        install_id: crate::paths::install_id(&state.data_dir).ok_or("no install id")?,
+        device_key: crate::key_derivation::base64_standard_encode(&crate::key_derivation::public_key_of_seed(&conductor_seed)),
+    };
+    let (mut mailbox, mailbox_id) = Mailbox::open(&api_url).await?;
+    let code_password = new_password().map_err(|e| e.to_string())?;
+    let code = format_code(&mailbox_id, &code_password);
+    let closer = mailbox.clone();
+
+    let task = tauri::async_runtime::spawn(async move {
+        let met_handle = app_handle.clone();
+        let handover = run_new_device(&mut mailbox, &mailbox_id, &code_password, &intro, move || {
+            let _ = met_handle.emit("pair-status", PairStatus::WaitingForApproval);
+        })
+        .await;
+        let outcome = match handover {
+            Ok(handover) if handover.identity_seed != identity_seed => Err("That device holds a different identity.".to_string()),
+            Ok(handover) => {
+                crate::device_registry::hold_approval(Some(handover.approval.clone()));
+                crate::device_registry::register_this_device(&state, &api_url).await.map(|_| ())
+            }
+            Err(e) => Err(e),
+        };
+        let status = match outcome {
+            Ok(()) => PairStatus::Done { agent_pub_key, did },
+            Err(reason) => PairStatus::Failed { reason },
+        };
+        let _ = app_handle.emit("pair-status", status);
+    });
+    *NEW_SIDE.lock().unwrap() = Some((task, closer));
     Ok(code)
 }
 
@@ -628,8 +689,11 @@ fn join_identity(
 /// New device: stop waiting (the person went back).
 #[tauri::command]
 pub async fn pair_cancel() -> Result<(), String> {
-    if let Some(task) = NEW_SIDE.lock().unwrap().take() {
+    let running = NEW_SIDE.lock().unwrap().take();
+    if let Some((task, mut mailbox)) = running {
         task.abort();
+        // The other device is told at once instead of waiting out the code.
+        mailbox.close().await;
     }
     Ok(())
 }

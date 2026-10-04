@@ -614,6 +614,17 @@ impl Drop for KeptConductor {
     }
 }
 
+/// The Vault's state in the tray's words.
+pub(crate) fn tray_state_label(state: &AppState) -> &'static str {
+    if state.vault_config.lock().unwrap().is_some() {
+        "Unlocked"
+    } else if state.kept_conductor.lock().unwrap().is_some() {
+        "Locked - still syncing"
+    } else {
+        "Locked"
+    }
+}
+
 /// A locked Vault that kept syncing stops: another identity is about to be
 /// opened, added or moved on this device. Does nothing while unlocked.
 pub(crate) fn stop_syncing_while_locked(state: &AppState) {
@@ -1690,6 +1701,15 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                         _ => None,
                     })
                     .collect();
+                for name in &added {
+                    use tauri_plugin_notification::NotificationExt;
+                    let _ = devices_app
+                        .notification()
+                        .builder()
+                        .title("Flowsta Vault")
+                        .body(format!("{} was added to your identity. Not you? Remove it in Settings, Devices.", name))
+                        .show();
+                }
                 let _ = devices_app.emit("devices-changed", serde_json::json!({ "added": added }));
             }
             Ok(_) => {}
@@ -4908,6 +4928,20 @@ pub async fn import_vault_export(
         }
     }
 
+    // The copies of other devices' backups the exporting device kept.
+    if let Some(other_devices) = export
+        .get("app_data")
+        .and_then(|a| a.get("other_devices"))
+        .and_then(|a| a.as_array())
+    {
+        let my_install = crate::paths::install_id(&state.data_dir).unwrap_or_default();
+        let copies = crate::backup_sync::import_copies(state.inner(), other_devices, &my_install, overwrite);
+        log::info!("[import] other devices' backups: {:?}", copies);
+        backups_restored += copies.restored;
+        backups_skipped += copies.skipped;
+        backups_failed += copies.failed;
+    }
+
     log::info!(
         "[import] sealed restored {} (skipped {}), backups restored {} (skipped {}, failed {}, unsupported {})",
         sealed_restored,
@@ -7301,7 +7335,7 @@ pub async fn claim_web_username(
 
 /// Persist the in-memory config under the live passphrase, restamping the
 /// display_email sidecar. Shared by the email-change commands.
-fn persist_config_now(state: &Arc<AppState>) -> Result<(), String> {
+pub(crate) fn persist_config_now(state: &Arc<AppState>) -> Result<(), String> {
     let vault_path = state.vault_path.lock().unwrap().clone();
     let config = state.vault_config.lock().unwrap();
     let pw = live_passphrase(state).ok_or("Vault is locked")?; // under the config lock

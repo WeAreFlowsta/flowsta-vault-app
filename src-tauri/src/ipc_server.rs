@@ -4196,6 +4196,14 @@ async fn dev_devices_handler(
                 .collect();
             Ok(serde_json::json!({ "held": held }))
         }
+        "standing" => Ok(serde_json::json!({ "standing": crate::device_registry::device_standing(), "tray": crate::commands::tray_state_label(app) })),
+        "phrase-once" => crate::device_registry::use_recovery_phrase_once_inner(api_url, text("phrase"), app)
+            .await
+            .map(|done| serde_json::json!({ "done": done })),
+        "confirm-begin" => crate::pairing::pair_confirm_begin_inner(api_url, state.app_handle.clone(), app.clone())
+            .await
+            .map(|code| serde_json::json!({ "code": code })),
+        "pair-cancel" => crate::pairing::pair_cancel().await.map(|_| serde_json::json!({ "cancelled": true })),
         "stop-syncing" => {
             crate::commands::stop_syncing_while_locked(app);
             Ok(serde_json::json!({ "stopped": true }))

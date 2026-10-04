@@ -487,6 +487,46 @@ pub fn save_backup_with_time(
     Ok(meta)
 }
 
+/// Write one backup as an encrypted file at `path` (a copy of another
+/// device's backup restored from an export). No rotation, no label rules:
+/// the file is what that device held.
+pub(crate) fn write_backup_file(
+    app_state: &AppState,
+    path: &Path,
+    client_id: &str,
+    app_name: &str,
+    label: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+    created_at: Option<i64>,
+) -> Result<(), String> {
+    if data.len() > MAX_BACKUP_SIZE {
+        return Err(format!("Backup too large: {} bytes (max {} bytes)", data.len(), MAX_BACKUP_SIZE));
+    }
+    let key = backup_keys(app_state)?.write_key();
+    let (ciphertext, nonce_bytes) = encrypt_with_key(data, &key)?;
+    let content_type = content_type.unwrap_or("application/json");
+    let encrypted = EncryptedBackup {
+        nonce: hex::encode(nonce_bytes),
+        ciphertext: hex::encode(ciphertext),
+        meta: BackupMeta {
+            client_id: client_id.to_string(),
+            app_name: app_name.to_string(),
+            label: Some(label.to_string()),
+            created_at: created_at.unwrap_or_else(unix_now),
+            data_size: data.len(),
+            content_type: content_type.to_string(),
+            identity: app_state.vault_config.lock().unwrap().as_ref().map(|c| c.agent_pub_key.clone()),
+            summary: extract_summary_if_canonical(&plain_view(data, content_type)),
+        },
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create backup dir: {}", e))?;
+    }
+    let json = serde_json::to_string(&encrypted).map_err(|e| format!("Backup serialize failed: {}", e))?;
+    crate::vault::write_atomic(path, json.as_bytes()).map_err(|e| format!("Backup write failed: {}", e))
+}
+
 /// Retrieve and decrypt a backup for an app.
 pub fn retrieve_backup(
     app_state: &AppState,

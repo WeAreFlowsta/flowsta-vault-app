@@ -307,6 +307,70 @@ pub fn newest_across_devices(identity_root: &Path, client_id: &str, label: &str)
         .max_by_key(|h| (h.meta.created_at, h.from_install.is_none()))
 }
 
+/// What an import of another device's backups from an export file did.
+#[derive(Debug, Default, PartialEq)]
+pub struct CopiesImported {
+    pub restored: usize,
+    pub skipped: usize,
+    pub failed: usize,
+}
+
+/// Restore the copies of other devices' backups an export file carries
+/// (`app_data.other_devices`). A copy already held is left alone unless
+/// `overwrite`. The exporting device's entries for THIS device are not
+/// copies: this device's own backups are the truth for it.
+pub fn import_copies(
+    state: &crate::commands::AppState,
+    other_devices: &[serde_json::Value],
+    my_install_id: &str,
+    overwrite: bool,
+) -> CopiesImported {
+    let root = state.identity_root();
+    let mut outcome = CopiesImported::default();
+    for device in other_devices {
+        let Some(install_id) = device.get("device").and_then(|v| v.as_str()).filter(|id| is_install_id(id)) else {
+            continue;
+        };
+        if install_id == my_install_id {
+            continue;
+        }
+        for snap in device.get("snapshots").and_then(|s| s.as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
+            let text = |key: &str| snap.get(key).and_then(|v| v.as_str());
+            let (Some(client_id), Some(label), Some(raw)) = (text("client_id"), text("label"), text("restore_base64")) else {
+                outcome.failed += 1;
+                continue;
+            };
+            let path = copy_path(&root, install_id, client_id, label);
+            if path.exists() && !overwrite {
+                outcome.skipped += 1;
+                continue;
+            }
+            let written = crate::commands::base64_standard_decode(raw)
+                .map_err(|_| "bad base64".to_string())
+                .and_then(|bytes| {
+                    crate::backup::write_backup_file(
+                        state,
+                        &path,
+                        client_id,
+                        text("app_name").unwrap_or(client_id),
+                        label,
+                        &bytes,
+                        text("content_type"),
+                        snap.get("saved_at").and_then(|v| v.as_i64()),
+                    )
+                });
+            match written {
+                Ok(()) => outcome.restored += 1,
+                Err(e) => {
+                    log::warn!("[import] a copy of another device's backup was not restored: {}", e);
+                    outcome.failed += 1;
+                }
+            }
+        }
+    }
+    outcome
+}
+
 /// What this device keeps from one of the identity's other devices.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct KeptFromDevice {
@@ -533,6 +597,34 @@ mod tests {
         // Another device's records are never rewritten from here.
         let theirs: Vec<SlotRecord> = first.iter().map(|r| SlotRecord { install_id: OTHER.into(), ..r.clone() }).collect();
         assert!(records_to_write(&[], &theirs, ME).is_empty());
+    }
+
+    #[test]
+    fn an_export_brings_back_the_copies_of_a_device_that_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::commands::AppState::new(tmp.path().to_path_buf());
+        *state.backup_key.lock().unwrap() = Some([7u8; 32]);
+        let snap = |label: &str, text: &str| serde_json::json!({
+            "app_name": "Poll App", "client_id": "app", "label": label, "saved_at": 5,
+            "content_type": "text/plain", "restore_base64": crate::key_derivation::base64_standard_encode(text.as_bytes()),
+        });
+        let export = vec![
+            serde_json::json!({ "device": OTHER, "snapshots": [snap("recovery", "theirs"), snap("latest", "theirs too"), { "label": "broken" }] }),
+            serde_json::json!({ "device": ME, "snapshots": [snap("recovery", "mine, as the other device saw it")] }),
+            serde_json::json!({ "device": "../escape", "snapshots": [snap("recovery", "x")] }),
+        ];
+        assert_eq!(import_copies(&state, &export, ME, false), CopiesImported { restored: 2, skipped: 0, failed: 1 });
+        // Again: nothing is written twice.
+        assert_eq!(import_copies(&state, &export, ME, false), CopiesImported { restored: 0, skipped: 2, failed: 1 });
+        assert_eq!(import_copies(&state, &export, ME, true).restored, 2);
+
+        // The copies open and are offered across devices; nothing was written as this device's own.
+        let held = newest_across_devices(tmp.path(), "app", "recovery").unwrap();
+        assert_eq!(held.from_install.as_deref(), Some(OTHER));
+        let keys = crate::backup::backup_keys(&state).unwrap();
+        assert_eq!(crate::backup::open_backup_file(&held.path, &keys).unwrap().0, b"theirs");
+        assert_eq!(kept_from_devices(tmp.path()).len(), 1);
+        assert!(local_index(tmp.path(), ME).is_empty());
     }
 
     #[test]
