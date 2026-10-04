@@ -3,8 +3,9 @@
 // in the built stylesheets or an outside stylesheet/font link in the pages.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = new URL('../dist/', import.meta.url).pathname;
+const root = fileURLToPath(new URL('../dist/', import.meta.url));
 const files = [];
 (function walk(dir) {
   for (const name of readdirSync(dir)) {
