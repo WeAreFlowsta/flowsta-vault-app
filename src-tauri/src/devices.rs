@@ -25,6 +25,10 @@ pub const DEVICE_ENTRY_TYPE: &str = "device";
 /// it changed: each refresh is a new entry every device keeps.
 const REFRESH_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// A device whose records changed says so again no sooner than this (the
+/// other devices read "up to date" from it).
+const REFRESH_AFTER_CHANGE_MS: u64 = 4 * 60 * 1000;
+
 /// A device that has not refreshed its record for this long is "not seen".
 const NOT_SEEN_AFTER_MS: u64 = 3 * REFRESH_AFTER_MS;
 
@@ -110,6 +114,8 @@ pub fn needs_refresh(existing: Option<&DeviceRecord>, current: &DeviceRecord) ->
         || existing.vault_version != current.vault_version
         || existing.generation != current.generation
         || current.seen_at.saturating_sub(existing.seen_at) >= REFRESH_AFTER_MS
+        || (current.latest_change > existing.latest_change
+            && current.seen_at.saturating_sub(existing.seen_at) >= REFRESH_AFTER_CHANGE_MS)
 }
 
 /// Whether the records say this device (this install, running this key)
@@ -211,19 +217,22 @@ fn known(devices: &[DeviceRecord]) -> Vec<KnownDevice> {
 }
 
 /// What changed among the identity's OTHER devices since this one last
-/// looked: a device it had not seen, or one removed by another device.
+/// looked: a device added after this one that it had not seen, or one
+/// removed by another device. Devices that were there before this one
+/// joined are not news when their records arrive.
 /// `before` is `None` the first time (nothing to compare with).
 pub fn changes_since(before: Option<&[KnownDevice]>, devices: &[DeviceRecord], me: &str) -> Vec<DeviceChange> {
     let Some(before) = before else {
         return Vec::new();
     };
+    let my_added_at = devices.iter().find(|d| d.install_id == me).map(|d| d.added_at).unwrap_or(0);
     let mut changes = Vec::new();
     for device in devices.iter().filter(|d| d.install_id != me) {
         let seen = before
             .iter()
             .find(|k| k.install_id == device.install_id && k.conductor_key == device.conductor_key);
         match (seen, device.removed_at.is_some()) {
-            (None, false) => changes.push(DeviceChange::Added(device.clone())),
+            (None, false) if device.added_at > my_added_at => changes.push(DeviceChange::Added(device.clone())),
             (Some(k), true) if !k.removed && device.removed_by.as_deref() != Some(me) => {
                 changes.push(DeviceChange::Removed(device.clone()))
             }
@@ -231,6 +240,20 @@ pub fn changes_since(before: Option<&[KnownDevice]>, devices: &[DeviceRecord], m
         }
     }
     changes
+}
+
+/// This device just added another one: it is not news here.
+pub fn remember_added(state: &AppState, install_id: &str, device_public: &[u8; 32]) {
+    let path = crate::paths::known_devices_path(&state.identity_root());
+    let mut list: Vec<KnownDevice> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    list.push(KnownDevice {
+        install_id: install_id.to_string(),
+        conductor_key: crate::key_derivation::base64_standard_encode(&crate::key_derivation::holo_agent_pub_key_bytes(device_public)),
+        removed: false,
+    });
+    if let Ok(bytes) = serde_json::to_vec(&list) {
+        let _ = std::fs::write(&path, bytes);
+    }
 }
 
 /// Notice devices added or removed elsewhere: one Activity line each and a
@@ -255,7 +278,13 @@ pub async fn notice_changes(state: &Arc<AppState>) -> Result<Vec<DeviceChange>, 
             }
         }
     }
-    let now = known(&devices);
+    let mut now = known(&devices);
+    // A device this one added whose record has not arrived yet stays known.
+    for earlier in before.as_deref().unwrap_or(&[]) {
+        if !now.iter().any(|k| k.install_id == earlier.install_id && k.conductor_key == earlier.conductor_key) {
+            now.push(earlier.clone());
+        }
+    }
     if before.as_deref() != Some(now.as_slice()) {
         if let Ok(bytes) = serde_json::to_vec(&now) {
             let _ = std::fs::write(&path, bytes);
@@ -459,6 +488,13 @@ mod tests {
         assert!(!needs_refresh(Some(&existing), &current));
         current.seen_at = existing.seen_at + DAY;
         assert!(needs_refresh(Some(&existing), &current));
+        // It holds something newer: said again, but not more often than every few minutes.
+        let mut holds_more = existing.clone();
+        holds_more.latest_change = existing.latest_change + 1;
+        holds_more.seen_at = existing.seen_at + REFRESH_AFTER_CHANGE_MS - 1;
+        assert!(!needs_refresh(Some(&existing), &holds_more));
+        holds_more.seen_at = existing.seen_at + REFRESH_AFTER_CHANGE_MS;
+        assert!(needs_refresh(Some(&existing), &holds_more));
         let mut renamed = existing.clone();
         renamed.vault_version = "1.6.1".into();
         assert!(needs_refresh(Some(&existing), &renamed));
@@ -485,6 +521,11 @@ mod tests {
         let mine = device("me");
         let mut other = device("other");
         other.conductor_key = "other key".into();
+        other.added_at = mine.added_at + 1;
+        // A device that was there before this one joined is not news.
+        let mut older = device("older");
+        older.added_at = mine.added_at - 1;
+        assert!(changes_since(Some(&known(&[mine.clone()])), &[mine.clone(), older], "me").is_empty());
         // The first look has nothing to compare with.
         assert!(changes_since(None, &[mine.clone(), other.clone()], "me").is_empty());
         // A device this one had not seen.

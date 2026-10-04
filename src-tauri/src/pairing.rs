@@ -668,6 +668,7 @@ pub async fn pair_approve(state: State<'_, Arc<AppState>>) -> Result<(), String>
 
 pub(crate) async fn pair_approve_inner(state: &Arc<AppState>) -> Result<(), String> {
     let mut met = MET.lock().await.take().ok_or("pair_closed")?;
+    let mut added_key = [0u8; 32];
     let handover = {
         let config = state.vault_config.lock().unwrap();
         let cfg = config.as_ref().ok_or("vault_locked")?;
@@ -677,6 +678,7 @@ pub(crate) async fn pair_approve_inner(state: &Arc<AppState>) -> Result<(), Stri
             .ok()
             .and_then(|k| k.as_slice().try_into().ok())
             .ok_or_else(|| PairError::Malformed.to_string())?;
+        added_key = new_device;
         let approval = crate::device_registry::approve_device(
             &crate::key_derivation::public_key_of_seed(&identity_seed),
             &approver_seed,
@@ -691,6 +693,7 @@ pub(crate) async fn pair_approve_inner(state: &Arc<AppState>) -> Result<(), Stri
     };
     let sent = hand_over(&mut met.mailbox, &met.channel, &handover).await;
     if sent.is_ok() {
+        crate::devices::remember_added(state, &met.intro.install_id, &added_key);
         state.activity.record("device_added", format!("Added {} as one of your devices", met.intro.name), None, None, None);
     } else {
         met.mailbox.close().await;

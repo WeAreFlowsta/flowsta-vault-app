@@ -1603,10 +1603,13 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
     let round = DEVICES_ROUND.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
         loop {
-            if devices_round(&devices_state, &devices_app).await {
-                break;
-            }
-            tokio::time::sleep(DEVICES_ROUND_EVERY).await;
+            let wait = match devices_round(&devices_state, &devices_app).await {
+                DevicesRound::StoodDown => break,
+                DevicesRound::Done => DEVICES_ROUND_EVERY,
+                // The cells of a returning identity can take minutes to answer.
+                DevicesRound::NotReady => DEVICES_ROUND_RETRY,
+            };
+            tokio::time::sleep(wait).await;
             let current = DEVICES_ROUND.load(std::sync::atomic::Ordering::SeqCst) == round;
             if !current || devices_state.vault_config.lock().unwrap().is_none() {
                 break;
@@ -1617,19 +1620,34 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
 
 static DEVICES_ROUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const DEVICES_ROUND_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const DEVICES_ROUND_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// One round. Returns true when this device stood down.
-async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHandle) -> bool {
+enum DevicesRound {
+    Done,
+    /// The identity's records could not be read yet.
+    NotReady,
+    StoodDown,
+}
+
+/// One round.
+async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHandle) -> DevicesRound {
     {
         // Removed by another device of the identity: stand down. Nothing is
         // erased; the lock screen offers what comes next.
-        if let Ok(true) = crate::devices::removed_here_now(devices_state).await {
+        let removed = match crate::devices::removed_here_now(devices_state).await {
+            Ok(removed) => removed,
+            Err(e) => {
+                log::info!("Devices not checked yet: {}", e.chars().take(120).collect::<String>());
+                return DevicesRound::NotReady;
+            }
+        };
+        if removed {
             log::info!("This device was removed from the identity. Standing down.");
             let _ = std::fs::write(crate::paths::removed_marker_path(&devices_state.identity_root()), b"");
             devices_state.activity.record("device_stood_down", "This device was removed from your identity", None, None, None);
             let _ = lock_vault_inner(devices_state);
             let _ = devices_app.emit("device-removed", serde_json::json!({}));
-            return true;
+            return DevicesRound::StoodDown;
         }
         match crate::devices::publish_own(devices_state).await {
             Ok(true) => log::info!("This device's record was written"),
@@ -1660,7 +1678,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             Err(e) => log::info!("Devices not checked: {}", e),
         }
     }
-    false
+    DevicesRound::Done
 }
 
 /// From here this device signs beside the identity key at sign-in, and
