@@ -285,6 +285,11 @@ jobs:
   publish-release:
     needs: [create-release, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # For the signed build records below.
+      id-token: write
+      attestations: write
     steps:
       - name: Rename release assets
         uses: actions/github-script@v8
@@ -344,6 +349,8 @@ jobs:
         with:
           script: |
             const crypto = require('crypto');
+            const fs = require('fs');
+            fs.mkdirSync('release-assets', { recursive: true });
             const releaseId = Number(process.env.release_id);
             const { owner, repo } = context.repo;
 
@@ -367,6 +374,8 @@ jobs:
                 { owner, repo, asset_id: a.id, headers: { accept: 'application/octet-stream' } }
               );
               const hash = crypto.createHash('sha256').update(Buffer.from(res.data)).digest('hex');
+              // Kept on disk for the build records step.
+              fs.writeFileSync(`release-assets/${a.name}`, Buffer.from(res.data));
               lines.push(`${hash}  ${a.name}`);
               console.log(`${hash}  ${a.name}`);
             }
@@ -377,6 +386,16 @@ jobs:
               name: 'SHA256SUMS.txt',
               data: lines.join('\n') + '\n',
             });
+
+      # A signed record, kept by GitHub, that each published file was built by
+      # this workflow from this commit of this repository. The files are the
+      # final ones (after code signing and notarization). Anyone can check a
+      # download with:
+      #   gh attestation verify <file> --repo <owner>/<repo>
+      - name: Signed build records
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-assets/*
 
       - name: Publish release
         uses: actions/github-script@v8
