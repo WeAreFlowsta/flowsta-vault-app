@@ -429,6 +429,7 @@ pub fn run() {
             pairing::pair_decline,
             devices::devices_list,
             devices::device_remove,
+            backup_sync::backups_kept_from_devices,
             connections_sync::connection_known_elsewhere,
             device_identity::attempt_account_reconcile,
             device_identity::update_pending_registration_email,

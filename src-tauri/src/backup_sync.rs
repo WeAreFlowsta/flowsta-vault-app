@@ -307,6 +307,42 @@ pub fn newest_across_devices(identity_root: &Path, client_id: &str, label: &str)
         .max_by_key(|h| (h.meta.created_at, h.from_install.is_none()))
 }
 
+/// What this device keeps from one of the identity's other devices.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct KeptFromDevice {
+    pub install_id: String,
+    pub backups: usize,
+    /// Bytes of data, as the apps stored it.
+    pub bytes: u64,
+}
+
+/// The copies this device keeps, counted per device.
+pub fn kept_from_devices(identity_root: &Path) -> Vec<KeptFromDevice> {
+    let Ok(devices) = std::fs::read_dir(crate::paths::backup_copies_dir(identity_root)) else {
+        return Vec::new();
+    };
+    let mut kept = Vec::new();
+    for device in devices.flatten() {
+        let install_id = device.file_name().to_string_lossy().to_string();
+        if !is_install_id(&install_id) {
+            continue;
+        }
+        let Ok(apps) = std::fs::read_dir(device.path()) else { continue };
+        let metas: Vec<BackupMeta> = apps.flatten().flat_map(|app| slots_in(&app.path())).map(|(_, meta)| meta).collect();
+        if !metas.is_empty() {
+            kept.push(KeptFromDevice { install_id, backups: metas.len(), bytes: metas.iter().map(|m| m.data_size as u64).sum() });
+        }
+    }
+    kept.sort_by(|a, b| a.install_id.cmp(&b.install_id));
+    kept
+}
+
+/// For Your Data: what this device keeps from the identity's other devices.
+#[tauri::command]
+pub fn backups_kept_from_devices(state: tauri::State<'_, Arc<crate::commands::AppState>>) -> Vec<KeptFromDevice> {
+    kept_from_devices(&state.identity_root())
+}
+
 // ── The round ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default, PartialEq)]
@@ -543,6 +579,7 @@ mod tests {
         assert_eq!(newest.from_install.as_deref(), Some(OTHER));
         assert_eq!(newest.meta.created_at, 30);
         assert_eq!(held_across_devices(here.path(), "app").len(), 2);
+        assert_eq!(kept_from_devices(here.path()), vec![KeptFromDevice { install_id: OTHER.into(), backups: 1, bytes: 6 }]);
         assert!(newest_across_devices(here.path(), "app", "missing").is_none());
         assert!(held_across_devices(here.path(), "another_app").is_empty());
 

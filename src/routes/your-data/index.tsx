@@ -208,6 +208,27 @@ function timeAgo(unixSecs: number): string {
 
 export default component$(() => {
   const identity = useSignal<VaultIdentity | null>(null);
+  // Copies this device keeps of the app backups made on the person's other devices.
+  const keptFromDevices = useSignal<{ name: string; backups: number; bytes: number }[]>([]);
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ cleanup }) => {
+    const load = async () => {
+      try {
+        const kept = await invoke<{ install_id: string; backups: number; bytes: number }[]>("backups_kept_from_devices");
+        const devices = kept.length
+          ? await invoke<{ install_id: string; name: string }[]>("devices_list").catch(() => [])
+          : [];
+        keptFromDevices.value = kept.map((k) => ({
+          name: devices.find((d) => d.install_id === k.install_id)?.name || "another device",
+          backups: k.backups,
+          bytes: k.bytes,
+        }));
+      } catch { /* locked */ }
+    };
+    load();
+    const id = setInterval(load, 30_000);
+    cleanup(() => clearInterval(id));
+  });
   const backupStats = useSignal<BackupStats>({
     app_count: 0,
     total_backups: 0,
@@ -862,6 +883,15 @@ export default component$(() => {
                 </div>
               );
             })}
+          </div>
+        )}
+        {keptFromDevices.value.length > 0 && (
+          <div class="mt-4 space-y-1 border-t border-gray-700/70 pt-3">
+            {keptFromDevices.value.map((k) => (
+              <p key={k.name} class="text-xs text-gray-400">
+                Also kept from {k.name}: {k.backups} backup{k.backups !== 1 ? "s" : ""}, {formatBytes(k.bytes)}
+              </p>
+            ))}
           </div>
         )}
       </div>

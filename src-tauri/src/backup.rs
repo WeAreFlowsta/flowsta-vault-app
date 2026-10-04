@@ -898,6 +898,41 @@ pub fn export_all_data_with_progress(
         }));
     }
 
+    // The copies this device keeps of the backups made on the identity's
+    // other devices, by device. Raw bytes only (base64): they restore
+    // verbatim, and the readable view is in that device's own export.
+    let other_devices = {
+        let keys = backup_keys(app_state)?;
+        let mut by_device: std::collections::BTreeMap<String, Vec<serde_json::Value>> = std::collections::BTreeMap::new();
+        if let Ok(devices) = std::fs::read_dir(crate::paths::backup_copies_dir(&app_state.identity_root())) {
+            for device in devices.flatten().filter(|d| d.path().is_dir()) {
+                let install_id = device.file_name().to_string_lossy().to_string();
+                let Ok(apps) = std::fs::read_dir(device.path()) else { continue };
+                for app in apps.flatten().filter(|a| a.path().is_dir()) {
+                    let Ok(files) = std::fs::read_dir(app.path()) else { continue };
+                    for file in files.flatten().map(|f| f.path()).filter(|p| p.extension().and_then(|x| x.to_str()) == Some("enc")) {
+                        match open_backup_file(&file, &keys) {
+                            Ok((data, meta)) => by_device.entry(install_id.clone()).or_default().push(serde_json::json!({
+                                "app_name": meta.app_name,
+                                "client_id": meta.client_id,
+                                "label": meta.label,
+                                "saved_at": meta.created_at,
+                                "size_bytes": meta.data_size,
+                                "content_type": meta.content_type,
+                                "restore_base64": base64_standard_encode(&data),
+                            })),
+                            Err(e) => log::warn!("A copy of another device's backup did not open ({:?}): {}", file, e),
+                        }
+                    }
+                }
+            }
+        }
+        by_device
+            .into_iter()
+            .map(|(device, snapshots)| serde_json::json!({ "device": device, "snapshot_count": snapshots.len(), "snapshots": snapshots }))
+            .collect::<Vec<_>>()
+    };
+
     // Build the linked apps list
     let linked_apps = app_state.linked_third_party_apps.lock().unwrap().clone();
 
@@ -914,7 +949,7 @@ pub fn export_all_data_with_progress(
         ),
 
         "format": {
-            "version": "2.0",
+            "version": "3.0",
             "exported_at": iso_now(),
             "license": "Cryptographic Autonomy License v1.0 (CAL-1.0)",
         },
@@ -945,6 +980,33 @@ pub fn export_all_data_with_progress(
             "device_seed_hex": device_seed_hex,
             "agent_pub_key_full_b64": config.agent_pub_key_raw_b64,
             "recovery_lookup_hash": config.recovery_lookup_hash,
+            // Every other key this device holds for the identity.
+            "conductor_seed_hex": config.conductor_seed.as_ref().map(hex::encode),
+            "data_key_hex": config.data_key.as_ref().map(hex::encode),
+            "backup_key_hex": config.backup_key.as_ref().map(hex::encode),
+            "private_network_seed": config.private_network_seed,
+            "_other_keys": concat!(
+                "conductor_seed_hex is the key THIS device runs on the network ",
+                "when it was added to an identity that already existed (absent ",
+                "on the identity's first device, which runs device_seed). ",
+                "data_key_hex encrypts your private records, backup_key_hex ",
+                "your app backups, and private_network_seed names the private ",
+                "network your own devices share.",
+            ),
+        },
+
+        // ── This device ───────────────────────────────────────────
+        "device": {
+            "_readme": concat!(
+                "The device this export was made on. Your identity can live ",
+                "on several devices; each keeps the same private records and ",
+                "its own app backups, plus a copy of the other devices' app ",
+                "backups (app_data.other_devices).",
+            ),
+            "install_id": crate::paths::install_id(&app_state.data_dir),
+            "platform": std::env::consts::OS,
+            "vault_version": env!("CARGO_PKG_VERSION"),
+            "runs_its_own_network_key": config.conductor_seed.is_some(),
         },
 
         // ── Web account link ──────────────────────────────────────
@@ -999,6 +1061,7 @@ pub fn export_all_data_with_progress(
             "total_snapshots": stats.total_backups,
             "total_size_bytes": stats.total_size,
             "apps": app_data,
+            "other_devices": other_devices,
         },
 
         // ── Sign It signatures ──────────────────────────────────────
