@@ -1,5 +1,13 @@
 @import "tailwindcss";
-@import url("https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@300;400;500;700&display=swap");
+/* The font ships inside the app: nothing is fetched to show the Vault. */
+@import "@fontsource/m-plus-rounded-1c/latin-300.css";
+@import "@fontsource/m-plus-rounded-1c/latin-ext-300.css";
+@import "@fontsource/m-plus-rounded-1c/latin-400.css";
+@import "@fontsource/m-plus-rounded-1c/latin-ext-400.css";
+@import "@fontsource/m-plus-rounded-1c/latin-500.css";
+@import "@fontsource/m-plus-rounded-1c/latin-ext-500.css";
+@import "@fontsource/m-plus-rounded-1c/latin-700.css";
+@import "@fontsource/m-plus-rounded-1c/latin-ext-700.css";
 
 @theme {
   --color-primary-50: oklch(0.977 0.014 307.247);
