@@ -464,7 +464,8 @@ export default component$(() => {
   // all the slow work BEFORE the dialog with only a label swap for
   // feedback - a long export looked broken.
   const handleExport = $(async () => {
-    const date = new Date().toISOString().split("T")[0];
+    const now = new Date();
+    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     const defaultName = `flowsta-vault-export-${date}.json`;
 
     const { save } = await import("@tauri-apps/plugin-dialog");

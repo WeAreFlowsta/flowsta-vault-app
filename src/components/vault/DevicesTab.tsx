@@ -26,6 +26,7 @@ interface Standing {
 interface NewDevice {
   name: string;
   platform: string;
+  install_id: string;
 }
 
 const PLATFORM_NAMES: Record<string, string> = { windows: "Windows", macos: "Mac", linux: "Linux" };
@@ -69,6 +70,8 @@ export const DevicesTab = component$(() => {
   const error = useSignal("");
   const asking = useSignal<NewDevice | null>(null);
   const added = useSignal("");
+  // The install id of the device just approved here, until it is listed.
+  const addedInstall = useSignal("");
   const removing = useSignal<DeviceRow | null>(null);
   // How the account sees this device, and the one-time recovery phrase step.
   const standing = useSignal<Standing>({ device: "unknown", enrollment: null });
@@ -111,6 +114,13 @@ export const DevicesTab = component$(() => {
   const load = $(async () => {
     try {
       devices.value = await invoke<DeviceRow[]>("devices_list");
+      // The device approved here has started: the waiting line goes.
+      if (addedInstall.value && devices.value.some((d) => d.install_id === addedInstall.value && d.state !== "removed")) {
+        const name = devices.value.find((d) => d.install_id === addedInstall.value)?.name || "The new device";
+        addedInstall.value = "";
+        added.value = `${name} has started and is one of your devices.`;
+        setTimeout(() => { added.value = ""; }, 8_000);
+      }
     } catch {
       /* the network is still starting: the list fills in on the next pass */
     }
@@ -143,7 +153,7 @@ export const DevicesTab = component$(() => {
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ cleanup }) => {
     load();
-    const id = setInterval(load, 10_000);
+    const id = setInterval(load, 5_000);
     cleanup(() => clearInterval(id));
   });
 
@@ -168,7 +178,8 @@ export const DevicesTab = component$(() => {
     busy.value = true;
     try {
       await invoke("pair_approve");
-      added.value = device ? `${device.name} is being added. It appears here once it has started.` : "";
+      added.value = device ? `Waiting for ${device.name} to start...` : "";
+      addedInstall.value = device?.install_id || "";
       adding.value = false;
       code.value = "";
     } catch (e) {
@@ -236,7 +247,17 @@ export const DevicesTab = component$(() => {
         )}
 
         {error.value && <p class="mb-4 text-sm text-red-400">{error.value}</p>}
-        {added.value && <p class="mb-4 text-sm text-sky-300">{added.value}</p>}
+        {added.value && (
+          <p class="mb-4 flex items-center gap-2 text-sm text-sky-300">
+            {addedInstall.value && (
+              <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+              </svg>
+            )}
+            <span>{added.value}</span>
+          </p>
+        )}
         {phraseDone.value && <p class="mb-4 text-sm text-sky-300">{phraseDone.value}</p>}
 
         {/* The account does not count this device yet: one question fixes it. */}
@@ -344,7 +365,7 @@ export const DevicesTab = component$(() => {
           <div class="mx-4 w-full max-w-md rounded-lg border border-gray-700 bg-gray-800 p-6">
             <h3 class="mb-2 text-lg font-semibold text-white">Remove {removing.value.name}?</h3>
             <p class="mb-6 text-sm text-gray-300">
-              It can no longer sign in or approve as you, and it stops syncing. What it already holds stays on it.
+              This device will no longer sign in or approve as you, and it stops syncing. Anything already on it stays there.
             </p>
             <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <GlassButton variant="secondary" disabled={busy.value} onClick$={() => { removing.value = null; }}>Cancel</GlassButton>

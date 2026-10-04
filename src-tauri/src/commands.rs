@@ -1618,14 +1618,20 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
     if !has_private_cell {
         return;
     }
-    // One round now, then one every few minutes while this identity stays
-    // unlocked. A newer unlock replaces this loop.
+    // A full round now, a light one every minute (what other devices
+    // changed), a full one every few minutes (what this device holds),
+    // while this identity stays unlocked. A newer unlock replaces this loop.
     let round = DEVICES_ROUND.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
+        let mut pass: u32 = 0;
         loop {
-            let wait = match devices_round(&devices_state, &devices_app).await {
+            let full = pass % FULL_EVERY_PASSES == 0;
+            let wait = match devices_round(&devices_state, &devices_app, full).await {
                 DevicesRound::StoodDown => break,
-                DevicesRound::Done => DEVICES_ROUND_EVERY,
+                DevicesRound::Done => {
+                    pass += 1;
+                    DEVICES_ROUND_EVERY
+                }
                 // The cells of a returning identity can take minutes to answer.
                 DevicesRound::NotReady => DEVICES_ROUND_RETRY,
             };
@@ -1639,8 +1645,10 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
 }
 
 static DEVICES_ROUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-const DEVICES_ROUND_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const DEVICES_ROUND_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 const DEVICES_ROUND_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+/// Every fifth pass also says what this device holds (its record, backups).
+const FULL_EVERY_PASSES: u32 = 5;
 
 enum DevicesRound {
     Done,
@@ -1649,17 +1657,18 @@ enum DevicesRound {
     StoodDown,
 }
 
-/// One round now (the dev harness; the page's own refresh).
+/// One full round now (the dev harness; the page's own refresh).
 pub(crate) async fn run_devices_round(state: &Arc<AppState>, app: &tauri::AppHandle) -> &'static str {
-    match devices_round(state, app).await {
+    match devices_round(state, app, true).await {
         DevicesRound::Done => "done",
         DevicesRound::NotReady => "not_ready",
         DevicesRound::StoodDown => "stood_down",
     }
 }
 
-/// One round.
-async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHandle) -> DevicesRound {
+/// One round. `full` adds what this device says about itself (its record,
+/// its backups); the light pass only follows what other devices changed.
+async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHandle, full: bool) -> DevicesRound {
     {
         // Removed by another device of the identity: stand down. Nothing is
         // erased; the lock screen offers what comes next.
@@ -1678,10 +1687,18 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             let _ = devices_app.emit("device-removed", serde_json::json!({}));
             return DevicesRound::StoodDown;
         }
-        match crate::devices::publish_own(devices_state).await {
-            Ok(true) => log::info!("This device's record was written"),
-            Ok(false) => {}
-            Err(e) => log::info!("This device's record was not written: {}", e),
+        if full {
+            match crate::devices::publish_own(devices_state).await {
+                Ok(true) => log::info!("This device's record was written"),
+                Ok(false) => {}
+                Err(e) => log::info!("This device's record was not written: {}", e),
+            }
+            // The first device's picture reaches the others as a record.
+            match ensure_profile_picture_record(devices_state).await {
+                Ok(true) => log::info!("This device's profile picture was written"),
+                Ok(false) => {}
+                Err(e) => log::info!("Profile picture not written: {}", e),
+            }
         }
         match apply_profile_from_other_devices(devices_state).await {
             Ok(true) => {
@@ -1725,6 +1742,9 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
         }
         // App backups: say what this device holds, keep copies of what the
         // other devices hold.
+        if !full {
+            return DevicesRound::Done;
+        }
         match crate::backup_sync::round(devices_state).await {
             Ok(outcome) if outcome.changed() => {
                 log::info!(
@@ -8128,6 +8148,32 @@ fn profile_fields_from_config(state: &AppState) -> (String, Option<String>) {
 /// device's config, so its own screens and its label show it. Returns
 /// whether anything changed. The records are the truth; the config is this
 /// device's working copy.
+/// The identity's picture as a record, when this device holds one (the
+/// identicon made at account creation, or one the person set before 1.6.0)
+/// and no device has written one yet. A device added to the identity does
+/// not write its own: the picture comes to it.
+pub(crate) async fn ensure_profile_picture_record(state: &Arc<AppState>) -> Result<bool, String> {
+    let picture = {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config.as_ref().ok_or("vault_locked")?;
+        if cfg.joined_existing {
+            return Ok(false);
+        }
+        cfg.profile_picture.clone().filter(|p| !p.is_empty())
+    };
+    let Some(picture) = picture else {
+        return Ok(false);
+    };
+    let records = crate::sealed::sealed_list_inner(state).await?;
+    if records.iter().any(|r| r.entry_type == "profile_picture") {
+        return Ok(false);
+    }
+    let now = crate::ipc_server::unix_now() as u64 * 1000;
+    crate::sealed::sealed_store_inner(state, "profile_picture".into(), serde_json::json!({ "profile_picture": picture }), Vec::new(), now)
+        .await
+        .map(|_| true)
+}
+
 pub(crate) async fn apply_profile_from_other_devices(state: &Arc<AppState>) -> Result<bool, String> {
     let records = crate::sealed::sealed_list_inner(state).await?;
     let mine = crate::paths::install_id(&state.data_dir);

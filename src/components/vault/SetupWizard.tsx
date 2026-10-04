@@ -1177,10 +1177,12 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
 
         {step.value === "pair-code" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-2 text-2xl font-bold text-white">Type this code on your other device</h2>
-            <p class="mb-6 text-sm text-gray-400">
-              In its Vault: Settings, Devices, Add a device.
-            </p>
+            <h2 class="mb-3 text-2xl font-bold text-white">Type this code on your other device</h2>
+            <ol class="mb-6 list-decimal space-y-1 pl-5 text-sm text-gray-300">
+              <li>Open Flowsta Vault on the device that already has your identity.</li>
+              <li>Go to <span class="text-white">Settings</span>, then the <span class="text-white">Devices</span> tab.</li>
+              <li>Choose <span class="text-white">Add a device</span> and type this code.</li>
+            </ol>
 
             {pairCode.value ? (
               <>
@@ -1192,7 +1194,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
                   </svg>
-                  <span>{pairWaitingApproval.value ? "Now choose Add device there." : "Waiting for your other device..."}</span>
+                  <span>{pairWaitingApproval.value ? "Code received. Choose Add device on your other device." : "Waiting for the code to be typed on your other device..."}</span>
                 </p>
               </>
             ) : (

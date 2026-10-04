@@ -663,6 +663,10 @@ export default component$(() => {
     const unlistenRemoved = listen("device-removed", () => {
       screen.value = "unlock";
     });
+    // Another device changed the profile: show it without a reload.
+    const unlistenProfileChanged = listen("profile-changed", () => {
+      fetchProfile();
+    });
 
     const unlistenOpPending = listen<{ op: string; origin: string | null }>(
       "op-pending",
@@ -770,6 +774,7 @@ export default component$(() => {
       unlistenAttention.then((unlisten) => unlisten());
       unlistenAttentionClear.then((unlisten) => unlisten());
       unlistenRemoved.then((unlisten) => unlisten());
+      unlistenProfileChanged.then((unlisten) => unlisten());
       unlistenCellOp.then((unlisten) => unlisten());
       unlistenOpPending.then((unlisten) => unlisten());
       unlistenOpPendingClear.then((unlisten) => unlisten());
@@ -1528,8 +1533,9 @@ export default component$(() => {
               <StatusIndicator status={connectionStatus.value} />
               <span class="text-xs text-gray-500">v{__APP_VERSION__}</span>
             </div>
+            <div class="mb-3 flex items-center justify-between gap-2">
             <div
-              class="mb-3 flex items-center gap-2"
+              class="flex min-w-0 items-center gap-2"
               title={conductorMessage.value || undefined}
             >
               <span class="relative flex h-2.5 w-2.5 shrink-0">
@@ -1562,12 +1568,13 @@ export default component$(() => {
                     : "Holochain"}
               </span>
             </div>
+            <DevicesChip ready={conductorStatus.value === "ready"} />
+            </div>
             {conductorStatus.value === "error" && conductorMessage.value && (
               <p class="mb-3 rounded-md border border-red-900/60 bg-red-950/40 px-2 py-1.5 text-[11px] leading-snug text-red-200 line-clamp-4">
                 {conductorMessage.value}
               </p>
             )}
-            {conductorStatus.value === "ready" && <DevicesChip />}
             <button
               type="button"
               class="mb-2 flex w-full items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-300 transition-colors"
