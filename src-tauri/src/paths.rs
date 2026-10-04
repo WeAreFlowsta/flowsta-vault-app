@@ -35,6 +35,8 @@ pub const ACTIVITY_FILE: &str = "activity.json";
 /// Set when a vault was created by restoring an identity; while present,
 /// third-party `/backup` writes are refused. See commands.rs.
 pub const RESTORE_CHOICE_MARKER: &str = "restore-choice-pending";
+/// Present once this device has read that it was removed from the identity.
+pub const REMOVED_MARKER: &str = "removed-from-identity";
 
 // ---- device-level ----------------------------------------------------------
 /// Plaintext marker with the active identity's agent key; selects the
@@ -68,6 +70,7 @@ pub const IDENTITY_STORE_FILES: &[&str] = &[
     QUOTA_KEY,
     ACTIVITY_FILE,
     RESTORE_CHOICE_MARKER,
+    REMOVED_MARKER,
 ];
 
 // ---- identity-root helpers -------------------------------------------------
@@ -86,6 +89,7 @@ pub fn quota_cache_path(root: &Path) -> PathBuf { root.join(QUOTA_CACHE) }
 pub fn quota_key_path(root: &Path) -> PathBuf { root.join(QUOTA_KEY) }
 pub fn activity_path(root: &Path) -> PathBuf { root.join(ACTIVITY_FILE) }
 pub fn restore_choice_path(root: &Path) -> PathBuf { root.join(RESTORE_CHOICE_MARKER) }
+pub fn removed_marker_path(root: &Path) -> PathBuf { root.join(REMOVED_MARKER) }
 
 // ---- partitions ------------------------------------------------------------
 /// Folder under the device root that holds one sub-folder per identity.

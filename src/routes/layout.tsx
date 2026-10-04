@@ -648,6 +648,11 @@ export default component$(() => {
     const unlistenAttentionClear = listen("unlock-attention-clear", () => {
       unlockAttention.value = null;
     });
+    // This device read that it was removed from the identity: the Vault
+    // locked itself, and the lock screen says what comes next.
+    const unlistenRemoved = listen("device-removed", () => {
+      screen.value = "unlock";
+    });
 
     const unlistenOpPending = listen<{ op: string; origin: string | null }>(
       "op-pending",
@@ -754,6 +759,7 @@ export default component$(() => {
       unlistenPublished.then((unlisten) => unlisten());
       unlistenAttention.then((unlisten) => unlisten());
       unlistenAttentionClear.then((unlisten) => unlisten());
+      unlistenRemoved.then((unlisten) => unlisten());
       unlistenCellOp.then((unlisten) => unlisten());
       unlistenOpPending.then((unlisten) => unlisten());
       unlistenOpPendingClear.then((unlisten) => unlisten());

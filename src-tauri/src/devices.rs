@@ -100,8 +100,9 @@ pub fn needs_refresh(existing: Option<&DeviceRecord>, current: &DeviceRecord) ->
         return true;
     };
     if existing.removed_at.is_some() {
-        // A removed device does not write itself back in.
-        return false;
+        // A removed device does not write itself back in. The same install
+        // added again runs a new key: that is a new device.
+        return existing.conductor_key != current.conductor_key;
     }
     existing.conductor_key != current.conductor_key
         || existing.name != current.name
@@ -109,6 +110,14 @@ pub fn needs_refresh(existing: Option<&DeviceRecord>, current: &DeviceRecord) ->
         || existing.vault_version != current.vault_version
         || existing.generation != current.generation
         || current.seen_at.saturating_sub(existing.seen_at) >= REFRESH_AFTER_MS
+}
+
+/// Whether the records say this device (this install, running this key)
+/// was removed from the identity.
+pub fn removed_here(devices: &[DeviceRecord], install_id: &str, conductor_key: &str) -> bool {
+    devices
+        .iter()
+        .any(|d| d.install_id == install_id && d.conductor_key == conductor_key && d.removed_at.is_some())
 }
 
 /// The newest version time among records that are not device records.
@@ -178,6 +187,14 @@ fn own_record(state: &AppState, existing: Option<&DeviceRecord>, latest_change: 
         removed_at: None,
         removed_by: None,
     })
+}
+
+/// Whether this device reads itself as removed, from the records it holds now.
+pub async fn removed_here_now(state: &Arc<AppState>) -> Result<bool, String> {
+    let records = crate::sealed::sealed_list_inner(state).await?;
+    let install_id = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    let current = own_record(state, None, 0)?;
+    Ok(removed_here(&devices_in(&records), &install_id, &current.conductor_key))
 }
 
 /// The identity's devices as this device knows them.
@@ -375,6 +392,21 @@ mod tests {
         current.seen_at = existing.seen_at + 10 * DAY;
         current.vault_version = "9.9.9".into();
         assert!(!needs_refresh(Some(&existing), &current));
+        // Added again, the same install runs a new key: a new device.
+        current.conductor_key = "new key".into();
+        assert!(needs_refresh(Some(&existing), &current));
+    }
+
+    #[test]
+    fn a_device_reads_its_own_removal_and_nobody_elses() {
+        let mut removed = device("me");
+        removed.removed_at = Some(9);
+        let other = device("other");
+        assert!(removed_here(&[other.clone(), removed.clone()], "me", "key"));
+        assert!(!removed_here(&[other.clone()], "me", "key"));
+        assert!(!removed_here(&[removed.clone()], "other", "key"), "another install's removal");
+        assert!(!removed_here(&[removed], "me", "new key"), "this install was added again with a new key");
+        assert!(!removed_here(&[device("me")], "me", "key"));
     }
 
     #[test]

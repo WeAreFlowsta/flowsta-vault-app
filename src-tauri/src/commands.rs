@@ -575,6 +575,9 @@ pub struct VaultStatus {
     pub did: Option<String>,
     /// Locked, and this identity's devices are still syncing.
     pub syncing_while_locked: bool,
+    /// This device was removed from the selected identity: it stays locked
+    /// and does not sync until it is added back or its copy is erased.
+    pub removed: bool,
 }
 
 /// Get the current vault status.
@@ -590,6 +593,7 @@ pub fn get_vault_status(state: State<'_, Arc<AppState>>) -> VaultStatus {
         agent_pub_key: config.as_ref().map(|c| c.agent_pub_key.clone()),
         did: config.as_ref().map(|c| c.did.clone()),
         syncing_while_locked: config.is_none() && state.kept_conductor.lock().unwrap().is_some(),
+        removed: crate::paths::removed_marker_path(&state.identity_root()).exists(),
     }
 }
 
@@ -1030,6 +1034,9 @@ pub(crate) fn unlock_vault_inner(
 
     if !vault_exists(&vault_path) {
         return Err("No vault found. Run setup first.".into());
+    }
+    if crate::paths::removed_marker_path(&state.identity_root()).exists() {
+        return Err("device_removed".into());
     }
 
     // Load and decrypt
@@ -1592,6 +1599,16 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
         return;
     }
     tauri::async_runtime::spawn(async move {
+        // Removed by another device of the identity: stand down. Nothing is
+        // erased; the lock screen offers what comes next.
+        if let Ok(true) = crate::devices::removed_here_now(&devices_state).await {
+            log::info!("This device was removed from the identity. Standing down.");
+            let _ = std::fs::write(crate::paths::removed_marker_path(&devices_state.identity_root()), b"");
+            devices_state.activity.record("device_stood_down", "This device was removed from your identity", None, None, None);
+            let _ = lock_vault_inner(&devices_state);
+            let _ = devices_app.emit("device-removed", serde_json::json!({}));
+            return;
+        }
         match crate::devices::publish_own(&devices_state).await {
             Ok(true) => log::info!("This device's record was written"),
             Ok(false) => {}

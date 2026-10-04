@@ -69,12 +69,15 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
   const switching = useSignal(false);
   // Locked, with this identity's devices still syncing.
   const stillSyncing = useSignal(false);
+  // This device was removed from the selected identity.
+  const removed = useSignal(false);
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ cleanup }) => {
     const check = async () => {
       try {
-        const status = await invoke<{ syncing_while_locked?: boolean }>("get_vault_status");
+        const status = await invoke<{ syncing_while_locked?: boolean; removed?: boolean }>("get_vault_status");
         stillSyncing.value = !!status.syncing_while_locked;
+        removed.value = !!status.removed;
       } catch { /* the page is closing */ }
     };
     check();
@@ -212,7 +215,26 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
         )}
 
         <div class="rounded-lg border border-gray-700 bg-gray-800 p-6">
-          <form preventdefault:submit onSubmit$={handleUnlock}>
+          {removed.value && (
+            <div class="rounded-md border border-amber-700/60 bg-amber-950/30 p-4 text-left">
+              <p class="mb-1 text-sm font-semibold text-amber-200">This device was removed</p>
+              <p class="mb-4 text-sm text-gray-300">
+                It no longer signs in or syncs for this identity. What it holds stays here until you choose.
+              </p>
+              <div class="flex flex-col gap-2">
+                <GlassButton class="w-full" onClick$={props.onResetVault$}>
+                  Add this device back
+                </GlassButton>
+                <p class="text-center text-xs text-gray-400">
+                  Sets it up again with your recovery phrase or another device. Your data returns from your other devices.
+                </p>
+                <GlassButton class="w-full" variant="danger" onClick$={props.onResetVault$}>
+                  Erase this device's copy
+                </GlassButton>
+              </div>
+            </div>
+          )}
+          <form preventdefault:submit onSubmit$={handleUnlock} class={removed.value ? "hidden" : ""}>
             <PasswordField
               class="mb-4"
               placeholder="Password"
