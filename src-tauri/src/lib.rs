@@ -4,6 +4,7 @@ mod commands;
 mod conductor;
 mod device_identity;
 mod device_registry;
+mod pairing;
 mod devices;
 mod dna;
 mod dna_updater;

@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 pub const REGISTER_PREFIX: &str = "flowsta-device-register:v1:";
 pub const REMOVE_PREFIX: &str = "flowsta-device-remove:v1:";
 pub const COSIGN_PREFIX: &str = "flowsta-device-cosign:v1:";
+pub const ENROLLMENT_PREFIX: &str = "flowsta-enrollment-register:v1:";
 
 /// What a Vault device may do, in the order the server expects.
 const VAULT_CAPABILITIES: [&str; 4] = ["approve", "login", "read", "sign"];
@@ -32,6 +33,61 @@ pub(crate) fn set_device_signer(seed: Option<[u8; 32]>) {
         old.fill(0);
     }
     *slot = seed;
+}
+
+/// The enrollment seed, held in memory from the moment the recovery phrase
+/// is typed until this device has registered with it (or the vault locks).
+/// Never written to disk.
+static ENROLLMENT_SEED: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+fn set_enrollment_seed(seed: Option<[u8; 32]>) {
+    let mut slot = ENROLLMENT_SEED.lock().unwrap();
+    if let Some(old) = slot.as_mut() {
+        old.fill(0);
+    }
+    *slot = seed;
+}
+
+/// The phrase was just typed: keep its enrollment seed until this device
+/// has registered.
+pub(crate) fn hold_enrollment_from_phrase(mnemonic: &str) {
+    if let Ok(seed) = crate::key_derivation::derive_seed(mnemonic, crate::key_derivation::ENROLLMENT_CONSTANT) {
+        set_enrollment_seed(Some(seed));
+    }
+}
+
+pub(crate) fn forget_enrollment_seed() {
+    set_enrollment_seed(None);
+}
+
+/// The enrollment key (standard base64 of its 32 bytes) and its signature
+/// over the enrollment message for this identity key and time.
+pub(crate) fn enrollment_fields(identity_public: &[u8; 32], enrollment_seed: &[u8; 32], timestamp: u64) -> (String, String) {
+    let enrollment_key = key32(&public_key_of_seed(enrollment_seed));
+    let message = format!("{}{}:{}:{}", ENROLLMENT_PREFIX, key32(identity_public), enrollment_key, timestamp);
+    (
+        enrollment_key,
+        base64_standard_encode(&sign_with_device_seed(enrollment_seed, message.as_bytes())),
+    )
+}
+
+/// The body of `POST /auth/devices/enrollment`.
+pub(crate) fn enrollment_body(
+    identity_agent_b64: &str,
+    identity_seed: &[u8; 32],
+    enrollment_seed: &[u8; 32],
+    now_ms: u64,
+) -> serde_json::Value {
+    let identity_public = public_key_of_seed(identity_seed);
+    let (enrollment_key, enrollment_signature) = enrollment_fields(&identity_public, enrollment_seed, now_ms);
+    let message = format!("{}{}:{}:{}", ENROLLMENT_PREFIX, key32(&identity_public), enrollment_key, now_ms);
+    serde_json::json!({
+        "identity_key": identity_agent_b64,
+        "enrollment_key": enrollment_key,
+        "timestamp": now_ms.to_string(),
+        "identity_signature": base64_standard_encode(&sign_with_device_seed(identity_seed, message.as_bytes())),
+        "enrollment_signature": enrollment_signature,
+    })
 }
 
 /// Standard base64 of a key's 32 bytes.
@@ -61,24 +117,61 @@ pub(crate) fn cosign(challenge: &str) -> Option<(String, String)> {
     Some(cosign_with(&seed, challenge))
 }
 
-/// The body of `POST /auth/devices/register`.
+/// The message every signature of a registration is over.
+fn registration_message(identity_public: &[u8; 32], device_public: &[u8; 32], install_id: &str, now_ms: u64) -> String {
+    format!(
+        "{}{}:{}:{}:{}:{}",
+        REGISTER_PREFIX,
+        key32(identity_public),
+        key32(device_public),
+        install_id,
+        VAULT_CAPABILITIES.join(","),
+        now_ms
+    )
+}
+
+/// A device of the identity vouching for a new one: its key, its signature
+/// over the new device's registration message, and the time in it.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Approval {
+    pub approver_key: String,
+    pub approver_signature: String,
+    pub timestamp: u64,
+}
+
+/// This device approves a new device of the same identity.
+pub(crate) fn approve_device(
+    identity_public: &[u8; 32],
+    approver_seed: &[u8; 32],
+    new_device_public: &[u8; 32],
+    install_id: &str,
+    now_ms: u64,
+) -> Approval {
+    let message = registration_message(identity_public, new_device_public, install_id, now_ms);
+    Approval {
+        approver_key: agent_key_b64(approver_seed),
+        approver_signature: base64_standard_encode(&sign_with_device_seed(approver_seed, message.as_bytes())),
+        timestamp: now_ms,
+    }
+}
+
+/// The body of `POST /auth/devices/register`. With the enrollment seed in
+/// hand (the phrase was typed on this device) its signature goes with it.
 pub(crate) fn registration_body(
     identity_agent_b64: &str,
     identity_seed: &[u8; 32],
     device_seed: &[u8; 32],
     install_id: &str,
     now_ms: u64,
+    enrollment_seed: Option<&[u8; 32]>,
 ) -> serde_json::Value {
-    let message = format!(
-        "{}{}:{}:{}:{}:{}",
-        REGISTER_PREFIX,
-        key32(&public_key_of_seed(identity_seed)),
-        key32(&public_key_of_seed(device_seed)),
+    let message = registration_message(
+        &public_key_of_seed(identity_seed),
+        &public_key_of_seed(device_seed),
         install_id,
-        VAULT_CAPABILITIES.join(","),
-        now_ms
+        now_ms,
     );
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "identity_key": identity_agent_b64,
         "device_key": agent_key_b64(device_seed),
         "install_id": install_id,
@@ -86,7 +179,27 @@ pub(crate) fn registration_body(
         "timestamp": now_ms.to_string(),
         "identity_signature": base64_standard_encode(&sign_with_device_seed(identity_seed, message.as_bytes())),
         "device_signature": base64_standard_encode(&sign_with_device_seed(device_seed, message.as_bytes())),
-    })
+    });
+    if let Some(seed) = enrollment_seed {
+        body["enrollment_signature"] =
+            serde_json::json!(base64_standard_encode(&sign_with_device_seed(seed, message.as_bytes())));
+    }
+    body
+}
+
+/// The same request, backed by a device that approved this one (adding a
+/// device with a code). The time is the one the approver signed.
+pub(crate) fn approved_registration_body(
+    identity_agent_b64: &str,
+    identity_seed: &[u8; 32],
+    device_seed: &[u8; 32],
+    install_id: &str,
+    approval: &Approval,
+) -> serde_json::Value {
+    let mut body = registration_body(identity_agent_b64, identity_seed, device_seed, install_id, approval.timestamp, None);
+    body["approver_key"] = serde_json::json!(approval.approver_key);
+    body["approver_signature"] = serde_json::json!(approval.approver_signature);
+    body
 }
 
 /// The body of `POST /auth/devices/remove`. `target_key` is the 32-byte key
@@ -159,15 +272,31 @@ pub async fn register_this_device(state: &Arc<AppState>, api_url: &str) -> Resul
         return Ok(false);
     };
     let install_id = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
-    let body = registration_body(&keys.identity_agent_b64, &keys.identity_seed, &keys.device_seed, &install_id, now_ms());
+    let base = api_url.trim_end_matches('/');
+    let enrollment_seed = *ENROLLMENT_SEED.lock().unwrap();
+    if let Some(seed) = enrollment_seed.as_ref() {
+        // The identity's enrollment key, when the account does not have it
+        // yet. Whatever the answer, the registration below decides.
+        let body = enrollment_body(&keys.identity_agent_b64, &keys.identity_seed, seed, now_ms());
+        let _ = client()?.post(format!("{}/auth/devices/enrollment", base)).json(&body).send().await;
+    }
+    let body = registration_body(
+        &keys.identity_agent_b64,
+        &keys.identity_seed,
+        &keys.device_seed,
+        &install_id,
+        now_ms(),
+        enrollment_seed.as_ref(),
+    );
     let resp = client()?
-        .post(format!("{}/auth/devices/register", api_url.trim_end_matches('/')))
+        .post(format!("{}/auth/devices/register", base))
         .json(&body)
         .send()
         .await
         .map_err(|e| format!("api_unreachable: {}", e))?;
     let status = resp.status();
     if status.is_success() {
+        forget_enrollment_seed();
         return Ok(true);
     }
     let error = resp
@@ -209,6 +338,7 @@ mod tests {
 
     const IDENTITY: [u8; 32] = [1u8; 32];
     const DEVICE: [u8; 32] = [2u8; 32];
+    const ENROLLMENT: [u8; 32] = [4u8; 32];
     const INSTALL: &str = "0123456789abcdef0123456789abcdef";
 
     fn keys_of(value: &serde_json::Value) -> Vec<String> {
@@ -229,7 +359,7 @@ mod tests {
     /// must fail this test.
     #[test]
     fn a_registration_sends_only_keys_an_install_id_capabilities_a_time_and_signatures() {
-        let body = registration_body("IDENTITY39", &IDENTITY, &DEVICE, INSTALL, 1_790_000_000_000);
+        let body = registration_body("IDENTITY39", &IDENTITY, &DEVICE, INSTALL, 1_790_000_000_000, None);
         assert_eq!(
             keys_of(&body),
             ["capabilities", "device_key", "device_signature", "identity_key", "identity_signature", "install_id", "timestamp"]
@@ -245,6 +375,60 @@ mod tests {
         );
         assert!(verifies(&IDENTITY, &message, body["identity_signature"].as_str().unwrap()));
         assert!(verifies(&DEVICE, &message, body["device_signature"].as_str().unwrap()));
+
+        // After the phrase was typed, one more signature and nothing else.
+        let with_phrase = registration_body("IDENTITY39", &IDENTITY, &DEVICE, INSTALL, 1_790_000_000_000, Some(&ENROLLMENT));
+        assert_eq!(
+            keys_of(&with_phrase),
+            ["capabilities", "device_key", "device_signature", "enrollment_signature", "identity_key", "identity_signature", "install_id", "timestamp"]
+        );
+        assert!(verifies(&ENROLLMENT, &message, with_phrase["enrollment_signature"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn a_device_added_with_a_code_registers_with_the_approving_devices_signature() {
+        let approver = [5u8; 32];
+        let approval = approve_device(&public_key_of_seed(&IDENTITY), &approver, &public_key_of_seed(&DEVICE), INSTALL, 1_790_000_000_000);
+        let body = approved_registration_body("IDENTITY39", &IDENTITY, &DEVICE, INSTALL, &approval);
+        assert_eq!(
+            keys_of(&body),
+            ["approver_key", "approver_signature", "capabilities", "device_key", "device_signature", "identity_key", "identity_signature", "install_id", "timestamp"]
+        );
+        assert_eq!(body["timestamp"], "1790000000000");
+        assert_eq!(body["approver_key"], agent_key_b64(&approver));
+        let message = registration_message(&public_key_of_seed(&IDENTITY), &public_key_of_seed(&DEVICE), INSTALL, 1_790_000_000_000);
+        assert!(verifies(&approver, &message, body["approver_signature"].as_str().unwrap()));
+        assert!(verifies(&DEVICE, &message, body["device_signature"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn registering_the_enrollment_key_sends_two_keys_a_time_and_two_signatures() {
+        let body = enrollment_body("IDENTITY39", &IDENTITY, &ENROLLMENT, 1_790_000_000_000);
+        assert_eq!(
+            keys_of(&body),
+            ["enrollment_key", "enrollment_signature", "identity_key", "identity_signature", "timestamp"]
+        );
+        assert_eq!(body["enrollment_key"], key32(&public_key_of_seed(&ENROLLMENT)));
+        let message = format!(
+            "flowsta-enrollment-register:v1:{}:{}:1790000000000",
+            key32(&public_key_of_seed(&IDENTITY)),
+            key32(&public_key_of_seed(&ENROLLMENT))
+        );
+        assert!(verifies(&IDENTITY, &message, body["identity_signature"].as_str().unwrap()));
+        assert!(verifies(&ENROLLMENT, &message, body["enrollment_signature"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn the_enrollment_key_is_its_own_derivation_from_the_phrase() {
+        use crate::key_derivation::{derive_seed, DEVICE_1_CONSTANT, ENROLLMENT_CONSTANT};
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let enrollment = derive_seed(phrase, ENROLLMENT_CONSTANT).unwrap();
+        assert_ne!(enrollment, derive_seed(phrase, DEVICE_1_CONSTANT).unwrap());
+        assert_eq!(enrollment, derive_seed(phrase, ENROLLMENT_CONSTANT).unwrap());
+        hold_enrollment_from_phrase(phrase);
+        assert_eq!(*ENROLLMENT_SEED.lock().unwrap(), Some(enrollment));
+        forget_enrollment_seed();
+        assert!(ENROLLMENT_SEED.lock().unwrap().is_none());
     }
 
     #[test]
@@ -313,12 +497,15 @@ mod tests {
             hex::encode(Sha256::digest(email.as_bytes())),
             ts
         );
+        let enrollment = crate::key_derivation::new_conductor_seed();
+        let (enrollment_key, enrollment_signature) = enrollment_fields(&public_key_of_seed(&identity), &enrollment, ts);
         let (status, body) = post(
             "/auth/register-device-identity",
             serde_json::json!({
                 "agent_pub_key": identity_agent, "email": email, "display_name": "Vault devices check",
                 "recovery_lookup_hash": lookup, "timestamp": ts,
                 "signature": base64_standard_encode(&sign_with_device_seed(&identity, message.as_bytes())),
+                "enrollment_key": enrollment_key, "enrollment_signature": enrollment_signature,
             }),
         )
         .await;
@@ -326,9 +513,11 @@ mod tests {
 
         let install_a = hex::encode(&crate::key_derivation::new_conductor_seed()[..16]);
         let install_b = hex::encode(&crate::key_derivation::new_conductor_seed()[..16]);
-        let (status, body) = post("/auth/devices/register", registration_body(&identity_agent, &identity, &identity, &install_a, now_ms())).await;
+        let (status, body) = post("/auth/devices/register", registration_body(&identity_agent, &identity, &identity, &install_a, now_ms(), None)).await;
+        assert_eq!(status, 403, "without the enrollment key: {}", body);
+        let (status, body) = post("/auth/devices/register", registration_body(&identity_agent, &identity, &identity, &install_a, now_ms(), Some(&enrollment))).await;
         assert_eq!(status, 200, "first device: {}", body);
-        let (status, body) = post("/auth/devices/register", registration_body(&identity_agent, &identity, &second, &install_b, now_ms())).await;
+        let (status, body) = post("/auth/devices/register", registration_body(&identity_agent, &identity, &second, &install_b, now_ms(), Some(&enrollment))).await;
         assert_eq!(status, 200, "second device: {}", body);
 
         // The Vault's sign-in, as the second device.

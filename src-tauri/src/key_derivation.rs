@@ -53,6 +53,11 @@ pub const PRIVATE_NETWORK_SEED_CONSTANT: &str = "flowsta-private-network-v2";
 /// read (never written) so existing backups keep working.
 pub const BACKUP_KEY_CONSTANT: &str = "flowsta-backup-key-v2";
 
+/// The enrollment key: says who may add or remove a device of the identity.
+/// Derived when the phrase is typed, used to sign, then dropped - it is
+/// never written to disk. Only its public half is registered.
+pub const ENROLLMENT_CONSTANT: &str = "flowsta-enrollment-v1";
+
 #[derive(Error, Debug)]
 pub enum KeyDerivationError {
     #[error("Invalid recovery phrase: {0}")]

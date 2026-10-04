@@ -893,6 +893,9 @@ pub(crate) fn setup_vault_inner(
         ),
     );
 
+    // The phrase was typed here: this device registers with its enrollment key.
+    crate::device_registry::hold_enrollment_from_phrase(&mnemonic);
+
     // Spawn conductor startup in background
     spawn_conductor_startup(
         conductor_seed,
@@ -1121,6 +1124,7 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     // Decrypted records read a moment ago do not outlive the lock.
     crate::sealed::forget_recent_versions();
     crate::device_registry::set_device_signer(None);
+    crate::device_registry::forget_enrollment_seed();
     // Cancel any open approval dialog: deny the waiting IPC request so it
     // returns immediately instead of hanging (and can never be approved
     // against a now-locked vault). The calling app sees a clean denial.
@@ -1843,6 +1847,7 @@ fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, 
 fn clear_identity_memory(state: &Arc<AppState>, root: &std::path::Path) {
     crate::sealed::forget_recent_versions();
     crate::device_registry::set_device_signer(None);
+    crate::device_registry::forget_enrollment_seed();
     *state.identity_root.lock().unwrap() = root.to_path_buf();
     *state.vault_path.lock().unwrap() = crate::paths::vault_file(root);
     state.connected_sites.lock().unwrap().clear();

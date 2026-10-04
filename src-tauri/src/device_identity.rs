@@ -145,6 +145,13 @@ pub async fn register_device_identity(
         agent_b64, lookup_hash, email_hash, ts
     );
     let signature = hex::encode(sign_with_device_seed(&device_seed, canonical.as_bytes()));
+    // The identity's enrollment key (see device_registry.rs): its public
+    // half goes with the account, so only the phrase or a device of the
+    // identity can add a device from the start.
+    let enrollment_seed = derive_seed(&mnemonic, crate::key_derivation::ENROLLMENT_CONSTANT)
+        .map_err(|e| format!("Enrollment key derivation failed: {}", e))?;
+    let (enrollment_key, enrollment_signature) =
+        crate::device_registry::enrollment_fields(&pub_key_bytes, &enrollment_seed, ts);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -163,6 +170,8 @@ pub async fn register_device_identity(
             "recovery_lookup_hash": lookup_hash,
             "timestamp": ts,
             "signature": signature,
+            "enrollment_key": enrollment_key,
+            "enrollment_signature": enrollment_signature,
         }))
         .send()
         .await
