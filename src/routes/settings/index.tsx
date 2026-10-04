@@ -37,6 +37,22 @@ export default component$(() => {
   const autoLockMinutes = useContext(autoLockContext);
 
   const activeTab = useSignal<"general" | "devices" | "about">("general");
+  // The devices chip in the sidebar opens this page on its Devices tab.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ cleanup }) => {
+    const open = () => {
+      try {
+        if (sessionStorage.getItem("settings-tab") === "devices") {
+          sessionStorage.removeItem("settings-tab");
+          activeTab.value = "devices";
+        }
+      } catch { /* no storage */ }
+    };
+    open();
+    // Already on this page when the chip is clicked.
+    window.addEventListener("open-devices-tab", open);
+    cleanup(() => window.removeEventListener("open-devices-tab", open));
+  });
 
   // Privacy: sites that reached this Vault's local port without holding any
   // permission. Traffic, not access - kept so nothing can talk to the Vault

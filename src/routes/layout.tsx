@@ -7,6 +7,7 @@ import { open } from "@tauri-apps/plugin-shell";
 import { SetupWizard } from "~/components/vault/SetupWizard";
 import { UnlockScreen } from "~/components/vault/UnlockScreen";
 import { StatusIndicator } from "~/components/vault/StatusIndicator";
+import { DevicesChip } from "~/components/vault/DevicesChip";
 import type { ConnectionStatus } from "~/components/vault/StatusIndicator";
 import { connectionStatusContext, autoLockContext, signaturesContext, pendingSignPathsContext } from "~/lib/context";
 import { hydrateSignaturesCache, persistSignaturesCache, setActiveSignatureAgent } from "~/lib/signatures-cache";
@@ -1557,6 +1558,7 @@ export default component$(() => {
                 {conductorMessage.value}
               </p>
             )}
+            {conductorStatus.value === "ready" && <DevicesChip />}
             <button
               type="button"
               class="mb-2 flex w-full items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-300 transition-colors"

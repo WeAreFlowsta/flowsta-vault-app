@@ -9,7 +9,7 @@ import { PillButton } from "~/components/ui/PillButton";
 
 declare const __API_URL__: string;
 
-interface DeviceRow {
+export interface DeviceRow {
   install_id: string;
   name: string;
   platform: string;
