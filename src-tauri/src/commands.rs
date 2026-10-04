@@ -224,6 +224,9 @@ pub struct AppState {
     pub linked_third_party_apps: Mutex<Vec<LinkedThirdPartyApp>>,
     /// Handle to the running conductor + lair processes (None = not running).
     pub conductor_handle: Mutex<Option<ConductorHandle>>,
+    /// Live tests point the record layer at a conductor they started themselves.
+    #[cfg(test)]
+    pub test_conductor_ports: Mutex<Option<(u16, u16)>>,
     /// Current conductor status (for frontend polling).
     pub conductor_status: Mutex<ConductorStatus>,
     /// MAU tracking state (loaded on unlock, encrypted on disk).
@@ -445,6 +448,8 @@ impl AppState {
             approved_apps: Mutex::new(approved_sites),
             linked_third_party_apps: Mutex::new(linked_apps),
             conductor_handle: Mutex::new(None),
+            #[cfg(test)]
+            test_conductor_ports: Mutex::new(None),
             conductor_status: Mutex::new(ConductorStatus::Stopped),
             mau_state: crate::mau::MauState::new(),
             verified_apps: Mutex::new(verified_apps),

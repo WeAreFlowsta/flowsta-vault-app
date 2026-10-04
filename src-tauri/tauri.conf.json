@@ -41,7 +41,8 @@
       "resources/flowsta_private_v2_0_happ.happ",
       "resources/flowsta_identity_v1_4_happ.happ",
       "resources/flowsta_signing_v1_4_happ.happ",
-      "resources/signing_coordinator_v1_4.wasm"
+      "resources/signing_coordinator_v1_4.wasm",
+      "resources/private_v2_coordinator.wasm"
     ],
     "icon": [
       "icons/32x32.png",

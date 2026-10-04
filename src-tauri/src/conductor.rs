@@ -802,6 +802,11 @@ async fn start_holochain_attempt(
     if let Err(e) = dna::ensure_signing_coordinators(admin_port, &resource_dir, &data_dir).await {
         log::warn!("Signing coordinator hot-swap failed (non-fatal): {}", e);
     }
+    // The private cell's coordinator likewise. When it fails the record
+    // layer falls back to the functions the original coordinator has.
+    if let Err(e) = dna::ensure_private_v2_coordinators(admin_port, &resource_dir).await {
+        log::warn!("Private v2 coordinator hot-swap failed (non-fatal): {}", e);
+    }
 
     // 9. Attach app interface for zome calls (e.g. pairing code generation).
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {

@@ -33,6 +33,10 @@ pub const BUNDLED_PRIVATE_V2_VERSION: &str = "2.0";
 /// v2 happ file changes; installs of older revisions are replaced on the
 /// next unlock. Safe while the cell is single-user-network and re-derivable
 /// (its content re-imports from the phrase-derived key or migration).
+///
+/// FROZEN at 2: a person's devices now share this network, and a new
+/// revision would split devices that have updated from those that have
+/// not. Coordinator changes go through `PRIVATE_V2_COORDINATOR_REV`.
 pub const BUNDLED_PRIVATE_V2_REVISION: u32 = 2;
 
 /// Installed app id for the bundled v2 private cell, including the bundle
@@ -173,6 +177,84 @@ pub async fn ensure_signing_coordinators(
         "Signing coordinator ensured at rev {} on {}",
         SIGNING_COORDINATOR_REV,
         signing_app_id,
+    );
+    Ok(())
+}
+
+/// Bundled private-v2 coordinator revision. The private v2 bundle itself is
+/// never rebuilt (its DNA hash names each person's own network), so every
+/// coordinator change reaches a cell through UpdateCoordinators.
+/// Rev 2: records are linked from one shared base and listed, retired and
+/// superseded there, so a person's devices share one set of records; pieces
+/// of large objects are sent between those devices as remote signals.
+pub const PRIVATE_V2_COORDINATOR_REV: u32 = 2;
+const PRIVATE_V2_COORDINATOR_WASM: &str = "private_v2_coordinator.wasm";
+
+/// Hot-swap the private v2 cell's coordinator to the bundled revision.
+/// Runs on every conductor start, for the same reason the signing one does.
+pub async fn ensure_private_v2_coordinators(
+    admin_port: u16,
+    resource_dir: &std::path::Path,
+) -> Result<(), String> {
+    use holochain_types::prelude::{
+        CoordinatorBundle, CoordinatorManifest, CoordinatorSource, UpdateCoordinatorsPayload,
+        ZomeDependency, ZomeManifest,
+    };
+
+    let wasm = std::fs::read(resource_dir.join(PRIVATE_V2_COORDINATOR_WASM))
+        .map_err(|e| format!("read {}: {}", PRIVATE_V2_COORDINATOR_WASM, e))?;
+
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", admin_port),
+        Some("flowsta-vault-coord-update".to_string()),
+    )
+    .await
+    .map_err(|e| format!("Admin WS: {}", e))?;
+
+    let apps = admin_ws
+        .list_apps(None)
+        .await
+        .map_err(|e| format!("list_apps: {}", e))?;
+    let app_id = private_v2_app_id();
+    let Some(app) = apps.iter().find(|a| a.installed_app_id == app_id) else {
+        // No private v2 cell on this install (nothing to swap).
+        return Ok(());
+    };
+    let cell_id = app
+        .cell_info
+        .values()
+        .flat_map(|cells| cells.iter())
+        .find_map(|c| match c {
+            holochain_client::CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        })
+        .ok_or("No provisioned private v2 cell")?;
+
+    let zome = ZomeManifest {
+        name: "private_data".into(),
+        hash: None,
+        path: "private_data_coordinator.wasm".into(),
+        dependencies: Some(vec![ZomeDependency {
+            name: "private_data_integrity".into(),
+        }]),
+    };
+    let resource_id = zome.resource_id();
+    let manifest = CoordinatorManifest { zomes: vec![zome] };
+    let bundle = mr_bundle::Bundle::new(manifest, [(resource_id, wasm.into())])
+        .map_err(|e| format!("coordinator bundle: {}", e))?;
+
+    admin_ws
+        .update_coordinators(UpdateCoordinatorsPayload {
+            cell_id,
+            source: CoordinatorSource::Bundle(Box::new(CoordinatorBundle::from(bundle))),
+        })
+        .await
+        .map_err(|e| format!("update_coordinators: {}", e))?;
+
+    log::info!(
+        "Private v2 coordinator ensured at rev {} on {}",
+        PRIVATE_V2_COORDINATOR_REV,
+        app_id,
     );
     Ok(())
 }
