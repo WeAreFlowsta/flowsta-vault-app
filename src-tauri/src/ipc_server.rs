@@ -4095,6 +4095,36 @@ async fn dev_devices_handler(
             }
             crate::commands::lock_and_keep_syncing(app, state.app_handle.clone()).map(|_| serde_json::json!({ "locked": true }))
         }
+        "round" => Ok(serde_json::json!({ "round": crate::commands::run_devices_round(app, &state.app_handle).await })),
+        "connections" => Ok(serde_json::json!({
+            "sites": app.approved_apps.lock().unwrap().clone(),
+            "apps": app.linked_third_party_apps.lock().unwrap().iter().map(|a| a.client_id.clone()).collect::<Vec<_>>(),
+            "scopes": app.linked_app_scopes.lock().unwrap().clone(),
+        })),
+        // A connection as /link-identity leaves it, without the app: for
+        // driving what follows the identity across devices.
+        "connect" => {
+            let client_id = text("client_id");
+            app.linked_third_party_apps.lock().unwrap().push(crate::commands::LinkedThirdPartyApp {
+                app_name: text("app_name"),
+                app_agent_pub_key: format!("harness-{}-{}", client_id, crate::paths::install_id(&app.data_dir).unwrap_or_default()),
+                linked_at: crate::ipc_server::unix_now(),
+                client_id: Some(client_id.clone()),
+                origin: None,
+            });
+            app.save_linked_apps();
+            app.linked_app_scopes.lock().unwrap().insert(client_id, vec!["profile".into()]);
+            app.save_linked_app_scopes();
+            Ok(serde_json::json!({ "connected": true }))
+        }
+        "disconnect" => {
+            let client_id = text("client_id");
+            app.linked_third_party_apps.lock().unwrap().retain(|a| a.client_id.as_deref() != Some(client_id.as_str()));
+            app.save_linked_apps();
+            app.linked_app_scopes.lock().unwrap().remove(&client_id);
+            app.save_linked_app_scopes();
+            Ok(serde_json::json!({ "disconnected": true }))
+        }
         "stop-syncing" => {
             crate::commands::stop_syncing_while_locked(app);
             Ok(serde_json::json!({ "stopped": true }))

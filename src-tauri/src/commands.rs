@@ -1630,6 +1630,15 @@ enum DevicesRound {
     StoodDown,
 }
 
+/// One round now (the dev harness; the page's own refresh).
+pub(crate) async fn run_devices_round(state: &Arc<AppState>, app: &tauri::AppHandle) -> &'static str {
+    match devices_round(state, app).await {
+        DevicesRound::Done => "done",
+        DevicesRound::NotReady => "not_ready",
+        DevicesRound::StoodDown => "stood_down",
+    }
+}
+
 /// One round.
 async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHandle) -> DevicesRound {
     {
