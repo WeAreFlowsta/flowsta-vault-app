@@ -3,6 +3,7 @@ mod backup;
 mod commands;
 mod conductor;
 mod device_identity;
+mod connections_sync;
 mod device_registry;
 mod pairing;
 mod devices;
@@ -426,6 +427,7 @@ pub fn run() {
             pairing::pair_decline,
             devices::devices_list,
             devices::device_remove,
+            connections_sync::connection_known_elsewhere,
             device_identity::attempt_account_reconcile,
             device_identity::update_pending_registration_email,
             relay_login::relay_claim,

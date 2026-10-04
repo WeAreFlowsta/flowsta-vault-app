@@ -39,6 +39,9 @@ pub const RESTORE_CHOICE_MARKER: &str = "restore-choice-pending";
 pub const REMOVED_MARKER: &str = "removed-from-identity";
 /// The identity's devices as this device last saw them (to notice a new one).
 pub const KNOWN_DEVICES: &str = "known-devices.json";
+/// Connections and remembered sites as this device held them when it last
+/// compared them with the identity's records.
+pub const SHARED_CONNECTIONS: &str = "shared-connections.json";
 
 // ---- device-level ----------------------------------------------------------
 /// Plaintext marker with the active identity's agent key; selects the
@@ -74,6 +77,7 @@ pub const IDENTITY_STORE_FILES: &[&str] = &[
     RESTORE_CHOICE_MARKER,
     REMOVED_MARKER,
     KNOWN_DEVICES,
+    SHARED_CONNECTIONS,
 ];
 
 // ---- identity-root helpers -------------------------------------------------
@@ -94,6 +98,7 @@ pub fn activity_path(root: &Path) -> PathBuf { root.join(ACTIVITY_FILE) }
 pub fn restore_choice_path(root: &Path) -> PathBuf { root.join(RESTORE_CHOICE_MARKER) }
 pub fn removed_marker_path(root: &Path) -> PathBuf { root.join(REMOVED_MARKER) }
 pub fn known_devices_path(root: &Path) -> PathBuf { root.join(KNOWN_DEVICES) }
+pub fn shared_connections_path(root: &Path) -> PathBuf { root.join(SHARED_CONNECTIONS) }
 
 // ---- partitions ------------------------------------------------------------
 /// Folder under the device root that holds one sub-folder per identity.

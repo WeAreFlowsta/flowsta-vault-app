@@ -259,10 +259,11 @@ export default component$(() => {
     const attempts = 8;
     for (let i = 0; i < attempts; i++) {
       try {
-        // Each device keeps an entry about itself among these records;
-        // those are shown under Settings, not counted as private records.
+        // Each device keeps an entry about itself among these records, and
+        // connections and remembered sites travel as records too; those are
+        // shown under Settings and Connections, not counted here.
         const records = (await invoke<SealedListItem[]>("sealed_list")).filter(
-          (r) => r.entry_type !== "device",
+          (r) => !["device", "connection", "remembered_site"].includes(r.entry_type),
         );
         const counts: Record<string, number> = {};
         for (const r of records) {

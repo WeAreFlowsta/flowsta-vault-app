@@ -290,6 +290,7 @@ export default component$(() => {
   });
 
   // Auth approval dialog state
+  const usedElsewhere = useSignal(false);
   const pendingAuth = useSignal<{
     id: string;
     app_name: string;
@@ -572,6 +573,14 @@ export default component$(() => {
     }>("auth-request", (event) => {
       pendingAuth.value = event.payload;
       rememberApp.value = false;
+      // The person may already use this app on another of their devices.
+      usedElsewhere.value = false;
+      const clientId = event.payload.client_id;
+      if (clientId) {
+        invoke<unknown>("connection_known_elsewhere", { clientId })
+          .then((known) => { usedElsewhere.value = !!known; })
+          .catch(() => {});
+      }
     });
 
     cleanup(() => {
@@ -1946,6 +1955,9 @@ export default component$(() => {
                     {pendingAuth.value.reason}
                   </p>
                 </div>
+              )}
+              {usedElsewhere.value && (
+                <p class="text-xs text-sky-300">You already use this app on another of your devices.</p>
               )}
               {pendingAuth.value.share_email && (
                 <div>

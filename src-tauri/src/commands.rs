@@ -1333,6 +1333,7 @@ fn lock_secrets(state: &Arc<AppState>) {
     crate::device_registry::set_device_signer(None);
     crate::device_registry::forget_enrollment_seed();
     crate::device_registry::hold_approval(None);
+    crate::connections_sync::forget_elsewhere();
     // Cancel any open approval dialog: deny the waiting IPC request so it
     // returns immediately instead of hanging (and can never be approved
     // against a now-locked vault). The calling app sees a clean denial.
@@ -1676,6 +1677,14 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             }
             Ok(_) => {}
             Err(e) => log::info!("Devices not checked: {}", e),
+        }
+        // Connections and remembered sites follow the identity.
+        match crate::connections_sync::round(devices_state).await {
+            Ok(true) => {
+                let _ = devices_app.emit("connections-changed", serde_json::json!({}));
+            }
+            Ok(false) => {}
+            Err(e) => log::info!("Connections not checked: {}", e),
         }
     }
     DevicesRound::Done
@@ -2131,6 +2140,7 @@ fn clear_identity_memory(state: &Arc<AppState>, root: &std::path::Path) {
     crate::device_registry::set_device_signer(None);
     crate::device_registry::forget_enrollment_seed();
     crate::device_registry::hold_approval(None);
+    crate::connections_sync::forget_elsewhere();
     *state.identity_root.lock().unwrap() = root.to_path_buf();
     *state.vault_path.lock().unwrap() = crate::paths::vault_file(root);
     state.connected_sites.lock().unwrap().clear();
