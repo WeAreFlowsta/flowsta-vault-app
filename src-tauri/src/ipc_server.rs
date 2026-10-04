@@ -4179,7 +4179,7 @@ async fn dev_setup_identity_handler(
         // The wizard's offline restore: no web fields, marked for reconcile.
         crate::commands::setup_vault_inner(
             phrase.clone(), body.password.clone(), None, None, None, None, None,
-            Some("device-hosted".to_string()), true, false,
+            Some("device-hosted".to_string()), true, false, true,
             state.app_handle.clone(), &app_state,
         )
         .map_err(|e| fail("setup_failed", e))?
@@ -4194,7 +4194,7 @@ async fn dev_setup_identity_handler(
         crate::commands::setup_vault_inner(
             phrase.clone(), body.password.clone(), None, Some(email), None,
             body.display_name.clone(), reg.profile_picture.clone(),
-            Some("device-hosted".to_string()), false, false,
+            Some("device-hosted".to_string()), false, false, false,
             state.app_handle.clone(), &app_state,
         )
         .map_err(|e| fail("setup_failed", e))?
@@ -4326,6 +4326,7 @@ async fn dev_setup_legacy_handler(
         None,
         None,
         Some("device-hosted".to_string()),
+        false,
         false,
         false,
         state.app_handle.clone(),

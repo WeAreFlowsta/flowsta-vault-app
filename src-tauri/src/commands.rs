@@ -712,6 +712,8 @@ pub fn setup_vault(
         hosting_model,
         pending_reconcile.unwrap_or(false),
         pending_registration.unwrap_or(false),
+        // Restoring = the identity already exists: this device is added to it.
+        is_restore.unwrap_or(false),
         app_handle,
         &state,
     )?;
@@ -752,6 +754,7 @@ pub(crate) fn setup_vault_inner(
     hosting_model: Option<String>,
     pending_reconcile: bool,
     pending_registration: bool,
+    joining: bool,
     app_handle: tauri::AppHandle,
     state: &Arc<AppState>,
 ) -> Result<SetupResult, String> {
@@ -759,14 +762,86 @@ pub(crate) fn setup_vault_inner(
     if !validate_mnemonic(&mnemonic) {
         return Err("Invalid recovery phrase".into());
     }
+    let keys = IdentityKeys::from_phrase(&mnemonic)?;
+    // The phrase was typed here: this device registers with its enrollment key.
+    crate::device_registry::hold_enrollment_from_phrase(&mnemonic);
+    let result = setup_vault_from_keys(
+        keys,
+        password,
+        web_agent_pub_key,
+        web_email,
+        None,
+        web_username,
+        display_name,
+        profile_picture,
+        hosting_model,
+        pending_reconcile,
+        pending_registration,
+        joining.then(crate::key_derivation::new_conductor_seed),
+        app_handle,
+        state,
+    );
+    if result.is_err() {
+        crate::device_registry::forget_enrollment_seed();
+    }
+    result
+}
 
+/// Everything a device holds of an identity: what the recovery phrase
+/// derives. A device gets it from the phrase or from another device of the
+/// identity (pairing).
+pub(crate) struct IdentityKeys {
+    pub identity_seed: [u8; 32],
+    pub recovery_lookup_hash: Option<String>,
+    pub data_key: [u8; 32],
+    pub private_network_seed: String,
+    pub backup_key: [u8; 32],
+}
 
-    // Derive device keypair
-    let signing_key =
-        derive_device_keypair(&mnemonic).map_err(|e| format!("Key derivation failed: {}", e))?;
+impl IdentityKeys {
+    pub(crate) fn from_phrase(mnemonic: &str) -> Result<Self, String> {
+        Ok(IdentityKeys {
+            identity_seed: derive_seed(mnemonic, DEVICE_1_CONSTANT)
+                .map_err(|e| format!("Device seed derivation failed: {}", e))?,
+            recovery_lookup_hash: Some(
+                derive_recovery_lookup_hash(mnemonic).map_err(|e| format!("Lookup hash derivation failed: {}", e))?,
+            ),
+            // The private network's material: the key its records are
+            // sealed with and the seed of the identity's own network. The
+            // same values on every device of the identity.
+            data_key: crate::key_derivation::derive_data_encryption_key(mnemonic)
+                .map_err(|e| format!("Data key derivation failed: {}", e))?,
+            private_network_seed: crate::key_derivation::derive_private_network_seed(mnemonic)
+                .map_err(|e| format!("Network seed derivation failed: {}", e))?,
+            backup_key: crate::key_derivation::derive_backup_identity_key(mnemonic)
+                .map_err(|e| format!("Backup key derivation failed: {}", e))?,
+        })
+    }
+}
 
-    let verifying_key = signing_key.verifying_key();
-    let pub_key_bytes = verifying_key.as_bytes();
+/// Create this device's vault for an identity and start its conductor.
+/// `own_conductor_seed`: set when the identity already exists on another
+/// device, so this one runs a conductor key of its own and takes the other
+/// devices' records over its own first ones.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn setup_vault_from_keys(
+    keys: IdentityKeys,
+    password: String,
+    web_agent_pub_key: Option<String>,
+    web_email: Option<String>,
+    email_verified: Option<bool>,
+    web_username: Option<String>,
+    display_name: Option<String>,
+    profile_picture: Option<String>,
+    hosting_model: Option<String>,
+    pending_reconcile: bool,
+    pending_registration: bool,
+    own_conductor_seed: Option<[u8; 32]>,
+    app_handle: tauri::AppHandle,
+    state: &Arc<AppState>,
+) -> Result<SetupResult, String> {
+    let device_seed = keys.identity_seed;
+    let pub_key_bytes = &crate::key_derivation::public_key_of_seed(&device_seed);
 
     // Proper 39-byte Holochain AgentPubKey (with DHT location)
     let agent_pub_key = construct_agent_pub_key_string(pub_key_bytes);
@@ -779,23 +854,9 @@ pub(crate) fn setup_vault_inner(
     let agent_pub_key_39 = construct_agent_pub_key_bytes(pub_key_bytes);
     let agent_pub_key_raw_b64 = base64_standard_encode(&agent_pub_key_39);
 
-    // Derive device seed (stored encrypted for agent linking signing)
-    let device_seed = derive_seed(&mnemonic, DEVICE_1_CONSTANT)
-        .map_err(|e| format!("Device seed derivation failed: {}", e))?;
-
-    // Derive recovery lookup hash (for API agent key discovery)
-    let lookup_hash = derive_recovery_lookup_hash(&mnemonic)
-        .map_err(|e| format!("Lookup hash derivation failed: {}", e))?;
-
-    // Derive the private DNA v2 material while the mnemonic is in hand
-    // (it is never stored): the symmetric Sealed-record key and the
-    // per-user network seed. Same values on every device from this phrase.
-    let data_key = crate::key_derivation::derive_data_encryption_key(&mnemonic)
-        .map_err(|e| format!("Data key derivation failed: {}", e))?;
-    let private_network_seed = crate::key_derivation::derive_private_network_seed(&mnemonic)
-        .map_err(|e| format!("Network seed derivation failed: {}", e))?;
-    let backup_identity_key = crate::key_derivation::derive_backup_identity_key(&mnemonic)
-        .map_err(|e| format!("Backup key derivation failed: {}", e))?;
+    let data_key = keys.data_key;
+    let private_network_seed = keys.private_network_seed.clone();
+    let backup_identity_key = keys.backup_key;
 
     // Kept for the public label written after the save (the config below
     // takes the originals).
@@ -813,17 +874,17 @@ pub(crate) fn setup_vault_inner(
             .unwrap()
             .as_secs() as i64,
         device_seed: Some(device_seed.to_vec()),
-        // Devices get a conductor key of their own when they are added to an
-        // identity; an identity created here runs its own seed.
-        conductor_seed: None,
-        joined_existing: false,
+        // A device added to an identity runs a conductor key of its own;
+        // an identity created here runs its own seed.
+        conductor_seed: own_conductor_seed.map(|seed| seed.to_vec()),
+        joined_existing: own_conductor_seed.is_some(),
         profile_applied_at: None,
-        recovery_lookup_hash: Some(lookup_hash),
+        recovery_lookup_hash: keys.recovery_lookup_hash.clone(),
         agent_pub_key_raw_b64: Some(agent_pub_key_raw_b64),
         web_agent_pub_key,
         web_email: web_email.clone(),
         pending_email: None,
-        email_verified: None,
+        email_verified,
         web_username,
         display_name,
         profile_picture,
@@ -892,9 +953,6 @@ pub(crate) fn setup_vault_inner(
             conductor_passphrase.as_bytes().to_vec(),
         ),
     );
-
-    // The phrase was typed here: this device registers with its enrollment key.
-    crate::device_registry::hold_enrollment_from_phrase(&mnemonic);
 
     // Spawn conductor startup in background
     spawn_conductor_startup(
@@ -1125,6 +1183,7 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     crate::sealed::forget_recent_versions();
     crate::device_registry::set_device_signer(None);
     crate::device_registry::forget_enrollment_seed();
+    crate::device_registry::hold_approval(None);
     // Cancel any open approval dialog: deny the waiting IPC request so it
     // returns immediately instead of hanging (and can never be approved
     // against a now-locked vault). The calling app sees a clean denial.
@@ -1848,6 +1907,7 @@ fn clear_identity_memory(state: &Arc<AppState>, root: &std::path::Path) {
     crate::sealed::forget_recent_versions();
     crate::device_registry::set_device_signer(None);
     crate::device_registry::forget_enrollment_seed();
+    crate::device_registry::hold_approval(None);
     *state.identity_root.lock().unwrap() = root.to_path_buf();
     *state.vault_path.lock().unwrap() = crate::paths::vault_file(root);
     state.connected_sites.lock().unwrap().clear();

@@ -56,6 +56,14 @@ pub(crate) fn hold_enrollment_from_phrase(mnemonic: &str) {
     }
 }
 
+/// The approval of the device that added this one with a code, held until
+/// this device has registered with it. It is good for a few minutes.
+static APPROVAL: Mutex<Option<Approval>> = Mutex::new(None);
+
+pub(crate) fn hold_approval(approval: Option<Approval>) {
+    *APPROVAL.lock().unwrap() = approval;
+}
+
 pub(crate) fn forget_enrollment_seed() {
     set_enrollment_seed(None);
 }
@@ -280,14 +288,24 @@ pub async fn register_this_device(state: &Arc<AppState>, api_url: &str) -> Resul
         let body = enrollment_body(&keys.identity_agent_b64, &keys.identity_seed, seed, now_ms());
         let _ = client()?.post(format!("{}/auth/devices/enrollment", base)).json(&body).send().await;
     }
-    let body = registration_body(
-        &keys.identity_agent_b64,
-        &keys.identity_seed,
-        &keys.device_seed,
-        &install_id,
-        now_ms(),
-        enrollment_seed.as_ref(),
-    );
+    let approval = APPROVAL.lock().unwrap().clone();
+    let body = match approval.as_ref() {
+        Some(approval) => approved_registration_body(
+            &keys.identity_agent_b64,
+            &keys.identity_seed,
+            &keys.device_seed,
+            &install_id,
+            approval,
+        ),
+        None => registration_body(
+            &keys.identity_agent_b64,
+            &keys.identity_seed,
+            &keys.device_seed,
+            &install_id,
+            now_ms(),
+            enrollment_seed.as_ref(),
+        ),
+    };
     let resp = client()?
         .post(format!("{}/auth/devices/register", base))
         .json(&body)
@@ -297,7 +315,12 @@ pub async fn register_this_device(state: &Arc<AppState>, api_url: &str) -> Resul
     let status = resp.status();
     if status.is_success() {
         forget_enrollment_seed();
+        hold_approval(None);
         return Ok(true);
+    }
+    if approval.is_some() {
+        // An approval that was not accepted is not tried again.
+        hold_approval(None);
     }
     let error = resp
         .json::<serde_json::Value>()

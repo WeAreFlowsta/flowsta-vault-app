@@ -1086,6 +1086,7 @@ pub(crate) async fn migrate_custodial_account_inner(
             Some("device-hosted".to_string()),
             false, // migration is online by construction - no reconcile needed
             false, // ...and registration long predates it
+            false, // the account's first Vault device
             app_handle.clone(),
             &state,
         )?;

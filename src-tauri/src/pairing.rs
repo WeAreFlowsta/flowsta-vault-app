@@ -439,12 +439,14 @@ const WAIT_FOR_CODE: std::time::Duration = std::time::Duration::from_secs(5 * 60
 const WAIT_FOR_STEP: std::time::Duration = std::time::Duration::from_secs(9 * 60);
 
 /// The new device's whole side: returns the identity once the person
-/// approved on the other device.
+/// approved on the other device. `on_met` runs when the other device has
+/// answered with the same code (the person is now reading its question).
 pub(crate) async fn run_new_device<T: Transport>(
     transport: &mut T,
     mailbox: &str,
     password: &str,
     intro: &DeviceIntro,
+    on_met: impl Fn(),
 ) -> Result<Handover, String> {
     let (state, first) = NewDevice::start(mailbox, password);
     transport.send(&first).await?;
@@ -457,6 +459,7 @@ pub(crate) async fn run_new_device<T: Transport>(
         }
     };
     transport.send(&introduction(&channel, &proof, intro).map_err(|e| e.to_string())?).await?;
+    on_met();
     let fourth = transport.next(WAIT_FOR_STEP).await?;
     let handover = Handover::open(&channel, &fourth).map_err(|e| e.to_string());
     transport.close().await;
@@ -487,6 +490,207 @@ pub(crate) async fn hand_over<T: Transport>(transport: &mut T, channel: &Channel
     transport.send(&handover.seal(channel).map_err(|e| e.to_string())?).await
 }
 
+// ── The two devices' commands ───────────────────────────────────────────────
+
+use crate::commands::AppState;
+use std::sync::{Arc, Mutex};
+use tauri::{Emitter, State};
+
+/// What the new device's screen follows (`pair-status` events).
+#[derive(Serialize, Clone)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum PairStatus {
+    /// The other device answered; the person is reading its question.
+    WaitingForApproval,
+    Done { agent_pub_key: String, did: String },
+    Failed { reason: String },
+}
+
+/// The new device's running ceremony (one at a time).
+static NEW_SIDE: Mutex<Option<tauri::async_runtime::JoinHandle<()>>> = Mutex::new(None);
+
+/// The existing device, between the typed code and the person's answer.
+struct Met {
+    mailbox: Mailbox,
+    channel: Channel,
+    intro: DeviceIntro,
+}
+static MET: tokio::sync::Mutex<Option<Met>> = tokio::sync::Mutex::const_new(None);
+
+fn device_name() -> String {
+    sysinfo::System::host_name()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "New device".to_string())
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// New device: open a mailbox and show the code. The rest runs in the
+/// background and reports through `pair-status`; when the other device
+/// approves, this device's vault is created under `password`.
+#[tauri::command]
+pub async fn pair_begin(
+    api_url: String,
+    password: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    crate::commands::validate_vault_password(&password)?;
+    if state.vault_config.lock().unwrap().is_some() {
+        return Err("Lock this Vault before adding another identity.".into());
+    }
+    pair_cancel().await?;
+
+    let install_id = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    let conductor_seed = crate::key_derivation::new_conductor_seed();
+    let intro = DeviceIntro {
+        name: device_name(),
+        platform: std::env::consts::OS.to_string(),
+        install_id,
+        device_key: crate::key_derivation::base64_standard_encode(&crate::key_derivation::public_key_of_seed(&conductor_seed)),
+    };
+    let (mut mailbox, mailbox_id) = Mailbox::open(&api_url).await?;
+    let code_password = new_password().map_err(|e| e.to_string())?;
+    let code = format_code(&mailbox_id, &code_password);
+
+    let state = state.inner().clone();
+    let task = tauri::async_runtime::spawn(async move {
+        let met_handle = app_handle.clone();
+        let handover = run_new_device(&mut mailbox, &mailbox_id, &code_password, &intro, move || {
+            let _ = met_handle.emit("pair-status", PairStatus::WaitingForApproval);
+        })
+        .await;
+        let status = match handover.and_then(|h| join_identity(h, password, conductor_seed, app_handle.clone(), &state)) {
+            Ok(done) => PairStatus::Done { agent_pub_key: done.agent_pub_key, did: done.did },
+            Err(reason) => PairStatus::Failed { reason },
+        };
+        let _ = app_handle.emit("pair-status", status);
+    });
+    *NEW_SIDE.lock().unwrap() = Some(task);
+    Ok(code)
+}
+
+/// New device: create the vault from what the other device handed over.
+fn join_identity(
+    handover: Handover,
+    password: String,
+    conductor_seed: [u8; 32],
+    app_handle: tauri::AppHandle,
+    state: &Arc<AppState>,
+) -> Result<crate::commands::SetupResult, String> {
+    let malformed = || PairError::Malformed.to_string();
+    let keys = crate::commands::IdentityKeys {
+        identity_seed: handover.identity_seed.as_slice().try_into().map_err(|_| malformed())?,
+        recovery_lookup_hash: handover.recovery_lookup_hash.clone(),
+        data_key: handover.data_key.as_slice().try_into().map_err(|_| malformed())?,
+        private_network_seed: handover.private_network_seed.clone(),
+        backup_key: handover.backup_key.as_slice().try_into().map_err(|_| malformed())?,
+    };
+    // This device registers with the approval of the one that added it.
+    crate::device_registry::hold_approval(Some(handover.approval.clone()));
+    let result = crate::commands::setup_vault_from_keys(
+        keys,
+        password,
+        handover.web_agent_pub_key.clone(),
+        handover.web_email.clone(),
+        handover.email_verified,
+        handover.web_username.clone(),
+        handover.display_name.clone(),
+        None, // the picture arrives with the identity's records
+        handover.hosting_model.clone(),
+        false,
+        false,
+        Some(conductor_seed),
+        app_handle,
+        state,
+    );
+    match &result {
+        Ok(_) => state.activity.record("device_joined", "Added this device to your identity", None, None, None),
+        Err(_) => crate::device_registry::hold_approval(None),
+    }
+    result
+}
+
+/// New device: stop waiting (the person went back).
+#[tauri::command]
+pub async fn pair_cancel() -> Result<(), String> {
+    if let Some(task) = NEW_SIDE.lock().unwrap().take() {
+        task.abort();
+    }
+    Ok(())
+}
+
+/// Existing device: the person typed the code shown on the new device.
+/// Returns who is asking, for the approve question.
+#[tauri::command]
+pub async fn pair_claim(api_url: String, code: String, state: State<'_, Arc<AppState>>) -> Result<DeviceIntro, String> {
+    let (mailbox_id, code_password) = parse_code(&code).ok_or("invalid_code")?;
+    {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config.as_ref().ok_or("vault_locked")?;
+        if cfg.data_key.is_none() || cfg.backup_key.is_none() || cfg.private_network_seed.is_none() {
+            return Err("needs_phrase_once".into());
+        }
+    }
+    let mut mailbox = Mailbox::claim(&api_url, &mailbox_id).await?;
+    let (channel, intro) = meet_new_device(&mut mailbox, &mailbox_id, &code_password).await?;
+    let mut met = MET.lock().await;
+    if let Some(mut earlier) = met.take() {
+        earlier.mailbox.close().await;
+    }
+    *met = Some(Met { mailbox, channel, intro: intro.clone() });
+    Ok(intro)
+}
+
+/// Existing device: the person approved. Hands the identity over.
+#[tauri::command]
+pub async fn pair_approve(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let mut met = MET.lock().await.take().ok_or("pair_closed")?;
+    let handover = {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config.as_ref().ok_or("vault_locked")?;
+        let identity_seed: [u8; 32] = cfg.device_seed.as_deref().and_then(|s| s.try_into().ok()).ok_or("vault_locked")?;
+        let approver_seed = cfg.conductor_seed_bytes().ok_or("vault_locked")?;
+        let new_device: [u8; 32] = crate::commands::base64_standard_decode(&met.intro.device_key)
+            .ok()
+            .and_then(|k| k.as_slice().try_into().ok())
+            .ok_or_else(|| PairError::Malformed.to_string())?;
+        let approval = crate::device_registry::approve_device(
+            &crate::key_derivation::public_key_of_seed(&identity_seed),
+            &approver_seed,
+            &new_device,
+            &met.intro.install_id,
+            now_ms(),
+        );
+        Handover::from_config(Some(cfg), approval).map_err(|gap| match gap {
+            HandoverGap::Locked => "vault_locked".to_string(),
+            HandoverGap::NeedsPhraseOnce => "needs_phrase_once".to_string(),
+        })?
+    };
+    let sent = hand_over(&mut met.mailbox, &met.channel, &handover).await;
+    if sent.is_ok() {
+        state.activity.record("device_added", format!("Added {} as one of your devices", met.intro.name), None, None, None);
+    } else {
+        met.mailbox.close().await;
+    }
+    sent
+}
+
+/// Existing device: the person said no. The new device is told at once.
+#[tauri::command]
+pub async fn pair_decline() -> Result<(), String> {
+    if let Some(mut met) = MET.lock().await.take() {
+        met.mailbox.close().await;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,7 +711,7 @@ mod tests {
         let api_for_new = mailbox.clone();
         let password_for_new = password.clone();
         let new_side = tokio::spawn(async move {
-            run_new_device(&mut new_box, &api_for_new, &password_for_new, &intro()).await
+            run_new_device(&mut new_box, &api_for_new, &password_for_new, &intro(), || {}).await
         });
 
         // The person types the code on the existing device.
@@ -525,7 +729,7 @@ mod tests {
         let (mut new_box, mailbox) = Mailbox::open(&api).await.unwrap();
         let new_side = tokio::spawn({
             let mailbox = mailbox.clone();
-            async move { run_new_device(&mut new_box, &mailbox, "GHJKMNPQ", &intro()).await }
+            async move { run_new_device(&mut new_box, &mailbox, "GHJKMNPQ", &intro(), || {}).await }
         });
         let mut old_box = Mailbox::claim(&api, &mailbox).await.unwrap();
         let met = meet_new_device(&mut old_box, &mailbox, "GHJKMNPR").await;
