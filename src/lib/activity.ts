@@ -18,6 +18,8 @@ export interface ActivityLogEntry {
   detail?: string | null;
   origin?: string | null;
   app_name?: string | null;
+  /** The device it happened on, when it was another of yours. */
+  device?: string | null;
 }
 
 /** True when this identity was restored from its phrase within `withinSecs`
@@ -58,6 +60,8 @@ export interface FeedItem {
   strong?: string | null;
   /** Second line, muted, before the time. */
   detail?: string | null;
+  /** Another of the person's devices this happened on. */
+  device?: string | null;
 }
 
 /** "12 polls, 38 votes" or null if nothing to show. */
@@ -127,7 +131,7 @@ export function buildFeed(input: {
     // The label carries the app name for sign-ins ("Signed in to X"); bold it.
     const strong = e.app_name && e.label.endsWith(e.app_name) ? e.app_name : e.origin && e.label.endsWith(e.origin) ? e.origin : null;
     const text = strong ? e.label.slice(0, e.label.length - strong.length) : e.label;
-    items.push({ key: `a${e.at}-${i}`, icon: KIND_ICON[e.kind] || "identity", timestamp: e.at, text, strong, detail: e.detail || null });
+    items.push({ key: `a${e.at}-${i}`, icon: KIND_ICON[e.kind] || "identity", timestamp: e.at, text, strong, detail: e.detail || null, device: e.device || null });
   });
   // Only surface sigs once the store has settled - otherwise the feed
   // would show the same partial count the Signatures tile hides behind

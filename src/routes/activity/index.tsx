@@ -61,7 +61,7 @@ export default component$(() => {
     <div>
       <h1 class="mb-1 text-2xl font-bold text-white">Activity</h1>
       <p class="mb-6 text-sm text-gray-400">
-        What has happened in your Vault: sign-ins, what you shared, signatures, backups and changes. Kept on this device only.
+        What has happened in your Vault on any of your devices: sign-ins, what you shared, signatures, backups and changes. Kept on your devices only.
       </p>
 
       {loading.value ? (

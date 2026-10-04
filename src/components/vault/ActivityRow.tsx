@@ -33,6 +33,7 @@ export const ActivityRow = component$<{ item: FeedItem; when: string }>(({ item,
         </p>
         <p class="truncate text-xs text-gray-500">
           {item.detail && item.icon !== "backup" && item.icon !== "link" ? <>{item.detail} · </> : null}
+          {item.device ? <>on {item.device} · </> : null}
           {when}
         </p>
       </div>

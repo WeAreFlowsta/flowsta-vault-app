@@ -1,6 +1,7 @@
 //! The Vault's own activity log: what happened here, in the order it
-//! happened, for the Overview and the Activity page. Local only - never
-//! synced or filed anywhere - and capped so it stays a small file.
+//! happened, for the Overview and the Activity page. Kept as a small local
+//! file, readable while locked; `activity_sync.rs` carries the lines to the
+//! identity's other devices and shows theirs here.
 //!
 //! Signatures, backups and app links are NOT logged: the feed already
 //! derives them from their own records (the signing network, backup stats,
@@ -32,6 +33,11 @@ pub struct ActivityEvent {
     pub origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_name: Option<String>,
+    /// The device it happened on, when it was not this one (name and install id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<String>,
 }
 
 pub struct ActivityLog {
@@ -90,6 +96,8 @@ impl ActivityLog {
             detail,
             origin,
             app_name,
+            device: None,
+            install: None,
         };
         let json = {
             let mut events = self.events.lock().unwrap();

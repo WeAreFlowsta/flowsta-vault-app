@@ -1,4 +1,5 @@
 mod activity;
+mod activity_sync;
 mod backup;
 mod backup_lane;
 mod backup_sync;

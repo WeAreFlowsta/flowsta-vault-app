@@ -42,6 +42,8 @@ pub const KNOWN_DEVICES: &str = "known-devices.json";
 /// Connections and remembered sites as this device held them when it last
 /// compared them with the identity's records.
 pub const SHARED_CONNECTIONS: &str = "shared-connections.json";
+/// Where this device's Activity log has been written to the identity's records up to.
+pub const ACTIVITY_SYNCED: &str = "activity-synced.json";
 
 // ---- device-level ----------------------------------------------------------
 /// Plaintext marker with the active identity's agent key; selects the
@@ -78,6 +80,7 @@ pub const IDENTITY_STORE_FILES: &[&str] = &[
     REMOVED_MARKER,
     KNOWN_DEVICES,
     SHARED_CONNECTIONS,
+    ACTIVITY_SYNCED,
 ];
 
 // ---- identity-root helpers -------------------------------------------------
@@ -101,6 +104,7 @@ pub fn restore_choice_path(root: &Path) -> PathBuf { root.join(RESTORE_CHOICE_MA
 pub fn removed_marker_path(root: &Path) -> PathBuf { root.join(REMOVED_MARKER) }
 pub fn known_devices_path(root: &Path) -> PathBuf { root.join(KNOWN_DEVICES) }
 pub fn shared_connections_path(root: &Path) -> PathBuf { root.join(SHARED_CONNECTIONS) }
+pub fn activity_synced_path(root: &Path) -> PathBuf { root.join(ACTIVITY_SYNCED) }
 
 // ---- partitions ------------------------------------------------------------
 /// Folder under the device root that holds one sub-folder per identity.
