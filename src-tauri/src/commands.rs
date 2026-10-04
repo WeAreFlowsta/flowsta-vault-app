@@ -228,6 +228,9 @@ pub struct AppState {
     /// the identity's devices keep syncing: whose conductor it is and what
     /// it runs as (to bring it back if it stops).
     pub kept_conductor: Mutex<Option<KeptConductor>>,
+    /// This device's end of the lane app backups travel on between the
+    /// identity's devices, while its conductor runs.
+    pub backup_lane: tokio::sync::Mutex<Option<Arc<crate::backup_lane::Lane>>>,
     /// Live tests point the record layer at a conductor they started themselves.
     #[cfg(test)]
     pub test_conductor_ports: Mutex<Option<(u16, u16)>>,
@@ -453,6 +456,7 @@ impl AppState {
             linked_third_party_apps: Mutex::new(linked_apps),
             conductor_handle: Mutex::new(None),
             kept_conductor: Mutex::new(None),
+            backup_lane: tokio::sync::Mutex::new(None),
             #[cfg(test)]
             test_conductor_ports: Mutex::new(None),
             conductor_status: Mutex::new(ConductorStatus::Stopped),
@@ -1310,6 +1314,10 @@ pub(crate) fn write_active_identity_marker(data_dir: &std::path::Path, agent_pub
 pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     lock_secrets(state);
     *state.kept_conductor.lock().unwrap() = None;
+    // The lane was open on the conductor that stops now.
+    if let Ok(mut lane) = state.backup_lane.try_lock() {
+        *lane = None;
+    }
 
     // Shutdown conductor + lair if running
     if let Some(handle) = state.conductor_handle.lock().unwrap().take() {
@@ -1694,6 +1702,19 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             }
             Ok(false) => {}
             Err(e) => log::info!("Connections not checked: {}", e),
+        }
+        // App backups: say what this device holds, keep copies of what the
+        // other devices hold.
+        match crate::backup_sync::round(devices_state).await {
+            Ok(outcome) if outcome.changed() => {
+                log::info!(
+                    "[backups] said {} · fetched {} · dropped {} · still to fetch {}",
+                    outcome.recorded, outcome.fetched, outcome.dropped, outcome.waiting
+                );
+                let _ = devices_app.emit("backups-changed", serde_json::json!({}));
+            }
+            Ok(_) => {}
+            Err(e) => log::info!("Backups not checked: {}", e),
         }
     }
     DevicesRound::Done

@@ -263,7 +263,7 @@ export default component$(() => {
         // connections and remembered sites travel as records too; those are
         // shown under Settings and Connections, not counted here.
         const records = (await invoke<SealedListItem[]>("sealed_list")).filter(
-          (r) => !["device", "connection", "remembered_site"].includes(r.entry_type),
+          (r) => !["device", "connection", "remembered_site", "backup_slot"].includes(r.entry_type),
         );
         const counts: Record<string, number> = {};
         for (const r of records) {

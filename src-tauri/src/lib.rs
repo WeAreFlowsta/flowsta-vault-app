@@ -1,5 +1,6 @@
 mod activity;
 mod backup;
+mod backup_lane;
 mod backup_sync;
 mod commands;
 mod conductor;

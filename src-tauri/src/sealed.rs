@@ -206,7 +206,7 @@ pub struct SealedListItem {
     pub device: Option<String>,
 }
 
-async fn connect_sealed_app_ws(
+pub(crate) async fn connect_sealed_app_ws(
     state: &Arc<AppState>,
     admin_port: u16,
     app_port: u16,
@@ -330,7 +330,7 @@ async fn sealed_zome_call(
     Err(last_err)
 }
 
-fn conductor_ports(state: &AppState) -> Result<(u16, u16), String> {
+pub(crate) fn conductor_ports(state: &AppState) -> Result<(u16, u16), String> {
     #[cfg(test)]
     if let Some(ports) = *state.test_conductor_ports.lock().unwrap() {
         return Ok(ports);
@@ -1219,6 +1219,66 @@ mod tests {
             on_a == vec![serde_json::json!("the first device")] && on_c == on_a
         })
         .await;
+    }
+
+    /// A backup made on one device is fetched by the other in pieces
+    /// through their conductors, checked against its index and opened.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "starts real conductors and uses the staging rendezvous"]
+    async fn live_a_backup_travels_between_devices() {
+        use crate::backup_sync::{local_index, newest_across_devices, store_copy};
+        let seed = format!("live-{}", hex::encode(crate::key_derivation::new_conductor_seed())[..16].to_string());
+        let mut config: crate::vault::VaultConfig = serde_json::from_str(
+            r#"{"agent_pub_key":"uhCAkTest","did":"did:flowsta:uhCAkTest","installed_app_ids":[],"created_at":1}"#,
+        )
+        .unwrap();
+        config.data_key = Some(vec![33u8; 32]);
+        config.device_seed = Some(vec![21u8; 32]);
+        config.backup_key = Some(vec![44u8; 32]);
+        config.agent_pub_key_raw_b64 = Some(crate::key_derivation::base64_standard_encode(
+            &crate::key_derivation::construct_agent_pub_key_bytes(&crate::key_derivation::public_key_of_seed(&[21u8; 32])),
+        ));
+        let a = live_device("a", 46061, &seed, &config, true).await;
+        let b = live_device("b", 46062, &seed, &config, true).await;
+        let (root_a, root_b) = (a.state.identity_root(), b.state.identity_root());
+
+        // About 1.5 MB of data: several pieces, more than one window.
+        let data: Vec<u8> = (0..1_500_000u32).map(|i| (i % 251) as u8).collect();
+        crate::backup::save_backup(&a.state, "harness_app", "Harness App", Some("recovery"), &data, Some("application/octet-stream")).unwrap();
+        let index = local_index(&root_a, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let slot = index[0].slots[0].clone();
+        println!("  the encrypted file is {} bytes = {} pieces", slot.size, crate::backup_lane::pieces_of(slot.size));
+
+        let lane_a = crate::backup_lane::Lane::open(&a.state).await.expect("A's lane");
+        let lane_b = crate::backup_lane::Lane::open(&b.state).await.expect("B's lane");
+        assert!(lane_a.alive().await && lane_b.alive().await);
+
+        let started = std::time::Instant::now();
+        let mut fetched = None;
+        while fetched.is_none() {
+            assert!(started.elapsed().as_secs() < 300, "the file did not arrive within 300 s");
+            match lane_b.fetch(&root_b, &lane_a.me, "harness_app", "recovery", slot.size, &slot.sha256, |done, total| println!("  {} of {} pieces", done, total)).await {
+                Ok(bytes) => fetched = Some(bytes),
+                Err(e) => {
+                    println!("  not yet ({}); the devices may not have found each other", e);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+        println!("  fetched after {} s", started.elapsed().as_secs());
+        store_copy(&root_b, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "harness_app", &slot, &fetched.unwrap()).expect("the copy matches A's index");
+
+        // B opens A's backup with the identity's backup key.
+        let held = newest_across_devices(&root_b, "harness_app", "recovery").expect("B holds a copy");
+        assert_eq!(held.from_install.as_deref(), Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        let keys = crate::backup::backup_keys(&b.state).unwrap();
+        let (opened, meta) = crate::backup::open_backup_file(&held.path, &keys).unwrap();
+        assert_eq!(opened, data);
+        assert_eq!(meta.label.as_deref(), Some("recovery"));
+
+        // A file the other device does not hold: told at once, nothing kept.
+        let missing = lane_b.fetch(&root_b, &lane_a.me, "harness_app", "nothing", 10, &"0".repeat(64), |_, _| {}).await;
+        assert_eq!(missing.err().as_deref(), Some("the other device no longer holds it"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

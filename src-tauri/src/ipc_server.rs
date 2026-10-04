@@ -4125,6 +4125,33 @@ async fn dev_devices_handler(
             app.save_linked_app_scopes();
             Ok(serde_json::json!({ "disconnected": true }))
         }
+        // An app backup as /backup leaves it, without the app.
+        "backup" => crate::backup::save_backup(
+            app,
+            &text("client_id"),
+            "Harness App",
+            Some(&text("label")),
+            text("text").as_bytes(),
+            Some("text/plain"),
+        )
+        .map(|meta| serde_json::json!({ "saved": meta.label })),
+        "backup-delete" => crate::backup::delete_backup(&app.identity_root(), &text("client_id"), Some(&text("label")))
+            .map(|_| serde_json::json!({ "deleted": true })),
+        "backups" => {
+            let keys = crate::backup::backup_keys(app);
+            let held: Vec<serde_json::Value> = crate::backup_sync::held_across_devices(&app.identity_root(), &text("client_id"))
+                .into_iter()
+                .map(|h| {
+                    let opened = keys
+                        .as_ref()
+                        .ok()
+                        .and_then(|k| crate::backup::open_backup_file(&h.path, k).ok())
+                        .map(|(bytes, _)| String::from_utf8_lossy(&bytes).chars().take(60).collect::<String>());
+                    serde_json::json!({ "label": h.meta.label, "from": h.from_install, "created_at": h.meta.created_at, "opens_as": opened })
+                })
+                .collect();
+            Ok(serde_json::json!({ "held": held }))
+        }
         "stop-syncing" => {
             crate::commands::stop_syncing_while_locked(app);
             Ok(serde_json::json!({ "stopped": true }))

@@ -7,13 +7,14 @@
 //!   backups/<app>/<label>.enc                     this device's (unchanged)
 //!   backups-from/<install id>/<app>/<label>.enc   copies of another device's
 //!
-//! Each device says what it holds in one sealed record per app (its index:
-//! for every label a time, a size and the SHA-256 of the encrypted file).
-//! A device makes its copies match the other devices' indexes: what an
-//! index lists and is missing or different here is fetched, what an index
-//! no longer lists is dropped. An index is the truth for its own device's
-//! backups, and a device that is gone keeps its last index, so its copies
-//! stay.
+//! Each device says what it holds in small sealed records, one per backup
+//! (its time, its size and the SHA-256 of the encrypted file), rewritten
+//! only when that backup changes or goes. Together they are the device's
+//! index. A device makes its copies match the other devices' indexes: what
+//! an index lists and is missing or different here is fetched, what an
+//! index no longer lists is dropped. An index is the truth for its own
+//! device's backups, and a device that is gone keeps its last index, so
+//! its copies stay.
 //!
 //! The copies are the encrypted files as the other device wrote them. Both
 //! backup keys are on every device of the identity, so they open here.
@@ -24,8 +25,26 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-pub const INDEX_ENTRY_TYPE: &str = "backup_index";
+pub const SLOT_ENTRY_TYPE: &str = "backup_slot";
+
+/// One backup on one device, as its record says.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SlotRecord {
+    pub install_id: String,
+    pub client_id: String,
+    pub app_name: String,
+    #[serde(flatten)]
+    pub slot: SlotInfo,
+    /// The device no longer holds it.
+    #[serde(default)]
+    pub gone: bool,
+}
+
+pub fn slot_record_id(install_id: &str, client_id: &str, label: &str) -> String {
+    format!("{}:{}:{}:{}", SLOT_ENTRY_TYPE, install_id, client_id, label)
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct SlotInfo {
@@ -45,10 +64,6 @@ pub struct AppIndex {
     pub app_name: String,
     /// Sorted by label.
     pub slots: Vec<SlotInfo>,
-}
-
-pub fn index_id(install_id: &str, client_id: &str) -> String {
-    format!("{}:{}:{}", INDEX_ENTRY_TYPE, install_id, client_id)
 }
 
 fn is_install_id(id: &str) -> bool {
@@ -115,27 +130,68 @@ pub fn local_index(identity_root: &Path, install_id: &str) -> Vec<AppIndex> {
     indexes
 }
 
-/// Every device's index found in a listing of the identity's records.
-pub fn indexes_in(records: &[SealedListItem]) -> Vec<AppIndex> {
+/// Every backup record in a listing of the identity's records.
+pub fn slot_records_in(records: &[SealedListItem]) -> Vec<SlotRecord> {
     records
         .iter()
-        .filter(|r| r.entry_type == INDEX_ENTRY_TYPE)
-        .filter_map(|r| serde_json::from_value::<AppIndex>(r.body.clone()).ok())
-        .filter(|i| is_install_id(&i.install_id))
+        .filter(|r| r.entry_type == SLOT_ENTRY_TYPE)
+        .filter_map(|r| serde_json::from_value::<SlotRecord>(r.body.clone()).ok())
+        .filter(|r| is_install_id(&r.install_id))
         .collect()
 }
 
-/// The indexes this device should write: one per app whose index changed,
-/// and an empty one for an app it no longer holds anything of.
-pub fn indexes_to_write(mine: &[AppIndex], recorded: &[AppIndex], install_id: &str) -> Vec<AppIndex> {
-    let mut out: Vec<AppIndex> = mine
-        .iter()
-        .filter(|index| !recorded.iter().any(|r| r == *index))
-        .cloned()
-        .collect();
-    for old in recorded.iter().filter(|r| r.install_id == install_id && !r.slots.is_empty()) {
-        if !mine.iter().any(|m| m.client_id == old.client_id) {
-            out.push(AppIndex { slots: Vec::new(), ..old.clone() });
+/// The records as one index per device and app (backups that are gone left out).
+pub fn indexes_of(records: &[SlotRecord]) -> Vec<AppIndex> {
+    let mut by_app: BTreeMap<(String, String), AppIndex> = BTreeMap::new();
+    for record in records {
+        let index = by_app
+            .entry((record.install_id.clone(), record.client_id.clone()))
+            .or_insert_with(|| AppIndex {
+                install_id: record.install_id.clone(),
+                client_id: record.client_id.clone(),
+                app_name: record.app_name.clone(),
+                slots: Vec::new(),
+            });
+        if !record.gone {
+            index.slots.push(record.slot.clone());
+        }
+    }
+    let mut indexes: Vec<AppIndex> = by_app.into_values().collect();
+    for index in &mut indexes {
+        index.slots.sort_by(|a, b| a.label.cmp(&b.label));
+    }
+    indexes
+}
+
+/// The records this device should write: one for each of its backups that
+/// is new or changed, and one saying "gone" for each it no longer holds.
+pub fn records_to_write(mine: &[AppIndex], recorded: &[SlotRecord], install_id: &str) -> Vec<SlotRecord> {
+    let mut out = Vec::new();
+    let said = |client_id: &str, label: &str| {
+        recorded
+            .iter()
+            .find(|r| r.install_id == install_id && r.client_id == client_id && r.slot.label == label)
+    };
+    for index in mine {
+        for slot in &index.slots {
+            let current = SlotRecord {
+                install_id: install_id.to_string(),
+                client_id: index.client_id.clone(),
+                app_name: index.app_name.clone(),
+                slot: slot.clone(),
+                gone: false,
+            };
+            if said(&index.client_id, &slot.label) != Some(&current) {
+                out.push(current);
+            }
+        }
+    }
+    for old in recorded.iter().filter(|r| r.install_id == install_id && !r.gone) {
+        let held = mine
+            .iter()
+            .any(|i| i.client_id == old.client_id && i.slots.iter().any(|s| s.label == old.slot.label));
+        if !held {
+            out.push(SlotRecord { gone: true, ..old.clone() });
         }
     }
     out
@@ -201,10 +257,14 @@ pub fn store_copy(identity_root: &Path, install_id: &str, client_id: &str, slot:
 /// The encrypted file of one of this device's own backups, for a sibling
 /// device that asked for it by what the index says.
 pub fn own_file_for(identity_root: &Path, client_id: &str, slot: &SlotInfo) -> Option<Vec<u8>> {
+    own_file_matching(identity_root, client_id, &slot.label, &slot.sha256)
+}
+
+pub fn own_file_matching(identity_root: &Path, client_id: &str, label: &str, sha256: &str) -> Option<Vec<u8>> {
     let dir = crate::paths::backups_dir(identity_root).join(crate::backup::sanitize_id(client_id));
-    let path = dir.join(format!("{}.enc", crate::backup::sanitize_id(&slot.label)));
+    let path = dir.join(format!("{}.enc", crate::backup::sanitize_id(label)));
     let bytes = std::fs::read(path).ok()?;
-    (sha256_hex(&bytes) == slot.sha256).then_some(bytes)
+    (sha256_hex(&bytes) == sha256).then_some(bytes)
 }
 
 /// One backup an app can be given: where it is and which device wrote it.
@@ -247,6 +307,130 @@ pub fn newest_across_devices(identity_root: &Path, client_id: &str, label: &str)
         .max_by_key(|h| (h.meta.created_at, h.from_install.is_none()))
 }
 
+// ── The round ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, PartialEq)]
+pub struct RoundOutcome {
+    /// Records written about this device's own backups.
+    pub recorded: usize,
+    pub fetched: usize,
+    pub dropped: usize,
+    /// Copies still missing (the device that holds them was not reachable).
+    pub waiting: usize,
+}
+
+impl RoundOutcome {
+    pub fn changed(&self) -> bool {
+        self.recorded + self.fetched + self.dropped > 0
+    }
+}
+
+/// At most this much is fetched in one round; the rest waits for the next.
+const FETCH_BYTES_PER_ROUND: u64 = 200 * 1024 * 1024;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// This device's end of the lane, opened when needed and again when the
+/// conductor it was opened on has gone.
+pub(crate) async fn lane(state: &Arc<crate::commands::AppState>) -> Result<Arc<crate::backup_lane::Lane>, String> {
+    let mut slot = state.backup_lane.lock().await;
+    if let Some(lane) = slot.as_ref() {
+        if lane.alive().await {
+            return Ok(lane.clone());
+        }
+    }
+    let lane = crate::backup_lane::Lane::open(state).await?;
+    *slot = Some(lane.clone());
+    Ok(lane)
+}
+
+/// One pass: write the records for this device's backups that changed,
+/// drop copies their device no longer holds, fetch copies that are missing.
+pub async fn round(state: &Arc<crate::commands::AppState>) -> Result<RoundOutcome, String> {
+    let records = crate::sealed::sealed_list_inner(state).await?;
+    let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    let root = state.identity_root();
+    let mut outcome = RoundOutcome::default();
+
+    // The lane is open on every device that takes part, so it can be asked.
+    let lane = lane(state).await;
+
+    let recorded = slot_records_in(&records);
+    for record in records_to_write(&local_index(&root, &me), &recorded, &me) {
+        let now = now_ms();
+        crate::sealed::sealed_store_spec(
+            state,
+            crate::sealed::StoreSpec {
+                entry_type: SLOT_ENTRY_TYPE.to_string(),
+                body: serde_json::to_value(&record).map_err(|e| e.to_string())?,
+                refs: Vec::new(),
+                created_at: now,
+                id: Some(slot_record_id(&record.install_id, &record.client_id, &record.slot.label)),
+                updated_at: Some(now),
+                deleted: false,
+            },
+            None,
+        )
+        .await?;
+        outcome.recorded += 1;
+    }
+
+    // Where each sibling device can be reached: the key its conductor runs.
+    let devices = crate::devices::devices_in(&records);
+    let agent_of = |install_id: &str| {
+        devices
+            .iter()
+            .find(|d| d.install_id == install_id && d.removed_at.is_none())
+            .and_then(|d| crate::commands::base64_standard_decode(&d.conductor_key).ok())
+            .filter(|raw| raw.len() == 39)
+            .map(holochain_types::prelude::AgentPubKey::from_raw_39)
+    };
+
+    let mut budget = FETCH_BYTES_PER_ROUND;
+    for step in plan(&root, &me, &indexes_of(&recorded)) {
+        match step {
+            CopyStep::Drop { path } => {
+                if std::fs::remove_file(&path).is_ok() {
+                    outcome.dropped += 1;
+                }
+            }
+            CopyStep::Fetch { install_id, client_id, slot } => {
+                let (Ok(lane), Some(from)) = (lane.as_ref(), agent_of(&install_id)) else {
+                    outcome.waiting += 1;
+                    continue;
+                };
+                if slot.size > budget {
+                    outcome.waiting += 1;
+                    continue;
+                }
+                let lane: &Arc<crate::backup_lane::Lane> = lane;
+                match lane.fetch(&root, &from, &client_id, &slot.label, slot.size, &slot.sha256, |_, _| {}).await {
+                    Ok(bytes) => match store_copy(&root, &install_id, &client_id, &slot, &bytes) {
+                        Ok(_) => {
+                            budget -= slot.size;
+                            outcome.fetched += 1;
+                        }
+                        Err(e) => {
+                            log::warn!("[backups] a fetched copy was not kept: {}", e);
+                            outcome.waiting += 1;
+                        }
+                    },
+                    Err(e) => {
+                        log::info!("[backups] {}/{} not fetched this time: {}", client_id, slot.label, e);
+                        outcome.waiting += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,25 +468,35 @@ mod tests {
     }
 
     #[test]
-    fn an_index_is_written_only_when_it_changed_and_emptied_when_the_app_has_nothing_left() {
+    fn a_backup_is_recorded_when_it_is_new_changed_or_gone_and_not_otherwise() {
         let tmp = tempfile::tempdir().unwrap();
         write_own(tmp.path(), "app", "latest", 10, "one");
+        write_own(tmp.path(), "app", "manifest", 10, "m");
         let mine = local_index(tmp.path(), ME);
-        assert_eq!(indexes_to_write(&mine, &[], ME), mine);
-        assert!(indexes_to_write(&mine, &mine, ME).is_empty());
-        // A new backup under the same label: the index changed.
+        let first = records_to_write(&mine, &[], ME);
+        assert_eq!(first.len(), 2);
+        assert!(records_to_write(&mine, &first, ME).is_empty());
+        assert_eq!(indexes_of(&first), mine);
+
+        // One backup rewritten: one record, not the whole index.
         std::thread::sleep(std::time::Duration::from_millis(20));
         write_own(tmp.path(), "app", "latest", 11, "one-b");
         let changed = local_index(tmp.path(), ME);
-        assert_eq!(indexes_to_write(&changed, &mine, ME), changed);
-        // Everything deleted here: the index says so (once).
-        let emptied = indexes_to_write(&[], &changed, ME);
-        assert_eq!(emptied.len(), 1);
-        assert!(emptied[0].slots.is_empty());
-        assert!(indexes_to_write(&[], &emptied, ME).is_empty());
-        // Another device's index is never rewritten from here.
-        let theirs = AppIndex { install_id: OTHER.into(), ..changed[0].clone() };
-        assert!(indexes_to_write(&[], &[theirs], ME).is_empty());
+        let second = records_to_write(&changed, &first, ME);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].slot.label, "latest");
+        assert!(!second[0].gone);
+
+        // Everything deleted here: each is said to be gone, once.
+        let gone = records_to_write(&[], &first, ME);
+        assert_eq!(gone.len(), 2);
+        assert!(gone.iter().all(|r| r.gone));
+        assert!(records_to_write(&[], &gone, ME).is_empty());
+        assert!(indexes_of(&gone)[0].slots.is_empty());
+
+        // Another device's records are never rewritten from here.
+        let theirs: Vec<SlotRecord> = first.iter().map(|r| SlotRecord { install_id: OTHER.into(), ..r.clone() }).collect();
+        assert!(records_to_write(&[], &theirs, ME).is_empty());
     }
 
     #[test]
