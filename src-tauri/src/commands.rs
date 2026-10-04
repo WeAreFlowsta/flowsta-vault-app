@@ -5462,7 +5462,7 @@ async fn fetch_linked_agent_keys(
         format!("localhost:{}", app_port),
         long_request_ws_config(),
         issued.token, signer.into(),
-        Some("flowsta-vault-linked".into()),
+        Some(crate::conductor::node_origin()),
     ).await {
         Ok(ws) => ws,
         Err(e) => { log::warn!("identity app WS: {}", e); return (Vec::new(), false); }
@@ -5710,7 +5710,7 @@ async fn open_signing_conductor(
 
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("flowsta-vault-read".to_string()),
+        Some(crate::conductor::node_origin()),
     ).await.map_err(|e| format!("Admin WS: {}", e))?;
 
     crate::dna::ensure_apps_enabled(&admin_ws, state).await;
@@ -6139,7 +6139,7 @@ async fn revoke_signature_attempt(
 
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("flowsta-vault-revoke".to_string()),
+        Some(crate::conductor::node_origin()),
     ).await.map_err(|e| format!("Admin WS: {}", e))?;
 
     crate::dna::ensure_apps_enabled(&admin_ws, state).await;
@@ -6171,7 +6171,7 @@ async fn revoke_signature_attempt(
         format!("localhost:{}", app_port),
         long_request_ws_config(),
         issued.token, signer.into(),
-        Some("flowsta-vault-revoke".into()),
+        Some(crate::conductor::node_origin()),
     ).await.map_err(|e| format!("App WS: {}", e))?;
 
     // Build the RevokeInput payload - must use ActionHash type (not raw bytes)
@@ -6241,7 +6241,7 @@ pub(crate) async fn set_thumbnail_inner(
 
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("flowsta-vault-thumb".to_string()),
+        Some(crate::conductor::node_origin()),
     ).await.map_err(|e| format!("Admin WS: {}", e))?;
 
     crate::dna::ensure_apps_enabled(&admin_ws, state).await;
@@ -6273,7 +6273,7 @@ pub(crate) async fn set_thumbnail_inner(
         format!("localhost:{}", app_port),
         retryable_request_ws_config(),
         issued.token, signer.into(),
-        Some("flowsta-vault-thumb".into()),
+        Some(crate::conductor::node_origin()),
     ).await.map_err(|e| format!("App WS: {}", e))?;
 
     let action_hash_bytes = hex::decode(&action_hash_hex)
@@ -6376,7 +6376,7 @@ pub(crate) async fn commit_signature_to_dht(
     // Connect to admin WS
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("flowsta-vault-sign".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Admin WS connect failed: {}", e))?;
@@ -6430,7 +6430,7 @@ pub(crate) async fn commit_signature_to_dht(
         long_request_ws_config(),
         issued.token,
         signer.into(),
-        Some("flowsta-vault-sign".into()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("App WS connect failed: {}", e))?;

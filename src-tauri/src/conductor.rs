@@ -311,7 +311,7 @@ network:
   request_timeout_s: 240
 "#,
         data_root = data_root,
-        node_origins = NODE_ORIGINS.join(","),
+        node_origins = fresh_node_origin(),
         admin_port = admin_port,
         lair_url = lair_url,
         bootstrap_url = bootstrap_url,
@@ -321,26 +321,66 @@ network:
     );
 
     let config_path = conductor_dir.join("conductor-config.yaml");
-    std::fs::write(&config_path, &config)
+    write_private(&config_path, &config)
         .map_err(|e| format!("Failed to write conductor config: {}", e))?;
 
     log::info!("Conductor config written to {:?}", config_path);
     Ok(config_path)
 }
 
-/// The origins the conductor's admin and app interfaces accept: the names
-/// this app connects under, and nothing else. A web page always presents
-/// its own address as its origin, so no page can open these interfaces.
-pub const NODE_ORIGINS: [&str; 8] = [
-    "flowsta-vault",
-    "flowsta-vault-coord-update",
-    "flowsta-vault-linked",
-    "flowsta-vault-read",
-    "flowsta-vault-revoke",
-    "flowsta-vault-sealed",
-    "flowsta-vault-sign",
-    "flowsta-vault-thumb",
-];
+/// The one origin the conductor's admin and app interfaces accept: a random
+/// value made for each conductor start. It is written to the conductor's
+/// config file, which only this OS account can read, and held here for the
+/// app's own connections. A web page always presents its own address as its
+/// origin, and another account on the device cannot read the file, so
+/// neither can open these interfaces.
+static NODE_ORIGIN: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+/// The origin this app's connections to its conductor present.
+pub fn node_origin() -> String {
+    NODE_ORIGIN.read().unwrap().clone()
+}
+
+/// Make a new origin for a conductor that is about to start.
+fn fresh_node_origin() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let origin = format!("fv-{}", hex::encode(bytes));
+    *NODE_ORIGIN.write().unwrap() = origin.clone();
+    origin
+}
+
+/// The current origin, made on first use - for tests that write their own
+/// conductor config.
+#[cfg(test)]
+pub(crate) fn node_origin_for_tests() -> String {
+    let current = node_origin();
+    if current.is_empty() { fresh_node_origin() } else { current }
+}
+
+/// Write a file only this OS account can read.
+fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        // A file left by an earlier version may be readable by others, and
+        // the mode below applies only when the file is created.
+        let _ = std::fs::remove_file(path);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        // The app's data folder is private to the account on Windows.
+        std::fs::write(path, contents)
+    }
+}
 
 /// Start the holochain conductor process.
 ///
@@ -836,41 +876,46 @@ async fn start_holochain_attempt(
 #[cfg(test)]
 mod bootstrap_target_tests {
     #[test]
-    fn every_origin_this_app_connects_under_is_on_the_accepted_list() {
+    fn every_connection_to_the_conductor_presents_the_current_origin() {
+        // No connection may carry a fixed origin name: the conductor accepts
+        // only the value made for this start.
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut seen = 0;
+        let fixed = ["Some(", "\"flowsta-vault"].concat();
+        let mut uses = 0;
         for entry in std::fs::read_dir(&src).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();
-            let marker = ["Some(", "\"flowsta-vault"].concat();
-            for (at, _) in text.match_indices(&marker) {
-                let rest = &text[at + "Some(\"".len()..];
-                let origin = &rest[..rest.find('"').unwrap()];
-                assert!(
-                    super::NODE_ORIGINS.contains(&origin),
-                    "{} connects as {:?}, which the conductor would refuse",
-                    path.display(),
-                    origin
-                );
-                seen += 1;
-            }
+            assert!(!text.contains(&fixed), "{} connects under a fixed origin name", path.display());
+            uses += text.matches("Some(crate::conductor::node_origin())").count();
         }
-        assert!(seen >= 10, "expected to find the app's connections, found {}", seen);
+        assert!(uses >= 10, "expected to find the app's connections, found {}", uses);
     }
 
     #[test]
-    fn the_conductor_config_names_its_origins() {
+    fn the_conductor_config_carries_a_fresh_origin_only_this_account_can_read() {
         let dir = std::env::temp_dir().join(format!("fv-origins-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        // A config left by an earlier version, readable by everyone.
+        std::fs::write(dir.join("conductor-config.yaml"), "old").unwrap();
         let target = super::BootstrapTarget { bootstrap_url: "https://example.test".into(), signal_url: "wss://example.test".into(), auth_material: None };
         let path = super::generate_conductor_config(&dir, "unix:///tmp/x?k=y", 4455, &target).unwrap();
-        let text = std::fs::read_to_string(path).unwrap();
+        let first = super::node_origin();
+        let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("allowed_origins: '*'"));
-        assert!(text.contains("allowed_origins: 'flowsta-vault,"));
+        assert!(first.starts_with("fv-") && first.len() == 35);
+        assert!(text.contains(&format!("allowed_origins: '{}'", first)));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // The next start gets another one.
+        super::generate_conductor_config(&dir, "unix:///tmp/x?k=y", 4455, &target).unwrap();
+        assert_ne!(super::node_origin(), first);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

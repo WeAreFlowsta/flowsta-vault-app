@@ -220,7 +220,7 @@ async fn connect_sealed_app_ws(
 
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("flowsta-vault-sealed".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Admin WS connect failed: {}", e))?;
@@ -265,7 +265,7 @@ async fn connect_sealed_app_ws(
         crate::commands::long_request_ws_config(),
         issued.token,
         signer.into(),
-        Some("flowsta-vault-sealed".into()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("App WS connect failed: {}", e))?;
@@ -891,7 +891,9 @@ mod tests {
 
     // ── Live: real conductors, the bundled binary, the staging rendezvous ──
     //
-    // cargo test --lib live_devices_share_one_set_of_records -- --ignored --nocapture
+    // cargo test --lib sealed::tests::live -- --ignored --nocapture --test-threads=1
+    // (name the module: a bare `live_` filter also runs the sidecar sweep test,
+    // which stops real leftover sidecars on this machine)
 
     struct LiveDevice {
         state: Arc<AppState>,
@@ -934,7 +936,7 @@ mod tests {
                 "data_root_path: '{d}/data'\nkeystore:\n  type: lair_server_in_proc\n  lair_root: '{d}/ks'\nadmin_interfaces:\n- driver:\n    type: websocket\n    port: {p}\n    allowed_origins: '{o}'\nnetwork:\n  bootstrap_url: https://bootstrap-staging.flowsta.com\n  signal_url: wss://bootstrap-staging.flowsta.com\n  relay_url: https://bootstrap-staging.flowsta.com./\n  base64_auth_material_bootstrap: \"{a}\"\n  base64_auth_material_relay: \"{a}\"\n  request_timeout_s: 240\n",
                 d = dir.display(),
                 p = admin_port,
-                o = crate::conductor::NODE_ORIGINS.join(","),
+                o = crate::conductor::node_origin_for_tests(),
                 a = auth,
             ),
         )
@@ -952,7 +954,7 @@ mod tests {
 
         let mut admin = None;
         for _ in 0..60 {
-            if let Ok(ws) = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some("flowsta-vault".to_string())).await {
+            if let Ok(ws) = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin())).await {
                 admin = Some(ws);
                 break;
             }

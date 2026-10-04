@@ -423,7 +423,7 @@ async fn update_single_dna(
     // 2. Connect to admin WebSocket.
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("flowsta-vault".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;

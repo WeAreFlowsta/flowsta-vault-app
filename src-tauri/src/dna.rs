@@ -127,7 +127,7 @@ pub async fn ensure_signing_coordinators(
 
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("flowsta-vault-coord-update".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Admin WS: {}", e))?;
@@ -206,7 +206,7 @@ pub async fn ensure_private_v2_coordinators(
 
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("flowsta-vault-coord-update".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Admin WS: {}", e))?;
@@ -306,7 +306,7 @@ mod coordinator_bundle_tests {
 async fn reconnect_admin(admin_port: u16) -> Result<AdminWebsocket, String> {
     AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("flowsta-vault".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("admin WS reconnect failed: {}", e))
@@ -587,7 +587,7 @@ pub async fn install_dnas(
     //    the conductor's WS server resets a long-running admin call.
     let mut admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("flowsta-vault".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
@@ -969,7 +969,7 @@ pub async fn install_dnas(
 pub async fn setup_app_interface(admin_port: u16) -> Result<u16, String> {
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
-        Some("flowsta-vault".to_string()),
+        Some(crate::conductor::node_origin()),
     )
     .await
     .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
@@ -978,7 +978,7 @@ pub async fn setup_app_interface(admin_port: u16) -> Result<u16, String> {
         .attach_app_interface(
             0,
             None,
-            AllowedOrigins::Origins(crate::conductor::NODE_ORIGINS.iter().map(|o| o.to_string()).collect()),
+            AllowedOrigins::Origins([crate::conductor::node_origin()].into_iter().collect()),
             None,
         )
         .await
