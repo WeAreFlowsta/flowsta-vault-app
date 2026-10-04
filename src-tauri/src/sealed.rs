@@ -453,11 +453,12 @@ pub(crate) async fn sealed_store_inner(
     .await
 }
 
-/// Create a once-per-identity record because none is visible on this
-/// device. On a device that was added to an existing identity the real
-/// record may simply not have arrived yet, so the version written here
-/// carries the lowest update time: it stands in until then, and any
-/// version another device wrote wins over it.
+/// Write a once-per-identity record AUTOMATICALLY, when a device is added to
+/// an existing identity and holds none yet (never for an edit the person
+/// makes - that is written with its real time). The real record may simply
+/// not have arrived, so this version carries the lowest update time: it
+/// stands in until then, and any version another device wrote wins.
+#[allow(dead_code)] // used by the add-a-device flows
 pub(crate) async fn sealed_store_first(
     state: &Arc<AppState>,
     entry_type: String,

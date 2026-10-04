@@ -7324,21 +7324,22 @@ async fn mirror_username_into_sealed_profile(
             .await?;
         }
         None => {
-            let email = {
+            let (email, display_name) = {
                 let config = state.vault_config.lock().unwrap();
-                config
-                    .as_ref()
-                    .and_then(|c| c.web_email.clone())
-                    .unwrap_or_default()
+                let cfg = config.as_ref();
+                (
+                    cfg.and_then(|c| c.web_email.clone()).unwrap_or_default(),
+                    cfg.and_then(|c| c.display_name.clone()),
+                )
             };
             let now_ms = (now_us / 1000) as u64;
-            crate::sealed::sealed_store_first(
+            crate::sealed::sealed_store_inner(
                 state,
                 "user_profile".into(),
                 serde_json::json!({
                     "email": email,
                     "username": username,
-                    "display_name": null,
+                    "display_name": display_name,
                     "created_at": now_us,
                     "updated_at": now_us,
                 }),
@@ -7630,19 +7631,17 @@ pub(crate) async fn write_profile_records(
                 .map_err(store_err)?;
             }
             None => {
-                let email = {
-                    let config = state.vault_config.lock().unwrap();
-                    config
-                        .as_ref()
-                        .and_then(|c| c.web_email.clone())
-                        .unwrap_or_default()
-                };
-                crate::sealed::sealed_store_first(
+                // No profile record on this device yet. The person is
+                // making an edit, so it is written as one - with everything
+                // this device knows of the profile, so that it is complete
+                // wherever it wins.
+                let (email, username) = profile_fields_from_config(state);
+                crate::sealed::sealed_store_inner(
                     state,
                     "user_profile".into(),
                     serde_json::json!({
                         "email": email,
-                        "username": null,
+                        "username": username,
                         "display_name": name,
                         "created_at": now_us,
                         "updated_at": now_us,
@@ -7677,7 +7676,7 @@ pub(crate) async fn write_profile_records(
                 .map_err(store_err)?;
             }
             None => {
-                crate::sealed::sealed_store_first(
+                crate::sealed::sealed_store_inner(
                     state,
                     "profile_picture".into(),
                     body,
@@ -7721,6 +7720,17 @@ pub(crate) async fn write_profile_records(
 
 
     Ok(())
+}
+
+/// The email and username this device's config holds, for a profile record
+/// written here.
+fn profile_fields_from_config(state: &AppState) -> (String, Option<String>) {
+    let config = state.vault_config.lock().unwrap();
+    let cfg = config.as_ref();
+    (
+        cfg.and_then(|c| c.web_email.clone()).unwrap_or_default(),
+        cfg.and_then(|c| c.web_username.clone()),
+    )
 }
 
 /// Copy a profile edit made on ANOTHER of the identity's devices into this
