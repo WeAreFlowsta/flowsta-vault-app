@@ -339,9 +339,199 @@ impl Handover {
     }
 }
 
+// ── Carrying the messages ───────────────────────────────────────────────────
+
+/// How the four messages travel. The ceremony above does not depend on it.
+pub(crate) trait Transport {
+    async fn send(&mut self, message: &[u8]) -> Result<(), String>;
+    /// The other device's next message, waiting up to `wait` for it.
+    async fn next(&mut self, wait: std::time::Duration) -> Result<Vec<u8>, String>;
+    async fn close(&mut self);
+}
+
+/// A mailbox on Flowsta's API: it stores the messages for a few minutes
+/// and cannot read them. It is not told which identity is involved.
+pub struct Mailbox {
+    base: String,
+    token: String,
+    read: u64,
+    http: reqwest::Client,
+}
+
+impl Mailbox {
+    fn http() -> Result<reqwest::Client, String> {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("HTTP client build failed: {}", e))
+    }
+
+    async fn post(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
+        let resp = self
+            .http
+            .post(format!("{}/auth/pair/{}", self.base, path))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("api_unreachable: {}", e))?;
+        let ok = resp.status().is_success();
+        let value: serde_json::Value = resp.json().await.unwrap_or_default();
+        if ok {
+            Ok(value)
+        } else {
+            Err(value.get("error").and_then(|e| e.as_str()).unwrap_or("pair_failed").to_string())
+        }
+    }
+
+    /// The new device opens a mailbox. Returns it and its name (the first
+    /// part of the code).
+    pub async fn open(api_url: &str) -> Result<(Mailbox, String), String> {
+        let mut mailbox = Mailbox { base: api_url.trim_end_matches('/').to_string(), token: String::new(), read: 0, http: Self::http()? };
+        let opened = mailbox.post("open", serde_json::json!({})).await?;
+        mailbox.token = opened["token"].as_str().ok_or("pair_failed")?.to_string();
+        let id = opened["mailbox"].as_str().ok_or("pair_failed")?.to_string();
+        Ok((mailbox, id))
+    }
+
+    /// The existing device claims the mailbox a typed code names.
+    pub async fn claim(api_url: &str, mailbox_id: &str) -> Result<Mailbox, String> {
+        let mut mailbox = Mailbox { base: api_url.trim_end_matches('/').to_string(), token: String::new(), read: 0, http: Self::http()? };
+        let claimed = mailbox.post("claim", serde_json::json!({ "mailbox": mailbox_id })).await?;
+        mailbox.token = claimed["token"].as_str().ok_or("pair_failed")?.to_string();
+        Ok(mailbox)
+    }
+}
+
+impl Transport for Mailbox {
+    async fn send(&mut self, message: &[u8]) -> Result<(), String> {
+        let body = crate::key_derivation::base64_standard_encode(message);
+        self.post("send", serde_json::json!({ "token": self.token, "body": body })).await.map(|_| ())
+    }
+
+    async fn next(&mut self, wait: std::time::Duration) -> Result<Vec<u8>, String> {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let answer = self.post("receive", serde_json::json!({ "token": self.token, "after": self.read })).await?;
+            if let Some(first) = answer["messages"].as_array().and_then(|m| m.first()) {
+                self.read = first["seq"].as_u64().unwrap_or(self.read + 1);
+                return crate::commands::base64_standard_decode(first["body"].as_str().unwrap_or(""))
+                    .map_err(|_| PairError::Malformed.to_string());
+            }
+            if answer["closed"].as_bool() == Some(true) {
+                return Err("pair_closed".into());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("pair_timeout".into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        }
+    }
+
+    async fn close(&mut self) {
+        let _ = self.post("close", serde_json::json!({ "token": self.token })).await;
+    }
+}
+
+/// How long the new device waits for the code to be typed on the other one.
+const WAIT_FOR_CODE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// How long either waits for the other's next step once they are talking
+/// (the person reads a dialog and approves in this time).
+const WAIT_FOR_STEP: std::time::Duration = std::time::Duration::from_secs(9 * 60);
+
+/// The new device's whole side: returns the identity once the person
+/// approved on the other device.
+pub(crate) async fn run_new_device<T: Transport>(
+    transport: &mut T,
+    mailbox: &str,
+    password: &str,
+    intro: &DeviceIntro,
+) -> Result<Handover, String> {
+    let (state, first) = NewDevice::start(mailbox, password);
+    transport.send(&first).await?;
+    let second = transport.next(WAIT_FOR_CODE).await?;
+    let (channel, proof) = match state.finish(&second) {
+        Ok(done) => done,
+        Err(e) => {
+            transport.close().await;
+            return Err(e.to_string());
+        }
+    };
+    transport.send(&introduction(&channel, &proof, intro).map_err(|e| e.to_string())?).await?;
+    let fourth = transport.next(WAIT_FOR_STEP).await?;
+    let handover = Handover::open(&channel, &fourth).map_err(|e| e.to_string());
+    transport.close().await;
+    handover
+}
+
+/// The existing device, up to the question for the person: who is asking.
+pub(crate) async fn meet_new_device<T: Transport>(
+    transport: &mut T,
+    mailbox: &str,
+    password: &str,
+) -> Result<(Channel, DeviceIntro), String> {
+    let first = transport.next(std::time::Duration::from_secs(20)).await?;
+    let (state, second) = ExistingDevice::answer(mailbox, password, &first).map_err(|e| e.to_string())?;
+    transport.send(&second).await?;
+    let third = transport.next(std::time::Duration::from_secs(60)).await?;
+    match state.confirm(&third) {
+        Ok(met) => Ok(met),
+        Err(e) => {
+            transport.close().await;
+            Err(e.to_string())
+        }
+    }
+}
+
+/// The existing device, after the person approved.
+pub(crate) async fn hand_over<T: Transport>(transport: &mut T, channel: &Channel, handover: &Handover) -> Result<(), String> {
+    transport.send(&handover.seal(channel).map_err(|e| e.to_string())?).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both devices' real code through a running API's mailbox (never production).
+    ///   FLOWSTA_TEST_API=https://... cargo test --lib pairing::tests::live -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn live_two_devices_pair_through_the_mailbox() {
+        let api = std::env::var("FLOWSTA_TEST_API").expect("FLOWSTA_TEST_API");
+        assert!(!api.contains("//auth-api.flowsta.com"), "not against production");
+
+        let (mut new_box, mailbox) = Mailbox::open(&api).await.unwrap();
+        let password = new_password().unwrap();
+        let code = format_code(&mailbox, &password);
+        println!("code {}", code);
+
+        let api_for_new = mailbox.clone();
+        let password_for_new = password.clone();
+        let new_side = tokio::spawn(async move {
+            run_new_device(&mut new_box, &api_for_new, &password_for_new, &intro()).await
+        });
+
+        // The person types the code on the existing device.
+        let (typed_mailbox, typed_password) = parse_code(&code.to_lowercase()).unwrap();
+        let mut old_box = Mailbox::claim(&api, &typed_mailbox).await.unwrap();
+        assert_eq!(Mailbox::claim(&api, &typed_mailbox).await.err().as_deref(), Some("already_claimed"));
+        let (channel, introduced) = meet_new_device(&mut old_box, &typed_mailbox, &typed_password).await.unwrap();
+        assert_eq!(introduced, intro());
+        hand_over(&mut old_box, &channel, &handover()).await.unwrap();
+
+        let received = new_side.await.unwrap().unwrap();
+        assert!(received == handover());
+
+        // A wrong password: the new device notices, nothing is handed over.
+        let (mut new_box, mailbox) = Mailbox::open(&api).await.unwrap();
+        let new_side = tokio::spawn({
+            let mailbox = mailbox.clone();
+            async move { run_new_device(&mut new_box, &mailbox, "GHJKMNPQ", &intro()).await }
+        });
+        let mut old_box = Mailbox::claim(&api, &mailbox).await.unwrap();
+        let met = meet_new_device(&mut old_box, &mailbox, "GHJKMNPR").await;
+        assert_eq!(new_side.await.unwrap().err().as_deref(), Some("code_mismatch"));
+        assert_eq!(met.err().as_deref(), Some("pair_closed"));
+    }
 
     fn intro() -> DeviceIntro {
         DeviceIntro {
