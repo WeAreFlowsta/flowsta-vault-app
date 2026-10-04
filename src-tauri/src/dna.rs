@@ -893,7 +893,12 @@ pub async fn setup_app_interface(admin_port: u16) -> Result<u16, String> {
     .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
 
     let app_port = admin_ws
-        .attach_app_interface(0, None, AllowedOrigins::Any, None)
+        .attach_app_interface(
+            0,
+            None,
+            AllowedOrigins::Origins(crate::conductor::NODE_ORIGINS.iter().map(|o| o.to_string()).collect()),
+            None,
+        )
         .await
         .map_err(|e| format!("Failed to attach app interface: {}", e))?;
 

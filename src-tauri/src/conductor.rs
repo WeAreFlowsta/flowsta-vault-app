@@ -297,7 +297,7 @@ admin_interfaces:
 - driver:
     type: websocket
     port: {admin_port}
-    allowed_origins: '*'
+    allowed_origins: '{node_origins}'
 network:
   bootstrap_url: {bootstrap_url}
   signal_url: {signal_url}
@@ -311,6 +311,7 @@ network:
   request_timeout_s: 240
 "#,
         data_root = data_root,
+        node_origins = NODE_ORIGINS.join(","),
         admin_port = admin_port,
         lair_url = lair_url,
         bootstrap_url = bootstrap_url,
@@ -326,6 +327,20 @@ network:
     log::info!("Conductor config written to {:?}", config_path);
     Ok(config_path)
 }
+
+/// The origins the conductor's admin and app interfaces accept: the names
+/// this app connects under, and nothing else. A web page always presents
+/// its own address as its origin, so no page can open these interfaces.
+pub const NODE_ORIGINS: [&str; 8] = [
+    "flowsta-vault",
+    "flowsta-vault-coord-update",
+    "flowsta-vault-linked",
+    "flowsta-vault-read",
+    "flowsta-vault-revoke",
+    "flowsta-vault-sealed",
+    "flowsta-vault-sign",
+    "flowsta-vault-thumb",
+];
 
 /// Start the holochain conductor process.
 ///
@@ -815,6 +830,45 @@ async fn start_holochain_attempt(
 
 #[cfg(test)]
 mod bootstrap_target_tests {
+    #[test]
+    fn every_origin_this_app_connects_under_is_on_the_accepted_list() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let marker = ["Some(", "\"flowsta-vault"].concat();
+            for (at, _) in text.match_indices(&marker) {
+                let rest = &text[at + "Some(\"".len()..];
+                let origin = &rest[..rest.find('"').unwrap()];
+                assert!(
+                    super::NODE_ORIGINS.contains(&origin),
+                    "{} connects as {:?}, which the conductor would refuse",
+                    path.display(),
+                    origin
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen >= 10, "expected to find the app's connections, found {}", seen);
+    }
+
+    #[test]
+    fn the_conductor_config_names_its_origins() {
+        let dir = std::env::temp_dir().join(format!("fv-origins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = super::BootstrapTarget { bootstrap_url: "https://example.test".into(), signal_url: "wss://example.test".into(), auth_material: None };
+        let path = super::generate_conductor_config(&dir, "unix:///tmp/x?k=y", 4455, &target).unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(!text.contains("allowed_origins: '*'"));
+        assert!(text.contains("allowed_origins: 'flowsta-vault,"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]
