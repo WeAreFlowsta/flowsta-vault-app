@@ -1734,12 +1734,16 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                     .collect();
                 for name in &added {
                     use tauri_plugin_notification::NotificationExt;
-                    let _ = devices_app
+                    let shown = devices_app
                         .notification()
                         .builder()
                         .title("Flowsta Vault")
                         .body(format!("{} was added to your identity. Not you? Remove it in Settings, Devices.", name))
                         .show();
+                    match shown {
+                        Ok(()) => log::info!("Told: {} was added to the identity (notification shown)", name),
+                        Err(e) => log::warn!("Told: {} was added to the identity (notification not shown: {})", name, e),
+                    }
                 }
                 let _ = devices_app.emit("devices-changed", serde_json::json!({ "added": added }));
             }
