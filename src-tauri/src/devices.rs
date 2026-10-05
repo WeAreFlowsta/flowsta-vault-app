@@ -305,6 +305,19 @@ pub fn remember_added(state: &AppState, install_id: &str, device_public: &[u8; 3
     }
 }
 
+/// How many devices the identity had when this device last looked, from the
+/// file it keeps: an answer before the network is up, so the count on screen
+/// starts from what is already known.
+#[tauri::command]
+pub fn devices_known_count(state: tauri::State<'_, Arc<AppState>>) -> usize {
+    let path = crate::paths::known_devices_path(&state.identity_root());
+    let list: Vec<KnownDevice> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut installs: Vec<&str> = list.iter().filter(|k| !k.removed).map(|k| k.install_id.as_str()).collect();
+    installs.sort();
+    installs.dedup();
+    installs.len().max(1)
+}
+
 /// Notice devices added or removed elsewhere: one Activity line each and a
 /// `devices-changed` event for the page. Returns the changes.
 pub async fn notice_changes(state: &Arc<AppState>) -> Result<Vec<DeviceChange>, String> {

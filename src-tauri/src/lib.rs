@@ -470,6 +470,7 @@ pub fn run() {
             pairing::pair_approve,
             pairing::pair_decline,
             devices::devices_list,
+            devices::devices_known_count,
             devices::device_remove,
             devices::sibling_sync,
             device_registry::device_standing,

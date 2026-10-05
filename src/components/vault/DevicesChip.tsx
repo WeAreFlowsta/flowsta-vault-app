@@ -35,6 +35,8 @@ export function devicesSummary(devices: Row[], now = Date.now()): { label: strin
 export const DevicesChip = component$<{ ready: boolean }>((props) => {
   const nav = useNavigate();
   const devices = useSignal<Row[] | null>(null);
+  // What this device already knew before the network came up.
+  const known = useSignal(1);
 
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ cleanup }) => {
@@ -45,6 +47,7 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
         /* locked, or the network is still starting */
       }
     };
+    invoke<number>("devices_known_count").then((n) => { known.value = n; }).catch(() => {});
     load();
     const id = setInterval(load, 30_000);
     // A change made on this device (remove, approve) or heard from another.
@@ -60,7 +63,12 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
 
   // Drawn from the start, so the panel never changes shape: "1 device"
   // until the list says otherwise.
-  const summary = devices.value && devices.value.length > 0 ? devicesSummary(devices.value) : devicesSummary([]);
+  // Until the list answers, the count is the one this device last saw, in grey.
+  const summary = devices.value && devices.value.length > 0
+    ? devicesSummary(devices.value)
+    : known.value > 1
+      ? { label: `${known.value} devices`, color: "bg-gray-500", title: "Checking your devices" }
+      : devicesSummary([]);
   // Shown from the first paint ("1 device", grey) and filled in later.
   void props.ready;
   return (
