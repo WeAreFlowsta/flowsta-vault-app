@@ -526,8 +526,14 @@ export default component$(() => {
           person re-enters the address and the server confirms it. Until
           then no app can be offered the email. */}
       {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && identity.value.joined_existing && (
-        <Callout intent="info" title="Your email is on its way" class="mb-6">
-          <p>It arrives from your other devices with the rest of your records. Nothing to do.</p>
+        <Callout intent="info" title="Your private data is on its way" class="mb-6">
+          <p class="flex items-center gap-2">
+            <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+            </svg>
+            <span>Your records, connections, email and app backups arrive from your other devices. Nothing to do.</span>
+          </p>
         </Callout>
       )}
       {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && !identity.value.joined_existing && (
@@ -990,7 +996,7 @@ export default component$(() => {
           </div>
         ) : (
           <>
-            {needsVerify && !usernameEditing.value ? (
+            {needsVerify && !usernameEditing.value && (id.web_email || !identity.value?.joined_existing) ? (
               <Callout
                 intent="info"
                 title="Verify your email to pick a username"
