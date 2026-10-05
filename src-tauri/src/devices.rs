@@ -374,6 +374,37 @@ pub async fn publish_own(state: &Arc<AppState>) -> Result<bool, String> {
     Ok(true)
 }
 
+/// What a device that joined an identity can say about the first minutes:
+/// which other devices it knows of and whether their records have arrived.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct SiblingSync {
+    /// This device was added to an identity that already existed.
+    pub joined: bool,
+    /// Names of the other devices whose records are here (removed ones left out).
+    pub other_devices: Vec<String>,
+    /// Records written by another device have arrived (anything, not only device records).
+    pub records_arrived: bool,
+}
+
+pub fn sibling_sync_in(records: &[SealedListItem], me: &str, joined: bool) -> SiblingSync {
+    let other_devices = devices_in(records)
+        .into_iter()
+        .filter(|d| d.install_id != me && d.removed_at.is_none())
+        .map(|d| d.name)
+        .collect();
+    let records_arrived = records.iter().any(|r| r.device.as_deref().map(|d| d != me).unwrap_or(false));
+    SiblingSync { joined, other_devices, records_arrived }
+}
+
+/// For the first minutes after a device joins: what has arrived.
+#[tauri::command]
+pub async fn sibling_sync(state: tauri::State<'_, Arc<AppState>>) -> Result<SiblingSync, String> {
+    let joined = state.vault_config.lock().unwrap().as_ref().map(|c| c.joined_existing).unwrap_or(false);
+    let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    let records = crate::sealed::sealed_list_inner(&state).await?;
+    Ok(sibling_sync_in(&records, &me, joined))
+}
+
 /// One row of Settings → Devices.
 #[derive(Serialize)]
 pub struct DeviceRow {
@@ -642,6 +673,28 @@ mod tests {
         readded.conductor_key = "new key".into();
         let records2 = vec![item(DEVICE_ENTRY_TYPE, serde_json::to_value(&readded).unwrap()), records[1].clone()];
         assert_eq!(devices_in(&records2)[0].removed_at, None);
+    }
+
+    #[test]
+    fn a_joined_device_knows_when_its_siblings_records_have_arrived() {
+        let item = |entry_type: &str, body: serde_json::Value, device: Option<&str>| SealedListItem {
+            action_hash: String::new(),
+            entry_type: entry_type.into(),
+            created_at: 0,
+            body,
+            refs: vec![],
+            id: String::new(),
+            updated_at: 0,
+            device: device.map(String::from),
+        };
+        let mine = item(DEVICE_ENTRY_TYPE, serde_json::to_value(device("me")).unwrap(), Some("me"));
+        let early = sibling_sync_in(&[mine.clone()], "me", true);
+        assert_eq!(early, SiblingSync { joined: true, other_devices: vec![], records_arrived: false });
+        let mut other = device("other");
+        other.name = "MacBook".into();
+        let later = sibling_sync_in(&[mine, item(DEVICE_ENTRY_TYPE, serde_json::to_value(&other).unwrap(), Some("other")), item("user_profile", serde_json::json!({}), Some("other"))], "me", true);
+        assert_eq!(later.other_devices, vec!["MacBook".to_string()]);
+        assert!(later.records_arrived);
     }
 
     #[test]

@@ -465,6 +465,7 @@ pub fn run() {
             pairing::pair_decline,
             devices::devices_list,
             devices::device_remove,
+            devices::sibling_sync,
             device_registry::device_standing,
             device_registry::use_recovery_phrase_once,
             backup_sync::backups_kept_from_devices,

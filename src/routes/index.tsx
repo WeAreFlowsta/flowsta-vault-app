@@ -27,6 +27,7 @@ interface VaultIdentity {
   display_name: string | null;
   profile_picture: string | null;
   web_email: string | null;
+  joined_existing?: boolean;
   /** Flowsta's confirmation of that address; null = not learned yet. */
   email_verified: boolean | null;
   web_username: string | null;
@@ -85,7 +86,10 @@ export default component$(() => {
     const unlisten = await listen("activity-recorded", async () => {
       activityLog.value = await invoke<ActivityLogEntry[]>("get_activity", { limit: 20 }).catch(() => []);
     });
-    cleanup(() => unlisten());
+    const unlistenProfile = await listen("profile-changed", async () => {
+      try { identity.value = await invoke<VaultIdentity>("get_identity"); } catch { /* locked */ }
+    });
+    cleanup(() => { unlisten(); unlistenProfile(); });
   });
   // Soft update notice: a newer Vault is shipped. Dismissed per version.
   const vaultUpdate = useSignal<{ current: string; latest: string | null; summary: string | null; download_url: string; update_available: boolean } | null>(null);
@@ -521,7 +525,12 @@ export default component$(() => {
       {/* A restored vault holds no email: Flowsta keeps only its hash, so the
           person re-enters the address and the server confirms it. Until
           then no app can be offered the email. */}
-      {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && (
+      {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && identity.value.joined_existing && (
+        <Callout intent="info" title="Your email is on its way" class="mb-6">
+          <p>It arrives from your other devices with the rest of your records. Nothing to do.</p>
+        </Callout>
+      )}
+      {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && !identity.value.joined_existing && (
         <Callout intent="info" title="Add the email you registered with" class="mb-6">
           <p class="mb-3">
             This Vault doesn't hold your email yet - Flowsta keeps only a fingerprint of it and can't send it back.

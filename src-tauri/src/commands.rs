@@ -1709,6 +1709,19 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             Ok(false) => {}
             Err(e) => log::info!("Profile not checked against other devices: {}", e),
         }
+        // Records from another device have arrived: the restore-or-fresh
+        // question answers itself (the data is coming from the devices).
+        if restore_choice_pending_path(&devices_state.identity_root()).exists() {
+            let me = crate::paths::install_id(&devices_state.data_dir).unwrap_or_default();
+            let arrived = crate::sealed::sealed_list_inner(devices_state)
+                .await
+                .map(|records| records.iter().any(|r| r.device.as_deref().map(|d| d != me).unwrap_or(false)))
+                .unwrap_or(false);
+            if arrived {
+                clear_restore_choice(&devices_state.identity_root());
+                let _ = devices_app.emit("restore-choice-resolved", serde_json::json!({}));
+            }
+        }
         // Every device is told when another one is added or removed.
         match crate::devices::notice_changes(devices_state).await {
             Ok(changes) if !changes.is_empty() => {
@@ -2367,6 +2380,7 @@ pub fn get_identity(state: State<'_, Arc<AppState>>) -> Result<VaultIdentity, St
         installed_app_ids: config.installed_app_ids.clone(),
         created_at: config.created_at,
         display_name: config.display_name.clone(),
+        joined_existing: config.joined_existing,
         profile_picture: config.profile_picture.clone(),
         web_email: config.web_email.clone(),
         email_verified: config.email_verified,
@@ -2387,6 +2401,9 @@ pub struct VaultIdentity {
     pub installed_app_ids: Vec<String>,
     pub created_at: i64,
     pub display_name: Option<String>,
+    /// This device was added to an identity that already existed elsewhere.
+    #[serde(default)]
+    pub joined_existing: bool,
     pub profile_picture: Option<String>,
     pub web_email: Option<String>,
     /// Whether Flowsta has confirmed that address (None = not learned yet).

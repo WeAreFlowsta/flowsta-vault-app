@@ -1,4 +1,4 @@
-import { component$, useSignal, useStore, $, type QRL } from "@builder.io/qwik";
+import { component$, useSignal, useStore, useVisibleTask$, $, type QRL } from "@builder.io/qwik";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
 import { GlassButton } from "~/components/common/GlassButton";
@@ -195,6 +195,24 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   // toward importing an export file, since the phrase brings back identity
   // but not data.
   const restoredFromPhrase = useSignal(false);
+  // The first minutes after the phrase: what has arrived from the other devices.
+  const siblingSync = useSignal<{ joined: boolean; other_devices: string[]; records_arrived: boolean } | null>(null);
+  const siblingWaitStarted = useSignal(0);
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track, cleanup }) => {
+    const on = track(() => step.value === "done" && restoredFromPhrase.value);
+    if (!on) return;
+    siblingWaitStarted.value = Date.now();
+    const poll = async () => {
+      try {
+        siblingSync.value = await invoke<{ joined: boolean; other_devices: string[]; records_arrived: boolean }>("sibling_sync");
+      } catch { /* the network is still starting */ }
+    };
+    poll();
+    const id = setInterval(poll, 5_000);
+    cleanup(() => clearInterval(id));
+  });
+  const showImportLink = useSignal(false);
 
   // Adding this device with a code typed on another device.
   const pairPassword = useSignal("");
@@ -2210,14 +2228,42 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             </div>
           )}
           {restoredFromPhrase.value && !restoreImportResult.value && (
-              <div class="mb-6 rounded-lg border border-amber-700/60 bg-amber-950/30 p-4 text-left">
-                <p class="mb-1 text-sm font-semibold text-amber-200">
-                  Bring your data home?
+              <div class="mb-6 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4 text-left">
+                <p class="mb-1 flex items-center gap-2 text-sm font-semibold text-sky-200">
+                  {!(siblingSync.value?.records_arrived) && (
+                    <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                    </svg>
+                  )}
+                  <span>
+                    {siblingSync.value?.records_arrived
+                      ? "Your things are arriving from your other devices."
+                      : siblingSync.value && siblingSync.value.other_devices.length > 0
+                        ? `Found ${siblingSync.value.other_devices.join(", ")}. Your things are arriving.`
+                        : Date.now() - siblingWaitStarted.value > 150_000
+                          ? "No other device has answered yet."
+                          : "Looking for your other devices..."}
+                  </span>
                 </p>
-                <p class="mb-4 text-sm text-gray-300">
-                  If you kept a Vault export file, import it now. Your private
-                  records, app backups and email come back.
+                <p class="mb-3 text-sm text-gray-300">
+                  {siblingSync.value?.records_arrived
+                    ? "Your private records, connections and app backups come across by themselves. Nothing to do."
+                    : "Your private data arrives from your other devices when one of them is on. Nothing to do."}
                 </p>
+                {!showImportLink.value ? (
+                  <button
+                    type="button"
+                    class="text-xs text-gray-400 underline decoration-gray-600 underline-offset-2 hover:text-gray-200"
+                    onClick$={() => { showImportLink.value = true; }}
+                  >
+                    Lost your only device? Restore from an export file
+                  </button>
+                ) : (
+                  <p class="mb-3 text-xs text-gray-400">
+                    If you kept a Vault export file, import it now. Your private records and app backups come back from it.
+                  </p>
+                )}
                 {restoreImportError.value && (
                   <p class="mb-3 text-sm text-red-300">{restoreImportError.value}</p>
                 )}
@@ -2230,14 +2276,16 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                     <span>{restoreImportProgress.value || "Importing your export..."}</span>
                   </p>
                 ) : (
-                  <div class="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end">
-                    <button
-                      class="rounded-full border border-gray-600 px-5 py-2 text-sm text-gray-300 hover:border-gray-400 hover:text-white"
-                      onClick$={continueWithoutImport}
-                    >
-                      Continue without importing
-                    </button>
-                    <GlassButton onClick$={importExportNow}>Import</GlassButton>
+                  <div class="mt-3 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end">
+                    {showImportLink.value && (
+                      <button
+                        class="rounded-full border border-gray-600 px-5 py-2 text-sm text-gray-300 hover:border-gray-400 hover:text-white"
+                        onClick$={importExportNow}
+                      >
+                        Import an export file
+                      </button>
+                    )}
+                    <GlassButton onClick$={continueWithoutImport}>Continue</GlassButton>
                   </div>
                 )}
               </div>
