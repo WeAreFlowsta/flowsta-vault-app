@@ -5,6 +5,20 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0-beta2] - 2026-10-05
+
+Second beta of multi-device. Test with a fresh identity, not the one you rely on.
+
+### Fixed
+- A device added while another identity was locked and still syncing now starts syncing by itself.
+- Signatures made on any of your devices are listed on all of them.
+- The signature list of an identity holds only that identity's signatures after switching identities.
+- A profile picture set before 1.6.0 reaches a device you add.
+- The devices count reads "2 devices" on a device that has just been added.
+
+### Changed
+- After entering your recovery phrase once in Settings → Devices, the confirmation reads "Done."
+
 ## [1.6.0-beta1] - 2026-10-05
 
 First beta of multi-device. Test with a fresh identity, not the one you rely on.
