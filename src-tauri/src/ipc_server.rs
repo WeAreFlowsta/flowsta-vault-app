@@ -4204,6 +4204,31 @@ async fn dev_devices_handler(
             .await
             .map(|code| serde_json::json!({ "code": code })),
         "pair-cancel" => crate::pairing::pair_cancel().await.map(|_| serde_json::json!({ "cancelled": true })),
+        "phrase-door" => {
+            let install_id = crate::paths::install_id(&app.data_dir).unwrap_or_default();
+            match crate::device_identity::restore_device_identity_inner(api_url, text("phrase"), &install_id).await {
+                Ok(account) => crate::commands::setup_vault_inner(
+                    text("phrase"),
+                    text("password"),
+                    account.web_agent_pub_key.clone(),
+                    None,
+                    account.username.clone(),
+                    account.display_name.clone(),
+                    account.profile_picture.clone(),
+                    Some("device-hosted".to_string()),
+                    false,
+                    false,
+                    true,
+                    state.app_handle.clone(),
+                    app,
+                )
+                .map(|done| {
+                    crate::commands::record_identity_setup(app, true);
+                    serde_json::json!({ "agent_pub_key": done.agent_pub_key, "did": done.did })
+                }),
+                Err(e) => Err(e),
+            }
+        }
         "stop-syncing" => {
             crate::commands::stop_syncing_while_locked(app);
             Ok(serde_json::json!({ "stopped": true }))

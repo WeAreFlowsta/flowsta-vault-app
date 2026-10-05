@@ -21,6 +21,9 @@
  *   node scripts/bridge-matrix.mjs --phase=switcher  # 1.5.0: two identities in one Vault, switch, one agent
  *       one identity, the epoch, claims, reset -> restore -> email. Same two fresh instances
  *       as --phase=create (VAULT_MATRIX_PORT required, VAULT_MATRIX_RESTORE_PORT optional).
+ *   node scripts/bridge-matrix.mjs --phase=devices   # 1.6.0: one identity on two devices
+ *       add with a code, sync, connections, backups, lock-and-sync, remove, stand down, the phrase
+ *       door. Two FRESH instances: VAULT_MATRIX_PORT (A) and VAULT_MATRIX_RESTORE_PORT (B).
  *   node scripts/bridge-matrix.mjs                   # all legs
  *
  * Env:
@@ -1287,6 +1290,125 @@ async function switcherLeg() {
   void phraseA;
 }
 
+// ───────────────────────── 1.6.0 devices leg ─────────────────────────
+//
+// One identity on two devices, end to end, through the dev harness's
+// /dev/devices operations (the same functions the pages call). Two FRESH
+// instances on the staging network. Regressions pinned here: the phrase
+// door after a removal, a removal that holds when the removed device writes
+// its record again, and a removed device that stays locked.
+
+async function devicesLeg() {
+  console.log('\n── Devices leg (one identity, two devices)');
+  const a = Number(process.env.VAULT_MATRIX_PORT || 0);
+  const b = Number(process.env.VAULT_MATRIX_RESTORE_PORT || 0);
+  if (!a || !b) { record('devices leg skipped - set VAULT_MATRIX_PORT and VAULT_MATRIX_RESTORE_PORT to two FRESH test instances', true); return; }
+  const op = async (port, body) => (await vaultFetch(port, '/dev/devices', { method: 'POST', body })).data || {};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const until = async (fn, secs) => {
+    const deadline = Date.now() + secs * 1000;
+    while (Date.now() < deadline) { if (await fn().catch(() => false)) return true; await sleep(2000); }
+    return false;
+  };
+  const pwA = `Matrix-dev-a-${randomHash().slice(0, 10)}!`;
+  const pwB = `Matrix-dev-b-${randomHash().slice(0, 10)}!`;
+
+  for (const port of [a, b]) {
+    const st = await vaultFetch(port, '/status');
+    if (st.data?.initialized !== false) { record(`devices leg skipped - the instance on ${port} already holds an identity`, true); return; }
+  }
+
+  // 1. A creates the identity.
+  const created = await vaultFetch(a, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password: pwA, email: `matrix-devices-${Date.now()}@example.com`, display_name: 'Matrix Devices' } });
+  record('A: identity created', created.status === 200 && !!created.data?.phrase, `${created.status} ${created.data?.description || ''}`);
+  if (created.status !== 200) return;
+  const phrase = created.data.phrase;
+  record('A: its records answer', await until(async () => Array.isArray((await op(a, { op: 'list' })).devices), 240));
+  const standingA = await op(a, { op: 'standing' });
+  record('A: registered with the account, enrollment key in force from the start',
+    standingA.standing?.device === 'registered' && standingA.standing?.enrollment === 'in_force', JSON.stringify(standingA.standing));
+  const stA = await op(a, { op: 'status' });
+  record('A: the first device runs the identity key', stA.own_conductor_key === false && stA.joined_existing === false);
+  await op(a, { op: 'write', text: 'from A, before B' });
+  await op(a, { op: 'connect', client_id: 'matrix_app', app_name: 'Matrix App' });
+  await vaultFetch(a, '/dev/remember-origin', { method: 'POST', body: { origin: 'https://remembered.example' } });
+  await op(a, { op: 'backup', client_id: 'matrix_app', label: 'recovery', text: 'A recovery v1' });
+  record('A: a round says what it holds', (await op(a, { op: 'round' })).round === 'done');
+
+  // 2. B joins with a code. A cancelled code is refused at once.
+  const cancelled = (await op(b, { op: 'pair-begin', password: pwB })).code;
+  await op(b, { op: 'pair-cancel' });
+  const refused = await vaultFetch(a, '/dev/devices', { method: 'POST', body: { op: 'pair-claim', code: cancelled } });
+  record('a cancelled code is not found', refused.status === 400 && /code_not_found/.test(refused.data?.description || ''), JSON.stringify(refused.data));
+  const code = (await op(b, { op: 'pair-begin', password: pwB })).code;
+  record('B: shows a code in three groups', /^[A-Z]{4}-[A-Z]{4}-[A-Z]{4}$/.test(code || ''), code);
+  const claim = await op(a, { op: 'pair-claim', code: (code || '').toLowerCase().replace(/-/g, ' ') });
+  record('A: the typed code (lower case, spaces) names the new device', !!claim.intro?.install_id && !!claim.intro?.name, JSON.stringify(claim));
+  record('A: approves', (await op(a, { op: 'pair-approve' })).approved === true);
+  record('B: holds the identity', await until(async () => (await op(b, { op: 'status' })).unlocked === true, 60));
+  const stB = await op(b, { op: 'status' });
+  record('B: same identity, its own conductor key, joined', stB.agent_pub_key === stA.agent_pub_key && stB.own_conductor_key === true && stB.joined_existing === true, JSON.stringify(stB));
+  record('B: registered with the account (approved by A)', await until(async () => (await op(b, { op: 'standing' })).standing?.device === 'registered', 90));
+  const installB = stB.install_id;
+
+  // 3. Records, devices, connections, backups reach B.
+  record("B: A's record arrives", await until(async () => ((await op(b, { op: 'notes' })).notes || []).some((n) => n.text === 'from A, before B'), 240));
+  record('both list two devices', await until(async () => ((await op(a, { op: 'list' })).devices || []).length === 2 && ((await op(b, { op: 'list' })).devices || []).length === 2, 180));
+  await op(b, { op: 'round' });
+  const connB = await op(b, { op: 'connections' });
+  record('B: the remembered site carried over; the app is NOT connected here', (connB.sites || []).includes('https://remembered.example') && !(connB.apps || []).includes('matrix_app'), JSON.stringify(connB));
+  const heldB = await until(async () => { await op(b, { op: 'round' }); return ((await op(b, { op: 'backups', client_id: 'matrix_app' })).held || []).some((h) => h.from && h.opens_as === 'A recovery v1'); }, 120);
+  record("B: holds and opens a copy of A's app backup", heldB);
+  const actB = (await vaultFetch(b, '/dev/status')).data?.activity || [];
+  record('B: is not told that the devices already there were "added"', !actB.includes('device_added_elsewhere'), JSON.stringify(actB));
+  const actA = (await vaultFetch(a, '/dev/status')).data?.activity || [];
+  record('A: logs that it added B, not that B was added elsewhere', actA.includes('device_added') && !actA.includes('device_added_elsewhere'), JSON.stringify(actA));
+
+  // 4. Disconnect applies on every device.
+  await op(b, { op: 'connect', client_id: 'matrix_app', app_name: 'Matrix App' });
+  await op(b, { op: 'round' });
+  await op(a, { op: 'disconnect', client_id: 'matrix_app' });
+  await op(a, { op: 'round' });
+  record('a Disconnect on A disconnects the app on B', await until(async () => { await op(b, { op: 'round' }); return !((await op(b, { op: 'connections' })).apps || []).includes('matrix_app'); }, 120));
+
+  // 5. Locked but still syncing.
+  await op(a, { op: 'lock' });
+  const lockedA = await op(a, { op: 'status' });
+  record('A locked: still syncing, conductor up', lockedA.unlocked === false && lockedA.syncing_while_locked === true && lockedA.conductor?.status === 'ready', JSON.stringify(lockedA));
+  const refusedRead = await vaultFetch(a, '/dev/devices', { method: 'POST', body: { op: 'notes' } });
+  record('A locked: reads are refused', refusedRead.status === 400 && /vault_locked/.test(refusedRead.data?.description || ''));
+  await op(b, { op: 'write', text: 'from B, while A was locked' });
+  await sleep(15000);
+  const t0 = Date.now();
+  const unlocked = await vaultFetch(a, '/dev/unlock', { method: 'POST' });
+  record('A unlocks onto the running conductor', unlocked.status === 200 && (await op(a, { op: 'status' })).conductor?.status === 'ready', `${Date.now() - t0} ms`);
+  record("A: B's record written while it was locked is there", await until(async () => ((await op(a, { op: 'notes' })).notes || []).some((n) => n.text === 'from B, while A was locked'), 60));
+
+  // 6. Remove. The removal holds even after the removed device's own round.
+  const removed = await op(a, { op: 'remove', install_id: installB });
+  record('A: removes B', removed.removed === true, JSON.stringify(removed));
+  const rowB = async () => ((await op(a, { op: 'list' })).devices || []).find((d) => d.install_id === installB);
+  record('A: B reads as removed', (await rowB())?.state === 'removed');
+  await op(b, { op: 'round' });   // B's routine round: it may refresh its record before it has heard
+  await sleep(20000);
+  await op(a, { op: 'round' });
+  record('A: B still reads as removed after B wrote its record again', (await rowB())?.state === 'removed', JSON.stringify(await rowB()));
+  const stood = await until(async () => { await op(b, { op: 'round' }).catch(() => {}); return (await op(b, { op: 'status' })).removed === true; }, 240);
+  record('B: stands down (locked, conductor stopped)', stood && (await op(b, { op: 'status' })).unlocked === false);
+  const tryUnlock = await vaultFetch(b, '/dev/unlock-with-password', { method: 'POST', body: { password: pwB } });
+  record('B: the password does not unlock a removed device', tryUnlock.status !== 200 && /device_removed/.test(JSON.stringify(tryUnlock.data || {})), JSON.stringify(tryUnlock.data));
+
+  // 7. The phrase door after a removal.
+  const reset = await vaultFetch(b, '/dev/reset', { method: 'POST' });
+  record('B: its copy is removed', reset.status === 200);
+  const door = await vaultFetch(b, '/dev/devices', { method: 'POST', body: { op: 'phrase-door', phrase, password: pwB } });
+  record('B: the recovery phrase adds it back although the account has removed a device', door.status === 200 && door.data?.agent_pub_key === stA.agent_pub_key, JSON.stringify(door.data));
+  record('B: registered with the account again', await until(async () => (await op(b, { op: 'standing' })).standing?.device === 'registered', 120));
+  record('B: its records arrive again', await until(async () => ((await op(b, { op: 'notes' })).notes || []).length >= 2, 300));
+  record('A: lists B again as ONE device, not removed', await until(async () => { await op(a, { op: 'round' }); const rows = ((await op(a, { op: 'list' })).devices || []).filter((d) => d.install_id === installB); return rows.length === 1 && rows[0].state !== 'removed'; }, 300));
+  record('A: is told a device was added elsewhere', await until(async () => { await op(a, { op: 'round' }); return ((await vaultFetch(a, '/dev/status')).data?.activity || []).includes('device_added_elsewhere'); }, 120));
+}
+
 // ───────────────────────── main ─────────────────────────
 
 (async () => {
@@ -1295,6 +1417,13 @@ async function switcherLeg() {
     await switcherLeg();
     const passedS = results.filter((r) => r.ok).length;
     console.log(`\nRESULT: ${passedS}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
+    process.exit(failures ? 1 : 0);
+  }
+  if (PHASE === 'devices') {
+    await devicesLeg();
+    const passedD = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedD}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
     if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
     process.exit(failures ? 1 : 0);
   }
