@@ -1528,6 +1528,8 @@ pub(crate) async fn ensure_conductor_alive(
         "conductor-status",
         ConductorStatus::Ready { admin_port: port },
     );
+    // The devices round runs whoever started the conductor.
+    spawn_after_ready(state.clone(), app_handle.clone());
     Ok(())
 }
 
@@ -1846,6 +1848,17 @@ fn spawn_conductor_startup_inner(
 
             tauri::async_runtime::spawn(async move {
                 let app_handle_ref = app_handle.clone();
+                // One start at a time: a command that finds the conductor
+                // down waits here instead of starting a second one.
+                let start_guard = state.conductor_restart_lock.lock().await;
+                let already_running = matches!(
+                    state.conductor_handle.lock().unwrap().as_mut().map(|h| h.conductor_child.try_wait()),
+                    Some(Ok(None))
+                );
+                if already_running {
+                    log::info!("Conductor already started by the watchdog - not starting a second one");
+                    return;
+                }
                 match crate::conductor::start_holochain(
                     app_handle,
                     data_dir.clone(),
@@ -1860,6 +1873,7 @@ fn spawn_conductor_startup_inner(
                         let port = handle.admin_port;
                         log::info!("Conductor started successfully on port {}", port);
                         *state.conductor_handle.lock().unwrap() = Some(handle);
+                        drop(start_guard);
                         let ready_status = ConductorStatus::Ready {
                             admin_port: port,
                         };
