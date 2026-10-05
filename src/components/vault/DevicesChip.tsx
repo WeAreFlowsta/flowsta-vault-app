@@ -46,7 +46,15 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
     };
     load();
     const id = setInterval(load, 30_000);
-    cleanup(() => clearInterval(id));
+    // A change made on this device (remove, approve) or heard from another.
+    window.addEventListener("devices-changed-here", load);
+    let unlisten: (() => void) | null = null;
+    import("@tauri-apps/api/event").then(({ listen }) => listen("devices-changed", load).then((u) => { unlisten = u; })).catch(() => {});
+    cleanup(() => {
+      clearInterval(id);
+      window.removeEventListener("devices-changed-here", load);
+      if (unlisten) unlisten();
+    });
   });
 
   // Drawn from the start, so the panel never changes shape: "1 device"

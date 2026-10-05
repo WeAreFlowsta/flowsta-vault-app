@@ -178,6 +178,7 @@ export const DevicesTab = component$(() => {
     busy.value = true;
     try {
       await invoke("pair_approve");
+      window.dispatchEvent(new Event("devices-changed-here"));
       added.value = device ? `Waiting for ${device.name} to start...` : "";
       addedInstall.value = device?.install_id || "";
       adding.value = false;
@@ -203,6 +204,7 @@ export const DevicesTab = component$(() => {
     error.value = "";
     try {
       await invoke("device_remove", { apiUrl: __API_URL__, installId: device.install_id });
+      window.dispatchEvent(new Event("devices-changed-here"));
     } catch (e) {
       error.value = String(e).includes("api_unreachable")
         ? "Couldn't reach Flowsta. Removing a device needs a connection."
@@ -314,7 +316,13 @@ export const DevicesTab = component$(() => {
         )}
 
         {devices.value === null ? (
-          <p class="text-sm text-gray-400">Loading your devices...</p>
+          <p class="flex items-center gap-2 text-sm text-gray-400">
+            <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+            </svg>
+            <span>Loading your devices...</span>
+          </p>
         ) : devices.value.length === 0 ? (
           <p class="text-sm text-gray-400">This device appears here once its network has started.</p>
         ) : (
