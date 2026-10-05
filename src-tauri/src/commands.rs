@@ -6067,10 +6067,33 @@ async fn fetch_linked_agent_keys(
         linked_keys.push(identity_key.clone());
     }
 
+    // So does what each of the identity's devices authored with its own key.
+    for key in identity_device_keys(state).await {
+        let same = |a: &AgentPubKey, b: &AgentPubKey| a.get_raw_32() == b.get_raw_32();
+        if !same(&key, &my_agent_key) && !linked_keys.iter().any(|k| same(k, &key)) {
+            linked_keys.push(key);
+        }
+    }
+
     if linked_keys.is_empty() {
         log::info!("No linked agents found (no cache, no DHT result)");
     }
     (linked_keys, dht_settled)
+}
+
+/// The conductor key of every device the identity has or had, in the form
+/// the network uses. Read from the identity's own records: nothing about a
+/// device is asked of, or published to, the network.
+async fn identity_device_keys(state: &Arc<AppState>) -> Vec<holochain_types::prelude::AgentPubKey> {
+    let Ok(records) = crate::sealed::sealed_list_inner(state).await else {
+        return Vec::new();
+    };
+    crate::devices::conductor_keys_ever(&records)
+        .iter()
+        .filter_map(|k| base64_standard_decode(k).ok())
+        .filter(|raw| raw.len() == 39)
+        .map(|raw| holochain_types::prelude::AgentPubKey::from_raw_32(raw[3..35].to_vec()))
+        .collect()
 }
 
 /// The identity's agent key in the form the network uses, from the unlocked
@@ -6425,7 +6448,13 @@ pub(crate) async fn get_my_linked_signatures_inner(
             .map(|c| c.did == format!("did:flowsta:{}", c.agent_pub_key))
             .unwrap_or(false)
     };
-    if device_hosted && is_native && cached_web_key.is_none() {
+    // ...unless the identity is on more than one device: each device signs
+    // with a key of its own, and those signatures are this person's too.
+    let other_devices = {
+        let joined = state.vault_config.lock().unwrap().as_ref().map(|c| c.joined_existing).unwrap_or(false);
+        joined || identity_device_keys(state).await.len() > 1
+    };
+    if device_hosted && is_native && cached_web_key.is_none() && !other_devices {
         log::info!("[get_my_linked_signatures] native account - no linked agents by construction");
         return Ok(LinkedSignaturesResult {
             signatures: Vec::new(),

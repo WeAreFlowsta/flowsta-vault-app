@@ -1310,6 +1310,17 @@ async function devicesLeg() {
     while (Date.now() < deadline) { if (await fn().catch(() => false)) return true; await sleep(2000); }
     return false;
   };
+  // Signing and reading signatures on a named instance.
+  const signOn = async (port, fileHash) => {
+    const sub = await vaultFetch(port, '/sign-document', { method: 'POST', body: { ...signBody(fileHash), job: true } });
+    if (sub.status !== 200 || !sub.data?.job_id) return { stage: 'failed', error: `${sub.status} ${JSON.stringify(sub.data)}` };
+    let last = {};
+    await until(async () => { last = (await vaultFetch(port, `/op-status/${sub.data.job_id}`)).data || {}; return last.stage === 'done' || last.stage === 'failed'; }, 300);
+    return last;
+  };
+  const sigsOn = async (port) => ((await vaultFetch(port, '/signatures')).data?.signatures) || [];
+  const hashSignedOnA = randomHash();
+  const hashSignedOnB = randomHash();
   const pwA = `Matrix-dev-a-${randomHash().slice(0, 10)}!`;
   const pwB = `Matrix-dev-b-${randomHash().slice(0, 10)}!`;
 
@@ -1335,6 +1346,9 @@ async function devicesLeg() {
   await op(a, { op: 'backup', client_id: 'matrix_app', label: 'recovery', text: 'A recovery v1' });
   const oldPicture = 'data:image/svg+xml;base64,PHN2Zy8+';
   record('A: holds a picture record written before devices were named', !!(await op(a, { op: 'old-picture', picture: oldPicture })).action_hash);
+  const signedA = await signOn(a, hashSignedOnA);
+  record('A: signs a file', signedA.stage === 'done' && !!signedA.result?.action_hash, JSON.stringify(signedA).slice(0, 200));
+  record('A: lists its signature', await until(async () => (await sigsOn(a)).some((x) => x.file_hash === hashSignedOnA), 60));
   record('A: a round says what it holds', (await op(a, { op: 'round' })).round === 'done');
 
   // 2. B joins with a code. A cancelled code is refused at once.
@@ -1366,6 +1380,14 @@ async function devicesLeg() {
   record("B: A's record arrives", await until(async () => ((await op(b, { op: 'notes' })).notes || []).some((n) => n.text === 'from A, before B'), 240));
   record('both list two devices', await until(async () => ((await op(a, { op: 'list' })).devices || []).length === 2 && ((await op(b, { op: 'list' })).devices || []).length === 2, 180));
   record('B: lists itself without being asked to run a round', ((await op(b, { op: 'list' })).devices || []).some((d) => d.state === 'this_device'));
+  // Signatures belong to the identity: made on either device, listed on both.
+  record("B: lists the signature made on A before it joined", await until(async () => (await sigsOn(b)).some((x) => x.file_hash === hashSignedOnA), 300));
+  const signedB = await signOn(b, hashSignedOnB);
+  record('B: the added device signs a file', signedB.stage === 'done' && !!signedB.result?.action_hash, JSON.stringify(signedB).slice(0, 200));
+  record('B: lists both signatures', await until(async () => { const l = await sigsOn(b); return l.some((x) => x.file_hash === hashSignedOnA) && l.some((x) => x.file_hash === hashSignedOnB); }, 120));
+  record('A: lists the signature made on B', await until(async () => (await sigsOn(a)).some((x) => x.file_hash === hashSignedOnB), 300));
+  const countA = (await sigsOn(a)).length, countB = (await sigsOn(b)).length;
+  record("both list the identity's two signatures and nothing else", countA === 2 && countB === 2, `A ${countA}, B ${countB}`);
   await op(b, { op: 'round' });
   const connB = await op(b, { op: 'connections' });
   record('B: the picture written before devices were named arrives', await until(async () => { await op(b, { op: 'round' }); return (await op(b, { op: 'status' })).profile_picture === oldPicture; }, 120));
@@ -1427,8 +1449,38 @@ async function devicesLeg() {
 
 // ───────────────────────── main ─────────────────────────
 
+/** Staging leaves an address that presents the test key out of its rate
+ * limits for two hours, so the legs can run back to back. The key comes
+ * from VAULT_MATRIX_TEST_KEY or ~/.config/flowsta/staging-test-key; with
+ * neither, the limits apply as they do to anyone. Never sent to production. */
+async function askForRateLimitExemption() {
+  if (!/staging/.test(API)) return;
+  let key = process.env.VAULT_MATRIX_TEST_KEY || '';
+  if (!key) {
+    try { key = (await import('node:fs')).readFileSync(`${process.env.HOME}/.config/flowsta/staging-test-key`, 'utf8').trim(); } catch { /* none */ }
+  }
+  if (!key) { console.log('No staging test key: the rate limits apply.'); return; }
+  // The Vaults may reach the API over IPv4 or IPv6: ask from both.
+  const https = await import('node:https');
+  const ask = (family) => new Promise((done) => {
+    const req = https.request(`${API}/api/v1/test/rate-limit-exemption`, { method: 'POST', family, headers: { 'x-flowsta-test-key': key, 'content-length': 0 }, timeout: 15000 }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => { let until = null; try { until = JSON.parse(body).exempt_until; } catch { /* not JSON */ } done({ status: res.statusCode, until }); });
+    });
+    req.on('error', () => done({ status: null }));
+    req.on('timeout', () => { req.destroy(); done({ status: null }); });
+    req.end();
+  });
+  for (const family of [4, 6]) {
+    const r = await ask(family);
+    console.log(r.status === 200 ? `IPv${family}: left out of the staging rate limits until ${r.until}` : `IPv${family}: no exemption (${r.status ?? 'unreachable'}) - the limits apply on that route.`);
+  }
+}
+
 (async () => {
   console.log(`Bridge matrix — phase: ${PHASE}, origin: ${ORIGIN}`);
+  await askForRateLimitExemption();
   if (PHASE === 'switcher') {
     await switcherLeg();
     const passedS = results.filter((r) => r.ok).length;

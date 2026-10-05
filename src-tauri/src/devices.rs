@@ -182,6 +182,23 @@ pub fn devices_in(records: &[SealedListItem]) -> Vec<DeviceRecord> {
     devices
 }
 
+/// The conductor key of every device the identity has or had, as written
+/// in its own records (removed devices and earlier keys of a device added
+/// again included: what they signed is still this person's).
+pub fn conductor_keys_ever(records: &[SealedListItem]) -> Vec<String> {
+    let mut keys: Vec<String> = devices_in(records).into_iter().map(|d| d.conductor_key).collect();
+    keys.extend(
+        records
+            .iter()
+            .filter(|r| r.entry_type == REMOVAL_ENTRY_TYPE)
+            .filter_map(|r| serde_json::from_value::<DeviceRemoval>(r.body.clone()).ok())
+            .map(|x| x.conductor_key),
+    );
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
