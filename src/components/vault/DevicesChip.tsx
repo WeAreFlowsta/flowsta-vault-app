@@ -60,7 +60,8 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
   // Drawn from the start, so the panel never changes shape: "1 device"
   // until the list says otherwise.
   const summary = devices.value && devices.value.length > 0 ? devicesSummary(devices.value) : devicesSummary([]);
-  if (!props.ready && !devices.value) return null;
+  // Shown from the first paint ("1 device", grey) and filled in later.
+  void props.ready;
   return (
     <button
       type="button"
