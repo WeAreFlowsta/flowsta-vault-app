@@ -5679,7 +5679,6 @@ async fn connect_signing_app_ws(
     admin_ws: &holochain_client::AdminWebsocket,
     app_port: u16,
     signing_app: &holochain_client::AppInfo,
-    ws_origin: &str,
 ) -> Option<(holochain_client::AppWebsocket, String)> {
     use holochain_client::{AppWebsocket, ClientAgentSigner, CellInfo,
         IssueAppAuthenticationTokenPayload};
@@ -5716,7 +5715,7 @@ async fn connect_signing_app_ws(
         format!("localhost:{}", app_port),
         long_request_ws_config(),
         issued.token, signer.into(),
-        Some(ws_origin.into()),
+        Some(crate::conductor::node_origin()),
     ).await {
         Ok(ws) => ws,
         Err(e) => {
@@ -5824,7 +5823,7 @@ async fn query_own_sigs_for_version(
     use holochain_types::prelude::{Entry, ExternIO, Record};
 
     let (app_ws, role_name) = connect_signing_app_ws(
-        state, admin_ws, app_port, signing_app, "flowsta-vault-read",
+        state, admin_ws, app_port, signing_app,
     ).await.ok_or_else(|| format!("connect_signing_app_ws failed for {}",
         signing_app.installed_app_id))?;
 
@@ -6104,7 +6103,7 @@ async fn query_linked_sigs_for_version(
     use holochain_types::prelude::{Entry, ExternIO, Record};
 
     let (app_ws, role_name) = connect_signing_app_ws(
-        state, admin_ws, app_port, signing_app, "flowsta-vault-linked-sign",
+        state, admin_ws, app_port, signing_app,
     ).await.ok_or_else(|| format!("connect_signing_app_ws failed for {}",
         signing_app.installed_app_id))?;
 

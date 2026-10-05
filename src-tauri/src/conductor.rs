@@ -889,6 +889,12 @@ mod bootstrap_target_tests {
             }
             let text = std::fs::read_to_string(&path).unwrap();
             assert!(!text.contains(&fixed), "{} connects under a fixed origin name", path.display());
+            // Every websocket connection in the file presents the current
+            // origin (a name handed to a helper that connects with it is
+            // caught here: the helper then presents something else).
+            let connects = text.matches("Websocket::connect").count();
+            let presented = text.matches("crate::conductor::node_origin()").count();
+            assert!(presented >= connects, "{}: {} connections, {} present the current origin", path.display(), connects, presented);
             uses += text.matches("Some(crate::conductor::node_origin())").count();
         }
         assert!(uses >= 10, "expected to find the app's connections, found {}", uses);
