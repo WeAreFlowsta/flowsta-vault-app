@@ -142,7 +142,7 @@ export const DevicesTab = component$(() => {
       phraseOpen.value = false;
       phraseDone.value =
         done.standing.enrollment === "waiting"
-          ? "Done. This protection starts in 7 days."
+          ? "Done."
           : "Done. Only you can add devices now.";
     } catch (e) {
       phraseError.value = String(e);
