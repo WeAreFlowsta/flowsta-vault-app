@@ -999,11 +999,19 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         phraseUpgradeOffer.value = true;
         error.value = "";
       } else if (msg.includes("not_device_hosted")) {
-        error.value = "This phrase belongs to a flowsta.com web account. Use 'Sign in with your Flowsta account' to restore it.";
+        error.value = "These words belong to a flowsta.com account made before the Vault. Go back and choose \"Move it into this Vault\".";
       } else if (msg.includes("account_blocked")) {
         error.value = "This account is blocked. Contact support.";
+      } else if (msg.includes("rate_limited") || msg.includes("Too many")) {
+        error.value = "Too many tries from this network for now. Wait an hour, or set up this device from another of your devices.";
+      } else if (msg.includes("vault_update_required") || msg.includes("device_not_registered") || msg.includes("approval_required")) {
+        error.value = "This device could not be added with the phrase just now. Set it up from another of your devices, or try again in a few minutes.";
+      } else if (msg.includes("Invalid recovery phrase") || msg.includes("Key derivation")) {
+        error.value = "Invalid recovery phrase. Please check your words.";
       } else {
-        error.value = msg;
+        // Never a raw code on screen; the log has the detail.
+        console.error("restore failed:", msg);
+        error.value = "That didn't work. Check your connection and try again, or set up this device from another of your devices.";
       }
     } finally {
       loading.value = false;
