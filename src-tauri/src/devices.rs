@@ -82,7 +82,8 @@ pub fn removal_logical_id(install_id: &str, conductor_key: &str) -> String {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum DeviceState {
     ThisDevice,
-    UpToDate,
+    /// Holds everything; last heard from at this time (ms).
+    UpToDate { at: u64 },
     /// Holds everything up to this time (ms).
     LastSynced { at: u64 },
     NotSeenSince { at: u64 },
@@ -107,7 +108,7 @@ pub fn device_state(device: &DeviceRecord, viewer_install_id: &str, viewer_lates
         return DeviceState::NotSeenSince { at: device.seen_at };
     }
     if device.latest_change >= viewer_latest_change {
-        DeviceState::UpToDate
+        DeviceState::UpToDate { at: device.seen_at }
     } else {
         DeviceState::LastSynced { at: device.seen_at }
     }
@@ -303,6 +304,19 @@ pub fn remember_added(state: &AppState, install_id: &str, device_public: &[u8; 3
     if let Ok(bytes) = serde_json::to_vec(&list) {
         let _ = std::fs::write(&path, bytes);
     }
+}
+
+/// The 32-byte key of every device this device has known for the identity
+/// (removed ones and earlier keys included), from the file it keeps. No
+/// network and no cell is needed to answer.
+pub fn known_device_keys(state: &AppState) -> Vec<[u8; 32]> {
+    let path = crate::paths::known_devices_path(&state.identity_root());
+    let list: Vec<KnownDevice> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    list.iter()
+        .filter_map(|k| crate::commands::base64_standard_decode(&k.conductor_key).ok())
+        .filter(|raw| raw.len() == 39)
+        .filter_map(|raw| raw[3..35].try_into().ok())
+        .collect()
 }
 
 /// How many devices the identity had when this device last looked, from the
@@ -566,8 +580,8 @@ mod tests {
         let now = 100 * DAY + 1000;
         let d = device("other");
         assert_eq!(device_state(&d, "other", 500, now), DeviceState::ThisDevice);
-        assert_eq!(device_state(&d, "me", 500, now), DeviceState::UpToDate);
-        assert_eq!(device_state(&d, "me", 400, now), DeviceState::UpToDate, "it holds newer than I do");
+        assert_eq!(device_state(&d, "me", 500, now), DeviceState::UpToDate { at: d.seen_at });
+        assert_eq!(device_state(&d, "me", 400, now), DeviceState::UpToDate { at: d.seen_at }, "it holds newer than I do");
         assert_eq!(device_state(&d, "me", 900, now), DeviceState::LastSynced { at: 100 * DAY });
         assert_eq!(device_state(&d, "me", 900, now + 4 * DAY), DeviceState::NotSeenSince { at: 100 * DAY });
     }

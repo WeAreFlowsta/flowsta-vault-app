@@ -194,6 +194,19 @@ export default component$(() => {
         persistSignaturesCache(merged);
       };
 
+      // The same rule on every refresh: a row signed by a key that is not
+      // this identity's leaves the list and the cache.
+      const dropForeign = async () => {
+        const mine = await invoke<string[]>("my_signing_keys").then((k) => new Set(k)).catch(() => null);
+        if (!mine || mine.size === 0) return;
+        const kept = signaturesSig.value.filter((s: any) => !s.agent_pub_key || mine.has(s.agent_pub_key));
+        if (kept.length !== signaturesSig.value.length) {
+          signaturesSig.value = kept;
+          persistSignaturesCache(kept);
+        }
+      };
+      await dropForeign();
+
       do {
         pendingRefresh.value = false;
 
@@ -227,6 +240,7 @@ export default component$(() => {
         if (linkedRes.confident && ownOk) {
           signaturesLoaded.value = true;
         }
+        await dropForeign();
       } while (pendingRefresh.value);
     } finally {
       signaturesRefreshing.value = false;
@@ -438,11 +452,15 @@ export default component$(() => {
       // this prevents the old data from being hydrated into the new
       // session - hydrate returns [] when the cache key doesn't match.
       setActiveSignatureAgent(identity.agent_pub_key);
-      const cached = hydrateSignaturesCache<any>();
+      // Only what one of this identity's own keys signed is ever shown,
+      // whatever an earlier session left in the cache.
+      const mine = await invoke<string[]>("my_signing_keys").then((k) => new Set(k)).catch(() => null);
+      const cached = hydrateSignaturesCache<any>().filter((s: any) => !mine || !s.agent_pub_key || mine.has(s.agent_pub_key));
       if (cached.length > 0 && signaturesSig.value.length === 0) {
         signaturesSig.value = cached;
         signaturesLoaded.value = true;
       }
+      if (mine) persistSignaturesCache(cached);
     } catch {
       // Non-critical - header just won't show profile info
     }

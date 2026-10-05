@@ -43,7 +43,7 @@ function day(ms: number): string {
 export function deviceLine(d: DeviceRow): string {
   switch (d.state) {
     case "this_device": return "This device";
-    case "up_to_date": return "Up to date";
+    case "up_to_date": return d.at ? `Up to date - last seen ${dayAndTime(d.at)}` : "Up to date";
     case "last_synced": return `Has everything up to ${dayAndTime(d.at ?? 0)}`;
     case "not_seen_since": return `Not seen since ${day(d.at ?? 0)}`;
     case "needs_update": return "Needs the Vault update to sync";

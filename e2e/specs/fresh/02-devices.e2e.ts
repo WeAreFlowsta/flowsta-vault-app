@@ -95,6 +95,17 @@ describe("a second device", () => {
   });
 
   it("locking says it is still syncing, and unlocking comes straight back", async () => {
+    // A row an earlier session left in this identity's cache, signed by a
+    // key that is not this identity's: it must never be shown again.
+    const planted = await browser.execute(() => {
+      const key = Object.keys(localStorage).find((k) => k.startsWith("flowsta_vault_sigs_v2_"));
+      if (!key) return false;
+      const rows = JSON.parse(localStorage.getItem(key) || "[]");
+      rows.push({ ...rows[0], action_hash: "foreign-action", file_hash: "f".repeat(64), agent_pub_key: "uhCAkForeignKeyThatIsNotThisIdentitysAAAAAAAAAAAAAAAA" });
+      localStorage.setItem(key, JSON.stringify(rows));
+      return true;
+    });
+    expect(planted).toBe(true);
     await click("lock-vault");
     await (await byId("unlock-password")).waitForDisplayed({ timeout: 60_000 });
     await browser.waitUntil(async () => /still syncing/i.test(await visibleText()), { timeout: 30_000, timeoutMsg: "the lock screen does not say the Vault is still syncing" });
@@ -112,6 +123,12 @@ describe("a second device", () => {
     await browser.waitUntil(async () => { const s = await stillBusy(); return s.spinning === 0 && s.words.length === 0; }, { timeout: 180_000, interval: 3_000, timeoutMsg: `still busy after unlock: ${JSON.stringify(await stillBusy())}` });
     await shot("d-unlocked-settled");
     await note("after unlock");
+    await goto("/sign-it/");
+    await browser.waitUntil(async () => (await $$('[data-testid="signature-row"]')).length >= 2, { timeout: 120_000, timeoutMsg: "Sign It lost its rows after unlock" });
+    const after: string[] = await browser.execute(() => [...document.querySelectorAll('[data-testid="signature-row"]')].map((e) => (e as HTMLElement).dataset.fileHash || ""));
+    expect(after.sort()).toEqual([hashHere, hashThere].sort());
+    const cachedForeign = await browser.execute(() => Object.keys(localStorage).filter((k) => k.startsWith("flowsta_vault_sigs_v2_")).some((k) => (localStorage.getItem(k) || "").includes("foreign-action")));
+    expect(cachedForeign).toBe(false);
   });
 
   it("no screen showed wording the app must never show", async () => {

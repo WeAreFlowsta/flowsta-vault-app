@@ -6081,6 +6081,48 @@ async fn fetch_linked_agent_keys(
     (linked_keys, dht_settled)
 }
 
+/// Every key that signs as this identity, in the form a signature record
+/// carries its signer: the identity key, this device's own key, the key of
+/// an earlier web account, and the key of every device this one has known.
+/// The signatures view shows nothing signed by any other key.
+#[tauri::command]
+pub fn my_signing_keys(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
+    let mut keys: Vec<[u8; 32]> = Vec::new();
+    {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config.as_ref().ok_or("vault_locked")?;
+        let raw32 = |b64: &str| -> Option<[u8; 32]> {
+            let raw = base64_standard_decode(b64).ok()?;
+            (raw.len() == 39).then(|| raw[3..35].try_into().ok()).flatten()
+        };
+        if let Some(k) = cfg.agent_pub_key_raw_b64.as_deref().and_then(raw32) {
+            keys.push(k);
+        }
+        // An older config may carry the identity key only as its string.
+        if let Some(raw) = crate::key_derivation::decode_agent_pub_key_flexible(&cfg.agent_pub_key) {
+            if let Ok(k) = <[u8; 32]>::try_from(&raw[3..35]) {
+                keys.push(k);
+            }
+        }
+        if let Some((seed, _)) = conductor_start_params(cfg) {
+            keys.push(crate::key_derivation::public_key_of_seed(&seed));
+        }
+        if let Some(k) = cfg.web_agent_pub_key.as_deref().and_then(raw32) {
+            keys.push(k);
+        }
+    }
+    if let Some(k) = state.linked_web_agent_key.lock().unwrap().as_deref().and_then(|b64| {
+        let raw = base64_standard_decode(b64).ok()?;
+        (raw.len() == 39).then(|| <[u8; 32]>::try_from(&raw[3..35]).ok()).flatten()
+    }) {
+        keys.push(k);
+    }
+    keys.extend(crate::devices::known_device_keys(&state));
+    keys.sort();
+    keys.dedup();
+    Ok(keys.iter().map(crate::key_derivation::construct_agent_pub_key_string).collect())
+}
+
 /// The conductor key of every device the identity has or had, in the form
 /// the network uses. Read from the identity's own records: nothing about a
 /// device is asked of, or published to, the network.
@@ -6471,10 +6513,11 @@ pub(crate) async fn get_my_linked_signatures_inner(
         // phrase-restored - is UNKNOWN: report Err so the frontend keeps
         // its background retry alive instead of freezing on a false
         // "authoritative empty" for the whole session.
-        if !dht_settled && !had_cache {
-            return Err(
-                "linked agents unresolved (cold DHT, no cached web agent key) - retry".to_string(),
-            );
+        // That includes a cell that is still starting: with an earlier web
+        // key known, an empty list can only mean the lookup did not run.
+        if !dht_settled {
+            let _ = had_cache;
+            return Err("linked agents unresolved (network or cells not ready) - retry".to_string());
         }
         log::info!("[get_my_linked_signatures] no linked agents - authoritative empty");
         return Ok(LinkedSignaturesResult {

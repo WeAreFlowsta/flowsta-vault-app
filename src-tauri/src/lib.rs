@@ -471,6 +471,7 @@ pub fn run() {
             pairing::pair_decline,
             devices::devices_list,
             devices::devices_known_count,
+            commands::my_signing_keys,
             devices::device_remove,
             devices::sibling_sync,
             device_registry::device_standing,
