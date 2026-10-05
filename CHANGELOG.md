@@ -5,6 +5,16 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0-beta3] - 2026-10-05
+
+Third beta of multi-device. Test with a fresh identity, not the one you rely on.
+
+### Fixed
+- A signature made on another of your devices appears on this one without locking and unlocking.
+
+### Changed
+- Wording: the app says "device" throughout.
+
 ## [1.6.0-beta2] - 2026-10-05
 
 Second beta of multi-device. Test with a fresh identity, not the one you rely on.
