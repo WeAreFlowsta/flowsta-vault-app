@@ -481,6 +481,10 @@ pub(crate) async fn sealed_store_first(
     .await
 }
 
+/// Dev harness only: write the next record with no device, as versions
+/// before devices were named did.
+pub(crate) static WRITE_WITHOUT_DEVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Seal one version and write it at the shared base; `supersedes` retires
 /// that earlier version in the same call.
 pub(crate) async fn sealed_store_spec(
@@ -505,7 +509,7 @@ pub(crate) async fn sealed_store_spec(
         refs: spec.refs,
         id: Some(id),
         updated_at: Some(spec.updated_at.unwrap_or(spec.created_at)),
-        device: crate::paths::install_id(&state.data_dir),
+        device: if WRITE_WITHOUT_DEVICE.load(std::sync::atomic::Ordering::SeqCst) { None } else { crate::paths::install_id(&state.data_dir) },
         deleted: spec.deleted,
     };
     let (cipher, nonce) = seal(&payload, &data_key).map_err(|e| e.to_string())?;

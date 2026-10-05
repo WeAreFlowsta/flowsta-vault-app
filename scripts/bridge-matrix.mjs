@@ -1333,6 +1333,8 @@ async function devicesLeg() {
   await op(a, { op: 'connect', client_id: 'matrix_app', app_name: 'Matrix App' });
   await vaultFetch(a, '/dev/remember-origin', { method: 'POST', body: { origin: 'https://remembered.example' } });
   await op(a, { op: 'backup', client_id: 'matrix_app', label: 'recovery', text: 'A recovery v1' });
+  const oldPicture = 'data:image/svg+xml;base64,PHN2Zy8+';
+  record('A: holds a picture record written before devices were named', !!(await op(a, { op: 'old-picture', picture: oldPicture })).action_hash);
   record('A: a round says what it holds', (await op(a, { op: 'round' })).round === 'done');
 
   // 2. B joins with a code. A cancelled code is refused at once.
@@ -1344,8 +1346,17 @@ async function devicesLeg() {
   record('B: shows a code in three groups', /^[A-Z]{4}-[A-Z]{4}-[A-Z]{4}$/.test(code || ''), code);
   const claim = await op(a, { op: 'pair-claim', code: (code || '').toLowerCase().replace(/-/g, ' ') });
   record('A: the typed code (lower case, spaces) names the new device', !!claim.intro?.install_id && !!claim.intro?.name, JSON.stringify(claim));
+  // While B starts, commands that find its conductor down ask for it to be
+  // started too. One start wins; what follows a start still happens.
+  let hammering = true;
+  const hammer = (async () => { while (hammering) { await op(b, { op: 'watchdog' }).catch(() => {}); await sleep(150); } })();
   record('A: approves', (await op(a, { op: 'pair-approve' })).approved === true);
   record('B: holds the identity', await until(async () => (await op(b, { op: 'status' })).unlocked === true, 60));
+  record('B: its conductor comes up once, under competing starts', await until(async () => (await op(b, { op: 'status' })).conductor?.status === 'ready', 180));
+  await sleep(5000);
+  hammering = false;
+  await hammer;
+  record('B: the conductor is still the one that started', (await op(b, { op: 'status' })).conductor?.status === 'ready');
   const stB = await op(b, { op: 'status' });
   record('B: same identity, its own conductor key, joined', stB.agent_pub_key === stA.agent_pub_key && stB.own_conductor_key === true && stB.joined_existing === true, JSON.stringify(stB));
   record('B: registered with the account (approved by A)', await until(async () => (await op(b, { op: 'standing' })).standing?.device === 'registered', 90));
@@ -1354,8 +1365,10 @@ async function devicesLeg() {
   // 3. Records, devices, connections, backups reach B.
   record("B: A's record arrives", await until(async () => ((await op(b, { op: 'notes' })).notes || []).some((n) => n.text === 'from A, before B'), 240));
   record('both list two devices', await until(async () => ((await op(a, { op: 'list' })).devices || []).length === 2 && ((await op(b, { op: 'list' })).devices || []).length === 2, 180));
+  record('B: lists itself without being asked to run a round', ((await op(b, { op: 'list' })).devices || []).some((d) => d.state === 'this_device'));
   await op(b, { op: 'round' });
   const connB = await op(b, { op: 'connections' });
+  record('B: the picture written before devices were named arrives', await until(async () => { await op(b, { op: 'round' }); return (await op(b, { op: 'status' })).profile_picture === oldPicture; }, 120));
   record('B: the remembered site carried over; the app is NOT connected here', (connB.sites || []).includes('https://remembered.example') && !(connB.apps || []).includes('matrix_app'), JSON.stringify(connB));
   const heldB = await until(async () => { await op(b, { op: 'round' }); return ((await op(b, { op: 'backups', client_id: 'matrix_app' })).held || []).some((h) => h.from && h.opens_as === 'A recovery v1'); }, 120);
   record("B: holds and opens a copy of A's app backup", heldB);
@@ -1372,8 +1385,10 @@ async function devicesLeg() {
   record('a Disconnect on A disconnects the app on B', await until(async () => { await op(b, { op: 'round' }); return !((await op(b, { op: 'connections' })).apps || []).includes('matrix_app'); }, 120));
 
   // 5. Locked but still syncing.
+  await op(a, { op: 'earlier-web-key', key: 'uhCAkHARNESS' });
   await op(a, { op: 'lock' });
   const lockedA = await op(a, { op: 'status' });
+  record('A locked: the earlier web key is forgotten', lockedA.earlier_web_key == null, JSON.stringify(lockedA.earlier_web_key));
   record('A locked: still syncing, conductor up', lockedA.unlocked === false && lockedA.syncing_while_locked === true && lockedA.conductor?.status === 'ready', JSON.stringify(lockedA));
   const refusedRead = await vaultFetch(a, '/dev/devices', { method: 'POST', body: { op: 'notes' } });
   record('A locked: reads are refused', refusedRead.status === 400 && /vault_locked/.test(refusedRead.data?.description || ''));
@@ -1382,6 +1397,7 @@ async function devicesLeg() {
   const t0 = Date.now();
   const unlocked = await vaultFetch(a, '/dev/unlock', { method: 'POST' });
   record('A unlocks onto the running conductor', unlocked.status === 200 && (await op(a, { op: 'status' })).conductor?.status === 'ready', `${Date.now() - t0} ms`);
+  record('A unlocked: the earlier web key is its own (none), not a leftover', (await op(a, { op: 'status' })).earlier_web_key == null);
   record("A: B's record written while it was locked is there", await until(async () => ((await op(a, { op: 'notes' })).notes || []).some((n) => n.text === 'from B, while A was locked'), 60));
 
   // 6. Remove. The removal holds even after the removed device's own round.

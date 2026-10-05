@@ -1868,29 +1868,41 @@ fn spawn_conductor_startup_inner(
                 // One start at a time: a command that finds the conductor
                 // down waits here instead of starting a second one.
                 let start_guard = state.conductor_restart_lock.lock().await;
-                let already_running = matches!(
-                    state.conductor_handle.lock().unwrap().as_mut().map(|h| h.conductor_child.try_wait()),
-                    Some(Ok(None))
-                );
-                if already_running {
-                    log::info!("Conductor already started by the watchdog - not starting a second one");
-                    return;
-                }
-                match crate::conductor::start_holochain(
-                    app_handle,
-                    data_dir.clone(),
-                    resource_dir,
-                    passphrase,
-                    seed,
-                    tag,
-                )
-                .await
-                {
-                    Ok(handle) => {
-                        let port = handle.admin_port;
+                let running_port = state
+                    .conductor_handle
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .and_then(|h| matches!(h.conductor_child.try_wait(), Ok(None)).then_some(h.admin_port));
+                let started = match running_port {
+                    // The watchdog got here first. What follows a start
+                    // still runs once, here.
+                    Some(port) => {
+                        log::info!("Conductor already started by the watchdog - not starting a second one");
+                        Ok(port)
+                    }
+                    None => match crate::conductor::start_holochain(
+                        app_handle,
+                        data_dir.clone(),
+                        resource_dir,
+                        passphrase,
+                        seed,
+                        tag,
+                    )
+                    .await
+                    {
+                        Ok(handle) => {
+                            let port = handle.admin_port;
+                            *state.conductor_handle.lock().unwrap() = Some(handle);
+                            Ok(port)
+                        }
+                        Err(e) => Err(e),
+                    },
+                };
+                drop(start_guard);
+                match started {
+                    Ok(port) => {
                         log::info!("Conductor started successfully on port {}", port);
-                        *state.conductor_handle.lock().unwrap() = Some(handle);
-                        drop(start_guard);
                         let ready_status = ConductorStatus::Ready {
                             admin_port: port,
                         };

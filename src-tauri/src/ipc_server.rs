@@ -4245,7 +4245,32 @@ async fn dev_devices_handler(
                 "removed": crate::paths::removed_marker_path(&app.identity_root()).exists(),
                 "install_id": crate::paths::install_id(&app.data_dir),
                 "conductor": app.conductor_status.lock().unwrap().clone(),
+                "earlier_web_key": app.linked_web_agent_key.lock().unwrap().clone(),
+                "profile_picture": config.as_ref().and_then(|c| c.profile_picture.clone()),
             }))
+        }
+        // The key of an earlier web account, as an unlock of a migrated identity leaves it.
+        "earlier-web-key" => {
+            *app.linked_web_agent_key.lock().unwrap() = Some(text("key"));
+            Ok(serde_json::json!({ "set": true }))
+        }
+        // What a command does when it finds the conductor down.
+        "watchdog" => Ok(serde_json::json!({
+            "watchdog": crate::commands::ensure_conductor_alive(app, &state.app_handle).await.err(),
+        })),
+        // A profile picture record as versions before devices were named wrote it.
+        "old-picture" => {
+            crate::sealed::WRITE_WITHOUT_DEVICE.store(true, std::sync::atomic::Ordering::SeqCst);
+            let written = crate::sealed::sealed_store_inner(
+                app,
+                "profile_picture".into(),
+                serde_json::json!({ "profile_picture": text("picture") }),
+                Vec::new(),
+                crate::ipc_server::unix_now() as u64 * 1000,
+            )
+            .await;
+            crate::sealed::WRITE_WITHOUT_DEVICE.store(false, std::sync::atomic::Ordering::SeqCst);
+            written.map(|hash| serde_json::json!({ "action_hash": hash }))
         }
         "write" => crate::sealed::sealed_store_inner(
             app,
