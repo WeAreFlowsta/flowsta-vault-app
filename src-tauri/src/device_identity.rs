@@ -234,6 +234,11 @@ async fn vault_grant(
     device_seed: &[u8; 32],
     agent_b64: &str,
 ) -> Result<VaultGrantResult, String> {
+    // A device the account has said was removed does not keep asking: every
+    // try would be refused, and the whole network shares the sign-in limit.
+    if crate::device_registry::told_removed() {
+        return Err("vault_grant_failed: device_removed".into());
+    }
     // 10s timeout: without one, a HUNG (not refused) API held the restore
     // wizard's spinner forever. Send errors carry the `api_unreachable:`
     // marker - the documented offline signal alongside `unknown_agent_key`
@@ -299,6 +304,7 @@ async fn vault_grant(
         .map_err(|e| format!("Token response parse failed: {}", e))?;
     if !status.is_success() {
         // Preserve the machine-readable code - the restore path branches on it.
+        crate::device_registry::note_answer(body.error.as_deref().unwrap_or(""));
         return Err(api_error(status, &body, "vault_grant_failed"));
     }
 

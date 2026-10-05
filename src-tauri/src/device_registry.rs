@@ -42,6 +42,22 @@ pub struct Standing {
 
 static STANDING: Mutex<Standing> = Mutex::new(Standing { device: "unknown", enrollment: None });
 
+/// Set once the account has said this device was removed. From then on
+/// this device does not try to sign in again until it is added back (each
+/// try would be refused, and the whole network shares the sign-in limit).
+static TOLD_REMOVED: Mutex<bool> = Mutex::new(false);
+
+pub(crate) fn told_removed() -> bool {
+    *TOLD_REMOVED.lock().unwrap()
+}
+
+/// Called with what a sign-in or a registration answered.
+pub(crate) fn note_answer(error: &str) {
+    if error.contains("device_removed") {
+        *TOLD_REMOVED.lock().unwrap() = true;
+    }
+}
+
 /// What a registration answer says about this device.
 pub(crate) fn standing_from(http_status: u16, body: &serde_json::Value) -> Option<Standing> {
     if (200..300).contains(&http_status) {
@@ -67,6 +83,8 @@ pub(crate) fn set_device_signer(seed: Option<[u8; 32]>) {
     if seed.is_none() {
         *STANDING.lock().unwrap() = Standing { device: "unknown", enrollment: None };
     }
+    // A new signer (unlock, a fresh setup) starts clean; being told again is cheap.
+    *TOLD_REMOVED.lock().unwrap() = false;
     let mut slot = DEVICE_SIGNER.lock().unwrap();
     if let Some(old) = slot.as_mut() {
         old.fill(0);
@@ -361,6 +379,7 @@ async fn send_registration(base: &str, body: &serde_json::Value) -> Result<bool,
         return Ok(true);
     }
     let error = answer.get("error").and_then(|e| e.as_str()).unwrap_or_default();
+    note_answer(error);
     Err(format!("{} [{}]", error, status.as_u16()))
 }
 
