@@ -1000,6 +1000,7 @@ pub(crate) fn setup_vault_from_keys(
     }
     write_active_identity_marker(&state.data_dir, &agent_pub_key);
 
+    seed_linked_web_agent_key(state);
     log::info!("Vault created and unlocked. Agent: {}", &agent_pub_key);
 
     // Load MAU state (fresh store for new vault)
@@ -1153,6 +1154,7 @@ pub(crate) fn unlock_vault_inner(
         }
     }
 
+    seed_linked_web_agent_key(state);
     log::info!("Vault unlocked.");
 
     // Load MAU state from encrypted disk storage
@@ -1386,8 +1388,23 @@ fn lock_secrets(state: &Arc<AppState>) {
     // Clear MAU state before clearing vault config (needs device_seed)
     crate::mau::clear_mau_state(&state);
 
+    // The earlier web key belongs to the identity that just locked.
+    *state.linked_web_agent_key.lock().unwrap() = None;
+
     *state.vault_config.lock().unwrap() = None;
     *state.grant_token_cache.lock().unwrap() = None;
+}
+
+/// The earlier web key of the identity that just became active, or none.
+/// Set the moment an identity unlocks, so a read never uses the key of the
+/// identity that was open before it.
+fn seed_linked_web_agent_key(state: &Arc<AppState>) {
+    let key = state.vault_config.lock().unwrap().as_ref().and_then(|c| {
+        (c.hosting_model.as_deref() == Some("device-hosted"))
+            .then(|| c.web_agent_pub_key.clone())
+            .flatten()
+    });
+    *state.linked_web_agent_key.lock().unwrap() = key;
 }
 
 /// Get the current conductor status (for frontend polling).
@@ -8222,11 +8239,14 @@ pub(crate) async fn ensure_profile_picture_record(state: &Arc<AppState>) -> Resu
 pub(crate) async fn apply_profile_from_other_devices(state: &Arc<AppState>) -> Result<bool, String> {
     let records = crate::sealed::sealed_list_inner(state).await?;
     let mine = crate::paths::install_id(&state.data_dir);
+    // A record written before devices were named carries no device. On a
+    // device that joined the identity it can only have come from another one.
+    let joined = state.vault_config.lock().unwrap().as_ref().map(|c| c.joined_existing).unwrap_or(false);
     let from_elsewhere = |entry_type: &str| {
         records
             .iter()
             .find(|r| r.entry_type == entry_type)
-            .filter(|r| r.device.is_some() && r.device != mine)
+            .filter(|r| r.device != mine && (r.device.is_some() || joined))
     };
     let profile = from_elsewhere("user_profile");
     let picture = from_elsewhere("profile_picture");
