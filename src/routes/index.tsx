@@ -738,7 +738,7 @@ export default component$(() => {
             </svg>
             <span class="text-sm font-medium">Signatures</span>
           </div>
-          <p class="text-3xl font-bold text-white">
+          <p data-testid="signatures-count" data-loaded={sigsLoaded ? "1" : "0"} class="text-3xl font-bold text-white">
             {sigsLoaded ? (
               sigCount
             ) : (

@@ -80,7 +80,7 @@ fn api_error(status: reqwest::StatusCode, body: &ApiEnvelope, context: &str) -> 
 
 /// The API refuses a signed request whose timestamp is more than five
 /// minutes from ITS clock (`stale_timestamp`). Nearly always the person's
-/// computer clock is off, and the raw code helped nobody (field report
+/// device clock is off, and the raw code helped nobody (field report
 /// 2026-09-26). The server's `Date` response header says what time it
 /// thinks it is; the difference to our clock is the message.
 fn clock_skew_message(server_date: Option<&str>) -> String {
@@ -95,12 +95,12 @@ fn clock_skew_message(server_date: Option<&str>) -> String {
             let mins = diff.abs() / 60;
             let amount = if mins >= 120 { format!("{} hours", mins / 60) } else { format!("{} minutes", mins) };
             format!(
-                "Your computer's clock is about {} {} of the real time. Turn on automatic date and time in your system settings, then try again.",
+                "Your device's clock is about {} {} of the real time. Turn on automatic date and time in your system settings, then try again.",
                 amount,
                 if diff > 0 { "ahead" } else { "behind" }
             )
         }
-        _ => "Your computer's clock does not match the real time closely enough. Turn on automatic date and time in your system settings, then try again.".to_string(),
+        _ => "Your device's clock does not match the real time closely enough. Turn on automatic date and time in your system settings, then try again.".to_string(),
     }
 }
 
@@ -964,7 +964,7 @@ mod clock_skew_tests {
         let m = clock_skew_message(Some(&http_date(3 * 3600)));
         assert!(m.contains("3 hours behind"), "{}", m);
         // no header or an unparseable one: the plain sentence
-        assert!(clock_skew_message(None).starts_with("Your computer's clock does not match"));
-        assert!(clock_skew_message(Some("garbage")).starts_with("Your computer's clock does not match"));
+        assert!(clock_skew_message(None).starts_with("Your device's clock does not match"));
+        assert!(clock_skew_message(Some("garbage")).starts_with("Your device's clock does not match"));
     }
 }

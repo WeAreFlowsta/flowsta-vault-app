@@ -56,3 +56,7 @@ src-tauri/.cargo/config.toml
 src-tauri/.cargo/config.toml.staging
 src-tauri/certs/
 src-tauri/vendor/
+
+# UI tests
+/e2e/shots
+/e2e/profile

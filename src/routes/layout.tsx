@@ -649,6 +649,18 @@ export default component$(() => {
     const unlistenPublished = listen("signature-published", () => {
       refreshSignatures();
     });
+    // Another device joined, or another device's activity arrived (it may
+    // have signed something): what this device believed about "no other
+    // keys sign as me" is out of date, so read the signatures again.
+    const unlistenDevicesChanged = listen("devices-changed", () => {
+      linkedConfirmedNone.value = false;
+      refreshSignatures();
+    });
+    const unlistenActivitySynced = listen<{ kind?: string }>("activity-recorded", (event) => {
+      if (event.payload?.kind !== "synced") return;
+      linkedConfirmedNone.value = false;
+      refreshSignatures();
+    });
     const unlistenAttention = listen<{ reason: string; origin: string | null; label?: string | null }>(
       "unlock-attention",
       (event) => {
@@ -771,6 +783,8 @@ export default component$(() => {
       unlistenPromise.then((unlisten) => unlisten());
       unlistenProfile.then((unlisten) => unlisten());
       unlistenPublished.then((unlisten) => unlisten());
+      unlistenDevicesChanged.then((unlisten) => unlisten());
+      unlistenActivitySynced.then((unlisten) => unlisten());
       unlistenAttention.then((unlisten) => unlisten());
       unlistenAttentionClear.then((unlisten) => unlisten());
       unlistenRemoved.then((unlisten) => unlisten());
@@ -1591,6 +1605,7 @@ export default component$(() => {
             </button>
             <button
               type="button"
+              data-testid="lock-vault"
               class="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-300 transition-colors"
               onClick$={async () => {
                 // Cache is intentionally NOT cleared here. Signature metadata
@@ -2299,6 +2314,7 @@ export default component$(() => {
               </GlassButton>
               <GlassButton
                 class="flex-1"
+                testId="sign-approve"
                 onClick$={() => handleDocumentSignResponse(true)}
               >
                 {pendingDocumentSign.value.commit ? 'Sign & publish' : 'Sign'}

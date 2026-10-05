@@ -239,6 +239,7 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
               class="mb-4"
               placeholder="Password"
               autocomplete="current-password"
+              testId="unlock-password"
               value={password.value}
               autoFocus
               disabled={loading.value}
@@ -255,6 +256,7 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
             )}
 
             <GlassButton
+              testId="unlock-submit"
               type="submit"
               class="w-full"
               disabled={loading.value || password.value.length === 0}

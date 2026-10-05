@@ -313,7 +313,7 @@ fn lair_exit_error(status: std::process::ExitStatus, lair_dir: &Path) -> String 
     let logs = read_lair_logs(lair_dir);
     format!(
         "{} (status {}). Lock the Vault and unlock it again; if it keeps happening, \
-         restart your computer or reinstall Flowsta Vault. Details: {}",
+         restart your device or reinstall Flowsta Vault. Details: {}",
         LAIR_STOPPED_MARKER,
         status,
         if logs.is_empty() { "(no output)".to_string() } else { logs }
@@ -449,7 +449,7 @@ pub async fn connect_to_lair(
         Ok(Err(e)) => Err(format!("Failed to connect to lair: {}", e)),
         Err(_) => Err(
             "The local key store is running but did not answer within 30 seconds. \
-             Restart your computer and open Flowsta Vault again; if it keeps \
+             Restart your device and open Flowsta Vault again; if it keeps \
              happening, reinstall Flowsta Vault."
                 .to_string(),
         ),

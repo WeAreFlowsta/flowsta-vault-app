@@ -102,6 +102,15 @@ sysinfo = "0.33"
 # RFC 7231 Date header parsing for the clock-skew message (device_identity.rs)
 httpdate = "1"
 
+# UI test harness only (e2e/README.md): an embedded WebDriver server inside
+# the app. Behind the `e2e` feature, which no release build carries -
+# scripts/check-no-e2e-feature.mjs proves it.
+tauri-plugin-wdio-webdriver = { version = "1.4", optional = true }
+
+[features]
+# Test builds only: `npm run e2e:build` builds with `--features e2e`.
+e2e = ["dep:tauri-plugin-wdio-webdriver"]
+
 [dev-dependencies]
 # oneshot() for the IPC guard tests (already in the tree via axum).
 tower = { version = "0.5", features = ["util"] }

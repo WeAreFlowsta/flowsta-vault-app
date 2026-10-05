@@ -315,7 +315,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
       if (!path) return;
       await invoke("write_json_file", {
         path,
-        content: `Flowsta recovery phrase - these 24 words ARE your identity.\nAnyone with these words can become you. Keep this file offline - \nprint it or move it to secure storage, then delete it from this computer.\n\n${newMnemonic.value}\n`,
+        content: `Flowsta recovery phrase - these 24 words ARE your identity.\nAnyone with these words can become you. Keep this file offline - \nprint it or move it to secure storage, then delete it from this device.\n\n${newMnemonic.value}\n`,
       });
       downloaded.value = true;
       setTimeout(() => { downloaded.value = false; }, 2000);
@@ -667,7 +667,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
 
       // Step 3: Create vault immediately
       step.value = "progress";
-      progressMessage.value = "Creating your keys on this computer...";
+      progressMessage.value = "Creating your keys on this device...";
 
       const setupResult = await invoke<{ agent_pub_key: string; did: string }>(
         "setup_vault",
@@ -762,7 +762,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         displayName: createDisplayName.value.trim() || null,
       });
 
-      progressMessage.value = "Creating your keys on this computer...";
+      progressMessage.value = "Creating your keys on this device...";
       const setupResult = await invoke<{ agent_pub_key: string; did: string }>(
         "setup_vault",
         {
@@ -976,7 +976,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         web_agent_pub_key: string | null;
       }>("restore_device_identity", { apiUrl: __API_URL__, mnemonic: trimmed });
 
-      progressMessage.value = "Rebuilding your identity on this computer...";
+      progressMessage.value = "Rebuilding your identity on this device...";
       const setupResult = await invoke<{ agent_pub_key: string; did: string }>(
         "setup_vault",
         {
@@ -1085,13 +1085,13 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
         {/* ── Step 0: Choose path ── */}
         {step.value === "choose" && (
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
-            <h2 class="mb-6 text-2xl font-bold text-white">{props.mode === "add" ? "Add another identity" : "Welcome to Flowsta Vault"}</h2>
+            <h2 data-testid="wizard-welcome" class="mb-6 text-2xl font-bold text-white">{props.mode === "add" ? "Add another identity" : "Welcome to Flowsta Vault"}</h2>
 
             <div class="flex flex-col gap-3">
-              <GlassButton onClick$={() => { error.value = ""; flow.value = "create"; step.value = "create-form"; }}>
+              <GlassButton testId="wizard-create" onClick$={() => { error.value = ""; flow.value = "create"; step.value = "create-form"; }}>
               {props.mode === "add" ? "Create a new identity" : "Create my identity"}
               </GlassButton>
-              <GlassButton variant="secondary" onClick$={() => { error.value = ""; flow.value = "restore"; step.value = "existing"; }}>
+              <GlassButton testId="wizard-existing" variant="secondary" onClick$={() => { error.value = ""; flow.value = "restore"; step.value = "existing"; }}>
               I already have an identity
               </GlassButton>
             </div>
@@ -1245,7 +1245,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
           <div class="rounded-lg border border-gray-700 bg-gray-800 p-8">
             <h2 class="mb-2 text-2xl font-bold text-white">Your details</h2>
             <p class="mb-6 text-sm text-gray-400">
-              Your keys are made on this computer and never leave it. Flowsta
+              Your keys are made on this device and never leave it. Flowsta
               receives only your public key and email.
             </p>
 
@@ -1259,6 +1259,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                   placeholder="you@example.com"
                   value={createEmail.value}
+                  data-testid="create-email"
                   autoFocus
                   onInput$={(e) => { createEmail.value = (e.target as HTMLInputElement).value; error.value = ""; }}
                 />
@@ -1273,6 +1274,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                   placeholder="Repeat your email"
                   value={createEmail2.value}
+                  data-testid="create-email2"
                   onInput$={(e) => { createEmail2.value = (e.target as HTMLInputElement).value; error.value = ""; }}
                   onPaste$={(e) => e.preventDefault()}
                 />
@@ -1285,6 +1287,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   class="w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
                   placeholder="How you appear to others"
                   value={createDisplayName.value}
+                  data-testid="create-name"
                   onInput$={(e) => { createDisplayName.value = (e.target as HTMLInputElement).value; }}
                 />
               </div>
@@ -1296,6 +1299,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   placeholder="At least 10 characters"
                   autocomplete="new-password"
                   value={createPassword.value}
+                  testId="create-password"
                   onInput$={(v) => { createPassword.value = v; error.value = ""; }}
                 />
                 <PasswordStrength password={createPassword.value} />
@@ -1307,6 +1311,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   placeholder="Repeat your password"
                   autocomplete="new-password"
                   value={createPassword2.value}
+                  testId="create-password2"
                   onInput$={(v) => { createPassword2.value = v; error.value = ""; }}
                 />
                 <p class="mt-1 text-xs text-gray-400">
@@ -1321,6 +1326,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                   Back
                 </GlassButton>
                 <GlassButton
+                  testId="create-continue"
                   type="submit"
                   disabled={loading.value || !normalizeEmail(createEmail.value) || !normalizeEmail(createEmail2.value) || !createPassword.value || !createPassword2.value}
                 >
@@ -1354,7 +1360,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               {newMnemonic.value.split(" ").map((word, i) => (
                 <div key={i} class="flex items-baseline gap-1.5">
                   <span class="w-5 text-right font-mono text-[10px] text-gray-500">{i + 1}.</span>
-                  <span class="font-mono text-sm text-white">{word}</span>
+                  <span data-testid="phrase-word" class="font-mono text-sm text-white">{word}</span>
                 </div>
               ))}
             </div>
@@ -1392,7 +1398,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             )}
 
             {!phraseSaved.value ? (
-              <GlassButton onClick$={() => { phraseSaved.value = true; error.value = ""; }}>
+              <GlassButton testId="phrase-saved" onClick$={() => { phraseSaved.value = true; error.value = ""; }}>
                 I've written it down
               </GlassButton>
             ) : (
@@ -1409,6 +1415,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                         autoComplete="off"
                         class="flex-1 rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm font-mono text-white focus:border-amber-400 focus:outline-none"
                         value={verifyWords[i] ?? ""}
+                        data-testid="verify-word"
+                        data-word={i}
                         onInput$={(e) => { verifyWords[i] = (e.target as HTMLInputElement).value; error.value = ""; }}
                       />
                     </div>
@@ -1422,6 +1430,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                     Show phrase again
                   </GlassButton>
                   <GlassButton
+                    testId="create-finish"
                     disabled={loading.value || verifyIndices.value.some((i) => !(verifyWords[i] ?? "").trim())}
                     onClick$={handleCreateFinish}
                   >
@@ -1656,7 +1665,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               Your account has no recovery phrase yet. Create one on flowsta.com, then come back.
               </p>
             <p class="mb-6 text-sm text-gray-400">
-              The phrase makes your keys and is the way back in if you ever lose this computer.
+              The phrase makes your keys and is the way back in if you ever lose this device.
             </p>
 
             {error.value && (
@@ -1698,10 +1707,10 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               Enter your recovery phrase
               </h2>
               <p class="mb-4 text-sm text-gray-400">
-              The 24 words you saved on flowsta.com. They prove the account is yours and become its key on this computer.
+              The 24 words you saved on flowsta.com. They prove the account is yours and become its key on this device.
               </p>
               <p class="mb-4 text-xs text-gray-500">
-              The words never leave this computer.
+              The words never leave this device.
               </p>
 
             <textarea
@@ -1927,7 +1936,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               {newMnemonic.value.split(" ").map((word, i) => (
                 <div key={i} class="flex items-baseline gap-1.5">
                   <span class="w-5 text-right font-mono text-[10px] text-gray-500">{i + 1}.</span>
-                  <span class="font-mono text-sm text-white">{word}</span>
+                  <span data-testid="phrase-word" class="font-mono text-sm text-white">{word}</span>
                 </div>
               ))}
             </div>
@@ -1963,7 +1972,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             )}
 
             {!phraseSaved.value ? (
-              <GlassButton onClick$={() => { phraseSaved.value = true; error.value = ""; }}>
+              <GlassButton testId="phrase-saved" onClick$={() => { phraseSaved.value = true; error.value = ""; }}>
                 I've written it down
               </GlassButton>
             ) : (
@@ -1980,6 +1989,8 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                         autoComplete="off"
                         class="flex-1 rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm font-mono text-white focus:border-amber-400 focus:outline-none"
                         value={verifyWords[i] ?? ""}
+                        data-testid="verify-word"
+                        data-word={i}
                         onInput$={(e) => { verifyWords[i] = (e.target as HTMLInputElement).value; error.value = ""; }}
                       />
                     </div>
@@ -2148,7 +2159,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
               </svg>
             </div>
-            <h2 class="mb-2 text-xl font-bold text-white">Your Vault is ready</h2>
+            <h2 data-testid="wizard-done" class="mb-2 text-xl font-bold text-white">Your Vault is ready</h2>
             <p class="mb-6 text-sm text-gray-400">
             Your identity lives on your own device, not on a server. Sign in to Flowsta apps and websites by approving here.
             </p>
@@ -2158,7 +2169,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
               {(webUser.email.includes("@") ? webUser.email : email.value) && (
                 <div class="mb-3">
                   <span class="text-xs font-medium text-gray-400">
-                    Linked Account
+                    Email
                   </span>
                   <p class="text-sm text-white">
                     {webUser.email.includes("@") ? webUser.email : email.value}
@@ -2211,7 +2222,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 Restored offline
               </p>
               <p class="text-xs text-gray-400">
-                Your records return as this computer syncs. Your username,
+                Your records return as this device syncs. Your username,
                 display name and email reconnect when Flowsta is reachable.
                 Nothing to do.
               </p>
@@ -2302,7 +2313,7 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
             )}
 
             {(!restoredFromPhrase.value || restoreImportResult.value) && (
-              <GlassButton onClick$={props.onComplete$}>
+              <GlassButton testId="wizard-finish" onClick$={props.onComplete$}>
                 Continue
               </GlassButton>
             )}

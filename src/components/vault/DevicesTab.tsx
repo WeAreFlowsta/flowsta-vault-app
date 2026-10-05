@@ -222,7 +222,7 @@ export const DevicesTab = component$(() => {
         <div class="mb-4 flex items-center justify-between gap-4">
           <h3 class="text-lg font-semibold text-white">Your devices</h3>
           {!adding.value && (
-            <GlassButton onClick$={() => { adding.value = true; error.value = ""; added.value = ""; }}>Add a device</GlassButton>
+            <GlassButton testId="device-add" onClick$={() => { adding.value = true; error.value = ""; added.value = ""; }}>Add a device</GlassButton>
           )}
         </div>
 
@@ -234,13 +234,14 @@ export const DevicesTab = component$(() => {
             <input
               class="mb-3 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-4 py-2 font-mono text-lg uppercase tracking-widest text-white placeholder-gray-600 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
               placeholder="XXXX-XXXX-XXXX"
+              data-testid="device-code"
               maxLength={20}
               value={code.value}
               onInput$={(e) => { code.value = (e.target as HTMLInputElement).value; error.value = ""; }}
             />
             <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <GlassButton variant="secondary" onClick$={() => { adding.value = false; code.value = ""; error.value = ""; }}>Cancel</GlassButton>
-              <GlassButton disabled={busy.value || code.value.replace(/[^a-zA-Z]/g, "").length !== 12} onClick$={submitCode}>
+              <GlassButton testId="device-code-submit" disabled={busy.value || code.value.replace(/[^a-zA-Z]/g, "").length !== 12} onClick$={submitCode}>
                 {busy.value ? "Checking..." : "Continue"}
               </GlassButton>
             </div>
@@ -362,7 +363,7 @@ export const DevicesTab = component$(() => {
             </p>
             <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <GlassButton variant="secondary" disabled={busy.value} onClick$={decline}>Cancel</GlassButton>
-              <GlassButton disabled={busy.value} onClick$={approve}>{busy.value ? "Adding..." : "Add device"}</GlassButton>
+              <GlassButton testId="device-approve" disabled={busy.value} onClick$={approve}>{busy.value ? "Adding..." : "Add device"}</GlassButton>
             </div>
           </div>
         </div>

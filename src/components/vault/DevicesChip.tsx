@@ -68,6 +68,7 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
       type="button"
       class="flex shrink-0 items-center gap-2 text-left"
       title={summary.title}
+      data-testid="devices-chip"
       onClick$={async () => {
         try { sessionStorage.setItem("settings-tab", "devices"); } catch { /* no storage */ }
         window.dispatchEvent(new Event("open-devices-tab"));

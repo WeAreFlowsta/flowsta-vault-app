@@ -509,7 +509,7 @@ export default component$(() => {
           <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
             <h3 class="mb-2 text-lg font-semibold text-white">Sites that tried to reach this Vault</h3>
             <p class="mb-4 text-sm text-gray-400">
-              Your Vault listens on this computer, so any page open in your browser can knock on its door. Nothing is
+              Your Vault listens on this device, so any page open in your browser can knock on its door. Nothing is
               answered without your approval. This is who knocked without holding any permission - Flowsta's own pages
               and the sites you connected are not listed here.
             </p>
@@ -579,7 +579,7 @@ export default component$(() => {
                 <h3 class="mb-2 text-lg font-semibold text-white">Start at Login</h3>
                 <p class="text-sm text-gray-400">
                   Open Flowsta Vault automatically when you sign in to this
-                  computer, so it's ready the moment a Flowsta app or website
+                  device, so it's ready the moment a Flowsta app or website
                   needs it. It starts in the background, locked - nothing
                   unlocks until you enter your password.
                 </p>
@@ -764,7 +764,7 @@ export default component$(() => {
               behind your password with strong encryption.
             </p>
             <p class="text-sm leading-relaxed text-gray-300">
-              So even if someone reached this computer, they would still need
+              So even if someone reached this device, they would still need
               your password to unlock anything - and they would never find your
               recovery phrase, because it isn't here. That is also why the
               phrase is yours to keep safe: it is the only way to recover your

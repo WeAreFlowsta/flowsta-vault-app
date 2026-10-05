@@ -18,6 +18,8 @@ export interface PasswordFieldProps {
   /** "amber" = the setup/settings recipe; "blue" = the dashboard-card recipe. */
   variant?: "amber" | "blue";
   id?: string;
+  /** For the UI tests: a stable name that does not change with the copy. */
+  testId?: string;
 }
 
 const RECIPES = {
@@ -33,6 +35,7 @@ export const PasswordField = component$<PasswordFieldProps>((props) => {
     <div class={["relative", props.class ?? ""].join(" ")}>
       <input
         id={props.id}
+        data-testid={props.testId}
         type={shown.value ? "text" : "password"}
         class={RECIPES[props.variant ?? "amber"]}
         placeholder={props.placeholder}

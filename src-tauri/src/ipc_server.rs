@@ -5129,7 +5129,7 @@ async fn owner_guard(
             Json(IpcError {
                 error: "other_user".into(),
                 description: Some(
-                    "This Vault belongs to another account on this computer.".into(),
+                    "This Vault belongs to another account on this device.".into(),
                 ),
             }),
         ));

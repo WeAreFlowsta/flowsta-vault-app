@@ -1541,6 +1541,8 @@ export default component$(() => {
               .map((sig, i) => (
               <div
                 key={i}
+                data-testid="signature-row"
+                data-file-hash={sig.file_hash}
                 class="flex items-start gap-3 rounded-xl border border-gray-700 bg-[#15203a] p-3"
               >
                 <img

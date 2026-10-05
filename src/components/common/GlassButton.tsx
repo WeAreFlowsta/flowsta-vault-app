@@ -19,10 +19,12 @@ interface GlassButtonProps {
   class?: string;
   disabled?: boolean;
   type?: "button" | "submit" | "reset";
+  /** For the UI tests: a stable name that does not change with the copy. */
+  testId?: string;
 }
 
 export const GlassButton = component$<GlassButtonProps>(
-  ({ variant = "primary", onClick$, class: className = "", disabled = false, type = "button" }) => {
+  ({ variant = "primary", onClick$, class: className = "", disabled = false, type = "button", testId }) => {
     const baseClasses = `
       relative
       h-[36px] sm:h-[44px]
@@ -159,6 +161,7 @@ export const GlassButton = component$<GlassButtonProps>(
         type={type}
         class={buttonClasses}
         disabled={disabled}
+        data-testid={testId}
       >
         {/* Layer 1: Bottom glass layer - refracts content behind */}
         <span

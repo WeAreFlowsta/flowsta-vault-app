@@ -184,7 +184,7 @@ pub(crate) fn adopt_partition_before_setup(state: &Arc<AppState>, agent_pub_key:
             return Err("The Vault is still shutting down. Try again in a moment.".into());
         }
         if !crate::paths::lair_socket_path_fits(&new_root) {
-            return Err("This computer's user folder path is too long to add a second identity.".into());
+            return Err("This device's user folder path is too long to add a second identity.".into());
         }
     } else if !crate::paths::lair_socket_path_fits(&new_root) {
         log::warn!("partition path too long for the key store socket - the first identity stays on the legacy root");
