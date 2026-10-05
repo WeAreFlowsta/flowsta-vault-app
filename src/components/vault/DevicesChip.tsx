@@ -25,7 +25,8 @@ export function devicesSummary(devices: Row[], now = Date.now()): { label: strin
   );
   const syncing = !behind && others.some((d) => d.state === "last_synced");
   return {
-    label: `${live.length} devices`,
+    // This device counts before its own record is written.
+    label: `${others.length + 1} devices`,
     color: behind ? "bg-amber-400" : "bg-green-400",
     title: others.map((d) => `${d.name} - ${d.state === "last_synced" && !behind ? "syncing" : deviceLine(d).toLowerCase()}`).join("\n") + (syncing ? "\nSyncing a recent change" : ""),
   };
