@@ -20,6 +20,9 @@ use std::sync::Arc;
 pub const NETWORK_GENERATION: &str = "holochain-0.6";
 
 pub const DEVICE_ENTRY_TYPE: &str = "device";
+/// A removal is its own record, so that a removed device's routine refresh
+/// of its record (written before it heard) can never overwrite it.
+pub const REMOVAL_ENTRY_TYPE: &str = "device_removed";
 
 /// A device refreshes its own record at most this often when nothing about
 /// it changed: each refresh is a new entry every device keeps.
@@ -58,6 +61,19 @@ pub struct DeviceRecord {
 
 pub fn device_logical_id(install_id: &str) -> String {
     format!("{}:{}", DEVICE_ENTRY_TYPE, install_id)
+}
+
+/// A device (this install running this key) was removed from the identity.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DeviceRemoval {
+    pub install_id: String,
+    pub conductor_key: String,
+    pub removed_at: u64,
+    pub removed_by: String,
+}
+
+pub fn removal_logical_id(install_id: &str, conductor_key: &str) -> String {
+    format!("{}:{}:{}", REMOVAL_ENTRY_TYPE, install_id, conductor_key)
 }
 
 /// How one device stands, seen from another. The page turns each into one
@@ -143,9 +159,25 @@ fn parse(item: &SealedListItem) -> Option<DeviceRecord> {
     serde_json::from_value(item.body.clone()).ok()
 }
 
-/// Every device record in a listing, newest-added first.
+/// Every device record in a listing, newest-added first, with removals
+/// applied: a device whose key has a removal record reads as removed
+/// whatever its own record says.
 pub fn devices_in(records: &[SealedListItem]) -> Vec<DeviceRecord> {
+    let removals: Vec<DeviceRemoval> = records
+        .iter()
+        .filter(|r| r.entry_type == REMOVAL_ENTRY_TYPE)
+        .filter_map(|r| serde_json::from_value(r.body.clone()).ok())
+        .collect();
     let mut devices: Vec<DeviceRecord> = records.iter().filter_map(parse).collect();
+    for device in &mut devices {
+        if device.removed_at.is_some() {
+            continue;
+        }
+        if let Some(removal) = removals.iter().find(|x| x.install_id == device.install_id && x.conductor_key == device.conductor_key) {
+            device.removed_at = Some(removal.removed_at);
+            device.removed_by = Some(removal.removed_by.clone());
+        }
+    }
     devices.sort_by(|a, b| b.added_at.cmp(&a.added_at).then_with(|| a.install_id.cmp(&b.install_id)));
     devices
 }
@@ -410,6 +442,23 @@ pub(crate) async fn device_remove_inner(api_url: String, install_id: String, sta
         Err(e) => return Err(e),
     }
     let now = now_ms();
+    // The removal is its own record (nothing the removed device writes can
+    // overwrite it), and the device's record says so too.
+    let removal = DeviceRemoval { install_id: device.install_id.clone(), conductor_key: device.conductor_key.clone(), removed_at: now, removed_by: me.clone() };
+    crate::sealed::sealed_store_spec(
+        state,
+        StoreSpec {
+            entry_type: REMOVAL_ENTRY_TYPE.to_string(),
+            body: serde_json::to_value(&removal).map_err(|e| e.to_string())?,
+            refs: Vec::new(),
+            created_at: now,
+            id: Some(removal_logical_id(&removal.install_id, &removal.conductor_key)),
+            updated_at: Some(now),
+            deleted: false,
+        },
+        None,
+    )
+    .await?;
     let removed = DeviceRecord { removed_at: Some(now), removed_by: Some(me), seen_at: device.seen_at, ..device.clone() };
     crate::sealed::sealed_store_spec(
         state,
@@ -563,6 +612,36 @@ mod tests {
         let conductor_key = crate::key_derivation::base64_standard_encode(&crate::key_derivation::holo_agent_pub_key_bytes(&public));
         assert_eq!(key32_of(&conductor_key), Some(crate::key_derivation::base64_standard_encode(&public)));
         assert_eq!(key32_of("AAAA"), None);
+    }
+
+    #[test]
+    fn a_removal_holds_even_when_the_removed_device_writes_its_record_again() {
+        let item = |entry_type: &str, body: serde_json::Value| SealedListItem {
+            action_hash: String::new(),
+            entry_type: entry_type.into(),
+            created_at: 0,
+            body,
+            refs: vec![],
+            id: String::new(),
+            updated_at: 0,
+            device: None,
+        };
+        // The removed device's record, refreshed AFTER the removal (its own
+        // routine write before it heard): no removed_at on it.
+        let fresh = device("other");
+        let records = vec![
+            item(DEVICE_ENTRY_TYPE, serde_json::to_value(&fresh).unwrap()),
+            item(REMOVAL_ENTRY_TYPE, serde_json::json!({ "install_id": "other", "conductor_key": "key", "removed_at": 77, "removed_by": "me" })),
+        ];
+        let seen = devices_in(&records);
+        assert_eq!(seen[0].removed_at, Some(77));
+        assert_eq!(seen[0].removed_by.as_deref(), Some("me"));
+        assert!(removed_here(&seen, "other", "key"));
+        // The same install added again with a new key is not removed.
+        let mut readded = device("other");
+        readded.conductor_key = "new key".into();
+        let records2 = vec![item(DEVICE_ENTRY_TYPE, serde_json::to_value(&readded).unwrap()), records[1].clone()];
+        assert_eq!(devices_in(&records2)[0].removed_at, None);
     }
 
     #[test]

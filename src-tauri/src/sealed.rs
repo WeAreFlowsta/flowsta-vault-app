@@ -189,7 +189,7 @@ use std::sync::Arc;
 use tauri::State;
 
 /// A decrypted sealed record as returned to the frontend.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SealedListItem {
     /// Hex of the raw 39-byte ActionHash (same convention as Sign It).
     pub action_hash: String,
