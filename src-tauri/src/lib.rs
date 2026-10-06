@@ -474,6 +474,7 @@ pub fn run() {
             commands::my_signing_keys,
             commands::cells_ready,
             commands::can_hand_over,
+            commands::joined_setup_pending,
             devices::device_remove,
             devices::sibling_sync,
             device_registry::device_standing,

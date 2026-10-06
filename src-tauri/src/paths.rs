@@ -102,6 +102,9 @@ pub fn quota_key_path(root: &Path) -> PathBuf { root.join(QUOTA_KEY) }
 pub fn activity_path(root: &Path) -> PathBuf { root.join(ACTIVITY_FILE) }
 pub fn restore_choice_path(root: &Path) -> PathBuf { root.join(RESTORE_CHOICE_MARKER) }
 pub fn removed_marker_path(root: &Path) -> PathBuf { root.join(REMOVED_MARKER) }
+/// Written on a device that joined an identity once its first full round
+/// has applied the other devices' profile, connections and backups.
+pub fn setup_done_path(root: &Path) -> PathBuf { root.join("setup-done") }
 pub fn known_devices_path(root: &Path) -> PathBuf { root.join(KNOWN_DEVICES) }
 pub fn shared_connections_path(root: &Path) -> PathBuf { root.join(SHARED_CONNECTIONS) }
 pub fn activity_synced_path(root: &Path) -> PathBuf { root.join(ACTIVITY_SYNCED) }

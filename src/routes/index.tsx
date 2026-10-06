@@ -81,16 +81,15 @@ export default component$(() => {
   const confirmEmailInput2 = useSignal("");
   const confirmEmailNote = useSignal("");
   const confirmEmailBusy = useSignal(false);
-  // A device that joined is "being set up" until its first round has run:
-  // its own device record is not written yet, and picture, connections and
-  // app backups may still be in transit even when the email came with the
-  // code. The list says so (this_device_setting_up) and the banner follows it.
+  // A device that joined is "being set up" until its first full round has
+  // brought the other devices' profile, connections and app backups over
+  // (a marker the round writes). The banner stays until then, including
+  // while the cells are still starting.
   const settingUp = useSignal(false);
   const checkSettingUp = $(async () => {
     try {
-      const rows = await invoke<{ state: string }[]>("devices_list");
-      settingUp.value = rows.some((d) => d.state === "this_device_setting_up");
-    } catch { /* cells still starting: keep what we had */ }
+      settingUp.value = await invoke<boolean>("joined_setup_pending");
+    } catch { /* locked */ }
   });
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ cleanup }) => {
@@ -101,9 +100,10 @@ export default component$(() => {
       try { identity.value = await invoke<VaultIdentity>("get_identity"); } catch { /* locked */ }
     });
     const unlistenDevices = await listen("devices-changed", checkSettingUp);
+    const unlistenSetup = await listen("setup-complete", checkSettingUp);
     checkSettingUp();
-    const everyMinute = setInterval(checkSettingUp, 60_000);
-    cleanup(() => { unlisten(); unlistenProfile(); unlistenDevices(); clearInterval(everyMinute); });
+    const everyHalfMinute = setInterval(() => { if (settingUp.value) checkSettingUp(); }, 30_000);
+    cleanup(() => { unlisten(); unlistenProfile(); unlistenDevices(); unlistenSetup(); clearInterval(everyHalfMinute); });
   });
   // Soft update notice: a newer Vault is shipped. Dismissed per version.
   const vaultUpdate = useSignal<{ current: string; latest: string | null; summary: string | null; download_url: string; update_available: boolean } | null>(null);

@@ -1424,6 +1424,17 @@ pub fn can_hand_over(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
     Ok(cfg.data_key.is_some() && cfg.backup_key.is_some() && cfg.private_network_seed.is_some())
 }
 
+/// A device that joined an identity, before its first full round has
+/// brought the other devices' profile, connections and backups over.
+#[tauri::command]
+pub fn joined_setup_pending(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    let joined = {
+        let config = state.vault_config.lock().unwrap();
+        config.as_ref().ok_or("vault_locked")?.joined_existing
+    };
+    Ok(joined && !crate::paths::setup_done_path(&state.identity_root()).exists())
+}
+
 /// Whether this conductor session's cells have answered yet. After a start
 /// the conductor is "ready" (admin socket up) minutes before its cells
 /// are: kitsune2 rebuilds each cell's DHT model first, one hash sector at a
@@ -1711,6 +1722,10 @@ pub(crate) async fn run_devices_round(state: &Arc<AppState>, app: &tauri::AppHan
 /// One round. `full` adds what this device says about itself (its record,
 /// its backups); the light pass only follows what other devices changed.
 async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHandle, full: bool) -> DevicesRound {
+    // A joined device is "being set up" until one full round has brought
+    // everything over without a step failing; then the marker is written
+    // and the Overview's banner goes.
+    let mut complete = full;
     {
         // Removed by another device of the identity: stand down. Nothing is
         // erased; the lock screen offers what comes next.
@@ -1737,7 +1752,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                     let _ = devices_app.emit("devices-changed", serde_json::json!({ "added": Vec::<String>::new() }));
                 }
                 Ok(false) => {}
-                Err(e) => log::info!("This device's record was not written: {}", e),
+                Err(e) => { complete = false; log::info!("This device's record was not written: {}", e); }
             }
             // The first device's picture reaches the others as a record.
             match ensure_profile_picture_record(devices_state).await {
@@ -1752,7 +1767,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                 let _ = devices_app.emit("profile-changed", serde_json::json!({}));
             }
             Ok(false) => {}
-            Err(e) => log::info!("Profile not checked against other devices: {}", e),
+            Err(e) => { complete = false; log::info!("Profile not checked against other devices: {}", e); }
         }
         // Records from another device have arrived: the restore-or-fresh
         // question answers itself (the data is coming from the devices).
@@ -1809,7 +1824,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                 let _ = devices_app.emit("connections-changed", serde_json::json!({}));
             }
             Ok(false) => {}
-            Err(e) => log::info!("Connections not checked: {}", e),
+            Err(e) => { complete = false; log::info!("Connections not checked: {}", e); }
         }
         // App backups: say what this device holds, keep copies of what the
         // other devices hold.
@@ -1824,8 +1839,19 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                 );
                 let _ = devices_app.emit("backups-changed", serde_json::json!({}));
             }
-            Ok(_) => {}
-            Err(e) => log::info!("Backups not checked: {}", e),
+            Ok(outcome) => {
+                if outcome.waiting > 0 { complete = false; }
+            }
+            Err(e) => { complete = false; log::info!("Backups not checked: {}", e); }
+        }
+    }
+    if complete {
+        let joined = devices_state.vault_config.lock().unwrap().as_ref().map(|c| c.joined_existing).unwrap_or(false);
+        let marker = crate::paths::setup_done_path(&devices_state.identity_root());
+        if joined && !marker.exists() {
+            let _ = std::fs::write(&marker, b"");
+            log::info!("This device has everything from the other devices");
+            let _ = devices_app.emit("setup-complete", serde_json::json!({}));
         }
     }
     DevicesRound::Done
