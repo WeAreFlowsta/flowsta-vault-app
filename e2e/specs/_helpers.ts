@@ -68,6 +68,22 @@ export const stillBusy = () =>
 export const PASSWORD = "Ui-journey-password-1!";
 const ORIGIN = "https://ourtest.flowsta.com";
 /** The window's Vault answers on the first port; a second device on the next. */
+/** A conductor that already holds data rebuilds its DHT model at every start,
+ *  one hash sector at a time over the whole database - minutes on staging,
+ *  longer as the network grows. Steps that need the cells after a restart
+ *  wait this long, and timed() prints what it actually took. */
+export const COLD_START_MS = 15 * 60_000;
+export async function timed<T>(what: string, run: () => Promise<T>): Promise<T> {
+  const t0 = Date.now();
+  const out = await run();
+  console.log(`[timed] ${what}: ${Math.round((Date.now() - t0) / 1000)}s`);
+  return out;
+}
+/** The Vault locks itself after 15 minutes without input. A person waiting
+ *  through a cold start moves the mouse now and then; a long wait does too. */
+export const nudge = () => browser.execute(() => { document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })); });
+export const waitAwake = (cond: () => Promise<boolean>, opts: Parameters<typeof browser.waitUntil>[1]) =>
+  browser.waitUntil(async () => { await nudge(); return cond(); }, opts);
 export const PORT_A = 27777;
 export const PORT_B = 27778;
 const TINY_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
@@ -126,4 +142,23 @@ export function stopSecondDevice() {
     }
   } catch { /* nothing listening */ }
   second = null;
+}
+
+/** The wizard's create path, from its first screen to "Your Vault is ready". */
+export async function createIdentityInWizard(name: string, email: string) {
+  await click("wizard-create");
+  await fill('[data-testid="create-email"]', email);
+  await fill('[data-testid="create-email2"]', email);
+  await fill('[data-testid="create-name"]', name);
+  await fill('[data-testid="create-password"]', PASSWORD);
+  await fill('[data-testid="create-password2"]', PASSWORD);
+  await click("create-continue");
+  await browser.waitUntil(async () => (await $$('[data-testid="phrase-word"]')).length === 24, { timeout: 60_000, timeoutMsg: "the phrase never appeared" });
+  const words: string[] = await browser.execute(() => [...document.querySelectorAll('[data-testid="phrase-word"]')].map((e) => (e as HTMLElement).innerText.trim()));
+  await click("phrase-saved");
+  await browser.waitUntil(async () => (await $$('[data-testid="verify-word"]')).length > 0, { timeout: 30_000 });
+  const asked: number[] = await browser.execute(() => [...document.querySelectorAll('[data-testid="verify-word"]')].map((e) => Number((e as HTMLElement).dataset.word)));
+  for (const i of asked) await fill(`[data-testid="verify-word"][data-word="${i}"]`, words[i]);
+  await click("create-finish");
+  await (await byId("wizard-done")).waitForDisplayed({ timeout: 300_000, timeoutMsg: "the identity was not ready within 5 minutes" });
 }

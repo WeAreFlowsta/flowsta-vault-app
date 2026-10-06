@@ -132,8 +132,9 @@ export const config: WebdriverIO.Config = {
     ],
   ],
   framework: "mocha",
-  // A first start installs the networks; joining waits on another device.
-  mochaOpts: { ui: "bdd", timeout: 600_000, bail: true },
+  // A first start installs the networks; joining waits on another device;
+  // a restart rebuilds the DHT model (COLD_START_MS in _helpers).
+  mochaOpts: { ui: "bdd", timeout: 1_500_000, bail: true },
   reporters: ["spec"],
   logLevel: "warn",
   waitforTimeout: 30_000,
@@ -142,7 +143,8 @@ export const config: WebdriverIO.Config = {
     holdIdleLock();
     stopTestApps();
     reapSidecars();
-    rmSync(PROFILE, { recursive: true, force: true });
+    // A probe run keeps what the last run left (VAULT_E2E_KEEP_PROFILE=1).
+    if (!process.env.VAULT_E2E_KEEP_PROFILE) rmSync(PROFILE, { recursive: true, force: true });
     rmSync(SHOTS, { recursive: true, force: true });
     mkdirSync(SHOTS, { recursive: true });
   },

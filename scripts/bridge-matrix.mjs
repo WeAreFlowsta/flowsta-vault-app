@@ -1378,7 +1378,9 @@ async function devicesLeg() {
 
   // 3. Records, devices, connections, backups reach B.
   record("B: A's record arrives", await until(async () => ((await op(b, { op: 'notes' })).notes || []).some((n) => n.text === 'from A, before B'), 240));
-  record('both list two devices', await until(async () => ((await op(a, { op: 'list' })).devices || []).length === 2 && ((await op(b, { op: 'list' })).devices || []).length === 2, 180));
+  // Real records only: a joined device lists itself as "being set up" before its own record exists.
+  const written = async (x) => ((await op(x, { op: 'list' })).devices || []).filter((d) => d.state !== 'this_device_setting_up').length;
+  record('both list two devices', await until(async () => (await written(a)) === 2 && (await written(b)) === 2, 180));
   record('B: lists itself without being asked to run a round', ((await op(b, { op: 'list' })).devices || []).some((d) => d.state === 'this_device'));
   // Signatures belong to the identity: made on either device, listed on both.
   record("B: lists the signature made on A before it joined", await until(async () => (await sigsOn(b)).some((x) => x.file_hash === hashSignedOnA), 300));

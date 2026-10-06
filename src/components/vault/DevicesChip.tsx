@@ -16,7 +16,7 @@ const RECENT_MS = 10 * 60 * 1000;
 /** The chip's text, colour and tooltip for a list of devices. */
 export function devicesSummary(devices: Row[], now = Date.now()): { label: string; color: string; title: string } {
   const live = devices.filter((d) => d.state !== "removed");
-  const others = live.filter((d) => d.state !== "this_device");
+  const others = live.filter((d) => d.state !== "this_device" && d.state !== "this_device_setting_up");
   if (others.length === 0) {
     return { label: "1 device", color: "bg-gray-500", title: "Only on this device" };
   }

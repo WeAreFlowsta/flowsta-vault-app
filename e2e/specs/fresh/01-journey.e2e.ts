@@ -70,6 +70,10 @@ describe("a new identity", () => {
     await note("overview");
     const text = await visibleText();
     expect(text).toContain("UI Journey");
+    // The Holochain row says "still starting" until the cells answer, then plain "Holochain".
+    const hc = await byId("holochain-status");
+    await browser.waitUntil(async () => (await hc.getAttribute("data-cells-ready")) === "1", { timeout: 120_000, timeoutMsg: "the Holochain row never reported its cells ready" });
+    expect(await hc.getText()).toBe("Holochain");
   });
 });
 

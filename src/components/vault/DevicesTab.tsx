@@ -14,7 +14,7 @@ export interface DeviceRow {
   name: string;
   platform: string;
   added_at: number;
-  state: "this_device" | "up_to_date" | "last_synced" | "not_seen_since" | "needs_update" | "removed";
+  state: "this_device" | "this_device_setting_up" | "up_to_date" | "last_synced" | "not_seen_since" | "needs_update" | "removed";
   at?: number;
 }
 
@@ -43,6 +43,7 @@ function day(ms: number): string {
 export function deviceLine(d: DeviceRow): string {
   switch (d.state) {
     case "this_device": return "This device";
+    case "this_device_setting_up": return "This device - being set up";
     case "up_to_date": return d.at ? `Up to date - last seen ${dayAndTime(d.at)}` : "Up to date";
     case "last_synced": return `Has everything up to ${dayAndTime(d.at ?? 0)}`;
     case "not_seen_since": return `Not seen since ${day(d.at ?? 0)}`;
@@ -64,6 +65,7 @@ function claimError(e: unknown): string {
 
 export const DevicesTab = component$(() => {
   const devices = useSignal<DeviceRow[] | null>(null);
+  const checking = useSignal(false);
   const adding = useSignal(false);
   const code = useSignal("");
   const busy = useSignal(false);
@@ -122,7 +124,9 @@ export const DevicesTab = component$(() => {
         setTimeout(() => { added.value = ""; }, 8_000);
       }
     } catch {
-      /* the network is still starting: the list fills in on the next pass */
+      // The cells are still starting (minutes after opening): say so
+      // rather than spin as if the list were a moment away.
+      checking.value = true;
     }
     try {
       standing.value = await invoke<Standing>("device_standing");
@@ -322,7 +326,7 @@ export const DevicesTab = component$(() => {
               <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
             </svg>
-            <span>Loading your devices...</span>
+            <span>{checking.value ? "Checking your devices - this takes a few minutes after opening." : "Loading your devices..."}</span>
           </p>
         ) : devices.value.length === 0 ? (
           <p class="text-sm text-gray-400">This device appears here once its network has started.</p>
@@ -335,11 +339,11 @@ export const DevicesTab = component$(() => {
                     {d.name}
                     <span class="ml-2 text-xs font-normal text-gray-500">{PLATFORM_NAMES[d.platform] || d.platform}</span>
                   </p>
-                  <p class={["text-xs", d.state === "up_to_date" || d.state === "this_device" ? "text-green-400" : d.state === "removed" ? "text-gray-500" : "text-amber-300"].join(" ")}>
+                  <p class={["text-xs", d.state === "up_to_date" || d.state === "this_device" ? "text-green-400" : d.state === "removed" || d.state === "this_device_setting_up" ? "text-gray-400" : "text-amber-300"].join(" ")}>
                     {deviceLine(d)}
                   </p>
                 </div>
-                {d.state !== "this_device" && d.state !== "removed" && (
+                {d.state !== "this_device" && d.state !== "this_device_setting_up" && d.state !== "removed" && (
                   <PillButton accent="red" onClick$={() => { removing.value = d; error.value = ""; }}>Remove</PillButton>
                 )}
               </li>

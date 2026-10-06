@@ -82,6 +82,9 @@ pub fn removal_logical_id(install_id: &str, conductor_key: &str) -> String {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum DeviceState {
     ThisDevice,
+    /// This device, before its first record is written (a device that just
+    /// joined, until its first round).
+    ThisDeviceSettingUp,
     /// Holds everything; last heard from at this time (ms).
     UpToDate { at: u64 },
     /// Holds everything up to this time (ms).
@@ -481,7 +484,19 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
             added_at: d.added_at,
         })
         .collect();
-    rows.sort_by_key(|r| (r.state != DeviceState::ThisDevice, r.state == DeviceState::Removed));
+    // A device that joined lists itself before its first record exists
+    // (the other devices' records arrive first), so the list never reads
+    // as "the other device only" on the device being set up.
+    if !rows.iter().any(|r| r.install_id == me) {
+        rows.push(DeviceRow {
+            install_id: me.clone(),
+            name: device_name(),
+            platform: std::env::consts::OS.to_string(),
+            added_at: now,
+            state: DeviceState::ThisDeviceSettingUp,
+        });
+    }
+    rows.sort_by_key(|r| (!matches!(r.state, DeviceState::ThisDevice | DeviceState::ThisDeviceSettingUp), r.state == DeviceState::Removed));
     Ok(rows)
 }
 

@@ -35,6 +35,10 @@ export default component$(() => {
   const connectionStatus = useSignal<ConnectionStatus>("offline");
   useContextProvider(connectionStatusContext, connectionStatus);
   const conductorStatus = useSignal<"stopped" | "starting" | "ready" | "error">("stopped");
+  // The conductor is "ready" minutes before its cells answer (the DHT
+  // model is rebuilt per cell at every start). Until then the row pulses
+  // blue and says so; nothing read in that window is final.
+  const cellsReady = useSignal(false);
   /** Set by an unlock that opened a different identity than the last one:
    *  the previous identity's name. Shown while the conductor starts. */
   const switchNotice = useSignal<string | null>(null);
@@ -573,6 +577,27 @@ export default component$(() => {
     });
   });
 
+  // Cells answering: polled while the conductor is up and they are not.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track, cleanup }) => {
+    const s = track(() => screen.value);
+    const status = track(() => conductorStatus.value);
+    cellsReady.value = false;
+    if (s !== "dashboard" || status !== "ready") return;
+    let stopped = false;
+    const poll = () => {
+      invoke<boolean>("cells_ready")
+        .then((ready) => {
+          if (stopped) return;
+          cellsReady.value = ready;
+          if (!ready) setTimeout(poll, 5_000);
+        })
+        .catch(() => { if (!stopped) setTimeout(poll, 5_000); });
+    };
+    poll();
+    cleanup(() => { stopped = true; });
+  });
+
   // Listen for auth-request events from the IPC server
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ track, cleanup }) => {
@@ -960,6 +985,20 @@ export default component$(() => {
     const id = setInterval(() => {
       if (!signaturesLoaded.value) refreshSignatures();
     }, 30_000);
+    cleanup(() => clearInterval(id));
+  });
+
+  // Once loaded, other keys may still sign as this identity (another device,
+  // the web account). Their records arrive without any event here, so the
+  // list re-reads every two minutes while the window is open; the read is
+  // coalesced and cheap once the cells are warm.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track, cleanup }) => {
+    const s = track(() => screen.value);
+    if (s !== "dashboard") return;
+    const id = setInterval(() => {
+      if (signaturesLoaded.value && !linkedConfirmedNone.value) refreshSignatures();
+    }, 120_000);
     cleanup(() => clearInterval(id));
   });
 
@@ -1568,20 +1607,24 @@ export default component$(() => {
             <div class="mb-3 flex items-center justify-between gap-2">
             <div
               class="flex min-w-0 items-center gap-2"
-              title={conductorMessage.value || undefined}
+              title={conductorStatus.value === "ready" && !cellsReady.value
+                ? "Still starting - your records answer a few minutes after opening or switching identity. What you see meanwhile is what this device last saw."
+                : (conductorMessage.value || undefined)}
+              data-testid="holochain-status"
+              data-cells-ready={cellsReady.value ? "1" : "0"}
             >
               <span class="relative flex h-2.5 w-2.5 shrink-0">
                 {(conductorStatus.value === "starting" || conductorStatus.value === "ready") && (
                   <span class={[
                     "absolute inline-flex h-full w-full animate-ping rounded-full opacity-75",
-                    conductorStatus.value === "ready" ? "bg-green-400" : "bg-blue-400",
+                    conductorStatus.value === "ready" && cellsReady.value ? "bg-green-400" : "bg-blue-400",
                   ].join(" ")} />
                 )}
                 <span
                   class={[
                     "relative inline-flex h-2.5 w-2.5 rounded-full",
                     conductorStatus.value === "ready"
-                      ? "bg-green-400"
+                      ? (cellsReady.value ? "bg-green-400" : "bg-blue-400")
                       : conductorStatus.value === "starting"
                         ? "bg-blue-400"
                         : conductorStatus.value === "error"
@@ -1597,10 +1640,12 @@ export default component$(() => {
                       : (conductorMessage.value || "Starting..."))
                   : conductorStatus.value === "error"
                     ? "Holochain stopped"
-                    : "Holochain"}
+                    : conductorStatus.value === "ready" && !cellsReady.value
+                      ? "Holochain - still starting"
+                      : "Holochain"}
               </span>
             </div>
-            <DevicesChip ready={conductorStatus.value === "ready"} />
+            <DevicesChip ready={conductorStatus.value === "ready" && cellsReady.value} />
             </div>
             {conductorStatus.value === "error" && conductorMessage.value && (
               <p class="mb-3 rounded-md border border-red-900/60 bg-red-950/40 px-2 py-1.5 text-[11px] leading-snug text-red-200 line-clamp-4">

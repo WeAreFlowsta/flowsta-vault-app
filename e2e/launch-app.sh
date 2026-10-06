@@ -9,6 +9,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export FLOWSTA_VAULT_DATA_DIR="${VAULT_E2E_DATA_DIR:-$HERE/profile/a}"
 mkdir -p "$FLOWSTA_VAULT_DATA_DIR"
+# The webview's storage (localStorage, caches) and the app's log follow the
+# XDG dirs, not the data dir: point them into the profile too, or the test
+# app shares the installed Vault's localStorage and log file. Each instance
+# then has its own log: <profile>/xdg/com.flowsta.vault/logs/.
+export XDG_DATA_HOME="$FLOWSTA_VAULT_DATA_DIR/xdg"
+export XDG_CACHE_HOME="$FLOWSTA_VAULT_DATA_DIR/xdg-cache"
+mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
 # The dev endpoints, so a spec can drive a second device without a window.
 export FLOWSTA_VAULT_AUTO_APPROVE=1
 # On a Wayland desktop the window is an XWayland window, which xdotool and

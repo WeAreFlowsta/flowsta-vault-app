@@ -179,6 +179,8 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
                   type="button"
                   disabled={switching.value || loading.value}
                   onClick$={() => chooseIdentity(e.key)}
+                  data-testid="identity-row"
+                  data-name={e.label?.display_name ?? ""}
                   class={[
                     "flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors",
                     e.active
@@ -311,6 +313,7 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
               <button
                 type="button"
                 class="text-xs text-gray-500 hover:text-gray-400 transition-colors"
+                data-testid="identity-add"
                 onClick$={props.onAddIdentity$}
               >
                 Add another identity

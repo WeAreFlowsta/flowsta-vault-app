@@ -405,6 +405,14 @@ pub fn start_conductor_process(
     let holochain_bin = crate::resolve_sidecar_bin("vault-holochain");
     log::info!("Using holochain binary: {:?}", holochain_bin);
 
+    // The conductor logs nothing unless RUST_LOG is set, and its stderr file
+    // is the only place a stuck cell start or a network fault explains
+    // itself. Warnings by default; a developer's own RUST_LOG wins. The
+    // child inherits our environment on every platform.
+    if std::env::var_os("RUST_LOG").is_none() {
+        std::env::set_var("RUST_LOG", "warn");
+    }
+
     // On Windows the conductor's console is created hidden (process_ext).
     // The `0xc0000005` access violation seen on first install of the
     // signing DNA happens regardless of window state - an upstream

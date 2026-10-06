@@ -1413,6 +1413,17 @@ pub fn get_conductor_status(state: State<'_, Arc<AppState>>) -> ConductorStatus 
     state.conductor_status.lock().unwrap().clone()
 }
 
+/// Whether this conductor session's cells have answered yet. After a start
+/// the conductor is "ready" (admin socket up) minutes before its cells
+/// are: kitsune2 rebuilds each cell's DHT model first, one hash sector at a
+/// time over the whole database, and every zome call meanwhile returns
+/// `CellDisabled`. The first authorized credential is the first answer;
+/// the cache is emptied at every conductor start and at lock.
+#[tauri::command]
+pub fn cells_ready(state: State<'_, Arc<AppState>>) -> bool {
+    !state.cell_credentials.lock().unwrap().is_empty()
+}
+
 /// Runtime conductor watchdog. Checks whether the conductor process is
 /// still alive; if it has exited, runs the full `start_holochain` flow
 /// again using the cached unlock-time credentials so the user doesn't
@@ -1709,7 +1720,11 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
         }
         if full {
             match crate::devices::publish_own(devices_state).await {
-                Ok(true) => log::info!("This device's record was written"),
+                Ok(true) => {
+                    log::info!("This device's record was written");
+                    // The list stops calling this device "being set up".
+                    let _ = devices_app.emit("devices-changed", serde_json::json!({ "added": Vec::<String>::new() }));
+                }
                 Ok(false) => {}
                 Err(e) => log::info!("This device's record was not written: {}", e),
             }

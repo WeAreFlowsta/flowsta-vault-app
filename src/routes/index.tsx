@@ -81,6 +81,17 @@ export default component$(() => {
   const confirmEmailInput2 = useSignal("");
   const confirmEmailNote = useSignal("");
   const confirmEmailBusy = useSignal(false);
+  // A device that joined is "being set up" until its first round has run:
+  // its own device record is not written yet, and picture, connections and
+  // app backups may still be in transit even when the email came with the
+  // code. The list says so (this_device_setting_up) and the banner follows it.
+  const settingUp = useSignal(false);
+  const checkSettingUp = $(async () => {
+    try {
+      const rows = await invoke<{ state: string }[]>("devices_list");
+      settingUp.value = rows.some((d) => d.state === "this_device_setting_up");
+    } catch { /* cells still starting: keep what we had */ }
+  });
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ cleanup }) => {
     const unlisten = await listen("activity-recorded", async () => {
@@ -89,7 +100,10 @@ export default component$(() => {
     const unlistenProfile = await listen("profile-changed", async () => {
       try { identity.value = await invoke<VaultIdentity>("get_identity"); } catch { /* locked */ }
     });
-    cleanup(() => { unlisten(); unlistenProfile(); });
+    const unlistenDevices = await listen("devices-changed", checkSettingUp);
+    checkSettingUp();
+    const everyMinute = setInterval(checkSettingUp, 60_000);
+    cleanup(() => { unlisten(); unlistenProfile(); unlistenDevices(); clearInterval(everyMinute); });
   });
   // Soft update notice: a newer Vault is shipped. Dismissed per version.
   const vaultUpdate = useSignal<{ current: string; latest: string | null; summary: string | null; download_url: string; update_available: boolean } | null>(null);
@@ -525,14 +539,14 @@ export default component$(() => {
       {/* A restored vault holds no email: Flowsta keeps only its hash, so the
           person re-enters the address and the server confirms it. Until
           then no app can be offered the email. */}
-      {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && identity.value.joined_existing && (
+      {identity.value && identity.value.hosting_model === "device-hosted" && identity.value.joined_existing && (!identity.value.web_email || settingUp.value) && (
         <Callout intent="info" title="Your private data is on its way" class="mb-6">
           <p class="flex items-center gap-2">
             <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
               <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
             </svg>
-            <span>Your records, connections, email and app backups arrive from your other devices. Nothing to do.</span>
+            <span>{identity.value.web_email ? "Your picture, connections and app backups arrive from your other devices. Nothing to do." : "Your records, connections, email and app backups arrive from your other devices. Nothing to do."}</span>
           </p>
         </Callout>
       )}

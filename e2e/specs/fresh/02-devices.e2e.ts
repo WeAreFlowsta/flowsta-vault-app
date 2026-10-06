@@ -4,7 +4,7 @@
 // what the person SEES on the first device while the second one joins,
 // signs, and while this one locks.
 import { resolve } from "node:path";
-import { byId, click, copyProblems, devOp, fill, PASSWORD, PORT_A, PORT_B, randomHash, shot, signOn, startSecondDevice, stillBusy, stopSecondDevice, vault, visibleText } from "../_helpers";
+import { byId, click, copyProblems, devOp, fill, PASSWORD, PORT_A, PORT_B, randomHash, shot, signOn, startSecondDevice, stillBusy, stopSecondDevice, vault, visibleText, COLD_START_MS, timed, waitAwake } from "../_helpers";
 
 const problems: string[] = [];
 const note = async (where: string) => { problems.push(...(await copyProblems(where))); };
@@ -55,8 +55,13 @@ describe("a second device", () => {
     await browser.pause(4_000);
     await shot("d-just-approved");
     await note("just approved");
-    await browser.waitUntil(async () => (await chipText()) === "2 devices", { timeout: 420_000, interval: 5_000, timeoutMsg: `never reached 2 devices; the chip says "${await chipText()}"` });
+    // This device was restarted at the top of this file, so its cells may
+    // still be coming up (see COLD_START_MS).
+    await timed("this device lists the new one", async () =>
+      waitAwake(async () => (await chipText()) === "2 devices", { timeout: COLD_START_MS, interval: 5_000, timeoutMsg: `never reached 2 devices; the chip says "${await chipText()}"` }));
     await shot("d-two-devices");
+    // Cells answered (the list came from them): the row is plain "Holochain" again.
+    expect(await (await byId("holochain-status")).getAttribute("data-cells-ready")).toBe("1");
     await browser.waitUntil(async () => !/Waiting for .* to start/.test(await visibleText()), { timeout: 120_000, timeoutMsg: 'still says "Waiting for ... to start" although both devices are listed' });
     await note("two devices");
     // The new device learns of this one a little after this one learns of it.
@@ -80,7 +85,7 @@ describe("a second device", () => {
     expect(there.stage).toBe("done");
     await goto("/");
     const count = await byId("signatures-count");
-    await browser.waitUntil(async () => (await count.getAttribute("data-loaded")) === "1" && (await count.getText()).trim() === "2", {
+    await waitAwake(async () => (await count.getAttribute("data-loaded")) === "1" && (await count.getText()).trim() === "2", {
       timeout: 420_000, interval: 5_000,
       timeoutMsg: `the Overview never showed 2 signatures; it shows "${await count.getText()}"`,
     });
