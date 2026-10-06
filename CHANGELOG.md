@@ -5,6 +5,92 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-10-06
+
+### Highlights
+- **Your identity on every device you own.** Add a second Vault with a code
+  shown on the new device and typed on one you already have, or with your
+  recovery phrase. It becomes your identity as fully as the first: it signs
+  in, approves, signs files and holds your private data. Your records,
+  profile picture, connections, remembered sites, app backups and activity
+  follow by themselves. Settings → Devices lists your devices, shows when
+  each was last seen, and removes one.
+- **Only you can add devices.** Your recovery phrase is the key to adding a
+  device. An identity made before this release gets that protection when
+  you enter the phrase once; it takes effect in 7 days, so nobody who merely
+  holds one of your devices can get there first.
+- **A locked Vault keeps syncing.** Lock it and your other devices keep
+  receiving its changes and it keeps receiving theirs. "Lock and stop
+  syncing" stops that too. Nothing is approved while locked.
+- **Removing a device holds.** A removed device can no longer sign in or
+  approve as you and stops syncing; the next time it is on it says so and
+  offers to be added back or erased. Your other devices are told when a
+  device is added or removed.
+- **Apps follow you across devices.** An app you connected is known on your
+  other devices: when it links there, the Vault says you already use it on
+  another of your devices, and a Disconnect made anywhere disconnects it
+  everywhere. Apps can read their newest backup from any of your devices.
+
+### Added
+- Settings → Devices: add a device (a code from the new device, typed here),
+  enter your recovery phrase once, who can add devices, remove, and each
+  device's standing ("Up to date - last seen", "Syncing a recent change",
+  "Has everything up to", "Not seen since", "Being set up").
+- The lock screen: "Locked - still syncing" and "Lock and stop syncing"; a
+  removed device is told and offered "Add this device back" or "Erase".
+- Joining by code: the new device's screens say what is happening ("Code
+  received. Choose Add device on your other device."), and the device that
+  approves shows "Waiting for <device> to start..." then "<device> has
+  started and is one of your devices." A system notification tells your
+  other devices a device was added.
+- Joining by recovery phrase: the done screen narrates "Looking for your
+  other devices..." → "Found <device>. Your things are arriving." →
+  "Your things are arriving from your other devices"; "Lost your only
+  device? Restore from an export file" is a quiet link.
+- A device that joined says your private data is on its way until it has all
+  arrived, profile picture included.
+- One Activity feed across your devices, each line marked with its device.
+- Signatures made on any of your devices are listed on all of them, and a
+  signature made elsewhere appears here within a couple of minutes.
+- The Backups card and Your Data show the copies this device keeps of the
+  backups made on your other devices ("made on <device>, kept here and in
+  your exports").
+- Export Data is format 3.0: every key this device holds and the copies of
+  your other devices' app backups.
+- The status line reads "Holochain - still starting" until your records
+  answer, which takes a few minutes after opening or switching identity;
+  the devices chip and Settings → Devices say they are checking meanwhile.
+- For apps: `/backup/retrieve` takes `across: "devices"` and answers
+  `from_device`; `/backup/list` adds `other_devices`. SDK
+  `@flowsta/holochain` 3.7.0 carries both.
+
+### Changed
+- Connections shows one row per app: its link and what it may see, whether
+  it signs you in without asking, and its requests, with one Disconnect.
+- The link dialog says "You already use this app on another of your
+  devices" when you do.
+- Choosing an identity on the lock screen puts the cursor in the password
+  field.
+- The app says "device" throughout. After entering your recovery phrase
+  once the confirmation reads "Done."
+- The Vault's network node writes its own log at warning level.
+
+### Fixed
+- Signatures from another identity on the same machine no longer appear in
+  an identity's list, and a row an earlier session left in the cache is
+  dropped at unlock.
+- Opening the Vault while its network is still starting no longer reads as
+  "no signatures"; the list keeps what it has and fills in.
+- The devices count on a device that already knows its siblings shows that
+  count from the start, in grey, until the round confirms.
+- A removed device no longer counts against the sign-in rate limit of every
+  device on the same network.
+- A removal written while the removed device was offline is no longer
+  undone by that device's next routine refresh.
+- Export filenames use the local date.
+
+The five betas (2026-10-05 to 2026-10-06) are listed below for the record.
+
 ## [1.6.0-beta5] - 2026-10-06
 
 Fifth beta of multi-device. Test with a fresh identity, not the one you rely on.
