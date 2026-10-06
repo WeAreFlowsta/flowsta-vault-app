@@ -106,10 +106,21 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
     }
   });
 
+  // Choosing an identity is the first half of unlocking it: the password
+  // field takes focus so the person just types.
+  const focusPassword = $(() => {
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLInputElement>('[data-testid="unlock-password"]')?.focus();
+    });
+  });
+
   const chooseIdentity = $(async (key: string) => {
     if (switching.value || loading.value) return;
     const current = identities.value.find((e) => e.active);
-    if (current?.key === key) return;
+    if (current?.key === key) {
+      await focusPassword();
+      return;
+    }
     switching.value = true;
     error.value = "";
     try {
@@ -121,6 +132,7 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
       error.value = String(e);
     } finally {
       switching.value = false;
+      await focusPassword();
     }
   });
 

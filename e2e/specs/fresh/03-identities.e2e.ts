@@ -25,6 +25,8 @@ const unlockAs = async (name: string) => {
   const row = await $(`[data-testid="identity-row"][data-name="${name}"]`);
   await row.waitForDisplayed({ timeout: 30_000 });
   await row.click();
+  // Choosing an identity puts the cursor in the password field.
+  await browser.waitUntil(async () => browser.execute(() => document.activeElement?.getAttribute("data-testid") === "unlock-password"), { timeout: 10_000, timeoutMsg: "the password field did not take focus after choosing an identity" });
   await fill('[data-testid="unlock-password"]', PASSWORD);
   await click("unlock-submit");
   await (await byId("devices-chip")).waitForDisplayed({ timeout: 300_000 });
