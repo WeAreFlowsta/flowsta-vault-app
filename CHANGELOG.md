@@ -5,6 +5,21 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0-beta4] - 2026-10-06
+
+Fourth beta of multi-device. Test with a fresh identity, not the one you rely on.
+
+### Fixed
+- Another identity's signatures no longer linger in the list from an earlier session on the same machine.
+- Opening the Vault while its network is still starting no longer reads as "no signatures"; the list keeps what it has and fills in.
+- A signature made on another of your devices appears here within a couple of minutes without any action.
+- The devices count on a device that already knows its siblings shows that count from the start.
+
+### Changed
+- The status line reads "Holochain - still starting" until your records answer; this takes a few minutes after opening or switching identity. The devices chip and Settings → Devices say they are checking meanwhile.
+- A device being added lists itself under Settings → Devices as "being set up" until its first record is written, and the Overview says what is still on its way.
+- Settings → Devices shows when each device was last seen.
+
 ## [1.6.0-beta3] - 2026-10-05
 
 Third beta of multi-device. Test with a fresh identity, not the one you rely on.
