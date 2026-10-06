@@ -39,13 +39,17 @@ function day(ms: number): string {
   return new Date(ms).toLocaleDateString(undefined, { day: "numeric", month: "long" });
 }
 
+/** A device that said what it holds this recently is catching up, not behind. */
+export const RECENT_MS = 10 * 60 * 1000;
+export const isCatchingUp = (d: DeviceRow, now = Date.now()) => d.state === "last_synced" && now - (d.at ?? 0) <= RECENT_MS;
+
 /** How current a device is, in plain words. */
 export function deviceLine(d: DeviceRow): string {
   switch (d.state) {
     case "this_device": return "This device";
     case "this_device_setting_up": return "This device - being set up";
     case "up_to_date": return d.at ? `Up to date - last seen ${dayAndTime(d.at)}` : "Up to date";
-    case "last_synced": return `Has everything up to ${dayAndTime(d.at ?? 0)}`;
+    case "last_synced": return isCatchingUp(d) ? "Syncing a recent change" : `Has everything up to ${dayAndTime(d.at ?? 0)}`;
     case "not_seen_since": return `Not seen since ${day(d.at ?? 0)}`;
     case "needs_update": return "Needs the Vault update to sync";
     case "removed": return "Removed";
@@ -118,6 +122,8 @@ export const DevicesTab = component$(() => {
   const load = $(async () => {
     try {
       devices.value = await invoke<DeviceRow[]>("devices_list");
+      // The chip shows the same list at the same moment.
+      window.dispatchEvent(new CustomEvent("devices-listed", { detail: devices.value }));
       // The device approved here has started: the waiting line goes.
       if (addedInstall.value && devices.value.some((d) => d.install_id === addedInstall.value && d.state !== "removed")) {
         const name = devices.value.find((d) => d.install_id === addedInstall.value)?.name || "The new device";
@@ -351,7 +357,7 @@ export const DevicesTab = component$(() => {
                     {d.name}
                     <span class="ml-2 text-xs font-normal text-gray-500">{PLATFORM_NAMES[d.platform] || d.platform}</span>
                   </p>
-                  <p class={["text-xs", d.state === "up_to_date" || d.state === "this_device" ? "text-green-400" : d.state === "removed" || d.state === "this_device_setting_up" ? "text-gray-400" : "text-amber-300"].join(" ")}>
+                  <p class={["text-xs", d.state === "up_to_date" || d.state === "this_device" ? "text-green-400" : d.state === "removed" || d.state === "this_device_setting_up" || isCatchingUp(d) ? "text-gray-400" : "text-amber-300"].join(" ")}>
                     {deviceLine(d)}
                   </p>
                 </div>

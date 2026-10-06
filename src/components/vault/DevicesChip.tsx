@@ -6,12 +6,10 @@
 import { component$, useSignal, useVisibleTask$ } from "@builder.io/qwik";
 import { useNavigate } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
-import { deviceLine } from "~/components/vault/DevicesTab";
+import { deviceLine, RECENT_MS } from "~/components/vault/DevicesTab";
 
 type Row = Parameters<typeof deviceLine>[0];
 
-/** A device that said what it holds this recently is still catching up, not behind. */
-const RECENT_MS = 10 * 60 * 1000;
 
 /** The chip's text, colour and tooltip for a list of devices. */
 export function devicesSummary(devices: Row[], now = Date.now()): { label: string; color: string; title: string } {
@@ -52,11 +50,15 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
     const id = setInterval(load, 30_000);
     // A change made on this device (remove, approve) or heard from another.
     window.addEventListener("devices-changed-here", load);
+    // The Devices tab just loaded the list: show the same one now.
+    const listed = (e: Event) => { devices.value = (e as CustomEvent<Row[]>).detail; };
+    window.addEventListener("devices-listed", listed);
     let unlisten: (() => void) | null = null;
     import("@tauri-apps/api/event").then(({ listen }) => listen("devices-changed", load).then((u) => { unlisten = u; })).catch(() => {});
     cleanup(() => {
       clearInterval(id);
       window.removeEventListener("devices-changed-here", load);
+      window.removeEventListener("devices-listed", listed);
       if (unlisten) unlisten();
     });
   });
