@@ -101,9 +101,11 @@ export default component$(() => {
     });
     const unlistenDevices = await listen("devices-changed", checkSettingUp);
     const unlistenSetup = await listen("setup-complete", checkSettingUp);
+    const unlistenBackups = await listen("backups-changed", loadKept);
     checkSettingUp();
+    loadKept();
     const everyHalfMinute = setInterval(() => { if (settingUp.value) checkSettingUp(); }, 30_000);
-    cleanup(() => { unlisten(); unlistenProfile(); unlistenDevices(); unlistenSetup(); clearInterval(everyHalfMinute); });
+    cleanup(() => { unlisten(); unlistenProfile(); unlistenDevices(); unlistenSetup(); unlistenBackups(); clearInterval(everyHalfMinute); });
   });
   // Soft update notice: a newer Vault is shipped. Dismissed per version.
   const vaultUpdate = useSignal<{ current: string; latest: string | null; summary: string | null; download_url: string; update_available: boolean } | null>(null);
@@ -119,6 +121,17 @@ export default component$(() => {
     } catch { /* offline or older API - no notice */ }
   });
   const backupStats = useSignal<BackupStats | null>(null);
+  // Copies this device keeps of the backups made on the person's other
+  // devices - the Backups card counts them too, so a second device never
+  // says "No backups yet" while it holds them.
+  const keptFromDevices = useSignal<{ name: string; backups: number }[]>([]);
+  const loadKept = $(async () => {
+    try {
+      const kept = await invoke<{ install_id: string; backups: number; bytes: number }[]>("backups_kept_from_devices");
+      const devices = kept.length ? await invoke<{ install_id: string; name: string }[]>("devices_list").catch(() => []) : [];
+      keptFromDevices.value = kept.map((k) => ({ name: devices.find((d) => d.install_id === k.install_id)?.name || "another device", backups: k.backups }));
+    } catch { /* locked */ }
+  });
   const linkedApps = useSignal<LinkedApp[]>([]);
   // One entry per distinct app (collapses multiple installs/agents of the
   // same app - see dedupeLinkedApps).
@@ -807,13 +820,20 @@ export default component$(() => {
             <span class="text-sm font-medium">Backups</span>
           </div>
           <p class="text-3xl font-bold text-white">
-            {stats?.total_backups ?? 0}
+            {(stats?.total_backups ?? 0) + keptFromDevices.value.reduce((n, k) => n + k.backups, 0)}
           </p>
           <p class="mt-1 text-xs text-gray-500">
             {stats && stats.total_backups > 0
               ? `${formatBytes(stats.total_size)} across ${stats.app_count} app${stats.app_count !== 1 ? "s" : ""}`
-              : "No backups yet"}
+              : keptFromDevices.value.length > 0
+                ? "None made on this device yet"
+                : "No backups yet"}
           </p>
+          {keptFromDevices.value.map((k) => (
+            <p key={k.name} class="mt-0.5 text-xs text-gray-500">
+              {k.backups} kept from {k.name}
+            </p>
+          ))}
           {stats && stats.apps.length > 0 && (
             <p class="mt-0.5 text-xs italic text-gray-600">
               Last backup {timeAgo(Math.max(...stats.apps.map((a) => a.last_backup_at)))}
