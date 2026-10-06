@@ -2030,8 +2030,11 @@ async fn backup_list_handler(
     }
 
     // Get all stats then filter to only the caller's app.
+    // Only what was made on this device: the copies kept of the other
+    // devices' backups go under `other_devices` below, never in `apps`
+    // (an app reconciles its own index against these labels).
     let mut stats = crate::backup::get_backup_stats(&state.app_state.identity_root());
-    stats.apps.retain(|a| a.client_id == caller_client_id);
+    stats.apps.retain(|a| a.client_id == caller_client_id && a.from_device.is_none());
     stats.app_count = stats.apps.len();
     stats.total_backups = stats.apps.iter().map(|a| a.backup_count).sum();
     stats.total_size = stats.apps.iter().map(|a| a.total_size).sum();

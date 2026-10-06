@@ -40,7 +40,7 @@ export interface BackupRecordSummary {
 }
 
 export interface BackupStatsLike {
-  apps: { app_name: string; last_backup_at: number; latest_summary?: BackupRecordSummary | null }[];
+  apps: { app_name: string; last_backup_at: number; latest_summary?: BackupRecordSummary | null; from_device?: string }[];
 }
 
 export interface LinkedAppLike {
@@ -149,7 +149,8 @@ export function buildFeed(input: {
     });
   }
   for (const app of input.stats?.apps ?? []) {
-    if (app.last_backup_at > 0) {
+    // Copies kept of other devices' backups are not this device's doing.
+    if (app.last_backup_at > 0 && !app.from_device) {
       const summary = formatSummary(app.latest_summary);
       items.push({ key: `b${app.app_name}`, icon: "backup", timestamp: app.last_backup_at, text: "", strong: app.app_name, detail: summary ? `backed up ${summary}` : "backed up data" });
     }

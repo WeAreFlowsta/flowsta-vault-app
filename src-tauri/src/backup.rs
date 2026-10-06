@@ -199,6 +199,11 @@ pub struct AppBackupSummary {
     /// Omitted when empty, so older readers see the same shape as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Set on a copy this device keeps of backups made on another of the
+    /// person's devices (that device's install id); the backups made here
+    /// leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_device: Option<String>,
 }
 
 /// Overall backup stats for the vault.
@@ -621,16 +626,89 @@ pub fn list_app_backups(data_dir: &Path, client_id: &str) -> Result<Vec<BackupMe
 }
 
 /// Get backup stats for all apps.
+/// One app's backups in one folder, summarized - or None when the folder
+/// holds no backup file.
+fn summarize_app_dir(dir: &Path) -> Option<AppBackupSummary> {
+    let dir_name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+
+    let mut app_backups = 0;
+    let mut app_size = 0;
+    let mut last_at = 0i64;
+    let mut app_name = dir_name.clone();
+    let mut client_id = dir_name.clone();
+    let mut latest_summary: Option<BackupRecordSummary> = None;
+    let mut has_manifest = false;
+    let mut manifest_summary: Option<BackupRecordSummary> = None;
+    let mut conv_bases: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut labels: Vec<String> = Vec::new();
+
+    if let Ok(files) = std::fs::read_dir(dir) {
+        for file in files.filter_map(|f| f.ok()) {
+            let path = file.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("enc") {
+                continue;
+            }
+            if let Ok(json) = std::fs::read_to_string(&path) {
+                if let Ok(enc) = serde_json::from_str::<EncryptedBackup>(&json) {
+                    app_backups += 1;
+                    app_size += enc.meta.data_size;
+                    if let Some(label) = enc.meta.label.as_deref() {
+                        labels.push(label.to_string());
+                        if label == "manifest" {
+                            has_manifest = true;
+                        } else if let Some(rest) = label.strip_prefix("conv-") {
+                            // Multi-part objects ("....pN") are one
+                            // conversation.
+                            let base = rest
+                                .rsplit_once(".p")
+                                .filter(|(_, n)| n.chars().all(|c| c.is_ascii_digit()))
+                                .map(|(b, _)| b)
+                                .unwrap_or(rest);
+                            conv_bases.insert(base.to_string());
+                        }
+                    }
+                    if enc.meta.created_at > last_at {
+                        last_at = enc.meta.created_at;
+                        app_name = enc.meta.app_name.clone();
+                        client_id = enc.meta.client_id.clone();
+                        latest_summary = enc.meta.summary.clone();
+                    }
+                    // The manifest's summary describes the WHOLE
+                    // per-object backup - it wins over whichever
+                    // object happens to be newest.
+                    if enc.meta.label.as_deref() == Some("manifest") {
+                        if enc.meta.summary.is_some() {
+                            manifest_summary = enc.meta.summary.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if app_backups == 0 {
+        return None;
+    }
+    Some(AppBackupSummary {
+        client_id,
+        app_name,
+        backup_count: app_backups,
+        total_size: app_size,
+        last_backup_at: last_at,
+        latest_summary: manifest_summary.or(latest_summary),
+        has_manifest,
+        conversation_count: conv_bases.len(),
+        labels: {
+            labels.sort();
+            labels
+        },
+        from_device: None,
+    })
+}
+
 pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
     let base = backups_dir(data_dir);
-    if !base.exists() {
-        return BackupStats {
-            app_count: 0,
-            total_backups: 0,
-            total_size: 0,
-            apps: Vec::new(),
-        };
-    }
 
     let mut apps = Vec::new();
     let mut total_backups = 0;
@@ -641,82 +719,28 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
             if !entry.path().is_dir() {
                 continue;
             }
-
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-
-            let mut app_backups = 0;
-            let mut app_size = 0;
-            let mut last_at = 0i64;
-            let mut app_name = dir_name.clone();
-            let mut client_id = dir_name.clone();
-            let mut latest_summary: Option<BackupRecordSummary> = None;
-            let mut has_manifest = false;
-            let mut manifest_summary: Option<BackupRecordSummary> = None;
-            let mut conv_bases: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            let mut labels: Vec<String> = Vec::new();
-
-            if let Ok(files) = std::fs::read_dir(entry.path()) {
-                for file in files.filter_map(|f| f.ok()) {
-                    let path = file.path();
-                    if path.extension().and_then(|x| x.to_str()) != Some("enc") {
-                        continue;
-                    }
-                    if let Ok(json) = std::fs::read_to_string(&path) {
-                        if let Ok(enc) = serde_json::from_str::<EncryptedBackup>(&json) {
-                            app_backups += 1;
-                            app_size += enc.meta.data_size;
-                            if let Some(label) = enc.meta.label.as_deref() {
-                                labels.push(label.to_string());
-                                if label == "manifest" {
-                                    has_manifest = true;
-                                } else if let Some(rest) = label.strip_prefix("conv-") {
-                                    // Multi-part objects ("....pN") are one
-                                    // conversation.
-                                    let base = rest
-                                        .rsplit_once(".p")
-                                        .filter(|(_, n)| n.chars().all(|c| c.is_ascii_digit()))
-                                        .map(|(b, _)| b)
-                                        .unwrap_or(rest);
-                                    conv_bases.insert(base.to_string());
-                                }
-                            }
-                            if enc.meta.created_at > last_at {
-                                last_at = enc.meta.created_at;
-                                app_name = enc.meta.app_name.clone();
-                                client_id = enc.meta.client_id.clone();
-                                latest_summary = enc.meta.summary.clone();
-                            }
-                            // The manifest's summary describes the WHOLE
-                            // per-object backup - it wins over whichever
-                            // object happens to be newest.
-                            if enc.meta.label.as_deref() == Some("manifest") {
-                                if enc.meta.summary.is_some() {
-                                    manifest_summary = enc.meta.summary.clone();
-                                }
-                            }
-                        }
-                    }
-                }
+            if let Some(summary) = summarize_app_dir(&entry.path()) {
+                total_backups += summary.backup_count;
+                total_size += summary.total_size;
+                apps.push(summary);
             }
+        }
+    }
 
-            if app_backups > 0 {
-                total_backups += app_backups;
-                total_size += app_size;
-                apps.push(AppBackupSummary {
-                    client_id,
-                    app_name,
-                    backup_count: app_backups,
-                    total_size: app_size,
-                    last_backup_at: last_at,
-                    latest_summary: manifest_summary.or(latest_summary),
-                    has_manifest,
-                    conversation_count: conv_bases.len(),
-                    labels: {
-                        labels.sort();
-                        labels
-                    },
-                });
+    // The copies kept of the other devices' backups, one row per app per
+    // device. They count in the list, not in this device's own totals.
+    if let Ok(devices) = std::fs::read_dir(crate::paths::backup_copies_dir(data_dir)) {
+        for device in devices.filter_map(|d| d.ok()).filter(|d| d.path().is_dir()) {
+            let install_id = device.file_name().to_string_lossy().to_string();
+            if install_id.starts_with('.') {
+                continue;
+            }
+            let Ok(app_dirs) = std::fs::read_dir(device.path()) else { continue };
+            for app_dir in app_dirs.filter_map(|a| a.ok()).filter(|a| a.path().is_dir()) {
+                if let Some(mut summary) = summarize_app_dir(&app_dir.path()) {
+                    summary.from_device = Some(install_id.clone());
+                    apps.push(summary);
+                }
             }
         }
     }
@@ -871,7 +895,10 @@ pub fn export_all_data_with_progress(
         config.as_ref().ok_or("Vault is locked")?.clone()
     };
 
-    let stats = get_backup_stats(&app_state.identity_root());
+    // This device's own backups here; the copies of the other devices'
+    // backups go in `other_devices` below, by device.
+    let mut stats = get_backup_stats(&app_state.identity_root());
+    stats.apps.retain(|a| a.from_device.is_none());
 
     // Collect decrypted backup data for each app
     let total_apps = stats.apps.len();

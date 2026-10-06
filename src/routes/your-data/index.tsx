@@ -20,6 +20,8 @@ interface BackupAppSummary {
   /** Distinct conversations among the per-object backups. */
   conversation_count?: number;
   latest_summary?: BackupRecordSummary | null;
+  /** Set on a copy kept of backups made on another of the person's devices (its install id). */
+  from_device?: string;
 }
 
 interface BackupStats {
@@ -210,6 +212,8 @@ export default component$(() => {
   const identity = useSignal<VaultIdentity | null>(null);
   // Copies this device keeps of the app backups made on the person's other devices.
   const keptFromDevices = useSignal<{ name: string; backups: number; bytes: number }[]>([]);
+  // install id -> name, for the rows that are copies from another device.
+  const deviceNames = useSignal<Record<string, string>>({});
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ cleanup }) => {
     const load = async () => {
@@ -218,6 +222,7 @@ export default component$(() => {
         const devices = kept.length
           ? await invoke<{ install_id: string; name: string }[]>("devices_list").catch(() => [])
           : [];
+        deviceNames.value = Object.fromEntries(devices.map((d) => [d.install_id, d.name]));
         keptFromDevices.value = kept.map((k) => ({
           name: devices.find((d) => d.install_id === k.install_id)?.name || "another device",
           backups: k.backups,
@@ -674,7 +679,11 @@ export default component$(() => {
         ) : (
           <div class="space-y-3">
             {backupStats.value.apps.map((app) => {
-              const isExpanded = expandedApp.value === app.client_id;
+              // A copy kept of backups made on another device: one row,
+              // named for that device, in every export, not opened or
+              // deleted here (it is re-fetched; delete where it was made).
+              const fromDevice = app.from_device ? (deviceNames.value[app.from_device] || "another device") : null;
+              const isExpanded = !fromDevice && expandedApp.value === app.client_id;
               // The vault's own migration snapshot lives in the same store
               // as third-party app backups - present it as what it is, not
               // as an app that stopped backing up.
@@ -682,7 +691,7 @@ export default component$(() => {
 
               return (
                 <div
-                  key={app.client_id}
+                  key={`${app.client_id}:${app.from_device ?? "here"}`}
                   class="rounded-lg border border-gray-700 bg-black/30 overflow-hidden"
                 >
                   {/* App header row */}
@@ -690,10 +699,11 @@ export default component$(() => {
                     <button
                       type="button"
                       class="flex items-center gap-3 text-left min-w-0 flex-1"
-                      onClick$={() => toggleExpand(app.client_id)}
+                      disabled={!!fromDevice}
+                      onClick$={() => { if (!fromDevice) toggleExpand(app.client_id); }}
                     >
                       <span
-                        class={`text-gray-500 text-xs transition-transform duration-200 ${isExpanded ? "rotate-90" : ""}`}
+                        class={`text-gray-500 text-xs transition-transform duration-200 ${isExpanded ? "rotate-90" : ""} ${fromDevice ? "invisible" : ""}`}
                       >
                         &#9654;
                       </span>
@@ -727,11 +737,12 @@ export default component$(() => {
                               {timeAgo(app.last_backup_at)}
                             </>
                           )}
+                          {fromDevice && <> &middot; made on {fromDevice}, kept here and in your exports</>}
                         </p>
                       </div>
                     </button>
 
-                    {deleteConfirm.value === app.client_id ? (
+                    {fromDevice ? null : deleteConfirm.value === app.client_id ? (
                       <div class="flex items-center gap-2 shrink-0">
                         <span class="text-xs text-red-400">Delete all?</span>
                         <PillButton variant="danger" disabled={deleting.value}
@@ -884,15 +895,6 @@ export default component$(() => {
                 </div>
               );
             })}
-          </div>
-        )}
-        {keptFromDevices.value.length > 0 && (
-          <div class="mt-4 space-y-1 border-t border-gray-700/70 pt-3">
-            {keptFromDevices.value.map((k) => (
-              <p key={k.name} class="text-xs text-gray-400">
-                Also kept from {k.name}: {k.backups} backup{k.backups !== 1 ? "s" : ""}, {formatBytes(k.bytes)}
-              </p>
-            ))}
           </div>
         )}
       </div>
