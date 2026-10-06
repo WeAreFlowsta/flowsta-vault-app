@@ -1846,12 +1846,35 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
         }
     }
     if complete {
-        let joined = devices_state.vault_config.lock().unwrap().as_ref().map(|c| c.joined_existing).unwrap_or(false);
+        let (joined, profile_seen) = {
+            let config = devices_state.vault_config.lock().unwrap();
+            let cfg = config.as_ref();
+            (
+                cfg.map(|c| c.joined_existing).unwrap_or(false),
+                cfg.map(|c| c.profile_applied_at.is_some()).unwrap_or(false),
+            )
+        };
         let marker = crate::paths::setup_done_path(&devices_state.identity_root());
         if joined && !marker.exists() {
-            let _ = std::fs::write(&marker, b"");
-            log::info!("This device has everything from the other devices");
-            let _ = devices_app.emit("setup-complete", serde_json::json!({}));
+            // The other devices' profile (picture included) must have landed
+            // too - gossip can deliver it a pass or two after the rest. If no
+            // such record ever comes (an identity without one), ten minutes
+            // after the first otherwise-complete round is enough waiting.
+            let pending = marker.with_extension("pending");
+            let waited_long_enough = std::fs::metadata(&pending)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d.as_secs() >= 600)
+                .unwrap_or(false);
+            if profile_seen || waited_long_enough {
+                let _ = std::fs::write(&marker, b"");
+                let _ = std::fs::remove_file(&pending);
+                log::info!("This device has everything from the other devices");
+                let _ = devices_app.emit("setup-complete", serde_json::json!({}));
+            } else if !pending.exists() {
+                let _ = std::fs::write(&pending, b"");
+            }
         }
     }
     DevicesRound::Done

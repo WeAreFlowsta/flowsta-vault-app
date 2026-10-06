@@ -546,7 +546,7 @@ export default component$(() => {
               <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
             </svg>
-            <span>{identity.value.web_email ? "Your picture, connections and app backups arrive from your other devices. Nothing to do." : "Your records, connections, email and app backups arrive from your other devices. Nothing to do."}</span>
+            <span>{identity.value.web_email ? "Your profile picture, connections and app backups arrive from your other devices. Nothing to do." : "Your records, connections, email and app backups arrive from your other devices. Nothing to do."}</span>
           </p>
         </Callout>
       )}
