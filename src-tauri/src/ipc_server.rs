@@ -4148,6 +4148,8 @@ async fn dev_devices_handler(
             "sites": app.approved_apps.lock().unwrap().clone(),
             "apps": app.linked_third_party_apps.lock().unwrap().iter().map(|a| a.client_id.clone()).collect::<Vec<_>>(),
             "scopes": app.linked_app_scopes.lock().unwrap().clone(),
+            // Connected on another device only: a link here says "you already use this app".
+            "elsewhere": crate::connections_sync::known_elsewhere(),
         })),
         // A connection as /link-identity leaves it, without the app: for
         // driving what follows the identity across devices.

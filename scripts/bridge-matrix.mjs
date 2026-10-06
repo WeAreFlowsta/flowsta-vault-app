@@ -1394,6 +1394,7 @@ async function devicesLeg() {
   const connB = await op(b, { op: 'connections' });
   record('B: the picture written before devices were named arrives', await until(async () => { await op(b, { op: 'round' }); return (await op(b, { op: 'status' })).profile_picture === oldPicture; }, 120));
   record('B: the remembered site carried over; the app is NOT connected here', (connB.sites || []).includes('https://remembered.example') && !(connB.apps || []).includes('matrix_app'), JSON.stringify(connB));
+  record('B: knows the app is used on A, so a link here says so', (connB.elsewhere || []).includes('matrix_app'), JSON.stringify(connB.elsewhere));
   const heldB = await until(async () => { await op(b, { op: 'round' }); return ((await op(b, { op: 'backups', client_id: 'matrix_app' })).held || []).some((h) => h.from && h.opens_as === 'A recovery v1'); }, 120);
   record("B: holds and opens a copy of A's app backup", heldB);
   const actB = (await vaultFetch(b, '/dev/status')).data?.activity || [];

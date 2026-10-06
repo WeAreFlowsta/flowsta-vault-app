@@ -189,6 +189,11 @@ pub fn connection_known_elsewhere(client_id: String) -> Option<Connection> {
     ELSEWHERE.lock().unwrap().get(&client_id).cloned()
 }
 
+/// The apps connected on other devices only (their client ids).
+pub fn known_elsewhere() -> Vec<String> {
+    ELSEWHERE.lock().unwrap().keys().cloned().collect()
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
