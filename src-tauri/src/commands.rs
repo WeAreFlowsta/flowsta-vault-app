@@ -57,6 +57,10 @@ pub struct ConnectedSite {
     pub has_authenticated: bool,
     /// Whether this origin is auto-approved for /authenticate (populated at query time).
     pub trusted: bool,
+    /// The app this origin belongs to, once a link or link-status call
+    /// named it: the Connections page shows one row per app.
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 /// Serializable info about a pending auth request (without the channel sender).

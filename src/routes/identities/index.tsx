@@ -18,6 +18,8 @@ interface ConnectedSite {
   last_action: string;
   has_authenticated: boolean;
   trusted: boolean;
+  /** The app this origin belongs to, once a link or link-status call named it. */
+  client_id?: string | null;
 }
 
 function isInternalOrigin(origin: string): boolean {
@@ -63,7 +65,17 @@ export default component$(() => {
   // only origins the user granted auto-approve to (trusted) appear in the
   // grants list; the rest live in the collapsed Bridge Activity log.
   const connectedSites = useSignal<ConnectedSite[]>([]);
-  const trustedSites = useComputed$(() => connectedSites.value.filter((s) => s.trusted));
+  // An app's origins (its sign-in trust and its traffic) show inside the
+  // app's own row; only trusted origins with no app of their own get a row.
+  const appClientIds = useComputed$(() => new Set(linkedApps.value.map((a) => a.client_id).filter(Boolean) as string[]));
+  const sitesOfApp = useComputed$(() => {
+    const by: Record<string, ConnectedSite[]> = {};
+    for (const s of connectedSites.value) {
+      if (s.client_id && appClientIds.value.has(s.client_id)) (by[s.client_id] ||= []).push(s);
+    }
+    return by;
+  });
+  const trustedSites = useComputed$(() => connectedSites.value.filter((s) => s.trusted && !(s.client_id && appClientIds.value.has(s.client_id))));
 
   // Web sign-ins (OAuth grants) - server-authoritative, fetched with a
   // vault-grant session so this page shows the COMPLETE picture. The web
@@ -269,6 +281,19 @@ export default component$(() => {
     }
   });
 
+  const handleDisconnectApp = $(async (appAgentPubKeys: string[], clientId: string | null) => {
+    await handleRevokeLinkedApp(appAgentPubKeys);
+    if (!clientId) return;
+    for (const site of connectedSites.value.filter((s) => s.client_id === clientId)) {
+      try {
+        await invoke("revoke_site", { origin: site.origin });
+      } catch (e) {
+        console.error("Failed to forget the app's origin:", e);
+      }
+    }
+    connectedSites.value = connectedSites.value.filter((s) => s.client_id !== clientId);
+  });
+
   const handleRevokeSite = $(async (origin: string) => {
     try {
       await invoke("revoke_site", { origin });
@@ -433,56 +458,33 @@ export default component$(() => {
                         stopping={!!grant && revokingGrant.value === grant.client_id}
                         onStopSharing$={grant ? $(() => handleRevokeEmailGrant(grant.client_id)) : undefined}
                       />
+                      {(app.client_id ? sitesOfApp.value[app.client_id] : undefined)?.map((site) => (
+                        <div key={site.origin} class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500" data-testid="app-origin">
+                          <span class="font-mono text-gray-400">{site.origin.replace(/^https?:\/\//, "")}</span>
+                          {site.has_authenticated && (
+                            <button
+                              type="button"
+                              class={["rounded-full px-2 py-0.5 text-[10px] font-medium", site.trusted ? "bg-green-900/30 text-green-400 hover:bg-green-900/50" : "bg-gray-700/50 text-gray-400 hover:bg-gray-700"].join(" ")}
+                              title={site.trusted ? "Ask before each sign-in" : "Sign in without asking"}
+                              onClick$={() => handleToggleTrust(site.origin, !site.trusted)}
+                            >
+                              {site.trusted ? "Signs you in without asking" : "Asks before each sign-in"}
+                            </button>
+                          )}
+                          <span>{site.request_count} request{site.request_count !== 1 ? "s" : ""} · last {timeAgo(site.last_request)}</span>
+                        </div>
+                      ))}
                     </div>
                     <GlassButton
                       variant="danger"
-                      onClick$={() => handleRevokeLinkedApp(app.agent_keys)}
+                      onClick$={() => handleDisconnectApp(app.agent_keys, app.client_id ?? null)}
                     >
-                      Revoke
+                      Disconnect
                     </GlassButton>
                   </div>
                 </div>
               );
             })}
-
-            {/* Auto-approve grants: origins the user explicitly trusted to
-                sign in without a dialog. This IS a grant - it lives with
-                the other grants. Plain traffic is in Bridge Activity below. */}
-            {trustedSites.value.map((site) => (
-              <div
-                key={`trusted-${site.origin}`}
-                class="flex items-center justify-between rounded-lg border border-green-800/50 bg-green-900/10 px-4 py-3"
-              >
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2">
-                    <div class="flex h-6 w-6 items-center justify-center rounded bg-green-900/50 text-xs text-green-400">
-                      {(() => {
-                        try {
-                          return new URL(site.origin).hostname.charAt(0).toUpperCase();
-                        } catch {
-                          return "?";
-                        }
-                      })()}
-                    </div>
-                    <span class="truncate text-sm font-medium text-white">
-                      {site.origin.replace(/^https?:\/\//, "")}
-                    </span>
-                    <span class="rounded-full border border-green-800 bg-green-900/20 px-2 py-0.5 text-[10px] font-medium text-green-400">
-                      Trusted
-                    </span>
-                  </div>
-                  <div class="mt-1 text-xs text-gray-500">
-                    Signs you in without asking · since {new Date(site.first_seen * 1000).toLocaleDateString()}
-                  </div>
-                </div>
-                <GlassButton
-                  variant="danger"
-                  onClick$={() => handleToggleTrust(site.origin, false)}
-                >
-                  Revoke
-                </GlassButton>
-              </div>
-            ))}
 
             {/* Remembered sites - the origins the user chose to trust for
                 sign-ins. Sites that merely contacted the Vault are traffic,
@@ -550,7 +552,7 @@ export default component$(() => {
                     variant="danger"
                     onClick$={() => handleRevokeSite(site.origin)}
                   >
-                    Remove
+                    Disconnect
                   </GlassButton>
                 </div>
               </div>

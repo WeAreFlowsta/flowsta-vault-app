@@ -215,7 +215,19 @@ fn track_request(state: &AppState, origin: Option<&str>, action: &str) {
             last_action: action.to_string(),
             has_authenticated: is_auth,
             trusted: false, // populated at query time by get_connected_sites
+            client_id: None,
         });
+}
+
+/// An origin's request named the app it belongs to.
+fn note_site_app(state: &AppState, origin: Option<&str>, client_id: &str) {
+    let Some(origin) = origin.filter(|o| !o.is_empty()) else { return };
+    if client_id.is_empty() {
+        return;
+    }
+    if let Some(site) = state.connected_sites.lock().unwrap().get_mut(origin) {
+        site.client_id = Some(client_id.to_string());
+    }
 }
 
 // ── GET /status ─────────────────────────────────────────────────────
@@ -1148,6 +1160,7 @@ async fn link_identity_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "link-identity");
+    note_site_app(&state.app_state, origin.as_deref(), &req.client_id);
 
     // Vault must be unlocked
     {
@@ -1674,6 +1687,9 @@ async fn link_status_handler(
 ) -> Json<LinkStatusResponse> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "link-status");
+    if let Some(client_id) = query.get("client_id") {
+        note_site_app(&state.app_state, origin.as_deref(), client_id);
+    }
 
     let app_agent_pub_key = query.get("app_agent_pub_key").cloned().unwrap_or_default();
 
