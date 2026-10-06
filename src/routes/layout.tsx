@@ -331,7 +331,10 @@ export default component$(() => {
     description: string | null;
     logo_url: string | null;
     replacing_existing: boolean;
+    client_id?: string | null;
   } | null>(null);
+  // The person may already use this app on another of their devices.
+  const linkUsedElsewhere = useSignal(false);
 
   // Document-sign approval dialog state (Sign It). `commit` means the
   // signature will be PUBLISHED to the Sign It network, not just returned.
@@ -653,8 +656,16 @@ export default component$(() => {
       logo_url: string | null;
       origin: string | null;
       replacing_existing: boolean;
+      client_id?: string | null;
     }>("link-identity-request", (event) => {
       pendingLinkIdentity.value = event.payload;
+      linkUsedElsewhere.value = false;
+      const clientId = event.payload.client_id;
+      if (clientId) {
+        invoke<unknown>("connection_known_elsewhere", { clientId })
+          .then((known) => { linkUsedElsewhere.value = !!known; })
+          .catch(() => {});
+      }
     });
 
     cleanup(() => {
@@ -2150,6 +2161,9 @@ export default component$(() => {
               <p class="mb-3 text-xs text-amber-400">
                 This app has updated its registration. Approving will update your existing link.
               </p>
+            )}
+            {linkUsedElsewhere.value && (
+              <p class="mb-3 text-xs text-sky-300" data-testid="link-used-elsewhere">You already use this app on another of your devices.</p>
             )}
 
             {pendingLinkIdentity.value.scopes && pendingLinkIdentity.value.scopes.length > 0 && (

@@ -1379,6 +1379,7 @@ async fn link_identity_handler(
         "logo_url": app_info.logo_url,
         "origin": origin,
         "replacing_existing": replacing_existing,
+        "client_id": req.client_id,
     });
 
     // Headless dev runs resolve the dialog automatically, exactly as
