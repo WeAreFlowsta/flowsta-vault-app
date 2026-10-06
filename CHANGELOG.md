@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.6.0] - 2026-10-06
 
 ### Highlights
-- **Your identity on every device you own.** Add a second Vault with a code
+- **Your identity on every desktop device you own.** Add a second Vault with a code
   shown on the new device and typed on one you already have, or with your
   recovery phrase. It becomes your identity as fully as the first: it signs
   in, approves, signs files and holds your private data. Your records,
