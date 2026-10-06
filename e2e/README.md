@@ -42,6 +42,10 @@ the webview's localStorage is shared with the installed Vault). The
 conductor's own log is `e2e/profile/<a|b>/identities/<id>/conductor/holochain-stderr.log`;
 the app writes it at `warn` unless `RUST_LOG` says otherwise.
 
+Each build variant leaves ~13 GB in `src-tauri/target`; run
+`scripts/prune-build-dir.sh` after a gate (keeps the last two days' artifacts,
+drops the incremental cache, never the binary).
+
 ## Writing a spec
 
 - Select by `data-testid`, never by copy.
