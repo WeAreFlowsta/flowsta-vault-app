@@ -5,6 +5,17 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0-beta5] - 2026-10-06
+
+Fifth beta of multi-device. Test with a fresh identity, not the one you rely on.
+
+### Fixed
+- A device that joined says your data is on its way until it has all arrived, including when the email came with the code.
+
+### Changed
+- Settings → Devices: "Add a device" is two steps (the new device shows a code; type it on a device you already have and approve). An identity made before 1.6.0 asks for your recovery phrase once as the first step, since it fills in what a new device needs. "Who can add devices" is its own section.
+- Choosing an identity on the lock screen puts the cursor in the password field.
+
 ## [1.6.0-beta4] - 2026-10-06
 
 Fourth beta of multi-device. Test with a fresh identity, not the one you rely on.
