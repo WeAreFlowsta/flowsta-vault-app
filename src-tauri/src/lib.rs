@@ -473,6 +473,7 @@ pub fn run() {
             devices::devices_known_count,
             commands::my_signing_keys,
             commands::cells_ready,
+            commands::can_hand_over,
             devices::device_remove,
             devices::sibling_sync,
             device_registry::device_standing,

@@ -1413,6 +1413,17 @@ pub fn get_conductor_status(state: State<'_, Arc<AppState>>) -> ConductorStatus 
     state.conductor_status.lock().unwrap().clone()
 }
 
+/// Whether this device holds what a new device needs (data key, backup
+/// key, private network seed). An identity set up before 1.6.0 lacks them
+/// until the recovery phrase is typed once (`use_recovery_phrase_once`);
+/// the Devices tab asks for it as the first step of Add, not after the code.
+#[tauri::command]
+pub fn can_hand_over(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    let config = state.vault_config.lock().unwrap();
+    let cfg = config.as_ref().ok_or("vault_locked")?;
+    Ok(cfg.data_key.is_some() && cfg.backup_key.is_some() && cfg.private_network_seed.is_some())
+}
+
 /// Whether this conductor session's cells have answered yet. After a start
 /// the conductor is "ready" (admin socket up) minutes before its cells
 /// are: kitsune2 rebuilds each cell's DHT model first, one hash sector at a

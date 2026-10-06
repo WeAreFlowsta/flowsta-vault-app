@@ -58,7 +58,7 @@ function claimError(e: unknown): string {
   if (msg.includes("code_not_found") || msg.includes("already_claimed") || msg.includes("pair_timeout"))
     return "That code wasn't found. Get a new one on the new device.";
   if (msg.includes("code_mismatch") || msg.includes("pair_closed")) return "That code didn't match. Get a new one on the new device.";
-  if (msg.includes("needs_phrase_once")) return "Enter your recovery phrase once (below), then add the device.";
+  if (msg.includes("needs_phrase_once")) return "Enter your recovery phrase once (above), then add the device.";
   if (msg.includes("api_unreachable")) return "Couldn't reach Flowsta. Check your connection, or use your recovery phrase on the new device.";
   return "That didn't work. Get a new code on the new device.";
 }
@@ -66,6 +66,8 @@ function claimError(e: unknown): string {
 export const DevicesTab = component$(() => {
   const devices = useSignal<DeviceRow[] | null>(null);
   const checking = useSignal(false);
+  // False on an identity set up before 1.6.0 until the phrase is typed once.
+  const handoverReady = useSignal(true);
   const adding = useSignal(false);
   const code = useSignal("");
   const busy = useSignal(false);
@@ -131,6 +133,9 @@ export const DevicesTab = component$(() => {
     try {
       standing.value = await invoke<Standing>("device_standing");
     } catch { /* locked */ }
+    try {
+      handoverReady.value = await invoke<boolean>("can_hand_over");
+    } catch { /* locked */ }
   });
 
   const submitPhrase = $(async () => {
@@ -142,6 +147,7 @@ export const DevicesTab = component$(() => {
         mnemonic: phrase.value,
       });
       standing.value = done.standing;
+      handoverReady.value = true;
       phrase.value = "";
       phraseOpen.value = false;
       phraseDone.value =
@@ -220,6 +226,26 @@ export const DevicesTab = component$(() => {
     }
   });
 
+  // The 24 words, used once: shown under "Who can add devices" and, on a
+  // device the account wants confirmed, in place of the code.
+  const phraseForm = (
+    <>
+            <p class="mb-3 text-sm text-gray-300">Your 24 words are used now and not kept.</p>
+            <textarea
+              class="mb-3 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-none"
+              rows={3}
+              placeholder="word1 word2 word3 ... word24"
+              value={phrase.value}
+              onInput$={(e) => { phrase.value = (e.target as HTMLTextAreaElement).value; phraseError.value = ""; }}
+            />
+            {phraseError.value && <p class="mb-3 text-sm text-red-400">{phraseError.value}</p>}
+            <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <GlassButton variant="secondary" disabled={busy.value} onClick$={() => { phraseOpen.value = false; phrase.value = ""; phraseError.value = ""; }}>Cancel</GlassButton>
+              <GlassButton disabled={busy.value || !phrase.value.trim()} onClick$={submitPhrase}>{busy.value ? "Checking..." : "Confirm"}</GlassButton>
+            </div>
+    </>
+  );
+
   return (
     <div class="space-y-6">
       <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
@@ -232,9 +258,19 @@ export const DevicesTab = component$(() => {
 
         {adding.value && (
           <div class="mb-5 rounded-lg border border-gray-700 bg-gray-900/40 p-4">
-            <p class="mb-3 text-sm text-gray-300">
-              On the new device, open Flowsta Vault and choose "I already have an identity", then "Use another device". Type the code it shows.
-            </p>
+            <h4 class="mb-2 text-sm font-semibold text-white">Add a device</h4>
+            {!handoverReady.value && (
+              <div class="mb-4 rounded-md border border-amber-400/30 bg-amber-400/5 p-3" data-testid="phrase-first">
+                <p class="mb-2 text-sm text-gray-200">
+                  First, your recovery phrase - once. This identity was made before devices could be added, and the phrase fills in what a new device needs.
+                </p>
+                {phraseForm}
+              </div>
+            )}
+            <ol class="mb-3 list-decimal space-y-1 pl-5 text-sm text-gray-300">
+              <li>On the new device, open Flowsta Vault and choose "I already have an identity", then "Use another device".</li>
+              <li>It shows a code. Type it here and approve.</li>
+            </ol>
             <input
               class="mb-3 w-full max-w-xs rounded-md border border-gray-600 bg-gray-900 px-4 py-2 font-mono text-lg uppercase tracking-widest text-white placeholder-gray-600 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
               placeholder="XXXX-XXXX-XXXX"
@@ -245,11 +281,11 @@ export const DevicesTab = component$(() => {
             />
             <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <GlassButton variant="secondary" onClick$={() => { adding.value = false; code.value = ""; error.value = ""; }}>Cancel</GlassButton>
-              <GlassButton testId="device-code-submit" disabled={busy.value || code.value.replace(/[^a-zA-Z]/g, "").length !== 12} onClick$={submitCode}>
+              <GlassButton testId="device-code-submit" disabled={busy.value || !handoverReady.value || code.value.replace(/[^a-zA-Z]/g, "").length !== 12} onClick$={submitCode}>
                 {busy.value ? "Checking..." : "Continue"}
               </GlassButton>
             </div>
-            <p class="mt-3 text-xs text-gray-500">No other device to hand? Use your recovery phrase on the new device instead.</p>
+            <p class="mt-3 text-xs text-gray-500">Without this device to hand, the new device can use your recovery phrase instead.</p>
           </div>
         )}
 
@@ -290,33 +326,9 @@ export const DevicesTab = component$(() => {
             )}
           </div>
         )}
-        {standing.value.device === "registered" && standing.value.enrollment === "none" && !phraseOpen.value && (
-          <p class="mb-5 text-sm text-gray-300">
-            <button
-              type="button"
-              class="text-amber-300 underline decoration-amber-300/40 underline-offset-2 hover:text-amber-200"
-              onClick$={() => { phraseOpen.value = true; phraseError.value = ""; }}
-            >
-              Enter your recovery phrase once
-            </button>{" "}
-            so only you can add devices.
-          </p>
-        )}
-        {phraseOpen.value && (
+        {phraseOpen.value && standing.value.device === "needs_confirming" && (
           <div class="mb-5 rounded-lg border border-gray-700 bg-gray-900/40 p-4">
-            <p class="mb-3 text-sm text-gray-300">Your 24 words. They are used now and not kept.</p>
-            <textarea
-              class="mb-3 w-full rounded-md border border-gray-600 bg-gray-900 px-4 py-3 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400 resize-none"
-              rows={3}
-              placeholder="word1 word2 word3 ... word24"
-              value={phrase.value}
-              onInput$={(e) => { phrase.value = (e.target as HTMLTextAreaElement).value; phraseError.value = ""; }}
-            />
-            {phraseError.value && <p class="mb-3 text-sm text-red-400">{phraseError.value}</p>}
-            <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-              <GlassButton variant="secondary" disabled={busy.value} onClick$={() => { phraseOpen.value = false; phrase.value = ""; phraseError.value = ""; }}>Cancel</GlassButton>
-              <GlassButton disabled={busy.value || !phrase.value.trim()} onClick$={submitPhrase}>{busy.value ? "Checking..." : "Confirm"}</GlassButton>
-            </div>
+            {phraseForm}
           </div>
         )}
 
@@ -349,6 +361,28 @@ export const DevicesTab = component$(() => {
               </li>
             ))}
           </ul>
+        )}
+
+        {standing.value.device === "registered" && standing.value.enrollment === "none" && !(adding.value && !handoverReady.value) && (
+          <div class="mt-6 rounded-lg border border-gray-700 bg-gray-900/40 p-4" data-testid="who-can-add">
+            <h4 class="mb-2 text-sm font-semibold text-white">Who can add devices</h4>
+            <p class="mb-2 text-sm text-gray-300">
+              Today: anyone with your Vault password on one of your devices, or an export of it.
+            </p>
+            <p class="mb-3 text-sm text-gray-300">
+              Enter your recovery phrase once and adding a device will need the phrase, or your approval on a device you already have. It takes effect in 7 days.
+            </p>
+            {phraseOpen.value ? (
+              <div>{phraseForm}</div>
+            ) : (
+              <GlassButton variant="secondary" disabled={busy.value} onClick$={() => { phraseOpen.value = true; phraseError.value = ""; }}>Enter recovery phrase</GlassButton>
+            )}
+          </div>
+        )}
+        {standing.value.device === "registered" && standing.value.enrollment === "waiting" && (
+          <p class="mt-6 text-sm text-gray-400" data-testid="who-can-add">
+            From 7 days after you entered your recovery phrase, adding a device needs the phrase or your approval on a device you already have.
+          </p>
         )}
 
         <p class="mt-5 text-xs text-gray-500">
