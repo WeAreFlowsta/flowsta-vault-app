@@ -4246,7 +4246,9 @@ async fn dev_devices_handler(
                 app_agent_pub_key: format!("harness-{}-{}", client_id, crate::paths::install_id(&app.data_dir).unwrap_or_default()),
                 linked_at: crate::ipc_server::unix_now(),
                 client_id: Some(client_id.clone()),
-                origin: None,
+                // An origin lets the matrix drive the real app routes
+                // (`/app-secret`, `/backup/*`) for this app.
+                origin: body.get("origin").and_then(|v| v.as_str()).filter(|o| !o.is_empty()).map(String::from),
             });
             app.save_linked_apps();
             app.linked_app_scopes.lock().unwrap().insert(client_id, vec!["profile".into()]);

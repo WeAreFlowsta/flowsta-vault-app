@@ -1397,6 +1397,26 @@ async function devicesLeg() {
   record('B: knows the app is used on A, so a link here says so', (connB.elsewhere || []).includes('matrix_app'), JSON.stringify(connB.elsewhere));
   const heldB = await until(async () => { await op(b, { op: 'round' }); return ((await op(b, { op: 'backups', client_id: 'matrix_app' })).held || []).some((h) => h.from && h.opens_as === 'A recovery v1'); }, 120);
   record("B: holds and opens a copy of A's app backup", heldB);
+  // 3b. 1.6.1: an app secret is the SAME on both devices of the identity
+  // (through the real route, from a linked origin), and a named device's
+  // backup copy can be read as such.
+  const APP_ORIGIN_MD = 'https://matrix-app.example';
+  await op(a, { op: 'connect', client_id: 'matrix_app', app_name: 'Matrix App', origin: APP_ORIGIN_MD });
+  await op(b, { op: 'connect', client_id: 'matrix_app', app_name: 'Matrix App', origin: APP_ORIGIN_MD });
+  const secretOn = (port, label, origin = APP_ORIGIN_MD) => vaultFetch(port, '/app-secret', { method: 'POST', body: { label }, origin });
+  const sA = await secretOn(a, 'network');
+  const sB = await secretOn(b, 'network');
+  record('A: derives an app secret for a linked app', sA.status === 200 && /^[0-9a-f]{64}$/.test(sA.data?.secret_hex || ''), JSON.stringify(sA.data));
+  record('B: derives the SAME secret for the same app and label', sB.status === 200 && sB.data?.secret_hex === sA.data?.secret_hex, `${sB.status}`);
+  record('another label is another secret', (await secretOn(a, 'data')).data?.secret_hex !== sA.data?.secret_hex);
+  record('an unlinked origin gets no secret', (await secretOn(a, 'network', 'https://evil.example')).status === 403);
+  record('a bad label is refused', (await secretOn(a, 'has space')).status === 400);
+  const installA = stA.install_id;
+  const named = await vaultFetch(b, '/backup/retrieve', { method: 'POST', origin: APP_ORIGIN_MD, body: { client_id: 'matrix_app', label: 'recovery', across: 'devices', device: installA } });
+  const namedText = typeof named.data?.data === 'string' ? Buffer.from(named.data.data, 'hex').toString('utf8') : '';
+  record("B: reads A's copy by naming the device", named.status === 200 && named.data?.from_device === installA && namedText === 'A recovery v1', `${named.status} ${JSON.stringify(named.data).slice(0, 160)}`);
+  const unknownDev = await vaultFetch(b, '/backup/retrieve', { method: 'POST', origin: APP_ORIGIN_MD, body: { client_id: 'matrix_app', label: 'recovery', across: 'devices', device: 'no-such-device' } });
+  record('an unknown device is not found', unknownDev.status === 404 && unknownDev.data?.error === 'backup_not_found', `${unknownDev.status}`);
   const actB = (await vaultFetch(b, '/dev/status')).data?.activity || [];
   record('B: is not told that the devices already there were "added"', !actB.includes('device_added_elsewhere'), JSON.stringify(actB));
   const actA = (await vaultFetch(a, '/dev/status')).data?.activity || [];
