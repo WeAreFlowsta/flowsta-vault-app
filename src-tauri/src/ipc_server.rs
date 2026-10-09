@@ -4243,7 +4243,14 @@ async fn dev_devices_handler(
             let client_id = text("client_id");
             app.linked_third_party_apps.lock().unwrap().push(crate::commands::LinkedThirdPartyApp {
                 app_name: text("app_name"),
-                app_agent_pub_key: format!("harness-{}-{}", client_id, crate::paths::install_id(&app.data_dir).unwrap_or_default()),
+                // A harness may name the app's own link key so the app's
+                // `/link-status` check finds this entry.
+                app_agent_pub_key: body
+                    .get("app_agent_pub_key")
+                    .and_then(|v| v.as_str())
+                    .filter(|k| !k.is_empty())
+                    .map(String::from)
+                    .unwrap_or_else(|| format!("harness-{}-{}", client_id, crate::paths::install_id(&app.data_dir).unwrap_or_default())),
                 linked_at: crate::ipc_server::unix_now(),
                 client_id: Some(client_id.clone()),
                 // An origin lets the matrix drive the real app routes
