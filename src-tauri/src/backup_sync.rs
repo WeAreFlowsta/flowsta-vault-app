@@ -300,6 +300,18 @@ pub fn held_across_devices(identity_root: &Path, client_id: &str) -> Vec<Held> {
 
 /// The newest backup with this label on any of the person's devices. This
 /// device's own wins a tie.
+/// The copy with this label held from one named device (the `device` ids
+/// `/backup/list` prints under `other_devices`), so an app can read EVERY
+/// sibling's copy of a per-device label (a manifest), not only the newest.
+pub fn held_from_device(identity_root: &Path, client_id: &str, label: &str, device: &str) -> Option<Held> {
+    pick_from_device(held_across_devices(identity_root, client_id), label, device)
+}
+
+fn pick_from_device(held: Vec<Held>, label: &str, device: &str) -> Option<Held> {
+    held.into_iter()
+        .find(|h| h.meta.label.as_deref() == Some(label) && h.from_install.as_deref() == Some(device))
+}
+
 pub fn newest_across_devices(identity_root: &Path, client_id: &str, label: &str) -> Option<Held> {
     held_across_devices(identity_root, client_id)
         .into_iter()
@@ -679,4 +691,29 @@ mod tests {
         write_own(here.path(), "app", "recovery", 30, "mine again");
         assert_eq!(newest_across_devices(here.path(), "app", "recovery").unwrap().from_install, None);
     }
+
+    #[test]
+    fn a_named_devices_copy_is_picked_by_label_and_device() {
+        let held = |label: &str, from: Option<&str>, at: i64| Held {
+            path: PathBuf::from(format!("/x/{}-{}", label, from.unwrap_or("own"))),
+            from_install: from.map(String::from),
+            meta: crate::backup::BackupMeta {
+                client_id: "app".into(),
+                app_name: "App".into(),
+                label: Some(label.into()),
+                created_at: at,
+                data_size: 1,
+                content_type: "application/json".into(),
+                identity: None,
+                summary: None,
+            },
+        };
+        let all = vec![held("manifest", None, 30), held("manifest", Some("inst-a"), 10), held("manifest", Some("inst-b"), 20), held("recovery", Some("inst-b"), 5)];
+        let pick = |label: &str, dev: &str| pick_from_device(all.iter().map(|h| Held { path: h.path.clone(), from_install: h.from_install.clone(), meta: h.meta.clone() }).collect(), label, dev);
+        assert_eq!(pick("manifest", "inst-a").map(|h| h.path), Some(PathBuf::from("/x/manifest-inst-a")));
+        assert_eq!(pick("manifest", "inst-b").map(|h| h.path), Some(PathBuf::from("/x/manifest-inst-b")));
+        assert!(pick("manifest", "inst-c").is_none(), "an unknown device has no copy");
+        assert!(pick("recovery", "inst-a").is_none(), "the label must match too");
+    }
+
 }

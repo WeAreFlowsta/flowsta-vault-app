@@ -2089,6 +2089,72 @@ struct BackupRetrieveRequest {
     /// devices (a label is required). Omitted: this device's own, as always.
     #[serde(default)]
     across: Option<String>,
+    /// With `across: "devices"`: the copy held from this one device (an id
+    /// from `/backup/list` `other_devices`) instead of the newest - so an
+    /// app can read every sibling's copy of a per-device label.
+    #[serde(default)]
+    device: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AppSecretRequest {
+    label: String,
+}
+
+/// `POST /app-secret { label }`: a 32-byte secret for this linked app and
+/// label, the same on every one of the person's devices (derived from the
+/// identity seed - `key_derivation::derive_app_secret`). Apps use it as a
+/// private network seed or data key that every device derives alike. Needs
+/// a linked origin and an unlocked Vault; nothing is written or sent.
+async fn app_secret_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+    Json(req): Json<AppSecretRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<IpcError>)> {
+    let origin = extract_origin(&headers);
+    track_request(&state.app_state, origin.as_deref(), "app_secret");
+    let client_id = match origin_to_client_id(&state.app_state, origin.as_deref()) {
+        Some(c) => c,
+        None => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError { error: "not_linked".into(), description: Some("This origin is not a linked third-party app.".into()) }),
+            ));
+        }
+    };
+    if !crate::key_derivation::app_secret_label_ok(&req.label) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(IpcError { error: "label_invalid".into(), description: Some("A label is 1-64 of letters, digits, '.', '_' or '-'.".into()) }),
+        ));
+    }
+    let seed = {
+        let config = state.app_state.vault_config.lock().unwrap();
+        match config.as_ref() {
+            None => {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(IpcError { error: "vault_locked".into(), description: Some("Unlock the Vault first.".into()) }),
+                ));
+            }
+            Some(c) => match c.device_seed.as_ref().filter(|s| s.len() == 32) {
+                Some(s) => s.clone(),
+                None => {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(IpcError { error: "not_available".into(), description: Some("This identity has no device-hosted seed.".into()) }),
+                    ));
+                }
+            },
+        }
+    };
+    let secret = crate::key_derivation::derive_app_secret(&seed, &client_id, &req.label);
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "label": req.label,
+        "secret_hex": hex::encode(secret),
+        "derivation": crate::key_derivation::APP_SECRET_CONSTANT,
+    })))
 }
 
 async fn backup_retrieve_handler(
@@ -2162,7 +2228,11 @@ async fn backup_retrieve_handler(
     let mut from_device: Option<String> = None;
     let retrieved = if across_devices {
         let label = req.label.as_deref().unwrap_or_default();
-        match crate::backup_sync::newest_across_devices(&state.app_state.identity_root(), &req.client_id, label) {
+        let held = match req.device.as_deref() {
+            Some(device) => crate::backup_sync::held_from_device(&state.app_state.identity_root(), &req.client_id, label, device),
+            None => crate::backup_sync::newest_across_devices(&state.app_state.identity_root(), &req.client_id, label),
+        };
+        match held {
             Some(held) => {
                 from_device = held.from_install.clone();
                 crate::backup::backup_keys(&state.app_state).and_then(|keys| crate::backup::open_backup_file(&held.path, &keys))
@@ -5208,6 +5278,7 @@ pub async fn start_ipc_server(
         .route("/backup/list", get(backup_list_handler))
         .route("/backup/retrieve", post(backup_retrieve_handler))
         .route("/backup/delete", post(backup_delete_handler))
+        .route("/app-secret", post(app_secret_handler))
         // Dev-only harness endpoints: 404 unless the auto-approve flag is
         // active in a debug build (never active in release).
         .route("/dev/status", get(dev_status_handler))

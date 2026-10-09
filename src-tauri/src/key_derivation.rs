@@ -117,6 +117,35 @@ pub fn derive_device_keypair(mnemonic_str: &str) -> Result<SigningKey, KeyDeriva
 ///
 /// Used during agent linking: the desktop sends this hash to the API to
 /// discover the web agent's pub key without revealing the mnemonic.
+/// A secret a linked app may ask for (`POST /app-secret`), the same on every
+/// one of the person's devices: HMAC-SHA256 keyed by the identity seed over
+/// this constant, the app's client_id and the app's label (each length-
+/// prefixed, so no two (client_id, label) pairs share a message). Apps use
+/// it as a private network seed or a data key that every device of the
+/// identity derives alike - no copy, no race, works while the other devices
+/// are off. Scoped per app: one app cannot ask for another's.
+pub const APP_SECRET_CONSTANT: &str = "flowsta-app-secret-v1";
+
+/// The 32-byte app secret for (identity seed, client_id, label).
+pub fn derive_app_secret(identity_seed: &[u8], client_id: &str, label: &str) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(identity_seed).expect("HMAC accepts any key length");
+    mac.update(APP_SECRET_CONSTANT.as_bytes());
+    for part in [client_id, label] {
+        let bytes = part.as_bytes();
+        mac.update(&(bytes.len() as u32).to_be_bytes());
+        mac.update(bytes);
+    }
+    let out = mac.finalize().into_bytes();
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&out);
+    secret
+}
+
+/// A label an app may ask a secret for: 1-64 of `A-Z a-z 0-9 . _ -`.
+pub fn app_secret_label_ok(label: &str) -> bool {
+    !label.is_empty() && label.len() <= 64 && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
+
 pub fn derive_recovery_lookup_hash(mnemonic_str: &str) -> Result<String, KeyDerivationError> {
     let seed = derive_seed(mnemonic_str, RECOVERY_LOOKUP_CONSTANT)?;
     Ok(hex::encode(seed))
@@ -664,4 +693,22 @@ mod tests {
         assert_eq!(decode_agent_pub_key_flexible("uhCAknope"), None);
         assert_eq!(decode_agent_pub_key_flexible("did:flowsta:x"), None);
     }
+
+    #[test]
+    fn app_secret_is_the_same_everywhere_and_scoped_per_app_and_label() {
+        let seed = [7u8; 32];
+        let a = derive_app_secret(&seed, "app_one", "network");
+        assert_eq!(a, derive_app_secret(&seed, "app_one", "network"), "deterministic: every device derives the same");
+        assert_ne!(a, derive_app_secret(&seed, "app_two", "network"), "another app gets another secret");
+        assert_ne!(a, derive_app_secret(&seed, "app_one", "data"), "another label gets another secret");
+        assert_ne!(a, derive_app_secret(&[8u8; 32], "app_one", "network"), "another identity gets another secret");
+        // Length prefixes: the same bytes split differently are different inputs.
+        assert_ne!(derive_app_secret(&seed, "ab", "c"), derive_app_secret(&seed, "a", "bc"));
+        assert!(app_secret_label_ok("network"));
+        assert!(app_secret_label_ok("recovery.v2_x-1"));
+        assert!(!app_secret_label_ok(""));
+        assert!(!app_secret_label_ok("has space"));
+        assert!(!app_secret_label_ok(&"x".repeat(65)));
+    }
+
 }
