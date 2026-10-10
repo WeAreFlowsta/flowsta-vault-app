@@ -5,6 +5,24 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - Unreleased
+
+### For apps
+- **`POST /app-secret`**: a secret derived from your identity and scoped to the
+  calling app, the same on every one of your devices. An app uses it to keep
+  its own private network or data key identical across your devices without
+  ever holding your recovery material.
+- **`/backup/retrieve` can name a device** (`across: "devices"` + `device`),
+  so an app reads one particular device's backup copy instead of the newest.
+- **`/backup/list` names the other devices**: each `other_devices` entry now
+  carries the device's `name`, `platform` and network `generation` from the
+  device registry, so an app can say which device it synced with and when one
+  needs the update.
+
+### Dev harness
+- The dev `connect` op takes an `origin` and an `app_agent_pub_key`, so the
+  real app routes can be driven against a test instance.
+
 ## [1.6.0] - 2026-10-06
 
 ### Highlights

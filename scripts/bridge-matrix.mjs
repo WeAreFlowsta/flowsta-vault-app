@@ -1415,6 +1415,9 @@ async function devicesLeg() {
   const named = await vaultFetch(b, '/backup/retrieve', { method: 'POST', origin: APP_ORIGIN_MD, body: { client_id: 'matrix_app', label: 'recovery', across: 'devices', device: installA } });
   const namedText = typeof named.data?.data === 'string' ? Buffer.from(named.data.data, 'hex').toString('utf8') : '';
   record("B: reads A's copy by naming the device", named.status === 200 && named.data?.from_device === installA && namedText === 'A recovery v1', `${named.status} ${JSON.stringify(named.data).slice(0, 160)}`);
+  const listB = await vaultFetch(b, '/backup/list', { origin: APP_ORIGIN_MD });
+  const heldA = (listB.data?.other_devices || []).find((d) => d.device === installA);
+  record("B: the list names A's device and its network generation", !!heldA && typeof heldA.name === 'string' && heldA.name.length > 0 && heldA.generation === 'holochain-0.6', JSON.stringify(heldA));
   const unknownDev = await vaultFetch(b, '/backup/retrieve', { method: 'POST', origin: APP_ORIGIN_MD, body: { client_id: 'matrix_app', label: 'recovery', across: 'devices', device: 'no-such-device' } });
   record('an unknown device is not found', unknownDev.status === 404 && unknownDev.data?.error === 'backup_not_found', `${unknownDev.status}`);
   const actB = (await vaultFetch(b, '/dev/status')).data?.activity || [];

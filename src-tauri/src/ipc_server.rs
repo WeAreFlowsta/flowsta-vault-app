@@ -2070,9 +2070,29 @@ async fn backup_list_handler(
         }
     }
     if !by_device.is_empty() {
+        // The device registry names them (1.6.1+): an app can say "Synced
+        // with Office PC" and see a device on another network generation.
+        // Best effort - the list answers without names if the registry is
+        // slow or unreadable.
+        let registry = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            crate::devices::list(&state.app_state),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
         resp["other_devices"] = serde_json::json!(by_device
             .into_iter()
-            .map(|(device, backups)| serde_json::json!({ "device": device, "backups": backups }))
+            .map(|(device, backups)| {
+                let mut entry = serde_json::json!({ "device": device, "backups": backups });
+                if let Some(rec) = registry.iter().find(|d| d.install_id == device) {
+                    entry["name"] = serde_json::json!(rec.name);
+                    entry["platform"] = serde_json::json!(rec.platform);
+                    entry["generation"] = serde_json::json!(rec.generation);
+                }
+                entry
+            })
             .collect::<Vec<_>>());
     }
 
