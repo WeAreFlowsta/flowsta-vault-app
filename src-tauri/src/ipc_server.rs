@@ -130,6 +130,17 @@ fn auto_approve_enabled() -> bool {
 /// `x-flowsta-test-deny: 1` is auto-DENIED instead of approved, so the
 /// harness can exercise the user_denied paths. Inert unless the
 /// auto-approve flag is active (and therefore inert in release builds).
+/// Dev harness only: `x-flowsta-test-dialog: 1` makes this request show its
+/// real approval dialog even in an auto-approve run, so UI tests can drive
+/// the dialogs themselves (one at a time, after unlock, remembered apps).
+fn test_dialog_requested(headers: &HeaderMap) -> bool {
+    auto_approve_enabled()
+        && headers
+            .get("x-flowsta-test-dialog")
+            .and_then(|v| v.to_str().ok())
+            == Some("1")
+}
+
 fn test_deny_requested(headers: &HeaderMap) -> bool {
     auto_approve_enabled()
         && headers
@@ -904,7 +915,7 @@ async fn authenticate_handler(
         false
     };
 
-    let approved = if auto_approve_enabled() {
+    let approved = if auto_approve_enabled() && !test_dialog_requested(&headers) {
         // Headless dev runs resolve the dialog automatically, matching
         // /sign, /sign-document and /link-identity - without this the
         // login-challenge signing path can't be exercised by the matrix.
@@ -1449,7 +1460,7 @@ async fn link_identity_handler(
     // /sign, /authenticate and /sign-document already do. Without this the
     // linked-app surface (every /backup endpoint gates on a link) could
     // not be exercised by the matrix at all.
-    let approved = if auto_approve_enabled() {
+    let approved = if auto_approve_enabled() && !test_dialog_requested(&headers) {
         let _ = state.app_state.pending_link_identity.lock().unwrap().take();
         let deny = test_deny_requested(&headers);
         log::warn!(

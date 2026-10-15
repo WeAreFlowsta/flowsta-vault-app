@@ -1,4 +1,4 @@
-import { component$, useComputed$, useSignal, useStore, useVisibleTask$, useContextProvider, $, Slot } from "@builder.io/qwik";
+import { component$, useSignal, useStore, useVisibleTask$, useContextProvider, $, Slot } from "@builder.io/qwik";
 import { useLocation, useNavigate, Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -13,6 +13,14 @@ import { connectionStatusContext, autoLockContext, signaturesContext, pendingSig
 import { hydrateSignaturesCache, persistSignaturesCache, setActiveSignatureAgent } from "~/lib/signatures-cache";
 import { GlassButton } from "~/components/common/GlassButton";
 import Callout from "~/components/dashboard/Callout";
+
+// UI tests: @wdio/tauri-service waits up to 5 s for this before every
+// element lookup (it reads window states through it). Without it each lookup
+// paid the full 5 s - most of a suite's run time. Inert outside the driver.
+try {
+  const w = typeof window !== "undefined" ? (window as unknown as Record<string, unknown>) : null;
+  if (w && !w.__wdio_original_core__) w.__wdio_original_core__ = { invoke };
+} catch { /* not in a webview */ }
 
 type AppScreen = "loading" | "setup" | "unlock" | "dashboard";
 
@@ -409,15 +417,23 @@ export default component$(() => {
   // request still lands in its own signal, but only the first in this order
   // is shown; the next appears when it is answered. Stacked modals left
   // people approving the wrong thing or none.
-  const activeRequest = useComputed$(() => {
-    if (pendingRawSign.value) return "raw-sign";
-    if (pendingRelayClaim.value) return "relay-claim";
-    if (pendingAuth.value) return "auth";
-    if (pendingLinkIdentity.value) return "link";
-    if (pendingCellOp.value) return "cell-op";
-    if (pendingProfileUpdate.value) return "profile";
-    if (pendingDocumentSign.value) return "document-sign";
-    return null;
+  const activeRequest = useSignal<string | null>(null);
+  // The dialog on screen stays until it is answered; only then does the
+  // next pending request (in this order) take its place.
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track }) => {
+    const pending: [string, unknown][] = [
+      ["raw-sign", track(() => pendingRawSign.value)],
+      ["relay-claim", track(() => pendingRelayClaim.value)],
+      ["auth", track(() => pendingAuth.value)],
+      ["link", track(() => pendingLinkIdentity.value)],
+      ["cell-op", track(() => pendingCellOp.value)],
+      ["profile", track(() => pendingProfileUpdate.value)],
+      ["document-sign", track(() => pendingDocumentSign.value)],
+    ];
+    const current = activeRequest.value;
+    if (current && pending.some(([k, v]) => k === current && v)) return;
+    activeRequest.value = pending.find(([, v]) => v)?.[0] ?? null;
   });
   const relayCodeInput = useSignal("");
   const relayBusy = useSignal(false);
@@ -2027,7 +2043,7 @@ export default component$(() => {
 
       {/* Auth approval dialog overlay */}
       {pendingAuth.value && activeRequest.value === "auth" && (
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" data-testid="auth-dialog">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <div class="mb-4 flex items-center gap-3">
               <div class="flex h-10 w-10 items-center justify-center rounded-full bg-amber-500/20">
@@ -2110,7 +2126,7 @@ export default component$(() => {
             )}
 
             <label class="mb-4 flex items-center gap-2 cursor-pointer">
-              <input
+              <input data-testid="auth-remember"
                 type="checkbox"
                 checked={rememberApp.value}
                 onChange$={(e) => {
@@ -2124,14 +2140,14 @@ export default component$(() => {
             </label>
 
             <div class="flex gap-3">
-              <GlassButton
+              <GlassButton testId="auth-deny"
                 variant="secondary"
                 class="flex-1"
                 onClick$={() => handleAuthResponse(false)}
               >
                 Deny
               </GlassButton>
-              <GlassButton
+              <GlassButton testId="auth-allow"
                 class="flex-1"
                 onClick$={() => handleAuthResponse(true)}
               >
@@ -2144,7 +2160,7 @@ export default component$(() => {
 
       {/* Link-identity approval dialog overlay */}
       {pendingLinkIdentity.value && activeRequest.value === "link" && (
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" data-testid="link-dialog">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <div class="mb-4 flex items-center gap-3">
               <div class="flex h-10 w-10 items-center justify-center rounded-full bg-blue-500/20">
@@ -2242,14 +2258,14 @@ export default component$(() => {
             </p>
 
             <div class="flex gap-3">
-              <GlassButton
+              <GlassButton testId="link-deny"
                 variant="secondary"
                 class="flex-1"
                 onClick$={() => handleLinkIdentityResponse(false)}
               >
                 Deny
               </GlassButton>
-              <GlassButton
+              <GlassButton testId="link-allow"
                 class="flex-1"
                 onClick$={() => handleLinkIdentityResponse(true)}
               >
