@@ -2021,10 +2021,10 @@ export default component$(() => {
               </div>
               <div>
                 <h3 class="text-base font-semibold text-white">
-                  Authentication Request
+                  Sign-in request
                 </h3>
                 <p class="text-xs text-gray-400">
-                  An app wants to verify your identity
+                  {pendingAuth.value.app_name} wants to sign you in
                 </p>
               </div>
             </div>
@@ -2067,19 +2067,19 @@ export default component$(() => {
 
             {pendingAuth.value.share_email ? (
               <p class="mb-4 text-xs text-gray-400">
-                Allow shares your DID, public key and email address.{" "}
+                Allow shares your permanent ID, public key and email address.{" "}
                 {pendingAuth.value.app_name} receives the address as text it
                 can keep and use to contact you. You can stop sharing it in
                 Connections; that stops future access, it does not unsend.
-                Your private key never leaves the vault.
+                Your private key never leaves your Vault.
               </p>
             ) : (
               <p class="mb-4 text-xs text-gray-400">
-                This will share your DID and public key.
+                Shares your permanent ID and public key.
                 {pendingAuth.value.email_unverified
                   ? " The app also asked for your email, but yours isn't verified yet, so it won't be shared."
                   : ""}{" "}
-                Your private key never leaves the vault.
+                Your private key never leaves your Vault.
               </p>
             )}
 
@@ -2093,7 +2093,7 @@ export default component$(() => {
                 class="h-4 w-4 rounded border-gray-600 bg-gray-700 text-amber-500 focus:ring-amber-500 focus:ring-offset-0"
               />
               <span class="text-xs text-gray-400">
-                Remember this site (auto-approve next time)
+                Approve this app without asking next time
               </span>
             </label>
 
@@ -2138,7 +2138,7 @@ export default component$(() => {
               </div>
               <div>
                 <h3 class="text-base font-semibold text-white">
-                  {pendingLinkIdentity.value.app_name}
+                  Connect {pendingLinkIdentity.value.app_name}?
                 </h3>
                 {pendingLinkIdentity.value.organization_name && (
                   <p class="text-xs text-gray-400">
@@ -2150,7 +2150,7 @@ export default component$(() => {
 
             {pendingLinkIdentity.value.origin && (
               <div class="mb-3">
-                <span class="text-xs text-gray-500">Requesting page</span>
+                <span class="text-xs text-gray-500">From</span>
                 <p class="break-all text-sm text-gray-300">
                   {pendingLinkIdentity.value.origin}
                 </p>
@@ -2159,7 +2159,7 @@ export default component$(() => {
 
             {pendingLinkIdentity.value.replacing_existing && (
               <p class="mb-3 text-xs text-amber-400">
-                This app has updated its registration. Approving will update your existing link.
+                This app updated what it asks for. Approving updates your existing connection.
               </p>
             )}
             {linkUsedElsewhere.value && (
@@ -2169,18 +2169,18 @@ export default component$(() => {
             {pendingLinkIdentity.value.scopes && pendingLinkIdentity.value.scopes.length > 0 && (
               <div class="mb-4 rounded-lg border border-gray-700 bg-gray-900 p-3">
                 <p class="mb-2 text-xs font-medium text-gray-400">
-                  This app will be able to access:
+                  It can use:
                 </p>
                 <ul class="space-y-1.5">
                   {pendingLinkIdentity.value.scopes.filter((s) => s !== "openid").map((scope) => {
                     const labels: Record<string, { label: string; elevated?: boolean }> = {
-                      did: { label: "Decentralized ID (DID)" },
+                      did: { label: "Your permanent ID" },
                       public_key: { label: "Public key" },
                       email: { label: "Email address" },
                       display_name: { label: "Display name" },
                       username: { label: "Username" },
                       profile_picture: { label: "Profile picture" },
-                      holochain: { label: "Holochain identity" },
+                      holochain: { label: "Your identity key, to sign in and back up as you" },
                     };
                     const info = labels[scope] || { label: scope };
                     return (
@@ -2212,7 +2212,7 @@ export default component$(() => {
             )}
 
             <p class="mb-4 text-xs text-gray-500">
-              Your private key never leaves the vault.
+              Your private key never leaves your Vault.
             </p>
 
             <div class="flex gap-3">

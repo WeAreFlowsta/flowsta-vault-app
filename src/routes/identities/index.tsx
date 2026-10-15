@@ -142,7 +142,8 @@ export default component$(() => {
 
   const disconnectWebSite = $(async (siteId: string, appName: string) => {
     if (!webToken.value || revokingWebId.value) return;
-    if (!confirm(`Disconnect from "${appName}"? This signs you out of it and revokes its access token.`)) return;
+    void appName;
+    confirmingDisconnect.value = null;
     revokingWebId.value = siteId;
     try {
       const resp = await fetch(`${__API_URL__}/auth/sites/${siteId}`, {
@@ -281,7 +282,13 @@ export default component$(() => {
     }
   });
 
+  // Disconnect asks once, in place: the row shows what happens and two
+  // buttons, never a browser confirm(). Keyed by the app's first agent key
+  // (apps) or the site id (web sign-ins).
+  const confirmingDisconnect = useSignal<string | null>(null);
+
   const handleDisconnectApp = $(async (appAgentPubKeys: string[], clientId: string | null) => {
+    confirmingDisconnect.value = null;
     await handleRevokeLinkedApp(appAgentPubKeys);
     if (!clientId) return;
     for (const site of connectedSites.value.filter((s) => s.client_id === clientId)) {
@@ -430,6 +437,8 @@ export default component$(() => {
                 <div
                   key={`app-${app.client_id ?? app.app_name}`}
                   class="rounded-lg border border-violet-800/50 bg-violet-900/10 px-4 py-3"
+                  data-testid="linked-app"
+                  data-app-name={app.app_name}
                 >
                   <div class="flex items-center justify-between gap-3">
                     <div class="min-w-0 flex-1">
@@ -475,12 +484,33 @@ export default component$(() => {
                         </div>
                       ))}
                     </div>
-                    <GlassButton
-                      variant="danger"
-                      onClick$={() => handleDisconnectApp(app.agent_keys, app.client_id ?? null)}
-                    >
-                      Disconnect
-                    </GlassButton>
+                    {confirmingDisconnect.value === app.agent_keys[0] ? (
+                      <div class="flex flex-col items-end gap-2" data-testid="disconnect-confirm">
+                        <p class="max-w-[22rem] text-right text-xs text-gray-300">
+                          Disconnect {app.app_name}? It is signed out on every device. What is already in the app stays there.
+                        </p>
+                        <div class="flex gap-2">
+                          <GlassButton variant="secondary" testId="disconnect-app-cancel" onClick$={() => { confirmingDisconnect.value = null; }}>
+                            Cancel
+                          </GlassButton>
+                          <GlassButton
+                            variant="danger"
+                            testId="disconnect-app-confirm"
+                            onClick$={() => handleDisconnectApp(app.agent_keys, app.client_id ?? null)}
+                          >
+                            Disconnect
+                          </GlassButton>
+                        </div>
+                      </div>
+                    ) : (
+                      <GlassButton
+                        variant="danger"
+                        testId="disconnect-app"
+                        onClick$={() => { confirmingDisconnect.value = app.agent_keys[0]; }}
+                      >
+                        Disconnect
+                      </GlassButton>
+                    )}
                   </div>
                 </div>
               );
@@ -599,13 +629,33 @@ export default component$(() => {
                     );
                   })()}
                 </div>
-                <GlassButton
-                  variant="danger"
-                  disabled={revokingWebId.value === site.id}
-                  onClick$={() => disconnectWebSite(site.id, site.appName || "this site")}
-                >
-                  {revokingWebId.value === site.id ? "…" : "Disconnect"}
-                </GlassButton>
+                {confirmingDisconnect.value === site.id ? (
+                  <div class="flex flex-col items-end gap-2" data-testid="disconnect-confirm">
+                    <p class="max-w-[22rem] text-right text-xs text-gray-300">
+                      Disconnect {site.appName || "this site"}? It signs you out there. What it already has stays with it.
+                    </p>
+                    <div class="flex gap-2">
+                      <GlassButton variant="secondary" onClick$={() => { confirmingDisconnect.value = null; }}>
+                        Cancel
+                      </GlassButton>
+                      <GlassButton
+                        variant="danger"
+                        disabled={revokingWebId.value === site.id}
+                        onClick$={() => disconnectWebSite(site.id, site.appName || "this site")}
+                      >
+                        {revokingWebId.value === site.id ? "…" : "Disconnect"}
+                      </GlassButton>
+                    </div>
+                  </div>
+                ) : (
+                  <GlassButton
+                    variant="danger"
+                    disabled={revokingWebId.value === site.id}
+                    onClick$={() => { confirmingDisconnect.value = site.id; }}
+                  >
+                    {revokingWebId.value === site.id ? "…" : "Disconnect"}
+                  </GlassButton>
+                )}
               </div>
             ))}
           </div>
