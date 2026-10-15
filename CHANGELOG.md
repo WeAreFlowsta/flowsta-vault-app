@@ -5,6 +5,19 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1-beta2] - 2026-10-15
+
+### Fixed
+- **A sign-in handed over from a browser shows its approval.** When Safari,
+  Brave or a phone passed a sign-in to the Vault with a code, the Vault came
+  to the front but showed nothing to approve, and the code was hidden behind
+  it on the web page. The approval now appears as the link arrives, and a
+  code that arrives while the Vault is locked shows after you unlock.
+- **Your Own AI opens its website signed in.** The Vault now accepts the
+  website's full client id when a linked app asks it to sign the web
+  sign-in, so See plans opens yourownai.net signed in instead of falling
+  back to the sign-in page.
+
 ## [1.6.1-beta1] - 2026-10-15
 
 ### Highlights
