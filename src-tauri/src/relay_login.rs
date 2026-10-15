@@ -201,7 +201,11 @@ pub async fn relay_claim(
             return Err("vault_locked".into());
         }
     }
-    let mut claim = relay_claim_core(&api_url, &user_code).await?;
+    let mut claim = relay_claim_core(&api_url, &user_code).await.map_err(|e| {
+        log::warn!("[relay] claim failed: {e}");
+        e
+    })?;
+    log::info!("[relay] code claimed; waiting for the approval in the window");
     // Offer the email when the target app asked for it and the Vault's
     // email is verified - same rule as the /authenticate dialog.
     if claim.app_scopes.iter().any(|s| s == "email") {

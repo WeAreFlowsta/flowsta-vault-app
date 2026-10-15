@@ -2610,7 +2610,7 @@ pub(crate) fn web_login_challenge_client(challenge: &[u8]) -> Option<&str> {
     let text = std::str::from_utf8(challenge).ok()?;
     let rest = text.strip_prefix("flowsta-auth-challenge:v1:")?;
     let client = rest.rsplit(':').next()?;
-    (!client.is_empty() && client.len() <= 64 && client.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))).then_some(client)
+    (!client.is_empty() && client.len() <= 128 && client.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))).then_some(client)
 }
 
 /// A linked app may have a web-login challenge signed when it names the
@@ -2662,6 +2662,17 @@ mod handoff_tests {
         assert!(!linked_app_may_sign_web_login(Some("desktop_app"), None, ch), "no companion declared");
         assert!(!linked_app_may_sign_web_login(Some("desktop_app"), Some("other_web"), ch), "another app's client");
         assert!(!linked_app_may_sign_web_login(None, Some("web_app"), b"random-challenge"));
+    }
+
+    #[test]
+    fn a_real_oauth_client_id_is_read_and_allowed_as_the_companion() {
+        // "flowsta_app_" + 64 hex = 76 characters, as the dev portal issues them.
+        let web = "flowsta_app_6a1d801a0c327b55ea84530926c9b9e8cd7abb3cea07375449dfa35bfdb74668";
+        let desktop = "flowsta_app_583c054abe01f0179d2c396aaa8adcb754b8c5be8187471476bc3a060d44c4c4";
+        let ch = format!("flowsta-auth-challenge:v1:TrDZMuzFi93ortA6JsWP+abc/def=:{web}");
+        assert_eq!(super::web_login_challenge_client(ch.as_bytes()), Some(web));
+        assert!(super::linked_app_may_sign_web_login(Some(desktop), Some(web), ch.as_bytes()));
+        assert!(!super::linked_app_may_sign_web_login(Some(desktop), None, ch.as_bytes()));
     }
 }
 
@@ -4375,6 +4386,13 @@ async fn dev_devices_handler(
             crate::commands::lock_and_keep_syncing(app, state.app_handle.clone()).map(|_| serde_json::json!({ "locked": true }))
         }
         "round" => Ok(serde_json::json!({ "round": crate::commands::run_devices_round(app, &state.app_handle).await })),
+        // A flowsta:// link as the OS delivers it (deep link), for UI tests
+        // of the relay hand-over.
+        "open_url" => {
+            let url = text("url");
+            crate::relay_login::handle_flowsta_url(&state.app_handle, &url);
+            Ok(serde_json::json!({ "opened": url }))
+        }
         "connections" => Ok(serde_json::json!({
             "sites": app.approved_apps.lock().unwrap().clone(),
             "apps": app.linked_third_party_apps.lock().unwrap().iter().map(|a| a.client_id.clone()).collect::<Vec<_>>(),

@@ -143,6 +143,13 @@ export const config: WebdriverIO.Config = {
     holdIdleLock();
     stopTestApps();
     reapSidecars();
+    // Another Vault on the port (the installed one, a dev run) would answer
+    // every spec's IPC call instead of the test app - silently testing the
+    // wrong Vault (2026-10-15). Refuse to start.
+    const holder = (() => {
+      try { return execFileSync("ss", ["-ltnpH", "sport = :27777"], { encoding: "utf8" }).trim(); } catch { return ""; }
+    })();
+    if (holder) throw new SevereServiceError(`e2e: port 27777 is held by another Vault (${holder.replace(/\s+/g, " ").slice(0, 120)}). Quit the installed Vault and any dev run, then run again.`);
     // A probe run keeps what the last run left (VAULT_E2E_KEEP_PROFILE=1).
     if (!process.env.VAULT_E2E_KEEP_PROFILE) rmSync(PROFILE, { recursive: true, force: true });
     rmSync(SHOTS, { recursive: true, force: true });

@@ -6,8 +6,8 @@
 // resolves dialogs headlessly, so this leg proves the gate, not the dialog.
 import { byId, click, fill, PASSWORD, PORT_A, devOp, vault } from "../_helpers";
 
-const DESKTOP = "handoff_desktop_app";
-const WEB = "handoff_web_app";
+const DESKTOP = "flowsta_app_" + "de5c".repeat(16);
+const WEB = "flowsta_app_" + "7e57".repeat(16); // real length: "flowsta_app_" + 64 hex
 const ORIGIN = "yoai://handoff-test";
 
 const authenticate = async (origin: string, challengeText: string) => {

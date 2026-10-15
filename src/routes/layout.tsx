@@ -442,6 +442,45 @@ export default component$(() => {
   // A flowsta:// code that arrived while locked - processed after unlock.
   const queuedRelayCode = useSignal<string | null>(null);
 
+  // Declared before every task and handler that calls it: Qwik captures a
+  // handler's variables where it is declared, and a later declaration left
+  // the deep-link listener and the after-unlock replay without it (a relay
+  // code arrived and nothing showed - Eric's Mac, 2026-10-15).
+  const startRelayClaim = $(async (rawCode: string) => {
+    relayBusy.value = true;
+    relayError.value = null;
+    try {
+      const claim = await invoke<{
+        app_name: string;
+        ua_family: string | null;
+        ip_prefix: string | null;
+        expires_in: number;
+        app_client_id: string | null;
+        app_scopes: string[];
+        share_email: string | null;
+        email_unverified: boolean;
+      }>("relay_claim", { apiUrl: __API_URL__, userCode: rawCode });
+      pendingRelayClaim.value = claim;
+      relayCodeModal.value = false;
+      relayCodeInput.value = "";
+    } catch (e: any) {
+      const s = String(e);
+      relayError.value = s.includes("code_not_found")
+        ? "That code wasn't found - it may have expired. Get a fresh code on your other device."
+        : s.includes("already_claimed")
+          ? "That code was already used. If that wasn't you, deny the request on your other device and get a fresh code."
+          : s.includes("invalid_code")
+            ? "Codes are 8 letters, shown as XXXX-XXXX."
+            : s.includes("vault_locked")
+              ? "Unlock your Vault first."
+              : "Couldn't check that code - are you online?";
+      // Surface the error in the code modal (also for the deep-link path).
+      relayCodeModal.value = true;
+    } finally {
+      relayBusy.value = false;
+    }
+  });
+
   // Fetch profile from unlocked vault for header display + register
   // the active identity with the signatures cache so per-agent reads
   // and writes work correctly. Called from each of the three paths
@@ -1214,40 +1253,6 @@ export default component$(() => {
   });
 
   // Claim a relay code (typed or deep-linked) and open the approval screen.
-  const startRelayClaim = $(async (rawCode: string) => {
-    relayBusy.value = true;
-    relayError.value = null;
-    try {
-      const claim = await invoke<{
-        app_name: string;
-        ua_family: string | null;
-        ip_prefix: string | null;
-        expires_in: number;
-        app_client_id: string | null;
-        app_scopes: string[];
-        share_email: string | null;
-        email_unverified: boolean;
-      }>("relay_claim", { apiUrl: __API_URL__, userCode: rawCode });
-      pendingRelayClaim.value = claim;
-      relayCodeModal.value = false;
-      relayCodeInput.value = "";
-    } catch (e: any) {
-      const s = String(e);
-      relayError.value = s.includes("code_not_found")
-        ? "That code wasn't found - it may have expired. Get a fresh code on your other device."
-        : s.includes("already_claimed")
-          ? "That code was already used. If that wasn't you, deny the request on your other device and get a fresh code."
-          : s.includes("invalid_code")
-            ? "Codes are 8 letters, shown as XXXX-XXXX."
-            : s.includes("vault_locked")
-              ? "Unlock your Vault first."
-              : "Couldn't check that code - are you online?";
-      // Surface the error in the code modal (also for the deep-link path).
-      relayCodeModal.value = true;
-    } finally {
-      relayBusy.value = false;
-    }
-  });
 
   const handleRelayResponse = $(async (approved: boolean) => {
     const wasApproving = approved;
@@ -1802,7 +1807,7 @@ export default component$(() => {
 
       {/* Relay login: enter-code modal */}
       {relayCodeModal.value && !pendingRelayClaim.value && (
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" data-testid="relay-code-modal">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <h3 class="mb-1 text-base font-semibold text-white">
               Approve a sign-in
@@ -1858,7 +1863,7 @@ export default component$(() => {
       {/* Relay login: approval dialog. Deliberately NO remember
           option - every cross-device sign-in is reviewed. */}
       {pendingRelayClaim.value && activeRequest.value === "relay-claim" && (
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" data-testid="relay-dialog">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <div class="mb-4 flex items-center gap-3">
               <div class="flex h-10 w-10 items-center justify-center rounded-full bg-amber-500/20">
@@ -1923,14 +1928,14 @@ export default component$(() => {
             </p>
 
             <div class="flex gap-3">
-              <GlassButton
+              <GlassButton testId="relay-deny"
                 variant="secondary"
                 class="flex-1"
                 onClick$={() => handleRelayResponse(false)}
               >
                 Deny
               </GlassButton>
-              <GlassButton
+              <GlassButton testId="relay-allow"
                 class="flex-1"
                 onClick$={() => handleRelayResponse(true)}
               >
