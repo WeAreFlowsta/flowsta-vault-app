@@ -5,9 +5,35 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.6.1] - Unreleased
+## [1.6.1-beta1] - 2026-10-15
+
+### Highlights
+- **Signing in to apps is one step at a time.** Requests from apps now show one
+  dialog at a time; the next appears when you answer the first. A request that
+  arrives while the Vault is still unlocking is no longer lost, and after you
+  approve or decline, the window steps back so you land in the app that asked.
+- **Dialogs say it plainly.** "Connect Your Own AI?" and "Sign-in request" name
+  the app; the list of what it can use calls your DID your permanent ID; the
+  remember option reads "Approve this app without asking next time".
+- **Disconnect asks once, in place.** In Connections, Disconnect shows what
+  happens on the row itself, with Cancel and Disconnect, instead of a browser
+  prompt.
+
+### Security
+- A remembered desktop app is approved without a dialog only when its request
+  carries the key the app linked with. Browsers set their own origin; a
+  native process can claim any, so without the key the dialog shows.
 
 ### For apps
+- **Open your web app signed in.** A linked desktop app may have the Flowsta
+  web-login challenge signed for its own client, or for the companion web app
+  its registration declares, so its web app opens already signed in and the
+  browser never has to reach the Vault (`@flowsta/holochain` 3.9.0
+  `openWebSignedIn`). Any other client, or an app that is not linked, is
+  refused as before.
+- **`app_agent_pub_key` on `/authenticate`**: send the key your app linked
+  with to keep return sign-ins silent for a remembered desktop app
+  (`localAgentPubKey` in the SDK).
 - **`POST /app-secret`**: a secret derived from your identity and scoped to the
   calling app, the same on every one of your devices. An app uses it to keep
   its own private network or data key identical across your devices without
