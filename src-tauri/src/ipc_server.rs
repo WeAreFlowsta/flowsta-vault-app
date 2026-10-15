@@ -803,7 +803,25 @@ async fn resolve_requested_scopes(
     requested.iter().filter(|s| allowed.contains(s)).cloned().collect()
 }
 
+/// Every sign-in request leaves one log line with its outcome, so a field
+/// report ("it failed twice, then worked") can be read from the log.
 async fn authenticate_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+    Json(req): Json<AuthenticateRequest>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    let origin = extract_origin(&headers).unwrap_or_else(|| "-".into());
+    let client = req.client_id.clone().unwrap_or_else(|| "-".into());
+    let started = std::time::Instant::now();
+    let out = authenticate_inner(State(state), headers, Json(req)).await;
+    match &out {
+        Ok(r) => log::info!("[auth] sign-in from {origin} (client {client}): {} in {} ms", r.status().as_u16(), started.elapsed().as_millis()),
+        Err((code, Json(e))) => log::warn!("[auth] sign-in from {origin} (client {client}): {} {} in {} ms{}", code.as_u16(), e.error, started.elapsed().as_millis(), e.description.as_deref().map(|d| format!(" - {d}")).unwrap_or_default()),
+    }
+    out
+}
+
+async fn authenticate_inner(
     State(state): State<Arc<IpcState>>,
     headers: HeaderMap,
     Json(req): Json<AuthenticateRequest>,
