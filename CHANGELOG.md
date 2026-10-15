@@ -5,6 +5,23 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1-beta4] - 2026-10-16
+
+### Fixed
+- **A sign-in no longer fails when a page asks twice.** When a sign-in page
+  sent the same request twice (for example right after switching identity),
+  the first one failed with "Vault sign-in failed" while the approval stayed
+  on screen. Both now wait on the one approval and both get your answer.
+- **The browser comes back in front after you answer.** When a browser link
+  or a waiting sign-in brought the Vault forward, the Vault now always steps
+  back once you approve or decline, including right after you unlock.
+
+### Changed
+- **Clearer sign-in prompts.** A sign-in from a browser on this computer reads
+  "Approve this sign-in?" instead of asking about another device. A sign-in
+  from an app you linked names the app on the unlock screen, for example
+  "Your Own AI asked to open yourownai.net signed in."
+
 ## [1.6.1-beta3] - 2026-10-15
 
 ### Changed

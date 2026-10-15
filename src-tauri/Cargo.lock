@@ -1879,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "flowsta-vault"
-version = "1.6.1-beta3"
+version = "1.6.1-beta4"
 dependencies = [
  "aes-gcm",
  "argon2",

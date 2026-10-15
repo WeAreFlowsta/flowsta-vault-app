@@ -5,6 +5,8 @@
 //      first is answered.
 //   2. A sign-in sent while the Vault is locked shows its dialog after unlock.
 //   3. A remembered desktop app signs silently only with its link key.
+//   4. The same sign-in sent twice at once (a page that started twice): one
+//      dialog, one answer, both requests get it (Windows, 2026-10-16).
 import { randomBytes } from "node:crypto";
 import { byId, click, fill, PASSWORD, PORT_A, devOp, vault } from "../_helpers";
 
@@ -69,6 +71,26 @@ describe("approval dialogs", () => {
     console.log(`e2e: queue answered: link ${l.status}, sign-in ${a.status}`);
     expect(l.status).toBe(403);
     expect(a.status).toBe(403);
+  });
+
+  it("the same sign-in sent twice at once takes one answer", async function () {
+    this.timeout(180_000);
+    const origin = "https://dialog-twice.example";
+    const first = signIn(origin);
+    await browser.waitUntil(() => shown("auth-dialog"), { timeout: 30_000, timeoutMsg: "the first sign-in showed no dialog" });
+    const second = signIn(origin);
+    // The second must not knock the first off: it waits on the same dialog.
+    await browser.pause(2_000);
+    expect(await shown("auth-dialog")).toBe(true);
+    await click("auth-allow");
+    const [a, b] = await Promise.all([first, second]);
+    console.log(`e2e: twice at once -> ${a.status}, ${b.status}`);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(typeof a.data?.signature).toBe("string");
+    expect(typeof b.data?.signature).toBe("string");
+    await browser.pause(1_000);
+    expect(await shown("auth-dialog")).toBe(false);
   });
 
   it("a sign-in sent while locked shows its dialog after unlock", async function () {
