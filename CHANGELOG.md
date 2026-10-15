@@ -5,6 +5,19 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1-beta3] - 2026-10-15
+
+### Changed
+- **Back to the browser after a handed-over sign-in.** When a browser sign-in
+  brings the Vault forward, approving or declining puts the Vault back where it
+  was, so the page you were signing in to is in front again.
+- **The waiting sign-in says what it is.** The unlock screen reads "A sign-in is
+  waiting" and that a browser asked to sign in, instead of naming another device.
+
+### For apps
+- Every sign-in request is logged with its origin, client and outcome, so a
+  failed sign-in can be traced from the Vault's log.
+
 ## [1.6.1-beta2] - 2026-10-15
 
 ### Fixed
