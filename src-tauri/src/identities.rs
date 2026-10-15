@@ -254,6 +254,7 @@ mod tests {
                 linked_at: 1,
                 client_id: Some("flowsta_app_x".into()),
                 origin: None,
+                companion_client_id: None,
             }];
             std::fs::write(crate::paths::store_path(root, crate::paths::LINKED_APPS), serde_json::to_vec(&apps).unwrap()).unwrap();
         };

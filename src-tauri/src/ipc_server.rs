@@ -747,6 +747,7 @@ async fn resolve_requested_scopes(
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .unwrap_or_default(),
             organization_name: app.get("organization_name").and_then(|v| v.as_str()).map(String::from),
+            companion_client_id: app.get("companion_client_id").and_then(|v| v.as_str()).filter(|c| !c.is_empty()).map(String::from),
         };
         Some(info)
     }
@@ -1037,7 +1038,20 @@ async fn authenticate_handler(
         if challenge_bytes.starts_with(b"flowsta-") {
             let is_web_login_challenge =
                 challenge_bytes.starts_with(b"flowsta-auth-challenge:v1:");
-            if !(is_web_login_challenge && is_flowsta_origin(origin.as_deref())) {
+            // A LINKED app may have the web-login challenge for its own
+            // client, or its companion web client, signed too: that is the
+            // desktop-to-web hand-off (its web app opens signed in, the
+            // browser never has to reach this Vault). The link consent is
+            // the consent; the per-app trust setting decides the dialog.
+            let linked_app_allows = is_web_login_challenge && {
+                let linked = state.app_state.linked_third_party_apps.lock().unwrap();
+                origin
+                    .as_deref()
+                    .and_then(|o| linked.iter().find(|a| a.origin.as_deref() == Some(o)))
+                    .map(|a| linked_app_may_sign_web_login(a.client_id.as_deref(), a.companion_client_id.as_deref(), &challenge_bytes))
+                    .unwrap_or(false)
+            };
+            if !(is_web_login_challenge && (is_flowsta_origin(origin.as_deref()) || linked_app_allows)) {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(IpcError {
@@ -1316,6 +1330,7 @@ async fn link_identity_handler(
                 .get("organization_name")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            companion_client_id: app_obj.get("companion_client_id").and_then(|v| v.as_str()).filter(|c| !c.is_empty()).map(String::from),
         };
 
         // Update cache with fresh data
@@ -1538,6 +1553,7 @@ async fn link_identity_handler(
             existing.app_name = req.app_name.clone();
             existing.origin = origin.clone();
             existing.linked_at = unix_now();
+            existing.companion_client_id = app_info.companion_client_id.clone();
         } else {
             linked.push(crate::commands::LinkedThirdPartyApp {
                 app_name: req.app_name.clone(),
@@ -1545,6 +1561,7 @@ async fn link_identity_handler(
                 linked_at: unix_now(),
                 client_id: Some(req.client_id.clone()),
                 origin: origin.clone(),
+                companion_client_id: app_info.companion_client_id.clone(),
             });
         }
     }
@@ -2540,6 +2557,48 @@ async fn wait_for_conductor(state: &Arc<AppState>, secs: u64) -> Option<(u16, u1
 /// trusted requesters for publishing to the user's own signing cell -
 /// the other is a linked third-party app (`origin_to_client_id`).
 /// Signature-only requests stay available to every app, dialog-gated.
+/// The client a web-login challenge was issued for: auth-api builds it as
+/// `flowsta-auth-challenge:v1:<nonce base64>:<client_id>` - the client is
+/// what follows the last colon (a base64 nonce never holds one).
+pub(crate) fn web_login_challenge_client(challenge: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(challenge).ok()?;
+    let rest = text.strip_prefix("flowsta-auth-challenge:v1:")?;
+    let client = rest.rsplit(':').next()?;
+    (!client.is_empty() && client.len() <= 64 && client.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))).then_some(client)
+}
+
+/// A linked app may have a web-login challenge signed when it names the
+/// app's own client or its companion web client - never another app's.
+pub(crate) fn linked_app_may_sign_web_login(client_id: Option<&str>, companion: Option<&str>, challenge: &[u8]) -> bool {
+    match web_login_challenge_client(challenge) {
+        Some(c) => Some(c) == client_id || (companion.is_some() && Some(c) == companion),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::{linked_app_may_sign_web_login, web_login_challenge_client};
+
+    #[test]
+    fn the_client_is_the_last_field() {
+        assert_eq!(web_login_challenge_client(b"flowsta-auth-challenge:v1:AbC+/=xyz:flowsta_app_6a1d"), Some("flowsta_app_6a1d"));
+        assert_eq!(web_login_challenge_client(b"flowsta-auth-challenge:v1:nonce:"), None);
+        assert_eq!(web_login_challenge_client(b"flowsta-relay-login:v1:n:c"), None);
+        assert_eq!(web_login_challenge_client(b"flowsta-auth-challenge:v1:n:bad client"), None);
+    }
+
+    #[test]
+    fn only_the_apps_own_or_companion_client() {
+        let ch = b"flowsta-auth-challenge:v1:n0nce:web_app";
+        assert!(linked_app_may_sign_web_login(Some("desktop_app"), Some("web_app"), ch));
+        assert!(linked_app_may_sign_web_login(Some("web_app"), None, ch), "the app's own client");
+        assert!(!linked_app_may_sign_web_login(Some("desktop_app"), None, ch), "no companion declared");
+        assert!(!linked_app_may_sign_web_login(Some("desktop_app"), Some("other_web"), ch), "another app's client");
+        assert!(!linked_app_may_sign_web_login(None, Some("web_app"), b"random-challenge"));
+    }
+}
+
 fn is_flowsta_origin(origin: Option<&str>) -> bool {
     let Some(origin) = origin else { return false };
     let Ok(url) = url::Url::parse(origin) else { return false };
@@ -4276,6 +4335,7 @@ async fn dev_devices_handler(
                 // An origin lets the matrix drive the real app routes
                 // (`/app-secret`, `/backup/*`) for this app.
                 origin: body.get("origin").and_then(|v| v.as_str()).filter(|o| !o.is_empty()).map(String::from),
+                companion_client_id: body.get("companion_client_id").and_then(|v| v.as_str()).filter(|c| !c.is_empty()).map(String::from),
             });
             app.save_linked_apps();
             app.linked_app_scopes.lock().unwrap().insert(client_id, vec!["profile".into()]);

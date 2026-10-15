@@ -118,6 +118,11 @@ pub struct VerifiedAppInfo {
     pub logo_url: Option<String>,
     pub scopes: Vec<String>,
     pub organization_name: Option<String>,
+    /// The web app that belongs to this desktop app (dev portal
+    /// `companion_client_id`): a linked desktop app may have the web-login
+    /// challenge for its companion signed, so its web app opens signed in.
+    #[serde(default)]
+    pub companion_client_id: Option<String>,
 }
 
 /// A pending identity link request awaiting user approval.
@@ -189,6 +194,10 @@ pub struct LinkedThirdPartyApp {
     /// Used by /status to match caller origin → client_id → granted scopes.
     #[serde(default)]
     pub origin: Option<String>,
+    /// The app's companion web client (from the registration at link time):
+    /// this app may obtain a web-login signature for it (desktop-to-web hand-off).
+    #[serde(default)]
+    pub companion_client_id: Option<String>,
 }
 
 /// Application state shared across commands.
