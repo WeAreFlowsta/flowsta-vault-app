@@ -538,10 +538,12 @@ async fn sign_handler(
             "sign_type": req.sign_type,
             "payload_bytes": payload_bytes,
         });
-        raise_window(&state.app_handle);
+        let prior = raise_window(&state.app_handle);
         let _ = state.app_handle.emit("raw-sign-request", event_payload);
 
-        let approved = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(60), rx).await;
+        restore_window(&state.app_handle, prior);
+        let approved = match waited {
             Ok(Ok(result)) => {
                 if result {
                     recheck_expected_identity(&state)?;
@@ -690,6 +692,27 @@ struct AuthenticateRequest {
     /// address comes back in the response and a grant is filed for the app.
     #[serde(default)]
     scopes: Vec<String>,
+    /// For a linked desktop app: the install key it linked with
+    /// (`app_agent_pub_key` at /link-identity). A silent (remembered)
+    /// signature for a non-browser origin requires it, because any local
+    /// process can send an `Origin` header; browsers set theirs themselves.
+    #[serde(default)]
+    app_agent_pub_key: Option<String>,
+}
+
+/// May a remembered origin be signed for WITHOUT a dialog? Browser origins
+/// (http/https) are trusted on the Origin header the browser enforces; any
+/// other origin is a native process, which must also present the link key
+/// the Vault handed its app at /link-identity (VAULT_CONNECTION_UX.md fix
+/// 15). A mismatch is not a refusal: the dialog shows instead.
+fn silent_signature_allowed(remembered: bool, email_grant_needed: bool, origin: &str, linked_key: Option<&str>, presented_key: Option<&str>) -> bool {
+    if !remembered || email_grant_needed {
+        return false;
+    }
+    if origin.starts_with("https://") || origin.starts_with("http://") {
+        return true;
+    }
+    matches!((linked_key, presented_key), (Some(l), Some(p)) if !l.is_empty() && l == p)
 }
 
 #[derive(Serialize)]
@@ -867,8 +890,16 @@ async fn authenticate_handler(
     // NOT cover a first request for the email: that is a new thing being
     // shared, so the dialog shows once more.
     let auto_approved = if let Some(ref orig) = origin {
-        let approved = state.app_state.approved_apps.lock().unwrap();
-        approved.contains(orig) && !email_grant_needed
+        let remembered = state.app_state.approved_apps.lock().unwrap().contains(orig);
+        let linked_key = {
+            let linked = state.app_state.linked_third_party_apps.lock().unwrap();
+            linked.iter().find(|a| a.origin.as_deref() == Some(orig.as_str())).map(|a| a.app_agent_pub_key.clone())
+        };
+        let ok = silent_signature_allowed(remembered, email_grant_needed, orig, linked_key.as_deref(), req.app_agent_pub_key.as_deref());
+        if remembered && !email_grant_needed && !ok {
+            log::info!("[ipc] /authenticate from remembered origin {} without its link key - asking instead of signing silently", orig);
+        }
+        ok
     } else {
         false
     };
@@ -923,11 +954,15 @@ async fn authenticate_handler(
         // Emit Tauri event to show the approval dialog
         let event_payload = serde_json::to_value(&info).unwrap_or(serde_json::json!({}));
 
-        raise_window(&state.app_handle);
+        let prior = raise_window(&state.app_handle);
         let _ = state.app_handle.emit("auth-request", event_payload);
 
-        // Wait for user response with 60s timeout
-        match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+        // Wait for user response with 60s timeout. Whatever the answer, the
+        // window goes back where it was: the person is returning to the app
+        // that asked (fix 7, VAULT_CONNECTION_UX.md).
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(60), rx).await;
+        restore_window(&state.app_handle, prior);
+        match waited {
             Ok(Ok(result)) => {
                 if result {
                     recheck_expected_identity(&state)?;
@@ -2573,6 +2608,26 @@ pub(crate) fn linked_app_may_sign_web_login(client_id: Option<&str>, companion: 
     match web_login_challenge_client(challenge) {
         Some(c) => Some(c) == client_id || (companion.is_some() && Some(c) == companion),
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod silent_signature_tests {
+    use super::silent_signature_allowed;
+
+    #[test]
+    fn browser_origins_ride_on_the_remembered_origin() {
+        assert!(silent_signature_allowed(true, false, "https://login.flowsta.com", None, None));
+        assert!(!silent_signature_allowed(false, false, "https://login.flowsta.com", None, None));
+        assert!(!silent_signature_allowed(true, true, "https://login.flowsta.com", None, None));
+    }
+
+    #[test]
+    fn native_origins_need_the_link_key() {
+        assert!(!silent_signature_allowed(true, false, "yoai://app", Some("uhCAk-link"), None));
+        assert!(!silent_signature_allowed(true, false, "yoai://app", Some("uhCAk-link"), Some("uhCAk-other")));
+        assert!(!silent_signature_allowed(true, false, "yoai://app", None, Some("uhCAk-link")));
+        assert!(silent_signature_allowed(true, false, "yoai://app", Some("uhCAk-link"), Some("uhCAk-link")));
     }
 }
 

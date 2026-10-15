@@ -1,4 +1,4 @@
-import { component$, useSignal, useStore, useVisibleTask$, useContextProvider, $, Slot } from "@builder.io/qwik";
+import { component$, useComputed$, useSignal, useStore, useVisibleTask$, useContextProvider, $, Slot } from "@builder.io/qwik";
 import { useLocation, useNavigate, Link } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -405,6 +405,20 @@ export default component$(() => {
   // the lock screen - its approval dialog appears the moment we unlock.
   const unlockAttention = useSignal<{ reason: string; origin: string | null; label?: string | null } | null>(null);
   const relayCodeModal = useSignal(false);
+  // One request dialog at a time (VAULT_CONNECTION_UX.md fix 5): every
+  // request still lands in its own signal, but only the first in this order
+  // is shown; the next appears when it is answered. Stacked modals left
+  // people approving the wrong thing or none.
+  const activeRequest = useComputed$(() => {
+    if (pendingRawSign.value) return "raw-sign";
+    if (pendingRelayClaim.value) return "relay-claim";
+    if (pendingAuth.value) return "auth";
+    if (pendingLinkIdentity.value) return "link";
+    if (pendingCellOp.value) return "cell-op";
+    if (pendingProfileUpdate.value) return "profile";
+    if (pendingDocumentSign.value) return "document-sign";
+    return null;
+  });
   const relayCodeInput = useSignal("");
   const relayBusy = useSignal(false);
   const relayError = useSignal<string | null>(null);
@@ -605,7 +619,15 @@ export default component$(() => {
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ track, cleanup }) => {
     const s = track(() => screen.value);
-    if (s !== "dashboard") return;
+    // Listen on every screen (an event sent during unlock used to be lost
+    // and the caller timed out); the dialog itself renders only on the
+    // dashboard, and a request that arrived before the dashboard mounted is
+    // picked up from the backend here (VAULT_CONNECTION_UX.md fix 6).
+    if (s === "dashboard" && !pendingAuth.value) {
+      invoke<{ id: string; app_name: string; origin: string | null; reason: string | null; client_id?: string | null; scopes?: string[]; share_email?: string | null; email_unverified?: boolean } | null>("get_pending_auth")
+        .then((p) => { if (p && !pendingAuth.value) { pendingAuth.value = p; rememberApp.value = false; } })
+        .catch(() => {});
+    }
 
     const unlistenPromise = listen<{
       id: string;
@@ -645,7 +667,11 @@ export default component$(() => {
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ track, cleanup }) => {
     const s = track(() => screen.value);
-    if (s !== "dashboard") return;
+    if (s === "dashboard" && !pendingLinkIdentity.value) {
+      invoke<Record<string, unknown> | null>("get_pending_link_identity")
+        .then((p) => { if (p && !pendingLinkIdentity.value) pendingLinkIdentity.value = p as unknown as NonNullable<typeof pendingLinkIdentity.value>; })
+        .catch(() => {});
+    }
 
     const unlistenPromise = listen<{
       id: string;
@@ -1707,7 +1733,7 @@ export default component$(() => {
       </div>
 
       {/* Generic /sign approval dialog */}
-      {pendingRawSign.value && (
+      {pendingRawSign.value && activeRequest.value === "raw-sign" && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <div class="mb-4 flex items-center gap-3">
@@ -1815,7 +1841,7 @@ export default component$(() => {
 
       {/* Relay login: approval dialog. Deliberately NO remember
           option - every cross-device sign-in is reviewed. */}
-      {pendingRelayClaim.value && (
+      {pendingRelayClaim.value && activeRequest.value === "relay-claim" && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <div class="mb-4 flex items-center gap-3">
@@ -2000,7 +2026,7 @@ export default component$(() => {
       )}
 
       {/* Auth approval dialog overlay */}
-      {pendingAuth.value && (
+      {pendingAuth.value && activeRequest.value === "auth" && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <div class="mb-4 flex items-center gap-3">
@@ -2117,7 +2143,7 @@ export default component$(() => {
       )}
 
       {/* Link-identity approval dialog overlay */}
-      {pendingLinkIdentity.value && (
+      {pendingLinkIdentity.value && activeRequest.value === "link" && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <div class="mb-4 flex items-center gap-3">
@@ -2234,7 +2260,7 @@ export default component$(() => {
         </div>
       )}
 
-      {pendingCellOp.value && (
+      {pendingCellOp.value && activeRequest.value === "cell-op" && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <h3 class="mb-1 text-base font-semibold text-white">
@@ -2270,7 +2296,7 @@ export default component$(() => {
         </div>
       )}
 
-      {pendingProfileUpdate.value && (
+      {pendingProfileUpdate.value && activeRequest.value === "profile" && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <h3 class="mb-1 text-base font-semibold text-white">Update Your Profile</h3>
@@ -2310,7 +2336,7 @@ export default component$(() => {
         </div>
       )}
 
-      {pendingDocumentSign.value && (
+      {pendingDocumentSign.value && activeRequest.value === "document-sign" && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <div class="mb-4 flex items-center gap-3">
