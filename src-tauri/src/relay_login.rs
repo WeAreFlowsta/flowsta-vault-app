@@ -393,7 +393,7 @@ pub fn handle_flowsta_url(app: &tauri::AppHandle, url_str: &str) {
     // Remember where the window was before the link brought it forward:
     // after the person answers, the browser that asked comes back in front
     // (relay_step_back) instead of being left behind the Vault.
-    let prior = crate::ipc_server::raise_window(app);
+    let prior = crate::ipc_server::raise_window_for_caller(app);
     if let Ok(mut slot) = RAISED_BY_LINK.lock() {
         if slot.is_none() {
             *slot = prior;

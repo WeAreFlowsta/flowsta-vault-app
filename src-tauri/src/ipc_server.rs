@@ -72,6 +72,27 @@ pub(crate) fn raise_window(app: &tauri::AppHandle) -> Option<PriorWindowState> {
     Some(prior)
 }
 
+/// `raise_window` for a request that came from another app's click (a
+/// flowsta:// link, a request held behind the lock screen): the person was in
+/// that app, whatever the focus reads now. macOS activates the Vault before a
+/// link reaches it, so the focus check alone would always say "already here"
+/// and leave the Vault in front of the browser that asked.
+pub(crate) fn raise_window_for_caller(app: &tauri::AppHandle) -> Option<PriorWindowState> {
+    raise_window(app).map(|p| PriorWindowState { was_focused: false, ..p })
+}
+
+/// Restores the window when dropped - for a path with many exits.
+pub(crate) struct RestoreWindowOnDrop {
+    pub(crate) app: tauri::AppHandle,
+    pub(crate) prior: Option<PriorWindowState>,
+}
+
+impl Drop for RestoreWindowOnDrop {
+    fn drop(&mut self) {
+        restore_window(&self.app, self.prior.take());
+    }
+}
+
 /// Put Vault back the way it was before `raise_window` - so that approving (or
 /// denying) a request from another app returns focus to THAT app instead of
 /// leaving Vault parked in front. If Vault was already the focused app the user
@@ -836,15 +857,20 @@ async fn authenticate_inner(
     // them having to go back and click again. Same pattern as relay codes,
     // which are queued through unlock. If they don't unlock in time we answer
     // vault_locked exactly as before; the page keeps watching for the unlock.
-    if state.app_state.vault_config.lock().unwrap().is_none() {
+    let _restore_after_unlock = if state.app_state.vault_config.lock().unwrap().is_none() {
         // The notice leads with what the person recognises (the page's own
         // label, e.g. "Sign in to Website-dev") and carries the origin as
         // the part the Vault can vouch for.
+        // A linked app is named as the person knows it, not by its origin.
+        let app_name = origin.as_deref().and_then(|o| {
+            let linked = state.app_state.linked_third_party_apps.lock().unwrap();
+            linked.iter().find(|a| a.origin.as_deref() == Some(o)).map(|a| a.app_name.clone())
+        });
         let _ = state.app_handle.emit(
             "unlock-attention",
-            serde_json::json!({ "reason": "sign-in", "origin": origin, "label": req.reason }),
+            serde_json::json!({ "reason": "sign-in", "origin": origin, "label": req.reason, "app_name": app_name }),
         );
-        raise_window(&state.app_handle);
+        let locked_prior = raise_window_for_caller(&state.app_handle);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(55);
         loop {
             if state.app_state.vault_config.lock().unwrap().is_some() {
@@ -865,7 +891,12 @@ async fn authenticate_inner(
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
         let _ = state.app_handle.emit("unlock-attention-clear", serde_json::json!({}));
-    }
+        // Unlocked for this request: once it is answered (silently or in a
+        // dialog), the app that asked comes back in front.
+        Some(RestoreWindowOnDrop { app: state.app_handle.clone(), prior: locked_prior })
+    } else {
+        None
+    };
 
     // The unlock may have brought a different identity than the request
     // named - check again before the dialog.

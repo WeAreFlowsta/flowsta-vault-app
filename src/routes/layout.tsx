@@ -411,8 +411,11 @@ export default component$(() => {
   } | null>(null);
   // Set while a Flowsta page's request (sign / profile) is waiting behind
   // the lock screen - its approval dialog appears the moment we unlock.
-  const unlockAttention = useSignal<{ reason: string; origin: string | null; label?: string | null } | null>(null);
+  const unlockAttention = useSignal<{ reason: string; origin: string | null; label?: string | null; app_name?: string | null } | null>(null);
   const relayCodeModal = useSignal(false);
+  // The relay request came from a browser on this computer (a flowsta://
+  // link), not a code typed in from another device.
+  const relayFromLink = useSignal(false);
   // One request dialog at a time (VAULT_CONNECTION_UX.md fix 5): every
   // request still lands in its own signal, but only the first in this order
   // is shown; the next appears when it is answered. Stacked modals left
@@ -446,7 +449,7 @@ export default component$(() => {
   // handler's variables where it is declared, and a later declaration left
   // the deep-link listener and the after-unlock replay without it (a relay
   // code arrived and nothing showed - Eric's Mac, 2026-10-15).
-  const startRelayClaim = $(async (rawCode: string) => {
+  const startRelayClaim = $(async (rawCode: string, fromLink = false) => {
     relayBusy.value = true;
     relayError.value = null;
     try {
@@ -460,6 +463,7 @@ export default component$(() => {
         share_email: string | null;
         email_unverified: boolean;
       }>("relay_claim", { apiUrl: __API_URL__, userCode: rawCode });
+      relayFromLink.value = fromLink;
       pendingRelayClaim.value = claim;
       relayCodeModal.value = false;
       relayCodeInput.value = "";
@@ -591,7 +595,7 @@ export default component$(() => {
     if (queuedRelayCode.value) {
       const code = queuedRelayCode.value;
       queuedRelayCode.value = null;
-      startRelayClaim(code);
+      startRelayClaim(code, true);
     }
     try {
       autoLockMinutes.value = await invoke<number>("get_auto_lock_minutes");
@@ -796,7 +800,7 @@ export default component$(() => {
       linkedConfirmedNone.value = false;
       refreshSignatures();
     });
-    const unlistenAttention = listen<{ reason: string; origin: string | null; label?: string | null }>(
+    const unlistenAttention = listen<{ reason: string; origin: string | null; label?: string | null; app_name?: string | null }>(
       "unlock-attention",
       (event) => {
         unlockAttention.value = event.payload;
@@ -964,7 +968,7 @@ export default component$(() => {
   useVisibleTask$(({ cleanup }) => {
     const route = (code: string) => {
       if (screen.value === "dashboard") {
-        startRelayClaim(code);
+        startRelayClaim(code, true);
       } else {
         queuedRelayCode.value = code;
       }
@@ -1383,7 +1387,9 @@ export default component$(() => {
                         ? "A sign-in is waiting"
                         : "A file is waiting to be signed",
                   body:
-                    unlockAttention.value.reason === "sign-in" && unlockAttention.value.label
+                    unlockAttention.value.reason === "sign-in" && unlockAttention.value.label && unlockAttention.value.app_name
+                      ? `${unlockAttention.value.app_name} asked to ${unlockAttention.value.label.charAt(0).toLowerCase()}${unlockAttention.value.label.slice(1)}. Unlock your Vault to continue.`
+                      : unlockAttention.value.reason === "sign-in" && unlockAttention.value.label
                       ? `${unlockAttention.value.label}, from ${unlockAttention.value.origin || "a Flowsta page"}. Unlock your Vault to carry on.`
                       : `${unlockAttention.value.origin || "A Flowsta page"} is waiting - unlock your Vault to ${unlockAttention.value.reason === "sign-in" ? "carry on" : "review and approve it"}.`,
                 }
@@ -1885,10 +1891,10 @@ export default component$(() => {
               </div>
               <div>
                 <h3 class="text-base font-semibold text-white">
-                  Sign in on another device?
+                  {relayFromLink.value ? "Approve this sign-in?" : "Sign in on another device?"}
                 </h3>
                 <p class="text-xs text-gray-400">
-                  A sign-in is waiting for your approval
+                  {relayFromLink.value ? "A browser on this computer is waiting" : "A sign-in is waiting for your approval"}
                 </p>
               </div>
             </div>
@@ -1924,9 +1930,9 @@ export default component$(() => {
             </div>
 
             <p class="mb-4 text-xs text-amber-200/90">
-              Only approve if YOU just requested this on your other device.
-              If someone asked you to enter a code for them, deny it - that is
-              a scam.
+              {relayFromLink.value
+                ? "Only approve if you just started this sign-in. If you didn't, deny it."
+                : "Only approve if YOU just requested this on your other device. If someone asked you to enter a code for them, deny it - that is a scam."}
             </p>
 
             <div class="flex gap-3">
