@@ -390,13 +390,27 @@ pub fn handle_flowsta_url(app: &tauri::AppHandle, url_str: &str) {
             }
         }
     }
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_always_on_top(true);
-        let _ = window.set_focus();
-        let _ = window.set_always_on_top(false);
+    // Remember where the window was before the link brought it forward:
+    // after the person answers, the browser that asked comes back in front
+    // (relay_step_back) instead of being left behind the Vault.
+    let prior = crate::ipc_server::raise_window(app);
+    if let Ok(mut slot) = RAISED_BY_LINK.lock() {
+        if slot.is_none() {
+            *slot = prior;
+        }
     }
+}
+
+/// The window state from before a flowsta:// link raised the Vault.
+static RAISED_BY_LINK: std::sync::Mutex<Option<crate::ipc_server::PriorWindowState>> = std::sync::Mutex::new(None);
+
+/// After a handed-over sign-in is answered: put the Vault back where it was,
+/// so the browser that asked is in front again. No-op when the person opened
+/// the Vault themselves.
+#[tauri::command]
+pub fn relay_step_back(app: tauri::AppHandle) {
+    let prior = RAISED_BY_LINK.lock().ok().and_then(|mut s| s.take());
+    crate::ipc_server::restore_window(&app, prior);
 }
 
 #[cfg(test)]

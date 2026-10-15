@@ -486,6 +486,7 @@ pub fn run() {
             relay_login::relay_claim,
             relay_login::relay_approve,
             relay_login::relay_deny,
+            relay_login::relay_step_back,
             relay_login::take_pending_relay_code,
             sealed::sealed_store,
             sealed::sealed_list,

@@ -38,7 +38,7 @@ use tauri::{Emitter, Manager};
 /// What the Vault window looked like before a consent request raised it, so we
 /// can put it back afterwards (see `restore_window`).
 #[derive(Clone, Copy)]
-struct PriorWindowState {
+pub(crate) struct PriorWindowState {
     /// Was Vault the focused/foreground app when the request arrived? If so the
     /// user was actively in Vault and we leave it where it is. Otherwise Vault
     /// only came forward FOR this consent, so we tuck it away afterwards.
@@ -54,7 +54,7 @@ struct PriorWindowState {
 /// NOTE: on Wayland the compositor will NOT let a background app raise itself
 /// in response to a non-user-initiated request - it shows a "<app> is ready"
 /// notification instead. There's no API workaround; this is by design.
-fn raise_window(app: &tauri::AppHandle) -> Option<PriorWindowState> {
+pub(crate) fn raise_window(app: &tauri::AppHandle) -> Option<PriorWindowState> {
     let win = app.get_webview_window("main")?;
     let prior = PriorWindowState {
         was_focused: win.is_focused().unwrap_or(false),
@@ -77,7 +77,7 @@ fn raise_window(app: &tauri::AppHandle) -> Option<PriorWindowState> {
 /// leaving Vault parked in front. If Vault was already the focused app the user
 /// was using, we leave it. Otherwise we minimize (or re-hide) it; minimizing
 /// the foreground window hands focus to the app behind it (the caller).
-fn restore_window(app: &tauri::AppHandle, prior: Option<PriorWindowState>) {
+pub(crate) fn restore_window(app: &tauri::AppHandle, prior: Option<PriorWindowState>) {
     let Some(prior) = prior else { return };
     if prior.was_focused {
         return;

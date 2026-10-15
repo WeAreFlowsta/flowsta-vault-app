@@ -1257,6 +1257,8 @@ export default component$(() => {
   const handleRelayResponse = $(async (approved: boolean) => {
     const wasApproving = approved;
     pendingRelayClaim.value = null;
+    // Back to the browser that asked (when a flowsta:// link raised the Vault).
+    setTimeout(() => { invoke("relay_step_back").catch(() => {}); }, approved ? 900 : 200);
     try {
       if (approved) {
         await invoke("relay_approve", { apiUrl: __API_URL__ });
@@ -1387,8 +1389,8 @@ export default component$(() => {
                 }
               : queuedRelayCode.value
                 ? {
-                    title: "A sign-in from another device is waiting",
-                    body: "Unlock your Vault to review it. The code expires about five minutes after it was requested.",
+                    title: "A sign-in is waiting",
+                    body: "A browser asked to sign in with your Flowsta identity. Unlock your Vault to review it; the request lasts about five minutes.",
                   }
                 : null
           }
