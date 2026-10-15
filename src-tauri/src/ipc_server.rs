@@ -999,23 +999,48 @@ async fn authenticate_inner(
             share_email: share_email.clone(),
             email_unverified,
         };
-        let pending = PendingAuthRequest {
-            info: info.clone(),
-            challenge: req.challenge.clone(),
-            responder: tx,
-        };
-
-        // Store the pending request
-        {
+        // A dialog already open for the same app from the same origin is the
+        // same question (a page that sent its sign-in twice): this request
+        // takes that answer. Replacing it dropped the first request's channel
+        // and that page failed while the dialog stayed up (Windows,
+        // 2026-10-16). A dialog for anything else is answered no first.
+        let joined = {
             let mut pending_auth = state.app_state.pending_auth.lock().unwrap();
-            *pending_auth = Some(pending);
+            match pending_auth.as_mut() {
+                Some(open)
+                    if !open.abandoned()
+                        && open.info.origin == info.origin
+                        && open.info.client_id == info.client_id
+                        && open.info.app_name == info.app_name =>
+                {
+                    open.followers.push(tx);
+                    true
+                }
+                _ => {
+                    if let Some(previous) = pending_auth.take() {
+                        previous.answer(false);
+                    }
+                    *pending_auth = Some(PendingAuthRequest {
+                        info: info.clone(),
+                        challenge: req.challenge.clone(),
+                        responder: tx,
+                        followers: Vec::new(),
+                    });
+                    false
+                }
+            }
+        };
+        if joined {
+            log::info!("[auth] the same sign-in again from {:?} - waiting on the dialog already open", origin);
         }
 
         // Emit Tauri event to show the approval dialog
         let event_payload = serde_json::to_value(&info).unwrap_or(serde_json::json!({}));
 
         let prior = raise_window(&state.app_handle);
-        let _ = state.app_handle.emit("auth-request", event_payload);
+        if !joined {
+            let _ = state.app_handle.emit("auth-request", event_payload);
+        }
 
         // Wait for user response with 60s timeout. Whatever the answer, the
         // window goes back where it was: the person is returning to the app
@@ -1040,9 +1065,12 @@ async fn authenticate_inner(
                 ));
             }
             Err(_) => {
-                // Timeout - clean up pending request
+                // Timeout - clean up the pending request once no request is
+                // waiting on it (a later one may have joined it, or replaced it).
                 let mut pending_auth = state.app_state.pending_auth.lock().unwrap();
-                *pending_auth = None;
+                if pending_auth.as_ref().map(|p| p.abandoned()).unwrap_or(false) {
+                    *pending_auth = None;
+                }
                 return Err((
                     StatusCode::REQUEST_TIMEOUT,
                     Json(IpcError {

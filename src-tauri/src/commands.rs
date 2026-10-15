@@ -107,6 +107,24 @@ pub struct PendingAuthRequest {
     #[allow(dead_code)]
     pub challenge: Option<String>,
     pub responder: tokio::sync::oneshot::Sender<bool>,
+    /// Further requests from the same app and origin that arrived while this
+    /// dialog was open: they take the same answer (one sign-in, one question).
+    pub followers: Vec<tokio::sync::oneshot::Sender<bool>>,
+}
+
+impl PendingAuthRequest {
+    /// Give every waiting request the answer.
+    pub fn answer(self, approved: bool) {
+        let _ = self.responder.send(approved);
+        for f in self.followers {
+            let _ = f.send(approved);
+        }
+    }
+
+    /// Nobody is waiting for the answer any more (every request timed out).
+    pub fn abandoned(&self) -> bool {
+        self.responder.is_closed() && self.followers.iter().all(|f| f.is_closed())
+    }
 }
 
 /// API-verified app info returned by /api/v1/apps/verify.
@@ -1373,7 +1391,7 @@ fn lock_secrets(state: &Arc<AppState>) {
     // returns immediately instead of hanging (and can never be approved
     // against a now-locked vault). The calling app sees a clean denial.
     if let Some(req) = state.pending_auth.lock().unwrap().take() {
-        let _ = req.responder.send(false);
+        req.answer(false);
     }
     if let Some(req) = state.pending_document_sign.lock().unwrap().take() {
         let _ = req.responder.send(false);
@@ -4118,7 +4136,7 @@ pub fn respond_auth_request(
     }
 
     // Send the response - ignore error if receiver was dropped (timeout)
-    let _ = req.responder.send(approved);
+    req.answer(approved);
     Ok(())
 }
 
@@ -8673,5 +8691,46 @@ mod password_policy_tests {
     #[test]
     fn rejects_two_class_under_sixteen() {
         assert!(validate_vault_password("lowerUPPERlow").is_err()); // 2 classes, 13 chars
+    }
+}
+
+#[cfg(test)]
+mod pending_auth_tests {
+    use super::{AuthRequestInfo, PendingAuthRequest};
+
+    fn pending() -> (PendingAuthRequest, tokio::sync::oneshot::Receiver<bool>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let info = AuthRequestInfo {
+            id: "auth-1".into(),
+            app_name: "Flowsta".into(),
+            origin: Some("https://login.flowsta.com".into()),
+            reason: Some("Sign in to flowsta.com".into()),
+            client_id: Some("fsk_914a064f6d696fa482d28afdabeb8a1a5b0e9b228e2a94597bad417722a40904".into()),
+            scopes: vec![],
+            share_email: None,
+            email_unverified: false,
+        };
+        (PendingAuthRequest { info, challenge: None, responder: tx, followers: Vec::new() }, rx)
+    }
+
+    #[test]
+    fn one_answer_reaches_every_request_waiting_on_the_dialog() {
+        let (mut open, mut first) = pending();
+        let (tx, mut second) = tokio::sync::oneshot::channel();
+        open.followers.push(tx);
+        open.answer(true);
+        assert_eq!(first.try_recv(), Ok(true));
+        assert_eq!(second.try_recv(), Ok(true));
+    }
+
+    #[test]
+    fn abandoned_only_when_no_request_still_waits() {
+        let (mut open, first) = pending();
+        let (tx, second) = tokio::sync::oneshot::channel::<bool>();
+        open.followers.push(tx);
+        drop(first);
+        assert!(!open.abandoned(), "the second request still waits");
+        drop(second);
+        assert!(open.abandoned());
     }
 }
