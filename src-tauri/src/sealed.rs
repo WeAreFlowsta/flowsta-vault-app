@@ -373,6 +373,29 @@ struct SealedAtWire {
     nonce: Vec<u8>,
     #[serde(with = "serde_bytes")]
     tag: Vec<u8>,
+    /// Coordinator rev 3: more links to the same record, one per tag. An
+    /// older coordinator ignores the field and writes the main link only.
+    extra_tags: Vec<serde_bytes::ByteBuf>,
+}
+
+/// The tag on the second link of every device and removal record, so a
+/// device that just joined can ask the other devices for those records
+/// alone instead of waiting for everything to arrive. Keyed with the data
+/// key: to anyone else it is 16 random-looking bytes, and it says nothing
+/// about what the record is.
+pub(crate) fn device_records_tag(data_key: &[u8; 32]) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(data_key).expect("HMAC accepts any key length");
+    mac.update(b"flowsta-device-records-v1");
+    mac.finalize().into_bytes()[..16].to_vec()
+}
+
+fn tags_for(entry_type: &str, data_key: &[u8; 32]) -> Vec<serde_bytes::ByteBuf> {
+    if entry_type == crate::devices::DEVICE_ENTRY_TYPE || entry_type == crate::devices::REMOVAL_ENTRY_TYPE {
+        vec![serde_bytes::ByteBuf::from(device_records_tag(data_key))]
+    } else {
+        Vec::new()
+    }
 }
 
 #[derive(Serialize)]
@@ -501,6 +524,7 @@ pub(crate) async fn sealed_store_spec(
     let id = spec
         .id
         .unwrap_or_else(|| derived_logical_id(&spec.entry_type, spec.created_at));
+    let extra_tags = tags_for(&spec.entry_type, &data_key);
     let payload = SealedPayload {
         v: SEALED_PAYLOAD_V2,
         entry_type: spec.entry_type,
@@ -519,7 +543,7 @@ pub(crate) async fn sealed_store_spec(
         original: ActionHash,
         replacement: SealedAtWire,
     }
-    let at = SealedAtWire { base, cipher: cipher.clone(), nonce: nonce.to_vec(), tag: Vec::new() };
+    let at = SealedAtWire { base, cipher: cipher.clone(), nonce: nonce.to_vec(), tag: Vec::new(), extra_tags };
     let (fn_name, input) = match &supersedes {
         Some(original) => (
             "replace_sealed_at",
@@ -651,7 +675,7 @@ pub(crate) fn forget_recent_versions() {
 /// Versions that fail to decrypt (foreign, corrupt, or a plaintext marker)
 /// are skipped with a warning, never fatal.
 pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredVersion>, String> {
-    use holochain_types::prelude::{Entry, Record};
+    use holochain_types::prelude::Record;
 
     let (admin_port, app_port) = conductor_ports(state)?;
     let data_key = vault_data_key(state)?;
@@ -685,8 +709,70 @@ pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredV
         Err(e) => return Err(e),
     };
 
+    let mut versions = decode_versions(&records, &data_key);
+    // Device and removal records the other devices answered with that have
+    // not arrived here yet (fetch_device_records).
+    if let Some(net) = NETWORK_DEVICE_VERSIONS.lock().unwrap().as_ref() {
+        if net.0 == root {
+            for v in &net.1 {
+                if !versions.iter().any(|h| h.action_hash == v.action_hash) {
+                    versions.push(v.clone());
+                }
+            }
+        }
+    }
+    *RECENT_VERSIONS.lock().unwrap() = Some(RecentVersions {
+        root,
+        read_at: std::time::Instant::now(),
+        versions: versions.clone(),
+    });
+    Ok(versions)
+}
+
+/// Device and removal records as the other devices hold them, kept for the
+/// identity they were read for.
+static NETWORK_DEVICE_VERSIONS: std::sync::Mutex<Option<(std::path::PathBuf, Vec<StoredVersion>)>> =
+    std::sync::Mutex::new(None);
+
+/// Ask the other devices for the identity's device and removal records (the
+/// ones on the tagged second link). A device that just joined holds only
+/// what has been sent to it since; an older record - a sibling that has not
+/// written its own since - would otherwise arrive only with the background
+/// sync. Returns how many versions were read.
+pub(crate) async fn fetch_device_records(state: &Arc<AppState>) -> Result<usize, String> {
+    let (admin_port, app_port) = conductor_ports(state)?;
+    let data_key = vault_data_key(state)?;
+    let base = sealed_base(state)?;
+    let root = state.identity_root();
+    let input = rmp_serde::to_vec_named(&ListAtWire { base, tag_prefix: device_records_tag(&data_key), network: true })
+        .map_err(|e| e.to_string())?;
+    let result = sealed_zome_call(state, admin_port, app_port, "get_all_sealed_at", input).await?;
+    let records: Vec<holochain_types::prelude::Record> = rmp_serde::from_slice::<Vec<ListedWire>>(result.as_bytes())
+        .map_err(|e| format!("Records decode failed: {}", e))?
+        .into_iter()
+        .map(|l| l.record)
+        .collect();
+    let versions: Vec<StoredVersion> = decode_versions(&records, &data_key)
+        .into_iter()
+        .filter(|v| v.payload.entry_type == crate::devices::DEVICE_ENTRY_TYPE || v.payload.entry_type == crate::devices::REMOVAL_ENTRY_TYPE)
+        .collect();
+    let n = versions.len();
+    *NETWORK_DEVICE_VERSIONS.lock().unwrap() = Some((root, versions));
+    forget_recent_versions();
+    Ok(n)
+}
+
+/// Lock and identity change: the device records read from the network
+/// (decrypted) leave memory with everything else.
+pub(crate) fn forget_network_device_versions() {
+    *NETWORK_DEVICE_VERSIONS.lock().unwrap() = None;
+    crate::devices::forget_network_asked();
+}
+
+fn decode_versions(records: &[holochain_types::prelude::Record], data_key: &[u8; 32]) -> Vec<StoredVersion> {
+    use holochain_types::prelude::Entry;
     let mut versions = Vec::with_capacity(records.len());
-    for record in &records {
+    for record in records {
         let Some(Entry::App(entry_bytes)) = record.entry().as_option() else {
             continue;
         };
@@ -710,7 +796,7 @@ pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredV
         }
         let mut nonce = [0u8; NONCE_BYTES];
         nonce.copy_from_slice(&sealed.nonce);
-        let payload = match unseal(&sealed.cipher, &nonce, &data_key) {
+        let payload = match unseal(&sealed.cipher, &nonce, data_key) {
             Ok(p) => p,
             Err(e) => {
                 log::warn!("Skipping undecryptable sealed record: {}", e);
@@ -722,12 +808,7 @@ pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredV
             payload,
         });
     }
-    *RECENT_VERSIONS.lock().unwrap() = Some(RecentVersions {
-        root,
-        read_at: std::time::Instant::now(),
-        versions: versions.clone(),
-    });
-    Ok(versions)
+    versions
 }
 
 /// The identity's records for an export: the newest version of each logical
@@ -1356,6 +1437,60 @@ mod tests {
         // The same record brought back by an import of an older copy loses to the deletion.
         sealed_store_inner(&b.state, "login_activity".into(), serde_json::json!({ "n": 1 }), vec![], 2000).await.unwrap();
         assert!(sealed_list_inner(&b.state).await.unwrap().iter().all(|r| r.entry_type != "login_activity"), "a deleted record stays deleted");
+    }
+
+    /// A device that joins later asks the network for the device records and
+    /// has the first device's at once - before its own copy has arrived by
+    /// the background sync, when that is slower.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "starts real conductors and uses the staging rendezvous"]
+    async fn live_a_joining_device_asks_for_the_device_records() {
+        let seed = format!("live-{}", hex::encode(crate::key_derivation::new_conductor_seed())[..16].to_string());
+        let identity_public = crate::key_derivation::public_key_of_seed(&[21u8; 32]);
+        let mut config: crate::vault::VaultConfig = serde_json::from_str(
+            r#"{"agent_pub_key":"uhCAkTest","did":"did:flowsta:uhCAkTest","installed_app_ids":[],"created_at":1}"#,
+        )
+        .unwrap();
+        config.data_key = Some(vec![33u8; 32]);
+        config.agent_pub_key_raw_b64 = Some(crate::key_derivation::base64_standard_encode(
+            &crate::key_derivation::construct_agent_pub_key_bytes(&identity_public),
+        ));
+        let a = live_device("a", 46071, &seed, &config, true).await;
+        a.state.vault_config.lock().unwrap().as_mut().unwrap().conductor_seed = Some([41u8; 32].to_vec());
+        assert!(crate::devices::publish_own(&a.state).await.unwrap());
+        let a_id = crate::paths::install_id(&a.state.data_dir).unwrap();
+
+        let b = live_device("b", 46072, &seed, &config, true).await;
+        let started = std::time::Instant::now();
+        loop {
+            let held = crate::devices::list(&b.state).await.map(|d| d.iter().any(|x| x.install_id == a_id)).unwrap_or(false);
+            if let Ok(n) = fetch_device_records(&b.state).await {
+                if n > 0 {
+                    println!("  asked after {}s ({} version(s)); held by the background sync already: {}", started.elapsed().as_secs(), n, held);
+                    break;
+                }
+            }
+            assert!(started.elapsed().as_secs() < 300, "the network never answered with the device records");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        let listed = crate::devices::list(&b.state).await.unwrap();
+        assert!(listed.iter().any(|d| d.install_id == a_id), "the first device is listed from what the network answered");
+        // Only device records come in this way, and the lock forgets them.
+        forget_network_device_versions();
+        assert!(NETWORK_DEVICE_VERSIONS.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn the_device_tag_is_keyed_and_only_on_device_records() {
+        let (k1, k2) = ([1u8; 32], [2u8; 32]);
+        assert_eq!(device_records_tag(&k1), device_records_tag(&k1));
+        assert_ne!(device_records_tag(&k1), device_records_tag(&k2), "another identity's tag differs");
+        assert_eq!(device_records_tag(&k1).len(), 16);
+        assert!(!device_records_tag(&k1).windows(6).any(|w| w == b"device"), "nothing readable in it");
+        assert_eq!(tags_for(crate::devices::DEVICE_ENTRY_TYPE, &k1).len(), 1);
+        assert_eq!(tags_for(crate::devices::REMOVAL_ENTRY_TYPE, &k1).len(), 1);
+        assert!(tags_for("user_profile", &k1).is_empty());
+        assert!(tags_for("login_activity", &k1).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

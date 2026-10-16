@@ -381,6 +381,40 @@ pub async fn removed_here_now(state: &Arc<AppState>) -> Result<bool, String> {
 }
 
 /// The identity's devices as this device knows them.
+/// When the device records were last asked of the other devices: (first
+/// ask this session, last ask).
+static NETWORK_ASKED: std::sync::Mutex<Option<(std::time::Instant, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+/// Ask the other devices for the device records: each minute for the first
+/// quarter hour (a device that just joined, or one back from a long time
+/// off, learns its siblings at once), then every ten minutes. Failing is
+/// fine - the records still arrive with the background sync.
+pub async fn ask_network_for_devices(state: &Arc<AppState>) {
+    let now = std::time::Instant::now();
+    let due = match *NETWORK_ASKED.lock().unwrap() {
+        None => true,
+        Some((first, last)) => {
+            let every = if now.duration_since(first) < std::time::Duration::from_secs(15 * 60) { 55 } else { 600 };
+            now.duration_since(last) >= std::time::Duration::from_secs(every)
+        }
+    };
+    if !due {
+        return;
+    }
+    match crate::sealed::fetch_device_records(state).await {
+        Ok(n) => log::info!("Device records from the other devices: {}", n),
+        Err(e) => log::info!("Device records not asked of the other devices: {}", e.chars().take(120).collect::<String>()),
+    }
+    let mut asked = NETWORK_ASKED.lock().unwrap();
+    let first = asked.map(|(f, _)| f).unwrap_or(now);
+    *asked = Some((first, now));
+}
+
+/// The next unlock asks again, each minute at first.
+pub fn forget_network_asked() {
+    *NETWORK_ASKED.lock().unwrap() = None;
+}
+
 pub async fn list(state: &Arc<AppState>) -> Result<Vec<DeviceRecord>, String> {
     Ok(devices_in(&crate::sealed::sealed_list_inner(state).await?))
 }

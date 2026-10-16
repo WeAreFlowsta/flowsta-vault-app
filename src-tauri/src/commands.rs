@@ -1382,6 +1382,7 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
 fn lock_secrets(state: &Arc<AppState>) {
     // Decrypted records read a moment ago do not outlive the lock.
     crate::sealed::forget_recent_versions();
+    crate::sealed::forget_network_device_versions();
     crate::device_registry::set_device_signer(None);
     crate::device_registry::forget_enrollment_seed();
     crate::device_registry::hold_approval(None);
@@ -1758,6 +1759,9 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
     // and the Overview's banner goes.
     let mut complete = full;
     {
+        // What the other devices hold about the identity's devices, before
+        // anything below reads the list.
+        crate::devices::ask_network_for_devices(devices_state).await;
         // Removed by another device of the identity: stand down. Nothing is
         // erased; the lock screen offers what comes next.
         let removed = match crate::devices::removed_here_now(devices_state).await {
@@ -2387,6 +2391,7 @@ fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, 
 /// state at `root`.
 fn clear_identity_memory(state: &Arc<AppState>, root: &std::path::Path) {
     crate::sealed::forget_recent_versions();
+    crate::sealed::forget_network_device_versions();
     crate::device_registry::set_device_signer(None);
     crate::device_registry::forget_enrollment_seed();
     crate::device_registry::hold_approval(None);

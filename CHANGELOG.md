@@ -5,6 +5,14 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A new device lists all your devices from the start.** A device you just
+  added showed only the devices that had been online since, until each of
+  the others was opened. It now asks your other devices for the full list
+  straight away, over your own private network.
+
 ## [1.6.1-beta4] - 2026-10-16
 
 ### Fixed

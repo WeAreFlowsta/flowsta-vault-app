@@ -187,7 +187,9 @@ pub async fn ensure_signing_coordinators(
 /// Rev 2: records are linked from one shared base and listed, retired and
 /// superseded there, so a person's devices share one set of records; pieces
 /// of large objects are sent between those devices as remote signals.
-pub const PRIVATE_V2_COORDINATOR_REV: u32 = 2;
+/// Rev 3: a record can carry more links with their own tags (device and
+/// removal records get one, so a device can ask for those alone).
+pub const PRIVATE_V2_COORDINATOR_REV: u32 = 3;
 const PRIVATE_V2_COORDINATOR_WASM: &str = "private_v2_coordinator.wasm";
 
 /// Hot-swap the private v2 cell's coordinator to the bundled revision.
