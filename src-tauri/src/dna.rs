@@ -189,7 +189,9 @@ pub async fn ensure_signing_coordinators(
 /// of large objects are sent between those devices as remote signals.
 /// Rev 3: a record can carry more links with their own tags (device and
 /// removal records get one, so a device can ask for those alone).
-pub const PRIVATE_V2_COORDINATOR_REV: u32 = 3;
+/// Rev 4: `list_sealed_at` lists the links with only the records the Vault
+/// does not hold yet (its own from the chain, the rest a hundred at a time).
+pub const PRIVATE_V2_COORDINATOR_REV: u32 = 4;
 const PRIVATE_V2_COORDINATOR_WASM: &str = "private_v2_coordinator.wasm";
 
 /// Hot-swap the private v2 cell's coordinator to the bundled revision.

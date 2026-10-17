@@ -470,6 +470,8 @@ pub fn run() {
             pairing::pair_approve,
             pairing::pair_decline,
             devices::devices_list,
+            devices::devices_checking,
+            devices::devices_progress,
             devices::devices_known_count,
             commands::my_signing_keys,
             commands::cells_ready,

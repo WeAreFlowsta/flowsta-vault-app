@@ -1762,6 +1762,8 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
         // What the other devices hold about the identity's devices, before
         // anything below reads the list.
         crate::devices::ask_network_for_devices(devices_state).await;
+        // And tell them about this one, directly (each minute at first).
+        crate::devices::announce_to_siblings(devices_state).await;
         // Removed by another device of the identity: stand down. Nothing is
         // erased; the lock screen offers what comes next.
         let removed = match crate::devices::removed_here_now(devices_state).await {
@@ -1902,11 +1904,22 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                 .and_then(|t| t.elapsed().ok())
                 .map(|d| d.as_secs() >= 600)
                 .unwrap_or(false);
-            if profile_seen || waited_long_enough {
+            if crate::devices::still_receiving_records(devices_state).await {
+                // Records are still arriving; the backups they list with them.
+            } else if profile_seen || waited_long_enough {
                 let _ = std::fs::write(&marker, b"");
                 let _ = std::fs::remove_file(&pending);
                 log::info!("This device has everything from the other devices");
                 let _ = devices_app.emit("setup-complete", serde_json::json!({}));
+                // The other devices stop showing this one as receiving: its
+                // record says so now, and they hear it directly.
+                match crate::devices::publish_own(devices_state).await {
+                    Ok(_) => {
+                        crate::devices::announce_again();
+                        crate::devices::announce_to_siblings(devices_state).await;
+                    }
+                    Err(e) => log::info!("This device's record was not rewritten after setup: {}", e),
+                }
             } else if !pending.exists() {
                 let _ = std::fs::write(&pending, b"");
             }
@@ -2367,6 +2380,7 @@ fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, 
         note(name, std::fs::remove_file(crate::paths::store_path(root, name)));
         note(name, std::fs::remove_file(root.join(format!("{}.bak", name))));
     }
+    note("kept records", std::fs::remove_file(crate::sealed::held_records_path(root)));
     for dir in [
         crate::paths::lair_dir(root),
         crate::paths::conductor_dir(root),

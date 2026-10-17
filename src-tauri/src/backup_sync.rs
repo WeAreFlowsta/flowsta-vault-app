@@ -503,8 +503,15 @@ pub async fn round(state: &Arc<crate::commands::AppState>) -> Result<RoundOutcom
             .map(holochain_types::prelude::AgentPubKey::from_raw_39)
     };
 
+    let indexes = indexes_of(&recorded);
+    let steps = plan(&root, &me, &indexes);
+    // How much of the other devices' backups this device should hold, and
+    // how much of it is still to come (Overview and Devices show it while a
+    // device is being set up).
+    let wanted: u64 = indexes.iter().filter(|i| i.install_id != me && is_install_id(&i.install_id)).flat_map(|i| i.slots.iter()).map(|s| s.size).sum();
+    let mut pending: u64 = steps.iter().map(|s| if let CopyStep::Fetch { slot, .. } = s { slot.size } else { 0 }).sum();
     let mut budget = FETCH_BYTES_PER_ROUND;
-    for step in plan(&root, &me, &indexes_of(&recorded)) {
+    for step in steps {
         match step {
             CopyStep::Drop { path } => {
                 if std::fs::remove_file(&path).is_ok() {
@@ -525,6 +532,7 @@ pub async fn round(state: &Arc<crate::commands::AppState>) -> Result<RoundOutcom
                     Ok(bytes) => match store_copy(&root, &install_id, &client_id, &slot, &bytes) {
                         Ok(_) => {
                             budget -= slot.size;
+                            pending = pending.saturating_sub(slot.size);
                             outcome.fetched += 1;
                         }
                         Err(e) => {
@@ -540,7 +548,22 @@ pub async fn round(state: &Arc<crate::commands::AppState>) -> Result<RoundOutcom
             }
         }
     }
+    *COPIES_PROGRESS.lock().unwrap() = Some((state.identity_root(), wanted, pending));
     Ok(outcome)
+}
+
+/// The other devices' backups this device should hold, and how much of that
+/// is still to come, as of the last round: (wanted, pending) bytes.
+static COPIES_PROGRESS: std::sync::Mutex<Option<(PathBuf, u64, u64)>> = std::sync::Mutex::new(None);
+
+pub fn copies_progress(identity_root: &Path) -> (u64, u64) {
+    COPIES_PROGRESS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(root, _, _)| root.as_path() == identity_root)
+        .map(|(_, w, p)| (*w, *p))
+        .unwrap_or((0, 0))
 }
 
 #[cfg(test)]

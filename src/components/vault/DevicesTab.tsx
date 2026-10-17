@@ -14,8 +14,38 @@ export interface DeviceRow {
   name: string;
   platform: string;
   added_at: number;
-  state: "this_device" | "this_device_setting_up" | "up_to_date" | "last_synced" | "not_seen_since" | "needs_update" | "removed";
+  state: "this_device" | "this_device_setting_up" | "up_to_date" | "setting_up" | "last_synced" | "not_seen_since" | "needs_update" | "removed";
   at?: number;
+}
+
+/** What a device holds (devices_progress): its private records and the
+ *  other devices' backups it should keep, with how much is still to come. */
+export interface Holds {
+  records: number;
+  backups_wanted: number;
+  backups_pending: number;
+  setting_up: boolean;
+}
+export interface DevicesProgress {
+  setting_up: boolean;
+  mine: Holds;
+  siblings: { install_id: string; holds: Holds; at: number }[];
+}
+
+export function sizeText(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${Math.round(bytes / 1e6)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1e3))} KB`;
+}
+
+/** How far a device being set up has got, in plain words: its records
+ *  against `target` (what the device showing it holds) and the backups it
+ *  is fetching. Empty when there is nothing to count yet. */
+export function progressText(h: Holds, target: number): string {
+  const parts: string[] = [];
+  if (target > 0) parts.push(`${Math.min(h.records, target).toLocaleString()} of ${target.toLocaleString()} records`);
+  if (h.backups_wanted > 0) parts.push(`${sizeText(h.backups_wanted - h.backups_pending)} of ${sizeText(h.backups_wanted)} of app backups`);
+  return parts.join(" · ");
 }
 
 interface Standing {
@@ -49,7 +79,10 @@ export function deviceLine(d: DeviceRow): string {
     case "this_device": return "This device";
     case "this_device_setting_up": return "This device - being set up";
     case "up_to_date": return d.at ? `Up to date - last seen ${dayAndTime(d.at)}` : "Up to date";
-    case "last_synced": return isCatchingUp(d) ? "Syncing a recent change" : `Has everything up to ${dayAndTime(d.at ?? 0)}`;
+    case "setting_up": return "Receiving your private data";
+    // Its newest record is older than this device's: it is behind. (It said
+    // "Has everything up to <when it last checked in>" - the opposite.)
+    case "last_synced": return isCatchingUp(d) ? "Syncing a recent change" : `Not up to date - last heard from ${dayAndTime(d.at ?? 0)}`;
     case "not_seen_since": return `Not seen since ${day(d.at ?? 0)}`;
     case "needs_update": return "Needs the Vault update to sync";
     case "removed": return "Removed";
@@ -70,6 +103,11 @@ function claimError(e: unknown): string {
 export const DevicesTab = component$(() => {
   const devices = useSignal<DeviceRow[] | null>(null);
   const checking = useSignal(false);
+  // A device this one knows has not been heard from yet this session (the
+  // first quarter hour after unlock): the list is not confirmed yet.
+  const reaching = useSignal(false);
+  // How far a device being set up has got (its own word, sent directly).
+  const progress = useSignal<DevicesProgress | null>(null);
   // False on an identity set up before 1.6.0 until the phrase is typed once.
   const handoverReady = useSignal(true);
   const adding = useSignal(false);
@@ -122,6 +160,8 @@ export const DevicesTab = component$(() => {
   const load = $(async () => {
     try {
       devices.value = await invoke<DeviceRow[]>("devices_list");
+      reaching.value = await invoke<boolean>("devices_checking").catch(() => false);
+      progress.value = await invoke<DevicesProgress>("devices_progress").catch(() => null);
       // The chip shows the same list at the same moment.
       window.dispatchEvent(new CustomEvent("devices-listed", { detail: devices.value }));
       // The device approved here has started: the waiting line goes.
@@ -360,6 +400,12 @@ export const DevicesTab = component$(() => {
                   <p class={["text-xs", d.state === "up_to_date" || d.state === "this_device" ? "text-green-400" : d.state === "removed" || d.state === "this_device_setting_up" || isCatchingUp(d) ? "text-gray-400" : "text-amber-300"].join(" ")}>
                     {deviceLine(d)}
                   </p>
+                  {d.state === "setting_up" && (() => {
+                    const p = progress.value;
+                    const theirs = p?.siblings.find((s) => s.install_id === d.install_id)?.holds;
+                    const text = theirs && p ? progressText(theirs, p.mine.records) : "";
+                    return text ? <p class="text-xs text-gray-400" data-testid="device-progress">{text}</p> : null;
+                  })()}
                 </div>
                 {d.state !== "this_device" && d.state !== "this_device_setting_up" && d.state !== "removed" && (
                   <PillButton accent="red" onClick$={() => { removing.value = d; error.value = ""; }}>Remove</PillButton>
@@ -367,6 +413,15 @@ export const DevicesTab = component$(() => {
               </li>
             ))}
           </ul>
+        )}
+        {devices.value !== null && devices.value.length > 0 && reaching.value && (
+          <p class="mt-2 flex items-center gap-2 text-xs text-gray-400" data-testid="devices-reaching">
+            <svg class="h-3.5 w-3.5 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+            </svg>
+            <span>Checking with your other devices...</span>
+          </p>
         )}
 
         {standing.value.device === "registered" && standing.value.enrollment === "none" && !(adding.value && !handoverReady.value) && (

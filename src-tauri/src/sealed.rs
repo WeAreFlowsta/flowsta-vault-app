@@ -411,6 +411,31 @@ struct ListedWire {
     record: holochain_types::prelude::Record,
 }
 
+/// `list_sealed_at` (coordinator revision 4): the links, with records only
+/// for targets not in `known`.
+#[derive(Serialize)]
+struct ListRefsWire<'a> {
+    base: holochain_types::prelude::AgentPubKey,
+    #[serde(with = "serde_bytes")]
+    tag_prefix: Vec<u8>,
+    known: &'a [holochain_types::prelude::ActionHash],
+    limit: u32,
+}
+
+#[derive(Deserialize)]
+struct ListedRefWire {
+    target: holochain_types::prelude::ActionHash,
+    record: Option<holochain_types::prelude::Record>,
+    #[serde(default)]
+    left: bool,
+}
+
+#[derive(Deserialize)]
+struct ListedRefsWire {
+    refs: Vec<ListedRefWire>,
+    more: bool,
+}
+
 /// The cell still runs the original coordinator (the hot-swap at start did
 /// not go through): the caller falls back to the functions it has.
 fn is_missing_function(err: &str) -> bool {
@@ -681,33 +706,17 @@ pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredV
     let data_key = vault_data_key(state)?;
     let base = sealed_base(state)?;
     let root = state.identity_root();
-    if let Some(recent) = RECENT_VERSIONS.lock().unwrap().as_ref() {
-        if recent.root == root && recent.read_at.elapsed() < RECENT_FOR {
-            return Ok(recent.versions.clone());
-        }
+    if let Some(versions) = recent_versions(&root) {
+        return Ok(versions);
+    }
+    // One read at a time; a caller that waited takes the answer of the read
+    // it waited for.
+    let _one = FULL_READ.lock().await;
+    if let Some(versions) = recent_versions(&root) {
+        return Ok(versions);
     }
 
-    let input = rmp_serde::to_vec_named(&ListAtWire { base, tag_prefix: Vec::new(), network: false })
-        .map_err(|e| e.to_string())?;
-    let records: Vec<Record> = match sealed_zome_call(state, admin_port, app_port, "get_all_sealed_at", input).await {
-        Ok(result) => rmp_serde::from_slice::<Vec<ListedWire>>(result.as_bytes())
-            .map_err(|e| format!("Records decode failed: {}", e))?
-            .into_iter()
-            .map(|l| l.record)
-            .collect(),
-        Err(e) if is_missing_function(&e) => {
-            let result = sealed_zome_call(
-                state,
-                admin_port,
-                app_port,
-                "get_all_sealed",
-                rmp_serde::to_vec_named(&()).map_err(|e| e.to_string())?,
-            )
-            .await?;
-            rmp_serde::from_slice(result.as_bytes()).map_err(|e| format!("Records decode failed: {}", e))?
-        }
-        Err(e) => return Err(e),
-    };
+    let records: Vec<Record> = read_records(state, admin_port, app_port, base, &data_key, &root).await?;
 
     let mut versions = decode_versions(&records, &data_key);
     // Device and removal records the other devices answered with that have
@@ -721,12 +730,249 @@ pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredV
             }
         }
     }
-    *RECENT_VERSIONS.lock().unwrap() = Some(RecentVersions {
-        root,
-        read_at: std::time::Instant::now(),
-        versions: versions.clone(),
-    });
+    // A lock while the read ran: decrypted versions do not stay behind it.
+    if vault_data_key(state).is_ok() && state.identity_root() == root {
+        *RECENT_VERSIONS.lock().unwrap() = Some(RecentVersions {
+            root,
+            read_at: std::time::Instant::now(),
+            versions: versions.clone(),
+        });
+    }
     Ok(versions)
+}
+
+fn recent_versions(root: &std::path::Path) -> Option<Vec<StoredVersion>> {
+    RECENT_VERSIONS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|recent| recent.root == root && recent.read_at.elapsed() < RECENT_FOR)
+        .map(|recent| recent.versions.clone())
+}
+
+/// One read of every record at a time. 2026-10-17: the Vault asked for
+/// them every 30 s and on every Devices page refresh, each read took
+/// minutes on a cell of thousands, and ten ran inside the conductor at once
+/// (it does not stop a call the Vault stopped waiting for) until gossip
+/// with a new device starved.
+static FULL_READ: std::sync::LazyLock<tokio::sync::Mutex<()>> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Records this device has read, as stored (ciphertext), by action hash.
+/// A record never changes (an edit is a new record), so a list asks the
+/// cell for its links and only for records not held yet. Per identity;
+/// kept across a lock (nothing in it opens without the data key) and in a
+/// file sealed with the data key, so a restart does not read every record
+/// again.
+struct HeldRecords {
+    root: std::path::PathBuf,
+    records: std::collections::HashMap<holochain_types::prelude::ActionHash, holochain_types::prelude::Record>,
+}
+static HELD_RECORDS: std::sync::Mutex<Option<HeldRecords>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static LIST_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static RECORDS_FROM_CELL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// At most this many records read one by one per call: about 0.3 s each on
+/// a large cell, so a call stays well inside the 5-minute wait and a long
+/// first read keeps what each call brought.
+const GETS_PER_CALL: u32 = 100;
+
+pub(crate) fn held_records_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("sealed-records.bin")
+}
+
+/// The held records for this identity, from its file the first time.
+fn ensure_held(root: &std::path::Path, data_key: &[u8; 32]) {
+    let mut held = HELD_RECORDS.lock().unwrap();
+    if held.as_ref().map(|h| h.root == root).unwrap_or(false) {
+        return;
+    }
+    let records = load_held_file(&held_records_path(root), data_key)
+        .into_iter()
+        .map(|r| (r.action_address().clone(), r))
+        .collect();
+    *held = Some(HeldRecords { root: root.to_path_buf(), records });
+}
+
+fn load_held_file(path: &std::path::Path, data_key: &[u8; 32]) -> Vec<holochain_types::prelude::Record> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    if bytes.len() < NONCE_BYTES + MAC_BYTES {
+        return Vec::new();
+    }
+    let (nonce, cipher) = bytes.split_at(NONCE_BYTES);
+    let mut nonce_arr = [0u8; NONCE_BYTES];
+    nonce_arr.copy_from_slice(nonce);
+    let mut plain = vec![0u8; cipher.len() - MAC_BYTES];
+    if sodoken::secretbox::xsalsa_open_easy(&mut plain, cipher, &nonce_arr, data_key).is_err() {
+        log::info!("[records] the kept records did not open; reading them again");
+        return Vec::new();
+    }
+    rmp_serde::from_slice(&plain).unwrap_or_default()
+}
+
+fn save_held_file(path: &std::path::Path, records: &[holochain_types::prelude::Record], data_key: &[u8; 32]) -> Result<(), String> {
+    let plain = rmp_serde::to_vec_named(records).map_err(|e| e.to_string())?;
+    let mut nonce = [0u8; NONCE_BYTES];
+    sodoken::random::randombytes_buf(&mut nonce).map_err(|e| e.to_string())?;
+    let mut cipher = vec![0u8; plain.len() + MAC_BYTES];
+    sodoken::secretbox::xsalsa_easy(&mut cipher, &nonce, &plain, data_key).map_err(|e| e.to_string())?;
+    let mut bytes = nonce.to_vec();
+    bytes.extend_from_slice(&cipher);
+    crate::vault::write_atomic(path, &bytes).map_err(|e| e.to_string())
+}
+
+/// Every record linked from the base with an empty tag that this device
+/// holds: the links each time, a record only the first time.
+async fn read_records(
+    state: &Arc<AppState>,
+    admin_port: u16,
+    app_port: u16,
+    base: holochain_types::prelude::AgentPubKey,
+    data_key: &[u8; 32],
+    root: &std::path::Path,
+) -> Result<Vec<holochain_types::prelude::Record>, String> {
+    use holochain_types::prelude::ActionHash;
+
+    ensure_held(root, data_key);
+    // Targets this device does not hold yet: not asked for again in this read.
+    let mut absent: std::collections::HashSet<ActionHash> = std::collections::HashSet::new();
+    let mut added = 0usize;
+    let targets: Vec<ActionHash> = loop {
+        let known: Vec<ActionHash> = {
+            let held = HELD_RECORDS.lock().unwrap();
+            let held = held.as_ref().filter(|h| h.root == root).ok_or("identity changed during the read")?;
+            held.records.keys().chain(absent.iter()).cloned().collect()
+        };
+        let input = rmp_serde::to_vec_named(&ListRefsWire { base: base.clone(), tag_prefix: Vec::new(), known: &known, limit: GETS_PER_CALL })
+            .map_err(|e| e.to_string())?;
+        #[cfg(test)]
+        LIST_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let listed: ListedRefsWire = match sealed_zome_call(state, admin_port, app_port, "list_sealed_at", input).await {
+            Ok(result) => rmp_serde::from_slice(result.as_bytes()).map_err(|e| format!("Records decode failed: {}", e))?,
+            Err(e) if is_missing_function(&e) => return read_records_one_by_one(state, admin_port, app_port, base).await,
+            Err(e) => return Err(e),
+        };
+        let mut held = HELD_RECORDS.lock().unwrap();
+        let held = held.as_mut().filter(|h| h.root == root).ok_or("identity changed during the read")?;
+        let mut targets = Vec::with_capacity(listed.refs.len());
+        for r in listed.refs {
+            match r.record {
+                Some(record) if record.action_address() == &r.target => {
+                    held.records.insert(r.target.clone(), record);
+                    added += 1;
+                    #[cfg(test)]
+                    RECORDS_FROM_CELL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                Some(_) => {}
+                None if !r.left && !held.records.contains_key(&r.target) => {
+                    absent.insert(r.target.clone());
+                }
+                None => {}
+            }
+            targets.push(r.target);
+        }
+        if !listed.more {
+            break targets;
+        }
+    };
+
+    let (records, kept, pruned) = {
+        let mut held = HELD_RECORDS.lock().unwrap();
+        let held = held.as_mut().filter(|h| h.root == root).ok_or("identity changed during the read")?;
+        let live: std::collections::HashSet<&ActionHash> = targets.iter().collect();
+        let before = held.records.len();
+        held.records.retain(|hash, _| live.contains(hash));
+        let pruned = before - held.records.len();
+        let records: Vec<_> = targets.iter().filter_map(|t| held.records.get(t).cloned()).collect();
+        (records, held.records.len(), pruned)
+    };
+    // Never recreates an identity's folder (an erase may have just removed it).
+    if (added > 0 || pruned > 0) && root.is_dir() {
+        let list: Option<Vec<holochain_types::prelude::Record>> = HELD_RECORDS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|h| h.root == root)
+            .map(|h| h.records.values().cloned().collect());
+        if let Some(list) = list {
+            if let Err(e) = save_held_file(&held_records_path(root), &list, data_key) {
+                log::info!("[records] not kept on disk: {}", e);
+            }
+        }
+        if added > 0 {
+            log::info!("[records] {} read from the cell, {} held", added, kept);
+        }
+    }
+    Ok(records)
+}
+
+/// How many more ops a sibling may report than this device holds and this
+/// device still count as caught up (every device writes all the time).
+const OPS_AHEAD_MARGIN: u64 = 50;
+
+/// Whether a sibling in the private network reports clearly more ops than
+/// this device holds - kitsune2's own measure of how far a sync has got.
+/// None when the conductor does not say (no sibling seen yet, or busy).
+pub(crate) async fn private_ops_behind(state: &Arc<AppState>) -> Option<bool> {
+    use holochain_client::{AdminWebsocket, CellInfo};
+
+    let (admin_port, _) = conductor_ports(state).ok()?;
+    let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+        .await
+        .ok()?;
+    let apps = admin_ws.list_apps(None).await.ok()?;
+    let app = apps.iter().find(|a| a.installed_app_id == crate::dna::private_v2_app_id())?;
+    let dna_hash = app.cell_info.values().flatten().find_map(|c| match c {
+        CellInfo::Provisioned(p) => Some(p.cell_id.dna_hash().clone()),
+        _ => None,
+    })?;
+    let metrics = admin_ws.dump_network_metrics(Some(dna_hash), false).await.ok()?;
+    let gossip = metrics.into_values().next()?.gossip_state_summary;
+    ops_behind(gossip.local_op_count, gossip.peer_meta.values().filter_map(|p| p.dht_op_count))
+}
+
+fn ops_behind(local: u64, sibling_counts: impl Iterator<Item = u64>) -> Option<bool> {
+    let mut seen = false;
+    let mut behind = false;
+    for count in sibling_counts {
+        seen = true;
+        behind |= count > local.saturating_add(OPS_AHEAD_MARGIN);
+    }
+    seen.then_some(behind)
+}
+
+/// A cell still on an older coordinator: every record, one `get` each.
+async fn read_records_one_by_one(
+    state: &Arc<AppState>,
+    admin_port: u16,
+    app_port: u16,
+    base: holochain_types::prelude::AgentPubKey,
+) -> Result<Vec<holochain_types::prelude::Record>, String> {
+    let input = rmp_serde::to_vec_named(&ListAtWire { base, tag_prefix: Vec::new(), network: false })
+        .map_err(|e| e.to_string())?;
+    match sealed_zome_call(state, admin_port, app_port, "get_all_sealed_at", input).await {
+        Ok(result) => Ok(rmp_serde::from_slice::<Vec<ListedWire>>(result.as_bytes())
+            .map_err(|e| format!("Records decode failed: {}", e))?
+            .into_iter()
+            .map(|l| l.record)
+            .collect()),
+        Err(e) if is_missing_function(&e) => {
+            let result = sealed_zome_call(
+                state,
+                admin_port,
+                app_port,
+                "get_all_sealed",
+                rmp_serde::to_vec_named(&()).map_err(|e| e.to_string())?,
+            )
+            .await?;
+            rmp_serde::from_slice(result.as_bytes()).map_err(|e| format!("Records decode failed: {}", e))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Device and removal records as the other devices hold them, kept for the
@@ -757,9 +1003,126 @@ pub(crate) async fn fetch_device_records(state: &Arc<AppState>) -> Result<usize,
         .filter(|v| v.payload.entry_type == crate::devices::DEVICE_ENTRY_TYPE || v.payload.entry_type == crate::devices::REMOVAL_ENTRY_TYPE)
         .collect();
     let n = versions.len();
-    *NETWORK_DEVICE_VERSIONS.lock().unwrap() = Some((root, versions));
-    forget_recent_versions();
+    hold_network_device_versions(&root, versions);
     Ok(n)
+}
+
+/// Add device and removal versions to the ones held for this identity
+/// (versions never change, so holding a union is safe: the newest per
+/// device still wins). A version a sibling sent directly stays held when
+/// the network has not answered with it yet.
+fn hold_network_device_versions(root: &std::path::Path, versions: Vec<StoredVersion>) -> usize {
+    let mut added = 0;
+    {
+        let mut held = NETWORK_DEVICE_VERSIONS.lock().unwrap();
+        if held.as_ref().map(|h| h.0.as_path() != root).unwrap_or(true) {
+            *held = Some((root.to_path_buf(), Vec::new()));
+        }
+        let list = &mut held.as_mut().unwrap().1;
+        for v in versions {
+            if !list.iter().any(|h| h.action_hash == v.action_hash) {
+                list.push(v);
+                added += 1;
+            }
+        }
+    }
+    if added > 0 {
+        forget_recent_versions();
+    }
+    added
+}
+
+/// One device or removal record as a sibling device sends it directly (the
+/// lane's "device" piece): sealed again with the identity's data key, so
+/// only the identity's own devices can open it - a piece nobody else could
+/// have made.
+#[derive(Serialize, Deserialize)]
+struct DevicePieceWire {
+    #[serde(with = "serde_bytes")]
+    action_hash: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    cipher: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    nonce: Vec<u8>,
+    /// What the sender holds now (sealed too: counts are the identity's
+    /// business). Absent from a sender that does not say.
+    #[serde(default, with = "serde_bytes")]
+    holds_cipher: Vec<u8>,
+    #[serde(default, with = "serde_bytes")]
+    holds_nonce: Vec<u8>,
+}
+
+/// The payload type a device's counts travel in (never stored).
+const HOLDS_TYPE: &str = "device_holds";
+
+fn holds_payload(holds: &crate::devices::Holds) -> Result<SealedPayload, String> {
+    Ok(SealedPayload {
+        v: SEALED_PAYLOAD_V2,
+        entry_type: HOLDS_TYPE.to_string(),
+        created_at: crate::devices::now_ms(),
+        body: rmp_serde::to_vec_named(holds).map_err(|e| e.to_string())?,
+        refs: Vec::new(),
+        id: None,
+        updated_at: None,
+        device: None,
+        deleted: false,
+    })
+}
+
+/// What a device piece brought: whose record, whether it is new here, and
+/// what that device holds.
+pub(crate) struct AcceptedPiece {
+    pub device: Option<String>,
+    pub new_here: bool,
+    pub holds: Option<crate::devices::Holds>,
+}
+
+/// This device's own latest device record, sealed for a sibling. None until
+/// it has written one.
+pub(crate) async fn own_device_piece(state: &Arc<AppState>, holds: &crate::devices::Holds) -> Result<Option<Vec<u8>>, String> {
+    let install_id = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    let id = crate::devices::device_logical_id(&install_id);
+    let data_key = vault_data_key(state)?;
+    let latest = sealed_versions(state)
+        .await?
+        .into_iter()
+        .filter(|v| v.payload.entry_type == crate::devices::DEVICE_ENTRY_TYPE && v.payload.logical_id() == id)
+        .max_by_key(|v| v.payload.version_time());
+    let Some(v) = latest else { return Ok(None) };
+    let (cipher, nonce) = seal(&v.payload, &data_key).map_err(|e| format!("{:?}", e))?;
+    let (holds_cipher, holds_nonce) = seal(&holds_payload(holds)?, &data_key).map_err(|e| format!("{:?}", e))?;
+    rmp_serde::to_vec_named(&DevicePieceWire { action_hash: v.action_hash, cipher, nonce: nonce.to_vec(), holds_cipher, holds_nonce: holds_nonce.to_vec() })
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// A sibling device sent its record directly: open it with the data key and
+/// hold it with the records the network answered, so the device list shows
+/// it at once. Returns the sender's install id when this record is new here.
+pub(crate) fn accept_device_piece(state: &Arc<AppState>, data: &[u8]) -> Result<AcceptedPiece, String> {
+    let wire: DevicePieceWire = rmp_serde::from_slice(data).map_err(|e| format!("device piece: {}", e))?;
+    if wire.nonce.len() != NONCE_BYTES || wire.action_hash.len() != 39 {
+        return Err("device piece: bad shape".into());
+    }
+    let data_key = vault_data_key(state)?;
+    let mut nonce = [0u8; NONCE_BYTES];
+    nonce.copy_from_slice(&wire.nonce);
+    let payload = unseal(&wire.cipher, &nonce, &data_key).map_err(|_| "device piece: not sealed with this identity's key".to_string())?;
+    if payload.entry_type != crate::devices::DEVICE_ENTRY_TYPE && payload.entry_type != crate::devices::REMOVAL_ENTRY_TYPE {
+        return Err("device piece: not a device record".into());
+    }
+    let device = payload.device.clone();
+    let holds = (wire.holds_nonce.len() == NONCE_BYTES)
+        .then(|| {
+            let mut n = [0u8; NONCE_BYTES];
+            n.copy_from_slice(&wire.holds_nonce);
+            n
+        })
+        .and_then(|n| unseal(&wire.holds_cipher, &n, &data_key).ok())
+        .filter(|p| p.entry_type == HOLDS_TYPE)
+        .and_then(|p| rmp_serde::from_slice::<crate::devices::Holds>(&p.body).ok());
+    let added = hold_network_device_versions(&state.identity_root(), vec![StoredVersion { action_hash: wire.action_hash, payload }]);
+    Ok(AcceptedPiece { device, new_here: added > 0, holds })
 }
 
 /// Lock and identity change: the device records read from the network
@@ -1306,6 +1669,48 @@ mod tests {
         .await;
     }
 
+    /// A device tells its sibling about itself directly: the sibling lists it
+    /// as soon as the two can reach each other, without waiting for the
+    /// network to answer its next ask, and answers with its own record.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "starts real conductors and uses the staging rendezvous"]
+    async fn live_a_device_tells_its_sibling_at_once() {
+        let seed = format!("live-{}", hex::encode(crate::key_derivation::new_conductor_seed())[..16].to_string());
+        let mut config: crate::vault::VaultConfig = serde_json::from_str(
+            r#"{"agent_pub_key":"uhCAkTest","did":"did:flowsta:uhCAkTest","installed_app_ids":[],"created_at":1}"#,
+        )
+        .unwrap();
+        config.data_key = Some(vec![33u8; 32]);
+        config.device_seed = Some(vec![21u8; 32]);
+        config.agent_pub_key_raw_b64 = Some(crate::key_derivation::base64_standard_encode(
+            &crate::key_derivation::construct_agent_pub_key_bytes(&crate::key_derivation::public_key_of_seed(&[21u8; 32])),
+        ));
+        let a = live_device("da", 46071, &seed, &config, true).await;
+        let b = live_device("db", 46072, &seed, &config, true).await;
+        let install_a = crate::paths::install_id(&a.state.data_dir).expect("A's install id");
+        assert!(crate::devices::publish_own(&a.state).await.expect("A writes its record"));
+        assert!(crate::devices::publish_own(&b.state).await.expect("B writes its record"));
+        let lane_a = crate::backup_lane::Lane::open(&a.state).await.expect("A's lane");
+        let lane_b = crate::backup_lane::Lane::open(&b.state).await.expect("B's lane");
+        assert!(lane_a.alive().await && lane_b.alive().await);
+        let b_lists_a = || async {
+            crate::devices::list(&b.state).await.map(|l| l.iter().any(|d| d.install_id == install_a)).unwrap_or(false)
+        };
+        println!("  before: B lists A {}", b_lists_a().await);
+
+        // A tells B, every few seconds, until B has heard it directly.
+        let started = std::time::Instant::now();
+        while !crate::devices::was_heard(&lane_a.me) {
+            assert!(started.elapsed().as_secs() < 240, "B never heard from A directly within 240 s");
+            crate::devices::announce_to(&a.state, &lane_a, &lane_b.me).await;
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+        println!("  B heard A directly after {} s", started.elapsed().as_secs());
+        assert!(b_lists_a().await, "B heard A but does not list it");
+        // B answered with its own record: A heard B too.
+        eventually("A heard B's answer", 60, || async { crate::devices::was_heard(&lane_b.me) }).await;
+    }
+
     /// A backup made on one device is fetched by the other in pieces
     /// through their conductors, checked against its index and opened.
     #[tokio::test(flavor = "multi_thread")]
@@ -1478,6 +1883,101 @@ mod tests {
         // Only device records come in this way, and the lock forgets them.
         forget_network_device_versions();
         assert!(NETWORK_DEVICE_VERSIONS.lock().unwrap().is_none());
+    }
+
+    /// Records are read from the cell once: the links each time after that,
+    /// one read at a time however many ask, and a restart opens the kept file
+    /// instead of reading them again. A device reads its own records from its
+    /// chain in one call; another device's a hundred per call.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "starts real conductors and uses the staging rendezvous"]
+    async fn live_records_are_read_once_and_kept() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let seed = format!("live-{}", hex::encode(crate::key_derivation::new_conductor_seed())[..16].to_string());
+        let identity_public = crate::key_derivation::public_key_of_seed(&[21u8; 32]);
+        let mut config: crate::vault::VaultConfig = serde_json::from_str(
+            r#"{"agent_pub_key":"uhCAkTest","did":"did:flowsta:uhCAkTest","installed_app_ids":[],"created_at":1}"#,
+        )
+        .unwrap();
+        config.data_key = Some(vec![33u8; 32]);
+        config.agent_pub_key_raw_b64 = Some(crate::key_derivation::base64_standard_encode(
+            &crate::key_derivation::construct_agent_pub_key_bytes(&identity_public),
+        ));
+        let a = live_device("ra", 46081, &seed, &config, true).await;
+        std::fs::create_dir_all(a.state.identity_root()).unwrap();
+        const N: usize = 150;
+        let started = std::time::Instant::now();
+        for i in 0..N {
+            sealed_store_inner(&a.state, "login_activity".into(), serde_json::json!({ "n": i }), vec![], 1000 + i as u64).await.unwrap();
+        }
+        println!("  A wrote {} records in {}s", N, started.elapsed().as_secs());
+
+        // A's own records come from its chain, all in one call.
+        forget_recent_versions();
+        let (calls, from_cell) = (LIST_CALLS.load(SeqCst), RECORDS_FROM_CELL.load(SeqCst));
+        assert_eq!(sealed_list_inner(&a.state).await.unwrap().len(), N);
+        println!("  A listed its own in {} call(s), {} from the cell", LIST_CALLS.load(SeqCst) - calls, RECORDS_FROM_CELL.load(SeqCst) - from_cell);
+        assert_eq!(LIST_CALLS.load(SeqCst) - calls, 1, "a device's own records come in one call");
+
+        // B, another device, reads A's records a hundred per call.
+        let b = live_device("rb", 46082, &seed, &config, true).await;
+        std::fs::create_dir_all(b.state.identity_root()).unwrap();
+        eventually("B holds all of A's records", 600, || async {
+            forget_recent_versions();
+            sealed_list_inner(&b.state).await.map(|l| l.len() == N).unwrap_or(false)
+        })
+        .await;
+
+        // Asked again: the links only, no record read again.
+        forget_recent_versions();
+        let from_cell = RECORDS_FROM_CELL.load(SeqCst);
+        assert_eq!(sealed_list_inner(&b.state).await.unwrap().len(), N);
+        assert_eq!(RECORDS_FROM_CELL.load(SeqCst), from_cell, "nothing read twice");
+
+        // Six readers at once: one call between them.
+        forget_recent_versions();
+        let calls = LIST_CALLS.load(SeqCst);
+        let readers: Vec<_> = (0..6).map(|_| { let s = b.state.clone(); tokio::spawn(async move { sealed_versions(&s).await.map(|v| v.len()) }) }).collect();
+        for r in readers {
+            assert_eq!(r.await.unwrap().unwrap(), N);
+        }
+        assert_eq!(LIST_CALLS.load(SeqCst) - calls, 1, "one read at a time, the others take its answer");
+
+        // A restart: memory gone, the kept file opens instead of the cell.
+        *HELD_RECORDS.lock().unwrap() = None;
+        forget_recent_versions();
+        assert!(held_records_path(&b.state.identity_root()).exists());
+        let from_cell = RECORDS_FROM_CELL.load(SeqCst);
+        assert_eq!(sealed_list_inner(&b.state).await.unwrap().len(), N);
+        assert_eq!(RECORDS_FROM_CELL.load(SeqCst), from_cell, "the kept records were used after the restart");
+        // The file opens only with the identity's key.
+        assert!(load_held_file(&held_records_path(&b.state.identity_root()), &[34u8; 32]).is_empty());
+
+        // Nothing kept at all: another device's records, a hundred per call.
+        *HELD_RECORDS.lock().unwrap() = None;
+        std::fs::remove_file(held_records_path(&b.state.identity_root())).unwrap();
+        forget_recent_versions();
+        let (calls, from_cell) = (LIST_CALLS.load(SeqCst), RECORDS_FROM_CELL.load(SeqCst));
+        assert_eq!(sealed_list_inner(&b.state).await.unwrap().len(), N);
+        assert_eq!(RECORDS_FROM_CELL.load(SeqCst) - from_cell, N);
+        assert_eq!(LIST_CALLS.load(SeqCst) - calls, 2, "150 of another device's records: 100, then 50");
+
+        // A record retired on A leaves B's list (and B's kept records).
+        let first = sealed_list_inner(&a.state).await.unwrap().into_iter().last().unwrap();
+        sealed_delete_inner(&a.state, &first.action_hash).await.unwrap();
+        eventually("the deletion reaches B", 300, || async {
+            forget_recent_versions();
+            sealed_list_inner(&b.state).await.map(|l| l.len() == N - 1).unwrap_or(false)
+        })
+        .await;
+    }
+
+    #[test]
+    fn a_device_is_behind_only_when_a_sibling_holds_clearly_more() {
+        assert_eq!(ops_behind(1000, std::iter::empty()), None, "no sibling has said");
+        assert_eq!(ops_behind(1000, [1000u64, 1040].into_iter()), Some(false), "within the margin");
+        assert_eq!(ops_behind(1000, [900u64].into_iter()), Some(false), "the sibling is the one behind");
+        assert_eq!(ops_behind(10_056, [13_953u64].into_iter()), Some(true), "the Mac on 10-17");
     }
 
     #[test]

@@ -14,6 +14,7 @@ import { connectionStatusContext, signaturesContext } from "~/lib/context";
 import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATCH } from "~/lib/email";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 import { ActivityRow } from "~/components/vault/ActivityRow";
+import { sizeText, type DevicesProgress } from "~/components/vault/DevicesTab";
 import { buildFeed, timeAgo, recentlyRestored, type ActivityLogEntry } from "~/lib/activity";
 
 declare const __API_URL__: string;
@@ -86,9 +87,13 @@ export default component$(() => {
   // (a marker the round writes). The banner stays until then, including
   // while the cells are still starting.
   const settingUp = useSignal(false);
+  // How far it has got: this device's records and the backups it fetches,
+  // against what the other devices say they hold.
+  const setupProgress = useSignal<DevicesProgress | null>(null);
   const checkSettingUp = $(async () => {
     try {
       settingUp.value = await invoke<boolean>("joined_setup_pending");
+      if (settingUp.value) setupProgress.value = await invoke<DevicesProgress>("devices_progress").catch(() => null);
     } catch { /* locked */ }
   });
   // eslint-disable-next-line qwik/no-use-visible-task
@@ -561,6 +566,34 @@ export default component$(() => {
             </svg>
             <span>{identity.value.web_email ? "Your profile picture, connections and app backups arrive from your other devices. Nothing to do." : "Your records, connections, email and app backups arrive from your other devices. Nothing to do."}</span>
           </p>
+          {(() => {
+            // Progress, once the other devices have said what they hold.
+            const p = setupProgress.value;
+            if (!p) return null;
+            const target = Math.max(0, ...p.siblings.map((s) => s.holds.records));
+            const rows: { label: string; done: number; of: number; text: string }[] = [];
+            if (target > 0) rows.push({ label: "Records", done: Math.min(p.mine.records, target), of: target, text: `${Math.min(p.mine.records, target).toLocaleString()} of ${target.toLocaleString()}` });
+            if (p.mine.backups_wanted > 0) {
+              const got = p.mine.backups_wanted - p.mine.backups_pending;
+              rows.push({ label: "App backups", done: got, of: p.mine.backups_wanted, text: `${sizeText(got)} of ${sizeText(p.mine.backups_wanted)}` });
+            }
+            if (rows.length === 0) return <p class="mt-2 text-xs text-gray-400" data-testid="setup-progress">Waiting to hear from your other devices...</p>;
+            return (
+              <div class="mt-3 space-y-2" data-testid="setup-progress">
+                {rows.map((r) => (
+                  <div key={r.label}>
+                    <div class="flex justify-between text-xs text-gray-300">
+                      <span>{r.label}</span>
+                      <span class="tabular-nums">{r.text}</span>
+                    </div>
+                    <div class="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-gray-700">
+                      <div class="h-full rounded-full bg-sky-400 transition-all" style={{ width: `${r.of > 0 ? Math.round((r.done / r.of) * 100) : 0}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
         </Callout>
       )}
       {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && !identity.value.joined_existing && (

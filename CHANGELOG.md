@@ -5,6 +5,32 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Lots of private data no longer slows your computer or stalls a new
+  device.** The Vault read every one of your private records one at a time
+  each time it checked your devices, every 30 seconds. With thousands of
+  records each check took minutes, the checks piled up, and a device being
+  added stopped receiving. The Vault now reads a record once and keeps it,
+  sealed with your key, runs one check at a time, and reads what is new a
+  hundred records at a time.
+- **A device being added no longer says it has everything too early.** It
+  waits until your private data has actually arrived, along with the list of
+  app backups that comes with it.
+- **Your other devices update at once.** When you add a device, the others
+  list it straight away instead of at their next check.
+- **Every device shows the same state.** A device still receiving your
+  private data shows as receiving on all your devices, instead of "Has
+  everything up to..." on the others.
+
+### Added
+- **Progress while a device is set up.** "Your private data is on its way"
+  shows how far your records and app backups have got, and the Devices page
+  shows it for each device.
+- **"Checking with your other devices..."** on the Devices page while it asks
+  them.
+
 ## [1.6.1-beta5] - 2026-10-16
 
 ### Fixed

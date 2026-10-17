@@ -57,6 +57,12 @@ pub struct DeviceRecord {
     /// The install that removed it.
     #[serde(default)]
     pub removed_by: Option<String>,
+    /// This device joined the identity and is still receiving what the
+    /// others hold (its first complete round has not finished). Its newest
+    /// record says nothing about the older ones, so the other devices show
+    /// it as receiving instead of comparing times. Absent on older records.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub setting_up: bool,
 }
 
 pub fn device_logical_id(install_id: &str) -> String {
@@ -87,7 +93,10 @@ pub enum DeviceState {
     ThisDeviceSettingUp,
     /// Holds everything; last heard from at this time (ms).
     UpToDate { at: u64 },
-    /// Holds everything up to this time (ms).
+    /// Joined the identity and is still receiving what the others hold;
+    /// last heard from at this time (ms).
+    SettingUp { at: u64 },
+    /// Holds less than this device; last heard from at this time (ms).
     LastSynced { at: u64 },
     NotSeenSince { at: u64 },
     /// On another network generation: it syncs again once it is updated.
@@ -109,6 +118,9 @@ pub fn device_state(device: &DeviceRecord, viewer_install_id: &str, viewer_lates
     }
     if now_ms.saturating_sub(device.seen_at) > NOT_SEEN_AFTER_MS {
         return DeviceState::NotSeenSince { at: device.seen_at };
+    }
+    if device.setting_up {
+        return DeviceState::SettingUp { at: device.seen_at };
     }
     if device.latest_change >= viewer_latest_change {
         DeviceState::UpToDate { at: device.seen_at }
@@ -133,6 +145,7 @@ pub fn needs_refresh(existing: Option<&DeviceRecord>, current: &DeviceRecord) ->
         || existing.platform != current.platform
         || existing.vault_version != current.vault_version
         || existing.generation != current.generation
+        || existing.setting_up != current.setting_up
         || current.seen_at.saturating_sub(existing.seen_at) >= REFRESH_AFTER_MS
         || (current.latest_change > existing.latest_change
             && current.seen_at.saturating_sub(existing.seen_at) >= REFRESH_AFTER_CHANGE_MS)
@@ -203,7 +216,7 @@ pub fn conductor_keys_ever(records: &[SealedListItem]) -> Vec<String> {
     keys
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -245,7 +258,15 @@ fn own_record(state: &AppState, existing: Option<&DeviceRecord>, latest_change: 
         latest_change,
         removed_at: None,
         removed_by: None,
+        setting_up: setting_up_here(state),
     })
+}
+
+/// Joined an existing identity and has not yet finished its first complete
+/// round (the setup-done marker is not written).
+fn setting_up_here(state: &AppState) -> bool {
+    let joined = state.vault_config.lock().unwrap().as_ref().map(|c| c.joined_existing).unwrap_or(false);
+    joined && !crate::paths::setup_done_path(&state.identity_root()).exists()
 }
 
 /// A device as this one last saw it. Kept on this device only.
@@ -413,6 +434,214 @@ pub async fn ask_network_for_devices(state: &Arc<AppState>) {
 /// The next unlock asks again, each minute at first.
 pub fn forget_network_asked() {
     *NETWORK_ASKED.lock().unwrap() = None;
+    *ANNOUNCED.lock().unwrap() = None;
+    *HEARD.lock().unwrap() = None;
+    *SIBLING_HOLDS.lock().unwrap() = None;
+}
+
+/// How long ago this session first asked the other devices (None = not yet).
+fn session_age() -> Option<std::time::Duration> {
+    NETWORK_ASKED.lock().unwrap().map(|(first, _)| first.elapsed())
+}
+
+/// Siblings this device has told about itself this session, and when.
+static ANNOUNCED: std::sync::Mutex<Option<std::collections::HashMap<String, std::time::Instant>>> = std::sync::Mutex::new(None);
+/// Siblings heard from directly this session (their conductor keys).
+static HEARD: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+fn key_text(agent: &holochain_types::prelude::AgentPubKey) -> String {
+    crate::key_derivation::base64_standard_encode(agent.get_raw_39())
+}
+
+/// A sibling reached this device directly: it is reachable this session.
+pub fn heard_from(agent: &holochain_types::prelude::AgentPubKey) {
+    HEARD.lock().unwrap().get_or_insert_with(Default::default).insert(key_text(agent));
+}
+
+/// Whether a sibling has reached this device directly this session.
+#[cfg(test)]
+pub fn was_heard(agent: &holochain_types::prelude::AgentPubKey) -> bool {
+    HEARD.lock().unwrap().as_ref().map(|h| h.contains(&key_text(agent))).unwrap_or(false)
+}
+
+/// What a device holds: its private records (stored versions, device
+/// records left out) and the other devices' backups it should keep, with how
+/// much of those is still to come. Sent with its record (sealed), so a
+/// device being set up, and the devices it is catching up with, can show
+/// how far it has got.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Holds {
+    pub records: u64,
+    pub backups_wanted: u64,
+    pub backups_pending: u64,
+    /// Still receiving what the others hold (its first complete round).
+    #[serde(default)]
+    pub setting_up: bool,
+}
+
+/// What each sibling said it holds, by install id, and when (ms).
+static SIBLING_HOLDS: std::sync::Mutex<Option<std::collections::HashMap<String, (Holds, u64)>>> = std::sync::Mutex::new(None);
+
+pub fn note_holds(install_id: &str, holds: Holds) {
+    SIBLING_HOLDS.lock().unwrap().get_or_insert_with(Default::default).insert(install_id.to_string(), (holds, now_ms()));
+}
+
+pub async fn own_holds(state: &Arc<AppState>) -> Holds {
+    let records = crate::sealed::sealed_versions(state)
+        .await
+        .map(|v| v.iter().filter(|x| x.payload.entry_type != DEVICE_ENTRY_TYPE && x.payload.entry_type != REMOVAL_ENTRY_TYPE).count() as u64)
+        .unwrap_or(0);
+    let (backups_wanted, backups_pending) = crate::backup_sync::copies_progress(&state.identity_root());
+    Holds { records, backups_wanted, backups_pending, setting_up: setting_up_here(state) }
+}
+
+/// Whether this device still has records to receive: the private network
+/// says a sibling holds clearly more than here, or, where the conductor
+/// does not say, a sibling said it holds more records. 10-17: a Mac called
+/// itself done at 72% of the records, and its banner went.
+pub async fn still_receiving_records(state: &Arc<AppState>) -> bool {
+    if let Some(behind) = crate::sealed::private_ops_behind(state).await {
+        return behind;
+    }
+    let mine = own_holds(state).await.records;
+    SIBLING_HOLDS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|m| m.values().any(|(holds, _)| holds.records > mine))
+        .unwrap_or(false)
+}
+
+#[derive(Serialize)]
+pub struct SiblingProgress {
+    pub install_id: String,
+    pub holds: Holds,
+    /// When it said so (ms).
+    pub at: u64,
+}
+
+#[derive(Serialize)]
+pub struct DevicesProgress {
+    /// This device is still receiving what the others hold.
+    pub setting_up: bool,
+    pub mine: Holds,
+    pub siblings: Vec<SiblingProgress>,
+}
+
+/// How far each device has got, for the Overview's "on its way" card and the
+/// Devices page: this device's counts and what each sibling last said.
+#[tauri::command]
+pub async fn devices_progress(state: tauri::State<'_, Arc<AppState>>) -> Result<DevicesProgress, String> {
+    let state = state.inner();
+    let mine = own_holds(state).await;
+    let siblings = SIBLING_HOLDS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|m| m.iter().map(|(id, (h, at))| SiblingProgress { install_id: id.clone(), holds: h.clone(), at: *at }).collect())
+        .unwrap_or_default();
+    Ok(DevicesProgress { setting_up: mine.setting_up, mine, siblings })
+}
+
+/// Say again soon: the next round tells every sibling about this device,
+/// whatever the cadence (this device's record just changed).
+pub fn announce_again() {
+    *ANNOUNCED.lock().unwrap() = None;
+}
+
+/// Tell one sibling about this device: its own sealed record, straight over
+/// the private network.
+pub async fn announce_to(state: &Arc<AppState>, lane: &crate::backup_lane::Lane, to: &holochain_types::prelude::AgentPubKey) {
+    let holds = own_holds(state).await;
+    match crate::sealed::own_device_piece(state, &holds).await {
+        Ok(Some(piece)) => match lane.send_device(to, piece).await {
+            Ok(()) => {
+                ANNOUNCED.lock().unwrap().get_or_insert_with(Default::default).insert(key_text(to), std::time::Instant::now());
+            }
+            Err(e) => log::info!("[devices] not told a sibling about this device: {}", e.chars().take(120).collect::<String>()),
+        },
+        Ok(None) => {}
+        Err(e) => log::info!("[devices] this device's record is not ready to send: {}", e.chars().take(120).collect::<String>()),
+    }
+}
+
+/// Tell the identity's other devices about this one, directly: each minute
+/// for the first quarter hour of a session (a device that just joined, or
+/// one back from a long time off, shows on the others the moment they can
+/// be reached), then every ten minutes. A sibling that has not heard of this
+/// device answers with its own record (backup_lane), so both lists fill in.
+/// Before 10-17 a device learned of a new sibling only when the network
+/// answered its next ask - minutes after the two were already syncing.
+pub async fn announce_to_siblings(state: &Arc<AppState>) {
+    let Ok(me) = own_conductor_key(state) else { return };
+    let Ok(devices) = list(state).await else { return };
+    let siblings: Vec<String> = devices
+        .into_iter()
+        .filter(|d| d.conductor_key != me && d.removed_at.is_none())
+        .map(|d| d.conductor_key)
+        .collect();
+    if siblings.is_empty() {
+        return;
+    }
+    // Each minute while young or while this device is being set up (the
+    // others show how far it has got), else every ten minutes.
+    let young = session_age().map(|a| a < std::time::Duration::from_secs(15 * 60)).unwrap_or(true);
+    let every = std::time::Duration::from_secs(if young || setting_up_here(state) { 55 } else { 600 });
+    let due: Vec<String> = {
+        let announced = ANNOUNCED.lock().unwrap();
+        siblings
+            .into_iter()
+            .filter(|k| announced.as_ref().and_then(|a| a.get(k)).map(|at| at.elapsed() >= every).unwrap_or(true))
+            .collect()
+    };
+    if due.is_empty() {
+        return;
+    }
+    let lane = match crate::backup_sync::lane(state).await {
+        Ok(lane) => lane,
+        Err(e) => {
+            log::info!("[devices] siblings not told yet: {}", e.chars().take(120).collect::<String>());
+            return;
+        }
+    };
+    for key in due {
+        let Some(agent) = crate::commands::base64_standard_decode(&key)
+            .ok()
+            .filter(|raw| raw.len() == 39)
+            .map(holochain_types::prelude::AgentPubKey::from_raw_39)
+        else {
+            continue;
+        };
+        announce_to(state, &lane, &agent).await;
+    }
+}
+
+/// Within a session's first quarter hour, a device this one knows has not
+/// been heard from yet: the Devices page says it is still checking instead
+/// of showing a list it has not confirmed.
+pub async fn still_checking(state: &Arc<AppState>) -> bool {
+    if session_age().map(|a| a >= std::time::Duration::from_secs(15 * 60)).unwrap_or(false) {
+        return false;
+    }
+    let Ok(me) = own_conductor_key(state) else { return false };
+    let Ok(devices) = list(state).await else { return false };
+    let heard = HEARD.lock().unwrap().clone().unwrap_or_default();
+    devices.iter().any(|d| d.conductor_key != me && d.removed_at.is_none() && !heard.contains(&d.conductor_key))
+}
+
+#[tauri::command]
+pub async fn devices_checking(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
+    Ok(still_checking(state.inner()).await)
+}
+
+/// This device's conductor key in the private network (standard base64 of
+/// the 39 bytes, as device records carry it).
+fn own_conductor_key(state: &AppState) -> Result<String, String> {
+    let config = state.vault_config.lock().unwrap();
+    let seed = config.as_ref().ok_or("vault_locked")?.conductor_seed_bytes().ok_or("no conductor seed")?;
+    Ok(crate::key_derivation::base64_standard_encode(&crate::key_derivation::holo_agent_pub_key_bytes(
+        &crate::key_derivation::public_key_of_seed(&seed),
+    )))
 }
 
 pub async fn list(state: &Arc<AppState>) -> Result<Vec<DeviceRecord>, String> {
@@ -621,7 +850,36 @@ mod tests {
             latest_change: 500,
             removed_at: None,
             removed_by: None,
+            setting_up: false,
         }
+    }
+
+    #[test]
+    fn a_device_being_set_up_reads_as_receiving_whatever_its_newest_record() {
+        let now = 100 * DAY + 1000;
+        let mut d = device("other");
+        d.setting_up = true;
+        // Its newest record is newer than anything here: still receiving.
+        d.latest_change = 9_000;
+        assert_eq!(device_state(&d, "me", 500, now), DeviceState::SettingUp { at: d.seen_at });
+        // Once set up it compares like any device.
+        d.setting_up = false;
+        assert_eq!(device_state(&d, "me", 500, now), DeviceState::UpToDate { at: d.seen_at });
+        // The flag changing is a reason to write the record again.
+        let mut done = d.clone();
+        d.setting_up = true;
+        assert!(needs_refresh(Some(&d), &done));
+        done.setting_up = true;
+        assert!(!needs_refresh(Some(&d), &done));
+    }
+
+    #[test]
+    fn an_older_record_without_the_flag_is_not_being_set_up() {
+        let mut v = serde_json::to_value(device("other")).unwrap();
+        assert!(v.get("setting_up").is_none(), "false is not written");
+        v.as_object_mut().unwrap().remove("setting_up");
+        let back: DeviceRecord = serde_json::from_value(v).unwrap();
+        assert!(!back.setting_up);
     }
 
     #[test]

@@ -33,7 +33,8 @@ const TRIES_PER_WINDOW: u32 = 3;
 pub struct Piece {
     /// The SHA-256 of the file this piece belongs to.
     pub id: String,
-    /// "want", "data" or "none".
+    /// "want", "data" or "none" (a backup file), or "device" (a sibling's
+    /// own device record, sealed - see sealed::accept_device_piece).
     pub kind: String,
     pub seq: u32,
     pub total: u32,
@@ -154,6 +155,24 @@ impl Lane {
                             let _ = waiting.send(arrived.piece);
                         }
                     }
+                    // A sibling says it is here, with its record: the list
+                    // shows it at once, and a sibling new to this device
+                    // hears back about this one.
+                    "device" => match crate::sealed::accept_device_piece(&state, &arrived.piece.data) {
+                        Ok(got) => {
+                            crate::devices::heard_from(&arrived.from);
+                            if let (Some(install_id), Some(holds)) = (got.device.as_deref(), got.holds) {
+                                crate::devices::note_holds(install_id, holds);
+                            }
+                            if got.new_here {
+                                log::info!("[devices] a sibling's record arrived directly ({}...)", got.device.as_deref().unwrap_or("").chars().take(8).collect::<String>());
+                                let state = state.clone();
+                                let to = arrived.from.clone();
+                                tokio::spawn(async move { crate::devices::announce_to(&state, &lane, &to).await });
+                            }
+                        }
+                        Err(e) => log::info!("[devices] a device piece was not used: {}", e),
+                    },
                     _ => {}
                 }
             }
@@ -174,6 +193,11 @@ impl Lane {
             Ok(nothing) => self.call("ensure_piece_grant", nothing).await.is_ok(),
             Err(_) => false,
         }
+    }
+
+    /// Send this device's sealed device record to a sibling.
+    pub async fn send_device(&self, to: &AgentPubKey, sealed_record: Vec<u8>) -> Result<(), String> {
+        self.send(to, Piece { id: "device".into(), kind: "device".into(), seq: 0, total: 1, data: sealed_record }).await
     }
 
     async fn send(&self, to: &AgentPubKey, piece: Piece) -> Result<(), String> {

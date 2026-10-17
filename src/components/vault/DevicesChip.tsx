@@ -18,7 +18,10 @@ export function devicesSummary(devices: Row[], now = Date.now()): { label: strin
   if (others.length === 0) {
     return { label: "1 device", color: "bg-gray-500", title: "Only on this device" };
   }
-  const behind = others.some(
+  // A device being set up - this one or another - is still receiving: the
+  // chip is amber on every device until it has everything (they match).
+  const receiving = live.some((d) => d.state === "this_device_setting_up") || others.some((d) => d.state === "setting_up");
+  const behind = receiving || others.some(
     (d) => d.state === "not_seen_since" || d.state === "needs_update" || (d.state === "last_synced" && now - (d.at ?? 0) > RECENT_MS),
   );
   const syncing = !behind && others.some((d) => d.state === "last_synced");
@@ -26,7 +29,9 @@ export function devicesSummary(devices: Row[], now = Date.now()): { label: strin
     // This device counts before its own record is written.
     label: `${others.length + 1} devices`,
     color: behind ? "bg-amber-400" : "bg-green-400",
-    title: others.map((d) => `${d.name} - ${d.state === "last_synced" && !behind ? "syncing" : deviceLine(d).toLowerCase()}`).join("\n") + (syncing ? "\nSyncing a recent change" : ""),
+    title:
+      (live.some((d) => d.state === "this_device_setting_up") ? "This device - receiving your private data\n" : "") +
+      others.map((d) => `${d.name} - ${d.state === "last_synced" && !behind ? "syncing" : deviceLine(d).toLowerCase()}`).join("\n") + (syncing ? "\nSyncing a recent change" : ""),
   };
 }
 
