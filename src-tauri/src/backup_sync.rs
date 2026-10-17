@@ -590,6 +590,26 @@ mod tests {
         SlotInfo { label: label.into(), created_at, size: bytes.len() as u64, sha256: sha256_hex(&bytes) }
     }
 
+    /// The totals count the copies kept of another device's backups in the
+    /// apps and bytes held here, not in the backups made here (a Mac holding
+    /// only copies read "3 apps · 0 B").
+    #[test]
+    fn copies_count_in_what_is_held_not_in_what_was_made_here() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_own(tmp.path(), "app", "latest", 10, "made here");
+        let slot = SlotInfo { label: "latest".into(), created_at: 20, size: 0, sha256: String::new() };
+        let bytes = file("other_app", "latest", 20, "kept from the other device");
+        let path = copy_path(tmp.path(), OTHER, "other_app", &slot.label);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+
+        let stats = crate::backup::get_backup_stats(tmp.path());
+        assert_eq!(stats.app_count, 2);
+        assert_eq!(stats.total_backups, 1, "only the backup made here");
+        assert_eq!(stats.total_size as usize, "made here".len() + "kept from the other device".len());
+        assert_eq!(stats.apps.iter().filter(|a| a.from_device.as_deref() == Some(OTHER)).count(), 1);
+    }
+
     #[test]
     fn a_device_lists_what_it_holds_per_app() {
         let tmp = tempfile::tempdir().unwrap();

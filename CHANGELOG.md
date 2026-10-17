@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   card said "No backups yet" on a device holding copies of another device's
   backups (Your Data listed them). Its setup progress now also shows as soon
   as the Overview opens.
+- **Your Data's App Backups total includes the copies kept from your other
+  devices.** It read "3 apps · 0 B" on a device holding only copies.
 
 ## [1.6.1-beta6] - 2026-10-17
 

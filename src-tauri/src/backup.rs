@@ -728,7 +728,9 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
     }
 
     // The copies kept of the other devices' backups, one row per app per
-    // device. They count in the list, not in this device's own totals.
+    // device. They count in the apps and the bytes held here (a header read
+    // "3 apps · 0 B" on a device holding only copies), not in the backups
+    // made on this device (`total_backups`).
     if let Ok(devices) = std::fs::read_dir(crate::paths::backup_copies_dir(data_dir)) {
         for device in devices.filter_map(|d| d.ok()).filter(|d| d.path().is_dir()) {
             let install_id = device.file_name().to_string_lossy().to_string();
@@ -739,6 +741,7 @@ pub fn get_backup_stats(data_dir: &Path) -> BackupStats {
             for app_dir in app_dirs.filter_map(|a| a.ok()).filter(|a| a.path().is_dir()) {
                 if let Some(mut summary) = summarize_app_dir(&app_dir.path()) {
                     summary.from_device = Some(install_id.clone());
+                    total_size += summary.total_size;
                     apps.push(summary);
                 }
             }
@@ -899,6 +902,8 @@ pub fn export_all_data_with_progress(
     // backups go in `other_devices` below, by device.
     let mut stats = get_backup_stats(&app_state.identity_root());
     stats.apps.retain(|a| a.from_device.is_none());
+    stats.app_count = stats.apps.len();
+    stats.total_size = stats.apps.iter().map(|a| a.total_size).sum();
 
     // Collect decrypted backup data for each app
     let total_apps = stats.apps.len();
