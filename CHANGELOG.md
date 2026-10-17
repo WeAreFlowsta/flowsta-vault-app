@@ -5,6 +5,14 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The Overview counts backups kept from your other devices.** The Backups
+  card said "No backups yet" on a device holding copies of another device's
+  backups (Your Data listed them). Its setup progress now also shows as soon
+  as the Overview opens.
+
 ## [1.6.1-beta6] - 2026-10-17
 
 ### Fixed

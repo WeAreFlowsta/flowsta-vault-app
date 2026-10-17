@@ -96,6 +96,19 @@ export default component$(() => {
       if (settingUp.value) setupProgress.value = await invoke<DevicesProgress>("devices_progress").catch(() => null);
     } catch { /* locked */ }
   });
+  // Defined before the task below uses it: the optimizer does not pass a
+  // QRL declared later into a task, which then fails on the bare name.
+  // Copies this device keeps of the backups made on the person's other
+  // devices - the Backups card counts them too, so a second device never
+  // says "No backups yet" while it holds them.
+  const keptFromDevices = useSignal<{ name: string; backups: number }[]>([]);
+  const loadKept = $(async () => {
+    try {
+      const kept = await invoke<{ install_id: string; backups: number; bytes: number }[]>("backups_kept_from_devices");
+      const devices = kept.length ? await invoke<{ install_id: string; name: string }[]>("devices_list").catch(() => []) : [];
+      keptFromDevices.value = kept.map((k) => ({ name: devices.find((d) => d.install_id === k.install_id)?.name || "another device", backups: k.backups }));
+    } catch { /* locked */ }
+  });
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ cleanup }) => {
     const unlisten = await listen("activity-recorded", async () => {
@@ -126,17 +139,6 @@ export default component$(() => {
     } catch { /* offline or older API - no notice */ }
   });
   const backupStats = useSignal<BackupStats | null>(null);
-  // Copies this device keeps of the backups made on the person's other
-  // devices - the Backups card counts them too, so a second device never
-  // says "No backups yet" while it holds them.
-  const keptFromDevices = useSignal<{ name: string; backups: number }[]>([]);
-  const loadKept = $(async () => {
-    try {
-      const kept = await invoke<{ install_id: string; backups: number; bytes: number }[]>("backups_kept_from_devices");
-      const devices = kept.length ? await invoke<{ install_id: string; name: string }[]>("devices_list").catch(() => []) : [];
-      keptFromDevices.value = kept.map((k) => ({ name: devices.find((d) => d.install_id === k.install_id)?.name || "another device", backups: k.backups }));
-    } catch { /* locked */ }
-  });
   const linkedApps = useSignal<LinkedApp[]>([]);
   // One entry per distinct app (collapses multiple installs/agents of the
   // same app - see dedupeLinkedApps).
