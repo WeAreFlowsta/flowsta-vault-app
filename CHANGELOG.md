@@ -5,6 +5,24 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A backup that missed is tried again within a minute.** When your other
+  device didn't answer, the copy waited for the next round five minutes
+  later. It is now asked for each minute while copies are still to come.
+- **A device being set up no longer says it has everything while backups
+  are still on their way.**
+
+### Changed
+- **The Overview's Backups card sums up the copies from your other devices
+  in one line**, for example "2 made here, 1,795 from LinuxLappy" or
+  "from 3 other devices". Your Data lists them by device.
+- **Devices says what is moving.** Under this device: "Getting 1 backup
+  from Erics-MacBook-Air" while copies are on their way. Another device
+  catching up reads "Catching up with a change made here" instead of
+  "Syncing a recent change".
+
 ## [1.6.1-beta7] - 2026-10-17
 
 ### Fixed

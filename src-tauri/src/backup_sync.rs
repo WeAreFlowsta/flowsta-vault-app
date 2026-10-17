@@ -511,6 +511,13 @@ pub async fn round(state: &Arc<crate::commands::AppState>) -> Result<RoundOutcom
     let wanted: u64 = indexes.iter().filter(|i| i.install_id != me && is_install_id(&i.install_id)).flat_map(|i| i.slots.iter()).map(|s| s.size).sum();
     let mut pending: u64 = steps.iter().map(|s| if let CopyStep::Fetch { slot, .. } = s { slot.size } else { 0 }).sum();
     let mut budget = FETCH_BYTES_PER_ROUND;
+    // What is still to come from each device after this round.
+    let mut still: std::collections::BTreeMap<String, (u64, u64)> = std::collections::BTreeMap::new();
+    let mut note_still = |install_id: &str, size: u64| {
+        let e = still.entry(install_id.to_string()).or_insert((0, 0));
+        e.0 += 1;
+        e.1 += size;
+    };
     for step in steps {
         match step {
             CopyStep::Drop { path } => {
@@ -521,10 +528,12 @@ pub async fn round(state: &Arc<crate::commands::AppState>) -> Result<RoundOutcom
             CopyStep::Fetch { install_id, client_id, slot } => {
                 let (Ok(lane), Some(from)) = (lane.as_ref(), agent_of(&install_id)) else {
                     outcome.waiting += 1;
+                    note_still(&install_id, slot.size);
                     continue;
                 };
                 if slot.size > budget {
                     outcome.waiting += 1;
+                    note_still(&install_id, slot.size);
                     continue;
                 }
                 let lane: &Arc<crate::backup_lane::Lane> = lane;
@@ -538,18 +547,45 @@ pub async fn round(state: &Arc<crate::commands::AppState>) -> Result<RoundOutcom
                         Err(e) => {
                             log::warn!("[backups] a fetched copy was not kept: {}", e);
                             outcome.waiting += 1;
+                            note_still(&install_id, slot.size);
                         }
                     },
                     Err(e) => {
                         log::info!("[backups] {}/{} not fetched this time: {}", client_id, slot.label, e);
                         outcome.waiting += 1;
+                        note_still(&install_id, slot.size);
                     }
                 }
             }
         }
     }
     *COPIES_PROGRESS.lock().unwrap() = Some((state.identity_root(), wanted, pending));
+    let still = still.into_iter().map(|(install_id, (backups, bytes))| FetchingFrom { install_id, backups, bytes }).collect();
+    *STILL_TO_FETCH.lock().unwrap() = Some((state.identity_root(), still));
     Ok(outcome)
+}
+
+/// Backups still to come from one device, as of the last round.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FetchingFrom {
+    pub install_id: String,
+    pub backups: u64,
+    pub bytes: u64,
+}
+
+static STILL_TO_FETCH: std::sync::Mutex<Option<(PathBuf, Vec<FetchingFrom>)>> = std::sync::Mutex::new(None);
+
+/// What this device is still getting from each of the others (the Devices
+/// page says so under this device: a fetch that missed used to show
+/// nowhere while it waited for the next round).
+pub fn still_to_fetch(identity_root: &Path) -> Vec<FetchingFrom> {
+    STILL_TO_FETCH
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(root, _)| root.as_path() == identity_root)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
 }
 
 /// The other devices' backups this device should hold, and how much of that

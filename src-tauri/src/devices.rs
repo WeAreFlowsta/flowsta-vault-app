@@ -526,6 +526,8 @@ pub struct DevicesProgress {
     pub setting_up: bool,
     pub mine: Holds,
     pub siblings: Vec<SiblingProgress>,
+    /// Backups this device is still getting, by the device that holds them.
+    pub fetching: Vec<crate::backup_sync::FetchingFrom>,
 }
 
 /// How far each device has got, for the Overview's "on its way" card and the
@@ -540,7 +542,8 @@ pub async fn devices_progress(state: tauri::State<'_, Arc<AppState>>) -> Result<
         .as_ref()
         .map(|m| m.iter().map(|(id, (h, at))| SiblingProgress { install_id: id.clone(), holds: h.clone(), at: *at }).collect())
         .unwrap_or_default();
-    Ok(DevicesProgress { setting_up: mine.setting_up, mine, siblings })
+    let fetching = crate::backup_sync::still_to_fetch(&state.identity_root());
+    Ok(DevicesProgress { setting_up: mine.setting_up, mine, siblings, fetching })
 }
 
 /// Say again soon: the next round tells every sibling about this device,

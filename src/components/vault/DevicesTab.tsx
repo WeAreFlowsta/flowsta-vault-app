@@ -30,6 +30,8 @@ export interface DevicesProgress {
   setting_up: boolean;
   mine: Holds;
   siblings: { install_id: string; holds: Holds; at: number }[];
+  /** Backups this device is still getting, by the device that holds them. */
+  fetching?: { install_id: string; backups: number; bytes: number }[];
 }
 
 export function sizeText(bytes: number): string {
@@ -46,6 +48,17 @@ export function progressText(h: Holds, target: number): string {
   if (target > 0) parts.push(`${Math.min(h.records, target).toLocaleString()} of ${target.toLocaleString()} records`);
   if (h.backups_wanted > 0) parts.push(`${sizeText(h.backups_wanted - h.backups_pending)} of ${sizeText(h.backups_wanted)} of app backups`);
   return parts.join(" · ");
+}
+
+/** What this device is still getting from the others, in plain words:
+ *  "Getting 1 backup from Erics-MacBook-Air (58 KB)". Empty when nothing is. */
+export function gettingText(fetching: DevicesProgress["fetching"], names: Record<string, string>): string {
+  const parts = (fetching ?? [])
+    .filter((f) => f.backups > 0)
+    .map((f) => `${f.backups.toLocaleString()} backup${f.backups === 1 ? "" : "s"} from ${names[f.install_id] || "another device"} (${sizeText(f.bytes)})`);
+  if (parts.length === 0) return "";
+  const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  return `Getting ${list}`;
 }
 
 interface Standing {
@@ -81,8 +94,10 @@ export function deviceLine(d: DeviceRow): string {
     case "up_to_date": return d.at ? `Up to date - last seen ${dayAndTime(d.at)}` : "Up to date";
     case "setting_up": return "Receiving your private data";
     // Its newest record is older than this device's: it is behind. (It said
-    // "Has everything up to <when it last checked in>" - the opposite.)
-    case "last_synced": return isCatchingUp(d) ? "Syncing a recent change" : `Not up to date - last heard from ${dayAndTime(d.at ?? 0)}`;
+    // "Has everything up to <when it last checked in>" - the opposite.) A
+    // recent one is catching up with this device, which it names (10-18:
+    // "Syncing a recent change" read as this device fetching from it).
+    case "last_synced": return isCatchingUp(d) ? "Catching up with a change made here" : `Not up to date - last heard from ${dayAndTime(d.at ?? 0)}`;
     case "not_seen_since": return `Not seen since ${day(d.at ?? 0)}`;
     case "needs_update": return "Needs the Vault update to sync";
     case "removed": return "Removed";
@@ -400,6 +415,11 @@ export const DevicesTab = component$(() => {
                   <p class={["text-xs", d.state === "up_to_date" || d.state === "this_device" ? "text-green-400" : d.state === "removed" || d.state === "this_device_setting_up" || isCatchingUp(d) ? "text-gray-400" : "text-amber-300"].join(" ")}>
                     {deviceLine(d)}
                   </p>
+                  {(d.state === "this_device" || d.state === "this_device_setting_up") && (() => {
+                    const names = Object.fromEntries((devices.value ?? []).map((x) => [x.install_id, x.name]));
+                    const text = gettingText(progress.value?.fetching, names);
+                    return text ? <p class="text-xs text-gray-400" data-testid="device-getting">{text}</p> : null;
+                  })()}
                   {d.state === "setting_up" && (() => {
                     const p = progress.value;
                     const theirs = p?.siblings.find((s) => s.install_id === d.install_id)?.holds;

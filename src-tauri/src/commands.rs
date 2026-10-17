@@ -1735,6 +1735,27 @@ const DEVICES_ROUND_RETRY: std::time::Duration = std::time::Duration::from_secs(
 /// Every fifth pass also says what this device holds (its record, backups).
 const FULL_EVERY_PASSES: u32 = 5;
 
+/// Since when copies of the other devices' backups have been waiting with
+/// no progress. While it is recent the backup step runs every pass (each
+/// minute), not only on the full ones; a device that stays out of reach is
+/// asked every five minutes again after that.
+static BACKUPS_WAITING_SINCE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+const BACKUPS_RETRY_FOR: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+fn backups_retry_due() -> bool {
+    BACKUPS_WAITING_SINCE.lock().unwrap().map(|t| t.elapsed() < BACKUPS_RETRY_FOR).unwrap_or(false)
+}
+
+fn note_backups_waiting(waiting: usize, fetched: usize) {
+    let mut since = BACKUPS_WAITING_SINCE.lock().unwrap();
+    *since = match (waiting, fetched) {
+        (0, _) => None,
+        // Progress: keep going each minute.
+        (_, f) if f > 0 => Some(std::time::Instant::now()),
+        _ => Some(since.unwrap_or_else(std::time::Instant::now)),
+    };
+}
+
 enum DevicesRound {
     Done,
     /// The identity's records could not be read yet.
@@ -1864,20 +1885,26 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             Err(e) => { complete = false; log::info!("Connections not checked: {}", e); }
         }
         // App backups: say what this device holds, keep copies of what the
-        // other devices hold.
-        if !full {
+        // other devices hold. Every full round; every round while copies are
+        // still to come (a fetch that missed waited five minutes, 10-18).
+        if !full && !backups_retry_due() {
             return DevicesRound::Done;
         }
         match crate::backup_sync::round(devices_state).await {
-            Ok(outcome) if outcome.changed() => {
-                log::info!(
-                    "[backups] said {} · fetched {} · dropped {} · still to fetch {}",
-                    outcome.recorded, outcome.fetched, outcome.dropped, outcome.waiting
-                );
-                let _ = devices_app.emit("backups-changed", serde_json::json!({}));
-            }
             Ok(outcome) => {
-                if outcome.waiting > 0 { complete = false; }
+                note_backups_waiting(outcome.waiting, outcome.fetched);
+                if outcome.changed() {
+                    log::info!(
+                        "[backups] said {} · fetched {} · dropped {} · still to fetch {}",
+                        outcome.recorded, outcome.fetched, outcome.dropped, outcome.waiting
+                    );
+                    let _ = devices_app.emit("backups-changed", serde_json::json!({}));
+                }
+                // Copies still to come: not everything yet (10-16: "fetched
+                // 43 · still to fetch 2", then "This device has everything").
+                if outcome.waiting > 0 {
+                    complete = false;
+                }
             }
             Err(e) => { complete = false; log::info!("Backups not checked: {}", e); }
         }
@@ -8751,5 +8778,29 @@ mod pending_auth_tests {
         assert!(!open.abandoned(), "the second request still waits");
         drop(second);
         assert!(open.abandoned());
+    }
+}
+
+#[cfg(test)]
+mod backups_retry_tests {
+    use super::{backups_retry_due, note_backups_waiting, BACKUPS_WAITING_SINCE};
+
+    /// Copies still to come are asked for each minute while they make
+    /// progress or have waited only a little; a device out of reach for long
+    /// goes back to the five-minute rounds.
+    #[test]
+    fn backups_are_retried_each_minute_while_they_wait() {
+        note_backups_waiting(0, 0);
+        assert!(!backups_retry_due(), "nothing waiting");
+        note_backups_waiting(1, 0);
+        assert!(backups_retry_due(), "a fetch missed: try again next minute");
+        *BACKUPS_WAITING_SINCE.lock().unwrap() = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(11 * 60));
+        assert!(!backups_retry_due(), "out of reach for long: the five-minute rounds");
+        note_backups_waiting(1, 0);
+        assert!(!backups_retry_due(), "still no progress: the wait keeps its start");
+        note_backups_waiting(3, 1);
+        assert!(backups_retry_due(), "progress: each minute again");
+        note_backups_waiting(0, 2);
+        assert!(!backups_retry_due(), "all here");
     }
 }

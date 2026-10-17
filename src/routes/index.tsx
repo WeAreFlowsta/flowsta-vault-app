@@ -854,21 +854,29 @@ export default component$(() => {
             </svg>
             <span class="text-sm font-medium">Backups</span>
           </div>
-          <p class="text-3xl font-bold text-white">
-            {(stats?.total_backups ?? 0) + keptFromDevices.value.reduce((n, k) => n + k.backups, 0)}
-          </p>
-          <p class="mt-1 text-xs text-gray-500">
-            {stats && stats.total_backups > 0
-              ? `${formatBytes(stats.total_size)} across ${stats.app_count} app${stats.app_count !== 1 ? "s" : ""}`
-              : keptFromDevices.value.length > 0
-                ? "None made on this device yet"
-                : "No backups yet"}
-          </p>
-          {keptFromDevices.value.map((k) => (
-            <p key={k.name} class="mt-0.5 text-xs text-gray-500">
-              {k.backups} kept from {k.name}
-            </p>
-          ))}
+          {(() => {
+            // One line for the copies however many devices share: the list
+            // by device is on Your Data (a line per device outgrew the card).
+            const made = stats?.total_backups ?? 0;
+            const kept = keptFromDevices.value.reduce((n, k) => n + k.backups, 0);
+            const from = keptFromDevices.value.length === 1 ? keptFromDevices.value[0].name : `${keptFromDevices.value.length} other devices`;
+            return (
+              <>
+                <p class="text-3xl font-bold text-white">{(made + kept).toLocaleString()}</p>
+                <p class="mt-1 text-xs text-gray-500">
+                  {made + kept > 0 && stats
+                    ? `${formatBytes(stats.total_size)} across ${stats.app_count} app${stats.app_count !== 1 ? "s" : ""}`
+                    : "No backups yet"}
+                </p>
+                {kept > 0 && (
+                  <p class="mt-0.5 text-xs text-gray-500" data-testid="backups-kept">
+                    {made > 0 ? `${made.toLocaleString()} made here, ` : ""}
+                    {kept.toLocaleString()} from {from}
+                  </p>
+                )}
+              </>
+            );
+          })()}
           {stats && stats.apps.length > 0 && (
             <p class="mt-0.5 text-xs italic text-gray-600">
               Last backup {timeAgo(Math.max(...stats.apps.map((a) => a.last_backup_at)))}
