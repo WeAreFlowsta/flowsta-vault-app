@@ -5,6 +5,13 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The meeting-point check registers each note once** and no longer reads
+  a full listing on Flowsta's shared network as a sign that this device had
+  dropped off. beta8 re-registered there every minute and logged it.
+
 ## [1.6.1-beta8] - 2026-10-19
 
 ### Fixed
