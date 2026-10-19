@@ -151,6 +151,23 @@ impl BootstrapTarget {
 /// Every rendezvous this build knows, for the registration keeper
 /// (`rendezvous_keeper`): Flowsta's with this app's auth material first,
 /// then the open community nodes. `(bootstrap url, base64 auth material)`.
+/// The rendezvous the running conductor was configured with at launch (the
+/// main one, or the first fallback that answered when it was dark). The
+/// registration keeper calls a stall only against this one: the conductor
+/// never registers anywhere else, so a missing note on a fallback is not a
+/// stall (10-19: "did not reach node1.flowsta.com" every few minutes).
+static CONDUCTOR_RENDEZVOUS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub(crate) fn conductor_rendezvous() -> Option<String> {
+    CONDUCTOR_RENDEZVOUS.lock().ok().and_then(|g| g.clone())
+}
+
+fn remember_conductor_rendezvous(url: &str) {
+    if let Ok(mut g) = CONDUCTOR_RENDEZVOUS.lock() {
+        *g = Some(url.trim_end_matches('/').to_string());
+    }
+}
+
 pub(crate) fn rendezvous_servers() -> Vec<(String, Option<String>)> {
     let primary = BootstrapTarget::primary();
     let mut servers = vec![(primary.bootstrap_url, primary.auth_material)];
@@ -757,6 +774,7 @@ async fn start_holochain_attempt(
         Err(e) => fail_with_lair_cleanup!(e),
     };
     let bootstrap_target = resolve_bootstrap_target().await;
+    remember_conductor_rendezvous(&bootstrap_target.bootstrap_url);
     let config_path = match generate_conductor_config(
         &conductor_dir,
         &connection_url,

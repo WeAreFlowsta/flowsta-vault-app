@@ -5,6 +5,14 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The meeting-point check no longer warns about the open fallback
+  servers.** The conductor registers only with the server it started on;
+  this device being listed on a fallback too is extra reach, said once,
+  not a sign that its own registration stalled.
+
 ## [1.6.1-beta9] - 2026-10-19
 
 ### Fixed
