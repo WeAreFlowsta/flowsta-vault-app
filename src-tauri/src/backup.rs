@@ -488,6 +488,7 @@ pub fn save_backup_with_time(
         data.len(),
         label_str,
     );
+    crate::backup_sync::note_saved();
 
     Ok(meta)
 }

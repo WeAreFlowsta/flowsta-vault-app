@@ -463,7 +463,35 @@ pub(crate) async fn lane(state: &Arc<crate::commands::AppState>) -> Result<Arc<c
 
 /// One pass: write the records for this device's backups that changed,
 /// drop copies their device no longer holds, fetch copies that are missing.
-pub async fn round(state: &Arc<crate::commands::AppState>) -> Result<RoundOutcome, String> {
+/// An app saved a backup: the devices loop wakes, waits for the burst to
+/// end, and says so to the other devices (10-20: a picture change took up
+/// to ten minutes to reach the other device, on the five-minute rounds).
+pub static SAVED: std::sync::LazyLock<tokio::sync::Notify> = std::sync::LazyLock::new(tokio::sync::Notify::new);
+
+pub fn note_saved() {
+    SAVED.notify_one();
+}
+
+/// The other devices' backups seen announced in an earlier round, so a NEW
+/// announcement is copied at once while a copy that keeps failing (the
+/// other device out of reach) waits for the slower schedule.
+static SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+fn step_key(install_id: &str, client_id: &str, slot: &SlotInfo) -> String {
+    format!("{install_id}/{client_id}/{}/{}", slot.label, slot.sha256)
+}
+
+/// Which of `now` were not in `before` (all of them on a first round), and
+/// the set to remember.
+pub(crate) fn fresh_announcements(before: Option<&std::collections::HashSet<String>>, now: &[String]) -> (std::collections::HashSet<String>, std::collections::HashSet<String>) {
+    let fresh = now.iter().filter(|k| before.map(|b| !b.contains(*k)).unwrap_or(true)).cloned().collect();
+    (fresh, now.iter().cloned().collect())
+}
+
+/// One round: say what this device holds (always), and copy what the other
+/// devices hold - every missing copy when `fetch_all`, else only the ones
+/// announced since the last round.
+pub async fn round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> Result<RoundOutcome, String> {
     let records = crate::sealed::sealed_list_inner(state).await?;
     let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
     let root = state.identity_root();
@@ -505,6 +533,19 @@ pub async fn round(state: &Arc<crate::commands::AppState>) -> Result<RoundOutcom
 
     let indexes = indexes_of(&recorded);
     let steps = plan(&root, &me, &indexes);
+    let wanted_keys: Vec<String> = steps
+        .iter()
+        .filter_map(|s| match s {
+            CopyStep::Fetch { install_id, client_id, slot } => Some(step_key(install_id, client_id, slot)),
+            _ => None,
+        })
+        .collect();
+    let fresh = {
+        let mut seen = SEEN.lock().unwrap();
+        let (fresh, remember) = fresh_announcements(seen.as_ref(), &wanted_keys);
+        *seen = Some(remember);
+        fresh
+    };
     // How much of the other devices' backups this device should hold, and
     // how much of it is still to come (Overview and Devices show it while a
     // device is being set up).
@@ -526,6 +567,11 @@ pub async fn round(state: &Arc<crate::commands::AppState>) -> Result<RoundOutcom
                 }
             }
             CopyStep::Fetch { install_id, client_id, slot } => {
+                if !fetch_all && !fresh.contains(&step_key(&install_id, &client_id, &slot)) {
+                    outcome.waiting += 1;
+                    note_still(&install_id, slot.size);
+                    continue;
+                }
                 let (Ok(lane), Some(from)) = (lane.as_ref(), agent_of(&install_id)) else {
                     outcome.waiting += 1;
                     note_still(&install_id, slot.size);
@@ -604,6 +650,21 @@ pub fn copies_progress(identity_root: &Path) -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_announcement_is_fresh_once_and_a_first_round_takes_all() {
+        use super::fresh_announcements;
+        let a = "dev/app/manifest/aaa".to_string();
+        let b = "dev/app/ais/bbb".to_string();
+        let (fresh, seen) = fresh_announcements(None, &[a.clone()]);
+        assert!(fresh.contains(&a), "first round: everything is fresh");
+        let (fresh, seen) = fresh_announcements(Some(&seen), &[a.clone(), b.clone()]);
+        assert!(!fresh.contains(&a), "still missing from before: waits for the slower schedule");
+        assert!(fresh.contains(&b), "announced since the last round: copied now");
+        let b2 = "dev/app/ais/ccc".to_string();
+        let (fresh, _) = fresh_announcements(Some(&seen), &[a, b2.clone()]);
+        assert!(fresh.contains(&b2), "a new version of the same backup is a new announcement");
+    }
+
     use super::*;
 
     const ME: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

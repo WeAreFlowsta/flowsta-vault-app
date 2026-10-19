@@ -1720,7 +1720,12 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                 // The cells of a returning identity can take minutes to answer.
                 DevicesRound::NotReady => DEVICES_ROUND_RETRY,
             };
-            tokio::time::sleep(wait).await;
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                // An app saved a backup: let its burst of saves finish, then
+                // a pass says so to the other devices.
+                _ = crate::backup_sync::SAVED.notified() => tokio::time::sleep(SAVED_SETTLE).await,
+            }
             let current = DEVICES_ROUND.load(std::sync::atomic::Ordering::SeqCst) == round;
             if !current || devices_state.vault_config.lock().unwrap().is_none() {
                 break;
@@ -1732,6 +1737,8 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
 static DEVICES_ROUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const DEVICES_ROUND_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 const DEVICES_ROUND_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+/// After an app saves a backup, how long to wait for the rest of its burst.
+const SAVED_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
 /// Every fifth pass also says what this device holds (its record, backups).
 const FULL_EVERY_PASSES: u32 = 5;
 
@@ -1884,13 +1891,19 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             Ok(false) => {}
             Err(e) => { complete = false; log::info!("Connections not checked: {}", e); }
         }
-        // App backups: say what this device holds, keep copies of what the
-        // other devices hold. Every full round; every round while copies are
-        // still to come (a fetch that missed waited five minutes, 10-18).
-        if !full && !backups_retry_due() {
-            return DevicesRound::Done;
+        // App backups, every pass: say what this device holds, and copy
+        // what another device announced since the last pass (10-20: a change
+        // waited for two five-minute rounds). Copies that keep failing - the
+        // other device out of reach - are retried on full rounds, and each
+        // minute for a while after progress (10-18).
+        let fetch_all = full || backups_retry_due();
+        let started = std::time::Instant::now();
+        let result = crate::backup_sync::round(devices_state, fetch_all).await;
+        let took = started.elapsed();
+        if took > std::time::Duration::from_secs(5) {
+            log::info!("[backups] the backup step took {} ms", took.as_millis());
         }
-        match crate::backup_sync::round(devices_state).await {
+        match result {
             Ok(outcome) => {
                 note_backups_waiting(outcome.waiting, outcome.fetched);
                 if outcome.changed() {

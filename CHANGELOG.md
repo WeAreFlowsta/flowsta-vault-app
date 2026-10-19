@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **A change reaches your other devices in about a minute.** When an app
+  saves a backup, the Vault tells your other devices within seconds, and
+  they copy a newly announced backup at their next check, each minute.
+  Before, both waited for a five-minute round, so a change could take up
+  to ten minutes. A copy that keeps failing (the other device asleep)
+  still retries on the slower schedule.
+
 ### Fixed
 - **The meeting-point check no longer warns about the open fallback
   servers.** The conductor registers only with the server it started on;
