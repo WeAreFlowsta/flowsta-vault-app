@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later. It is now asked for each minute while copies are still to come.
 - **A device being set up no longer says it has everything while backups
   are still on their way.**
+- **A device that drops off Flowsta's meeting point puts itself back.**
+  After a spell with no connection, a device could stay unlisted there
+  for good, so your other devices could not find it until the Vault was
+  restarted. The Vault now checks every minute and re-registers itself,
+  without a restart; its conductor's logs from the previous run are kept.
 
 ### Changed
 - **The Overview's Backups card sums up the copies from your other devices

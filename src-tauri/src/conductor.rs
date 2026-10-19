@@ -148,6 +148,18 @@ impl BootstrapTarget {
     }
 }
 
+/// Every rendezvous this build knows, for the registration keeper
+/// (`rendezvous_keeper`): Flowsta's with this app's auth material first,
+/// then the open community nodes. `(bootstrap url, base64 auth material)`.
+pub(crate) fn rendezvous_servers() -> Vec<(String, Option<String>)> {
+    let primary = BootstrapTarget::primary();
+    let mut servers = vec![(primary.bootstrap_url, primary.auth_material)];
+    for f in BootstrapTarget::fallbacks() {
+        servers.push((f.bootstrap_url, None));
+    }
+    servers
+}
+
 /// Is a bootstrap server answering? kitsune2-bootstrap-srv serves
 /// GET /health directly (200, no auth) - verified against the live
 /// fleet; community nodes run the same binary, so the probe is
@@ -396,6 +408,10 @@ pub fn start_conductor_process(
 
     let stdout_path = conductor_dir.join("holochain-stdout.log");
     let stderr_path = conductor_dir.join("holochain-stderr.log");
+    // Keep the previous run's logs: a restart is the usual cure for a
+    // network problem, and it used to erase the only evidence.
+    let _ = std::fs::rename(&stdout_path, conductor_dir.join("holochain-stdout.previous.log"));
+    let _ = std::fs::rename(&stderr_path, conductor_dir.join("holochain-stderr.previous.log"));
 
     let stdout_file = std::fs::File::create(&stdout_path)
         .map_err(|e| format!("Failed to create conductor stdout log: {}", e))?;

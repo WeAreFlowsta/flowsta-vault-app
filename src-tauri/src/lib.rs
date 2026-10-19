@@ -26,6 +26,7 @@ mod relocate;
 mod identities;
 mod instance_guard;
 mod relay_login;
+mod rendezvous_keeper;
 mod sealed;
 mod vault;
 
@@ -389,6 +390,9 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Keep this device listed on the rendezvous when the conductor's own registration stalls.
+            rendezvous_keeper::start(app.state::<Arc<AppState>>().inner().clone());
 
             // Keep the tray's first line and tooltip saying the state.
             {
