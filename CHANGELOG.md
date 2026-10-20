@@ -5,6 +5,83 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-10-20
+
+### Highlights
+- **Apps keep your private data in step across your devices.** An app built
+  with the Flowsta SDK can keep one private network on all of your devices,
+  read the copy any one of them made, and show which of your devices are
+  reachable right now. When an app saves a backup, the Vault tells your
+  other devices within seconds, and they copy it within about a minute
+  while their Vaults are unlocked.
+- **Signing in is one step at a time.** Requests from apps show one dialog
+  at a time; the next appears when you answer the first. A request that
+  arrives while the Vault is unlocking waits for you, and after you answer,
+  the window steps back so you land in the app or page that asked.
+- **A desktop app can open its website signed in.** A linked app can have
+  the web sign-in signed for its own website, so it opens already signed in.
+- **Adding a device shows its progress.** "Your private data is on its way"
+  shows how far your records and app backups have got, Settings → Devices
+  shows it for each device, and a new device lists all your devices from
+  the start.
+
+### Added
+- Settings → Devices says what is moving ("Getting 1 backup from <device>")
+  and shows "Checking with your other devices..." while it asks them.
+- The Overview's Backups card sums up the copies from your other devices in
+  one line ("2 made here, 1,795 from <device>"); Your Data lists them by
+  device.
+- A device that drops off Flowsta's meeting point after a spell offline puts
+  itself back within a minute, without a restart.
+
+### Changed
+- Clearer dialogs: "Connect <app>?" and "Sign-in request" name the app, your
+  DID is called your permanent ID, and the remember option reads "Approve
+  this app without asking next time". A sign-in from a browser on this
+  computer reads "Approve this sign-in?", and the unlock screen says when a
+  sign-in is waiting and which app asked.
+- Disconnect in Connections asks in place, with Cancel and Disconnect.
+- Signing a file for an app without publishing it says the signature goes
+  back to that app, not to the Sign It network.
+- Sign It's licensing option reads "Open to licensing inquiries".
+
+### Fixed
+- Lots of private data no longer slows your computer or stalls a new device:
+  the Vault reads each record once and keeps it sealed with your key, runs
+  one check at a time, and reads what is new a hundred records at a time.
+- A sign-in handed over from Safari, Brave or a phone shows its approval as
+  the link arrives, including after you unlock.
+- A sign-in page that asks twice no longer fails; both requests wait on one
+  approval.
+- A backup copy that missed is tried again within a minute.
+- The Overview and Your Data count the backups kept from your other devices.
+- A device being added waits until your private data has arrived before
+  saying it has everything, and every device shows the same state for it.
+
+### Security
+- A remembered desktop app is approved without a dialog only when its
+  request carries the key the app linked with.
+- `rustls` 0.23.46, with the fixes for RUSTSEC-2026-0285, -0346, -0348 and
+  -0349.
+
+### For apps
+- `POST /app-secret`: a secret derived from your identity and scoped to the
+  calling app, the same on every one of your devices.
+- `GET /devices`: the person's devices and when this Vault last heard from
+  each, with `catching_up` and `known_count`.
+- `/backup/retrieve` can name a device (`across: "devices"` + `device`), and
+  `/backup/list` names the other devices (`name`, `platform`, `generation`).
+- `app_agent_pub_key` on `/authenticate` keeps return sign-ins silent for a
+  remembered desktop app.
+- A linked desktop app may have the web-login challenge signed for its own
+  client or its declared companion web app.
+- Every sign-in request is logged with its origin, client and outcome.
+- `@flowsta/holochain` 3.8.0 to 3.10.3 carries all of these (`getAppSecret`,
+  `getAppNetworkSecret`, `localAgentPubKey`, `openWebSignedIn`) and
+  `keepRegistered`.
+
+The thirteen betas (2026-10-15 to 2026-10-20) are listed below for the record.
+
 ## [1.6.1-beta13] - 2026-10-20
 
 ### Fixed
