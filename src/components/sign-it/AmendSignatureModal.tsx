@@ -184,7 +184,7 @@ export default component$<Props>(({ target, onAmended$ }) => {
               }}>
               <option value="">-- Not declared --</option>
               <option value="not_available">Not available for licensing</option>
-              <option value="open_to_licensing">Open to licensing enquiries</option>
+              <option value="open_to_licensing">Open to licensing inquiries</option>
             </select>
           </div>
           <div>

@@ -2433,7 +2433,7 @@ export default component$(() => {
                 ? pendingDocumentSign.value.amends
                   ? 'This publishes an updated signature that replaces an earlier one you made - the original stays visible in its history.'
                   : 'This will publish a signature from this device to the Sign It network - publicly verifiable, and it speaks as you.'
-                : 'This app wants you to cryptographically sign a file. Your signature will be publicly verifiable on the DHT.'}
+                : 'This signs the file for the app that asked: the signature goes back to that app, not to the Sign It network, and it speaks as you.'}
             </p>
 
             <div class="flex gap-3">

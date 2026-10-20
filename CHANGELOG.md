@@ -5,6 +5,21 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1-beta13] - 2026-10-20
+
+### Fixed
+- **Signing a file for an app says where the signature goes.** When an app
+  asks you to sign a file without publishing it, the dialog now says the
+  signature goes back to that app, not to the Sign It network. It said the
+  signature would be publicly verifiable, which is true only of a published
+  one.
+- Sign It's licensing option reads "Open to licensing inquiries".
+
+### Security
+- `rustls` 0.23.46, the TLS library behind the connection to Flowsta's
+  meeting point, with the fixes for RUSTSEC-2026-0285, -0346, -0348 and
+  -0349.
+
 ## [1.6.1-beta12] - 2026-10-20
 
 ### Fixed

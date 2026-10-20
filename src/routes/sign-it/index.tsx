@@ -998,7 +998,7 @@ export default component$(() => {
                       }}>
                       <option value="">-- Not declared --</option>
                       <option value="not_available">Not available for licensing</option>
-                      <option value="open_to_licensing">Open to licensing enquiries</option>
+                      <option value="open_to_licensing">Open to licensing inquiries</option>
                     </select>
                   </div>
                   <div>
@@ -1286,7 +1286,7 @@ export default component$(() => {
                       value={metadata.commercialLicensing}
                       onChange$={(e) => {
                         metadata.commercialLicensing = (e.target as HTMLSelectElement).value;
-                        // Auto-enable contact requests if open to licensing enquiries
+                        // Auto-enable contact requests if open to licensing inquiries
                         if ((e.target as HTMLSelectElement).value === "open_to_licensing") {
                           metadata.contactPreference = "allow_contact_requests";
                         }
@@ -1294,7 +1294,7 @@ export default component$(() => {
                     >
                       <option value="">-- Not declared --</option>
                       <option value="not_available">Not available for licensing</option>
-                      <option value="open_to_licensing">Open to licensing enquiries</option>
+                      <option value="open_to_licensing">Open to licensing inquiries</option>
                     </select>
                   </div>
                   <div>
