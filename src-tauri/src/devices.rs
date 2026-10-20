@@ -348,7 +348,13 @@ pub fn known_device_keys(state: &AppState) -> Vec<[u8; 32]> {
 /// starts from what is already known.
 #[tauri::command]
 pub fn devices_known_count(state: tauri::State<'_, Arc<AppState>>) -> usize {
-    let path = crate::paths::known_devices_path(&state.identity_root());
+    known_device_count(&state.identity_root())
+}
+
+/// How many devices (this one included) this Vault knew of the last time
+/// it read the identity's list - known before the network is up.
+pub fn known_device_count(identity_root: &std::path::Path) -> usize {
+    let path = crate::paths::known_devices_path(identity_root);
     let list: Vec<KnownDevice> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let mut installs: Vec<&str> = list.iter().filter(|k| !k.removed).map(|k| k.install_id.as_str()).collect();
     installs.sort();

@@ -5,6 +5,15 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`GET /devices` says when it is still catching up.** Just after a start
+  or an unlock, while the identity's records are being read, the list could
+  be short or empty; it now carries `catching_up` and `known_count` (how
+  many devices this Vault already knows of), so an app shows "catching up"
+  instead of "this is your only device".
+
 ## [1.6.1-beta11] - 2026-10-20
 
 ### Added

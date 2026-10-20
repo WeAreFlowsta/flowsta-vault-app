@@ -2173,11 +2173,18 @@ async fn devices_handler(
         ));
     }
     let me = crate::paths::install_id(&state.app_state.data_dir).unwrap_or_default();
-    let records = tokio::time::timeout(std::time::Duration::from_secs(5), crate::devices::list(&state.app_state))
+    let live = tokio::time::timeout(std::time::Duration::from_secs(5), crate::devices::list(&state.app_state))
         .await
         .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
+        .and_then(|r| r.ok());
+    // Just after a start or an unlock the identity's records are still being
+    // read: the list is short or unreadable while this Vault already knows
+    // how many devices there are. Say so, so an app shows "catching up" and
+    // not "this is your only device" (10-20).
+    let known = crate::devices::known_device_count(&state.app_state.identity_root());
+    let live_count = live.as_ref().map(|l| l.iter().filter(|d| d.removed_at.is_none()).count()).unwrap_or(0);
+    let catching_up = live.is_none() || live_count < known;
+    let records = live.unwrap_or_default();
     let devices: Vec<serde_json::Value> = records
         .iter()
         .filter(|d| d.removed_at.is_none())
@@ -2195,6 +2202,8 @@ async fn devices_handler(
     Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({
         "devices": devices,
         "announce_every_secs": crate::devices::ANNOUNCE_EVERY_SECS,
+        "catching_up": catching_up,
+        "known_count": known,
     }))))
 }
 
