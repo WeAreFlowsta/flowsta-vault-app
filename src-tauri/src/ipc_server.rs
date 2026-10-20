@@ -2148,6 +2148,56 @@ async fn backup_limits_handler(
     }))
 }
 
+/// GET /devices - the identity's devices for a linked app: each one's name,
+/// platform and network generation, whether it is this device, and when this
+/// Vault last heard from it directly (`heard_at`, seconds; a device heard in
+/// the last few minutes has its Vault unlocked and reachable - every
+/// unlocked Vault announces itself at least every `announce_every_secs`).
+/// Removed devices are left out. Locked Vault: 403 `vault_locked`.
+async fn devices_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    let origin = extract_origin(&headers);
+    track_request(&state.app_state, origin.as_deref(), "devices");
+    if origin_to_client_id(&state.app_state, origin.as_deref()).is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError { error: "not_linked".into(), description: Some("This origin is not a linked third-party app.".into()) }),
+        ));
+    }
+    if state.app_state.vault_config.lock().unwrap().is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError { error: "vault_locked".into(), description: Some("Vault is locked.".into()) }),
+        ));
+    }
+    let me = crate::paths::install_id(&state.app_state.data_dir).unwrap_or_default();
+    let records = tokio::time::timeout(std::time::Duration::from_secs(5), crate::devices::list(&state.app_state))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+    let devices: Vec<serde_json::Value> = records
+        .iter()
+        .filter(|d| d.removed_at.is_none())
+        .map(|d| {
+            serde_json::json!({
+                "device": d.install_id,
+                "name": d.name,
+                "platform": d.platform,
+                "generation": d.generation,
+                "this_device": d.install_id == me,
+                "heard_at": crate::devices::heard_at(&d.install_id),
+            })
+        })
+        .collect();
+    Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({
+        "devices": devices,
+        "announce_every_secs": crate::devices::ANNOUNCE_EVERY_SECS,
+    }))))
+}
+
 async fn backup_list_handler(
     State(state): State<Arc<IpcState>>,
     headers: HeaderMap,
@@ -5526,6 +5576,7 @@ pub async fn start_ipc_server(
         )
         .route("/backup/limits", get(backup_limits_handler))
         .route("/backup/list", get(backup_list_handler))
+        .route("/devices", get(devices_handler))
         .route("/backup/retrieve", post(backup_retrieve_handler))
         .route("/backup/delete", post(backup_delete_handler))
         .route("/app-secret", post(app_secret_handler))

@@ -446,6 +446,23 @@ fn session_age() -> Option<std::time::Duration> {
 
 /// Siblings this device has told about itself this session, and when.
 static ANNOUNCED: std::sync::Mutex<Option<std::collections::HashMap<String, std::time::Instant>>> = std::sync::Mutex::new(None);
+/// While unlocked, a device announces itself this often (after its first
+/// quarter hour, when it announces each minute).
+pub const ANNOUNCE_EVERY_SECS: u64 = 120;
+
+/// When each device of the identity was last heard from directly (its
+/// announcement arrived), by install id, seconds since the epoch.
+static HEARD_AT: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
+
+pub fn note_heard(install_id: &str) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    HEARD_AT.lock().unwrap().get_or_insert_with(Default::default).insert(install_id.to_string(), now);
+}
+
+pub fn heard_at(install_id: &str) -> Option<u64> {
+    HEARD_AT.lock().unwrap().as_ref().and_then(|m| m.get(install_id).copied())
+}
+
 /// Siblings heard from directly this session (their conductor keys).
 static HEARD: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
 
@@ -589,7 +606,11 @@ pub async fn announce_to_siblings(state: &Arc<AppState>) {
     // Each minute while young or while this device is being set up (the
     // others show how far it has got), else every ten minutes.
     let young = session_age().map(|a| a < std::time::Duration::from_secs(15 * 60)).unwrap_or(true);
-    let every = std::time::Duration::from_secs(if young || setting_up_here(state) { 55 } else { 600 });
+    // After that, every two minutes while unlocked: a device that has not
+    // been heard for a few minutes is locked, asleep or off - the apps show
+    // that (Your Own AI's Settings > Devices), so a change that waits for it
+    // is explained by a dot, not a mystery (10-20).
+    let every = std::time::Duration::from_secs(if young || setting_up_here(state) { 55 } else { ANNOUNCE_EVERY_SECS });
     let due: Vec<String> = {
         let announced = ANNOUNCED.lock().unwrap();
         siblings

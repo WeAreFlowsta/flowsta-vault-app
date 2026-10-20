@@ -5,6 +5,16 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Apps can show which of your devices are reachable now.** An unlocked
+  Vault tells your other devices it is there every two minutes, and each
+  Vault notes when it last heard from each one. Linked apps read the list
+  with `GET /devices` (name, platform, whether it is this device, when it
+  was last heard), so a change that waits for a locked or sleeping device
+  can say so.
+
 ## [1.6.1-beta10] - 2026-10-20
 
 ### Changed

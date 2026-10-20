@@ -161,6 +161,9 @@ impl Lane {
                     "device" => match crate::sealed::accept_device_piece(&state, &arrived.piece.data) {
                         Ok(got) => {
                             crate::devices::heard_from(&arrived.from);
+                            if let Some(install_id) = got.device.as_deref() {
+                                crate::devices::note_heard(install_id);
+                            }
                             if let (Some(install_id), Some(holds)) = (got.device.as_deref(), got.holds) {
                                 crate::devices::note_holds(install_id, holds);
                             }
