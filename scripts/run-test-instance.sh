@@ -18,6 +18,14 @@ DIR="$HOME/.local/share/flowsta-vault-$SUFFIX"
 mkdir -p "$DIR"
 cd "$(dirname "$0")/.."
 
+# The webview's storage and the app log follow the XDG dirs, not
+# FLOWSTA_VAULT_DATA_DIR: without these a test instance logs into the
+# installed Vault's own log folder (~/.local/share/com.flowsta.vault/logs),
+# mixing the two (found 2026-10-20). Same as e2e/launch-app.sh.
+export XDG_DATA_HOME="$DIR/xdg"
+export XDG_CACHE_HOME="$DIR/xdg-cache"
+mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+
 # Staging network parameters — same values as the tauri:dev-staging script.
 FLOWSTA_VAULT_DATA_DIR="$DIR" \
 FLOWSTA_VAULT_AUTO_APPROVE=1 \
