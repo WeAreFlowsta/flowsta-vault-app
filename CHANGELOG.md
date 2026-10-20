@@ -76,7 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A linked desktop app may have the web-login challenge signed for its own
   client or its declared companion web app.
 - Every sign-in request is logged with its origin, client and outcome.
-- `@flowsta/holochain` 3.8.0 to 3.10.3 carries all of these (`getAppSecret`,
+- `@flowsta/holochain` 3.9.0 and later carries all of these (`getAppSecret`,
   `getAppNetworkSecret`, `localAgentPubKey`, `openWebSignedIn`) and
   `keepRegistered`.
 
