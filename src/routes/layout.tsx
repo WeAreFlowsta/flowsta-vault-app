@@ -393,6 +393,21 @@ export default component$(() => {
     sign_type: string;
     payload_bytes: number;
   } | null>(null);
+  // /sign-node-manifest approval: what every node on a channel will run.
+  const pendingManifestSign = useSignal<{
+    id: string;
+    app_name: string;
+    origin: string | null;
+    summary: {
+      channel: string;
+      sequence: number;
+      issued_at: string;
+      generations: { id: string; state: string; holochain: string; image_digest: string; dnas: string[] }[];
+      agent_digest: string;
+      advisories: { id: string; severity: string; action: string; text: string }[];
+      statement: string;
+    };
+  } | null>(null);
   // Transient notice when a remembered app authenticated without a dialog.
   const autoApprovedNotice = useSignal<string | null>(null);
 
@@ -948,6 +963,12 @@ export default component$(() => {
     }>("raw-sign-request", (event) => {
       pendingRawSign.value = event.payload;
     });
+    const unlistenManifest = listen<NonNullable<typeof pendingManifestSign.value>>(
+      "manifest-sign-request",
+      (event) => {
+        pendingManifestSign.value = event.payload;
+      },
+    );
     const unlistenAuto = listen<{ app_name: string; origin: string | null }>(
       "auth-auto-approved",
       (event) => {
@@ -957,6 +978,7 @@ export default component$(() => {
     );
     cleanup(() => {
       unlistenSign.then((u) => u());
+      unlistenManifest.then((u) => u());
       unlistenAuto.then((u) => u());
     });
   });
@@ -1253,6 +1275,16 @@ export default component$(() => {
       console.error("Failed to respond to sign request:", e);
     } finally {
       pendingRawSign.value = null;
+    }
+  });
+
+  const handleManifestSignResponse = $(async (approved: boolean) => {
+    try {
+      await invoke("respond_manifest_sign_request", { approved });
+    } catch (e) {
+      console.error("Failed to respond to manifest signing request:", e);
+    } finally {
+      pendingManifestSign.value = null;
     }
   });
 
@@ -1798,6 +1830,75 @@ export default component$(() => {
               </GlassButton>
               <GlassButton class="flex-1" onClick$={() => handleRawSignResponse(true)}>
                 Approve
+              </GlassButton>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Node manifest signing: every item the manifest carries, then sign */}
+      {pendingManifestSign.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div class="w-full max-w-lg rounded-2xl border border-gray-700 bg-gray-800 p-6 shadow-2xl">
+            <div class="mb-4 flex items-start gap-3">
+              <div class="rounded-full bg-amber-500/20 p-2">
+                <svg class="h-5 w-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                </svg>
+              </div>
+              <div>
+                <h3 class="text-base font-semibold text-white">Publish a node manifest</h3>
+                <p class="text-xs text-gray-400">
+                  {pendingManifestSign.value.app_name} asks you to sign what every node on the{" "}
+                  <span class="font-medium text-gray-200">{pendingManifestSign.value.summary.channel}</span> channel will run
+                </p>
+              </div>
+            </div>
+            <div class="mb-4 max-h-[50vh] space-y-3 overflow-y-auto rounded-lg border border-gray-700 bg-gray-900 p-3 text-sm">
+              <div class="flex justify-between">
+                <span class="text-xs text-gray-500">Channel · sequence</span>
+                <span class="font-mono text-gray-200">
+                  {pendingManifestSign.value.summary.channel} #{pendingManifestSign.value.summary.sequence}
+                </span>
+              </div>
+              {pendingManifestSign.value.summary.generations.map((g) => (
+                <div key={g.id} class="rounded-md border border-gray-700/70 p-2">
+                  <div class="flex justify-between">
+                    <span class="font-medium text-white">{g.id}</span>
+                    <span class={g.state === "serving" ? "text-emerald-300" : g.state === "retired" ? "text-rose-300" : "text-amber-300"}>{g.state}</span>
+                  </div>
+                  <p class="text-xs text-gray-400">
+                    Holochain {g.holochain} · conductor image <span class="font-mono">{g.image_digest}</span>
+                  </p>
+                  <p class="text-xs text-gray-400">
+                    DNAs: {g.dnas.length ? g.dnas.join(", ") : "none"}
+                  </p>
+                </div>
+              ))}
+              <p class="text-xs text-gray-400">
+                Agent image <span class="font-mono">{pendingManifestSign.value.summary.agent_digest}</span>
+              </p>
+              {pendingManifestSign.value.summary.advisories.length > 0 && (
+                <div>
+                  <span class="text-xs text-gray-500">Advisories</span>
+                  {pendingManifestSign.value.summary.advisories.map((a) => (
+                    <p key={a.id} class="text-xs text-gray-300">
+                      <span class={a.severity === "security" ? "text-rose-300" : "text-gray-400"}>[{a.severity} · {a.action}]</span> {a.text}
+                    </p>
+                  ))}
+                </div>
+              )}
+              <p class="break-all font-mono text-[10px] text-gray-500">{pendingManifestSign.value.summary.statement}</p>
+            </div>
+            <p class="mb-4 text-xs text-amber-200/90">
+              Approve only if the channel, sequence and digests match what the release tool just printed. Every node on this channel will act on it.
+            </p>
+            <div class="flex gap-3">
+              <GlassButton variant="secondary" class="flex-1" onClick$={() => handleManifestSignResponse(false)}>
+                Deny
+              </GlassButton>
+              <GlassButton class="flex-1" onClick$={() => handleManifestSignResponse(true)}>
+                Sign and publish
               </GlassButton>
             </div>
           </div>

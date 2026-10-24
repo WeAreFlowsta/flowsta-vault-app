@@ -5,6 +5,31 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - Unreleased
+
+The Holochain 0.7.1 release. Its first beta carries only the two items
+below, so that Flowsta can publish signed node manifests and move its
+servers to the new network line before any Vault does; later betas bring
+the Vault's own 0.7.1 conductor.
+
+### Added
+- **The Vault signs node manifests.** A linked release tool can ask the
+  Vault to sign a Flowsta node manifest, the document that tells every
+  Flowsta server on a channel which conductor images, DNAs and agent to
+  run. The Vault works out the statement itself from the manifest, shows
+  the channel, sequence, every generation with its image digest and DNAs,
+  the agent digest and every advisory, and signs with your identity key
+  only when you approve. The general-purpose signing route keeps refusing
+  Flowsta protocol statements.
+
+### Changed
+- **Websites learn which identity your Vault holds only if you signed in
+  there.** The status your Vault answers on this computer still tells any
+  page whether a Vault is installed and unlocked, but your identity, agent
+  key and permanent ID now go only to Flowsta's own sites, sites you
+  remembered, apps you linked, and local programs. Before, any page you
+  visited could read them.
+
 ## [1.6.1] - 2026-10-20
 
 ### Highlights

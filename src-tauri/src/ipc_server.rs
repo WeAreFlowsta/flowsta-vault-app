@@ -6,6 +6,7 @@
 //! Endpoints:
 //! - GET  /status           → { unlocked, agent_pub_key, did, version }
 //! - POST /sign             → signs bytes or actions with the device Ed25519 key
+//! - POST /sign-node-manifest → signs a Flowsta node manifest (the dialog names what is signed)
 //! - POST /authenticate     → identity proof via challenge-response with user approval
 //! - POST /link-identity    → agent-linking signature for third-party Holochain apps (with approval)
 //! - POST /sign-document    → Sign It: sign a file hash and commit to signing DNA (with approval)
@@ -18,7 +19,7 @@
 
 use crate::commands::{
     AppState, AuthRequestInfo, ConnectedSite, PendingAuthRequest, PendingDocumentSignRequest,
-    PendingLinkIdentityRequest,
+    PendingLinkIdentityRequest, PendingManifestSignRequest,
 };
 use crate::key_derivation::{
     base64_standard_encode, build_sorted_agent_pair_payload, construct_agent_pub_key_bytes,
@@ -402,6 +403,19 @@ async fn status_handler(
     let active_identity = agent_pub_key
         .clone()
         .or_else(|| crate::paths::read_active_identity(&state.app_state.data_dir));
+
+    // Who may learn WHICH identity this Vault holds: Flowsta's own sites,
+    // sites the person remembered, apps the person linked, and local callers
+    // that are not web pages (no Origin). Any other web page learns only
+    // that a Vault is here, unlocked or not. CORS is open on this endpoint;
+    // this filter is the boundary (found 2026-10-23: any origin could read
+    // the identity).
+    let may_see_identity = origin_may_see_identity(&state.app_state, origin.as_deref());
+    let (active_identity, agent_pub_key, did) = if may_see_identity {
+        (active_identity, agent_pub_key, did)
+    } else {
+        (None, None, None)
+    };
 
     // Phase 3: return only fields the app was granted at link time.
     Json(StatusResponse {
@@ -2810,6 +2824,23 @@ mod handoff_tests {
         assert!(super::linked_app_may_sign_web_login(Some(desktop), Some(web), ch.as_bytes()));
         assert!(!super::linked_app_may_sign_web_login(Some(desktop), None, ch.as_bytes()));
     }
+}
+
+/// Whether a caller may learn which identity this Vault holds (see /status).
+fn origin_may_see_identity(state: &AppState, origin: Option<&str>) -> bool {
+    let Some(o) = origin.filter(|o| !o.is_empty()) else {
+        // Not a web page (curl, a local tool, a desktop app without an
+        // Origin header): a local process is not what the identity is
+        // hidden from.
+        return true;
+    };
+    if is_flowsta_origin(Some(o)) {
+        return true;
+    }
+    if origin_to_client_id(state, Some(o)).is_some() {
+        return true;
+    }
+    state.approved_apps.lock().unwrap().iter().any(|a| a == o)
 }
 
 fn is_flowsta_origin(origin: Option<&str>) -> bool {
@@ -5402,6 +5433,236 @@ fn captured_expected_identity() -> Option<String> {
 
 /// Re-run the entry gate after a wait. No expected identity = nothing to
 /// check (older clients), never a refusal.
+// ── POST /sign-node-manifest ────────────────────────────────────────────
+//
+// A Flowsta node manifest (what every node on a channel should run) is
+// signed by Team Flowsta's identity in this Vault. The caller sends the
+// manifest body; the Vault derives the statement ITSELF (never signs a
+// caller-supplied statement), shows every item the manifest carries, and
+// signs on approval. Verifier: flowsta-dht-node/agent/lib/manifest.mjs;
+// canonical JSON must match it byte for byte (sorted keys, no whitespace,
+// integers only).
+
+#[derive(Deserialize)]
+struct SignNodeManifestRequest {
+    /// The manifest; a `signature` member, if present, is ignored.
+    manifest: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct SignNodeManifestResponse {
+    success: bool,
+    /// Ed25519 over the UTF-8 statement, base64 (standard).
+    signature: String,
+    signer_did: String,
+    statement: String,
+    agent_pub_key: String,
+}
+
+/// Canonical JSON: object keys sorted, no whitespace. Written out by hand so
+/// it does not depend on serde_json's map type or features.
+pub(crate) fn canonical_json(v: &serde_json::Value, out: &mut String) {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, k) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(k).unwrap_or_default());
+                out.push(':');
+                canonical_json(&map[*k], out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&serde_json::to_string(other).unwrap_or_default()),
+    }
+}
+
+/// The statement for a manifest body, plus the summary the dialog shows.
+pub(crate) fn node_manifest_statement(manifest: &serde_json::Value) -> Result<(String, serde_json::Value), String> {
+    let obj = manifest.as_object().ok_or("manifest must be an object")?;
+    let channel = obj.get("channel").and_then(|c| c.as_str()).ok_or("manifest.channel missing")?;
+    if !channel.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false)
+        || channel.len() > 32
+        || !channel.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err("manifest.channel is not a channel name".into());
+    }
+    let sequence = obj.get("sequence").and_then(|s| s.as_u64()).filter(|s| *s >= 1).ok_or("manifest.sequence must be a positive integer")?;
+    let generations = obj.get("generations").and_then(|g| g.as_array()).filter(|g| !g.is_empty()).ok_or("manifest.generations missing")?;
+    let agent_image = obj.get("agent").and_then(|a| a.get("image")).and_then(|i| i.as_str()).ok_or("manifest.agent.image missing")?;
+    let mut body = obj.clone();
+    body.remove("signature");
+    let mut canon = String::new();
+    canonical_json(&serde_json::Value::Object(body), &mut canon);
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(canon.as_bytes()));
+    let statement = format!("flowsta-node-manifest:v1:{}:{}:{}", channel, sequence, hash);
+    let digest_tail = |s: &str| s.rsplit("@sha256:").next().map(|d| d.chars().take(12).collect::<String>()).unwrap_or_default();
+    let summary = serde_json::json!({
+        "channel": channel,
+        "sequence": sequence,
+        "issued_at": obj.get("issued_at").and_then(|v| v.as_str()).unwrap_or(""),
+        "generations": generations.iter().map(|g| serde_json::json!({
+            "id": g.get("id").and_then(|v| v.as_str()).unwrap_or("?"),
+            "state": g.get("state").and_then(|v| v.as_str()).unwrap_or("?"),
+            "holochain": g.get("holochain").and_then(|v| v.as_str()).unwrap_or("?"),
+            "image_digest": g.get("conductor").and_then(|c| c.get("image")).and_then(|i| i.as_str()).map(digest_tail).unwrap_or_default(),
+            "dnas": g.get("dnas").and_then(|d| d.as_array()).map(|d| d.iter().filter_map(|x| x.get("app_id").and_then(|a| a.as_str()).map(String::from)).collect::<Vec<_>>()).unwrap_or_default(),
+        })).collect::<Vec<_>>(),
+        "agent_digest": digest_tail(agent_image),
+        "advisories": obj.get("advisories").and_then(|a| a.as_array()).map(|a| a.iter().map(|x| serde_json::json!({
+            "id": x.get("id").and_then(|v| v.as_str()).unwrap_or("?"),
+            "severity": x.get("severity").and_then(|v| v.as_str()).unwrap_or("?"),
+            "action": x.get("action").and_then(|v| v.as_str()).unwrap_or("?"),
+            "text": x.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+        })).collect::<Vec<_>>()).unwrap_or_default(),
+        "statement": statement,
+    });
+    Ok((statement, summary))
+}
+
+async fn sign_node_manifest_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+    Json(req): Json<SignNodeManifestRequest>,
+) -> Result<Json<SignNodeManifestResponse>, (StatusCode, Json<IpcError>)> {
+    let origin = extract_origin(&headers);
+    track_request(&state.app_state, origin.as_deref(), "sign-node-manifest");
+
+    // Linked apps only, as for /sign: the release tool links once.
+    if origin_to_client_id(&state.app_state, origin.as_deref()).is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "not_linked".into(),
+                description: Some("This origin is not a linked app. Call /link-identity and obtain user approval first.".into()),
+            }),
+        ));
+    }
+
+    let (statement, summary) = node_manifest_statement(&req.manifest).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(IpcError { error: "bad_manifest".into(), description: Some(e) }))
+    })?;
+
+    let (seed_arr, agent_pub_key, did) = {
+        let config_guard = state.app_state.vault_config.lock().unwrap();
+        let config = config_guard.as_ref().ok_or_else(|| {
+            (StatusCode::FORBIDDEN, Json(IpcError { error: "vault_locked".into(), description: Some("Vault is locked. Unlock it first.".into()) }))
+        })?;
+        let device_seed = config.device_seed.as_ref().ok_or_else(|| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(IpcError { error: "no_device_seed".into(), description: Some("Vault was created before signing support. Please re-create it.".into()) }))
+        })?;
+        let mut seed_arr = [0u8; 32];
+        seed_arr.copy_from_slice(device_seed);
+        (seed_arr, config.agent_pub_key.clone(), config.did.clone())
+    };
+
+    // Always a dialog: a manifest tells every node on a channel what to run.
+    let app_name = origin_to_client_id(&state.app_state, origin.as_deref())
+        .and_then(|cid| {
+            let apps = state.app_state.linked_third_party_apps.lock().unwrap();
+            apps.iter().find(|a| a.client_id.as_deref() == Some(cid.as_str())).map(|a| a.app_name.clone())
+        })
+        .or_else(|| origin.clone())
+        .unwrap_or_else(|| "Unknown app".to_string());
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    let request_id = format!("manifest-{}", unix_now());
+    {
+        let mut pending = state.app_state.pending_manifest_sign.lock().unwrap();
+        *pending = Some(PendingManifestSignRequest {
+            id: request_id.clone(),
+            app_name: app_name.clone(),
+            origin: origin.clone(),
+            summary: summary.clone(),
+            responder: tx,
+        });
+    }
+    let prior = raise_window(&state.app_handle);
+    let _ = state.app_handle.emit(
+        "manifest-sign-request",
+        serde_json::json!({ "id": request_id, "app_name": app_name, "origin": origin, "summary": summary }),
+    );
+    // Reading a manifest takes longer than a byte count: two minutes.
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(120), rx).await;
+    restore_window(&state.app_handle, prior);
+    let approved = match waited {
+        Ok(Ok(result)) => {
+            if result {
+                recheck_expected_identity(&state)?;
+            }
+            result
+        }
+        Ok(Err(_)) => false,
+        Err(_) => {
+            let mut pending = state.app_state.pending_manifest_sign.lock().unwrap();
+            *pending = None;
+            false
+        }
+    };
+    if !approved {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError { error: "user_denied".into(), description: Some("The user did not approve signing this manifest.".into()) }),
+        ));
+    }
+
+    let signature = sign_with_device_seed(&seed_arr, statement.as_bytes());
+    log::info!("[manifest] signed {} for {}", statement, app_name);
+    Ok(Json(SignNodeManifestResponse {
+        success: true,
+        signature: base64_standard_encode(&signature),
+        signer_did: did,
+        statement,
+        agent_pub_key,
+    }))
+}
+
+#[cfg(test)]
+mod node_manifest_tests {
+    use super::*;
+
+    /// The same fixture run through the node agent's manifest.mjs gave this
+    /// statement (2026-10-24); the Rust side must match it byte for byte.
+    #[test]
+    fn statement_matches_the_node_agents_canonical_json() {
+        let m = serde_json::json!({
+            "v": 1, "channel": "stable", "issued_at": "2026-10-25T00:00:00Z", "sequence": 7,
+            "generations": [{ "id": "holochain-0.6", "state": "serving", "holochain": "0.6.1",
+                "conductor": { "image": format!("us-docker.pkg.dev/flowsta-475001/public/flowsta-edgenode@sha256:{}", "9".repeat(64)), "admin_port": 4444 },
+                "bootstrap": { "url": "https://bootstrap.flowsta.com" }, "dnas": [] }],
+            "agent": { "image": format!("us-docker.pkg.dev/flowsta-475001/public/flowsta-dht-node@sha256:{}", "1".repeat(64)) },
+            "advisories": [{ "id": "note-1", "severity": "routine", "action": "notice", "text": "Hello, \"world\" & friends / ünïcode" }],
+            "signature": { "signer": "x", "sig": "y" }
+        });
+        let (statement, summary) = node_manifest_statement(&m).unwrap();
+        assert_eq!(statement, "flowsta-node-manifest:v1:stable:7:0204db22b8317758961a97283e78c1ead35f742ae62c739f11cc6b2fe9168c13");
+        assert_eq!(summary["generations"][0]["image_digest"], "999999999999");
+        assert_eq!(summary["agent_digest"], "111111111111");
+        assert_eq!(summary["advisories"][0]["id"], "note-1");
+    }
+
+    #[test]
+    fn a_manifest_without_a_channel_or_sequence_is_refused() {
+        assert!(node_manifest_statement(&serde_json::json!({ "v": 1 })).is_err());
+        assert!(node_manifest_statement(&serde_json::json!({ "channel": "Stable", "sequence": 1, "generations": [{}], "agent": { "image": "x" } })).is_err());
+        assert!(node_manifest_statement(&serde_json::json!({ "channel": "stable", "sequence": 0, "generations": [{}], "agent": { "image": "x" } })).is_err());
+    }
+}
+
 fn recheck_expected_identity(state: &IpcState) -> Result<(), (StatusCode, Json<IpcError>)> {
     match captured_expected_identity() {
         Some(expected) => check_expected_identity(state, &expected),
@@ -5566,6 +5827,7 @@ pub async fn start_ipc_server(
     let app = Router::new()
         .route("/status", get(status_handler))
         .route("/sign", post(sign_handler))
+        .route("/sign-node-manifest", post(sign_node_manifest_handler))
         .route("/authenticate", post(authenticate_handler))
         .route("/link-identity", post(link_identity_handler))
         .route("/sign-document", post(sign_document_handler))

@@ -199,6 +199,18 @@ pub struct PendingRawSignRequest {
     pub responder: tokio::sync::oneshot::Sender<bool>,
 }
 
+/// A pending /sign-node-manifest request: what the manifest says, shown to
+/// the person before the identity key signs it.
+pub struct PendingManifestSignRequest {
+    pub id: String,
+    pub app_name: String,
+    pub origin: Option<String>,
+    /// channel, sequence, generations (id, state, holochain, image digest),
+    /// agent digest, advisories: the dialog names every item.
+    pub summary: serde_json::Value,
+    pub responder: tokio::sync::oneshot::Sender<bool>,
+}
+
 /// A third-party app that has been linked via /link-identity.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LinkedThirdPartyApp {
@@ -245,6 +257,8 @@ pub struct AppState {
     pub pending_cell_op: Mutex<Option<PendingCellOpRequest>>,
     /// A pending generic /sign request waiting for user approval.
     pub pending_raw_sign: Mutex<Option<PendingRawSignRequest>>,
+    /// A pending /sign-node-manifest request waiting for user approval.
+    pub pending_manifest_sign: Mutex<Option<PendingManifestSignRequest>>,
     /// Origins whose /link-identity approval is recent enough that the
     /// immediate follow-up /sign of the agent-pair payload (the linking
     /// ceremony) proceeds without a second dialog.
@@ -482,6 +496,7 @@ impl AppState {
             pending_profile_update: Mutex::new(None),
             pending_cell_op: Mutex::new(None),
             pending_raw_sign: Mutex::new(None),
+            pending_manifest_sign: Mutex::new(None),
             recent_link_approvals: Mutex::new(std::collections::HashMap::new()),
             approved_apps: Mutex::new(approved_sites),
             linked_third_party_apps: Mutex::new(linked_apps),
@@ -4287,6 +4302,19 @@ pub fn respond_raw_sign_request(
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
     let mut pending = state.pending_raw_sign.lock().unwrap();
+    if let Some(req) = pending.take() {
+        let _ = req.responder.send(approved);
+    }
+    Ok(())
+}
+
+/// Respond to a pending node-manifest signing dialog.
+#[tauri::command]
+pub fn respond_manifest_sign_request(
+    approved: bool,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let mut pending = state.pending_manifest_sign.lock().unwrap();
     if let Some(req) = pending.take() {
         let _ = req.responder.send(approved);
     }
