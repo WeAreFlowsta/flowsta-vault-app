@@ -5,7 +5,7 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.7.0] - Unreleased
+## [1.7.0-beta1] - 2026-10-24
 
 The Holochain 0.7.1 release. Its first beta carries only the two items
 below, so that Flowsta can publish signed node manifests and move its
