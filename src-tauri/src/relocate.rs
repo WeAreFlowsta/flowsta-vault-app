@@ -58,6 +58,9 @@ fn movable_entries(root: &Path) -> Vec<PathBuf> {
     }
     let conductor = paths::conductor_dir(root);
     if conductor.exists() { out.push(conductor); }
+    // the 0.7 line's data, when the line has run
+    let conductor_07 = paths::conductor_dir_07(root);
+    if conductor_07.exists() { out.push(conductor_07); }
     out
 }
 
@@ -133,6 +136,12 @@ fn move_everything(device_root: &Path, new_root: &Path) -> Result<(), String> {
     let lair = paths::lair_dir(device_root);
     if lair.exists() {
         plan.push((lair, paths::lair_old_dir(new_root, ts)));
+    }
+    // The 0.7 key store likewise: its config names a socket path under the
+    // old root, so it is set aside and re-initialised, never moved.
+    let lair_07 = paths::lair_dir_07(device_root);
+    if lair_07.exists() {
+        plan.push((lair_07, paths::lair_old_dir_07(new_root, ts)));
     }
     if let Ok(rd) = std::fs::read_dir(device_root) {
         for e in rd.flatten() {

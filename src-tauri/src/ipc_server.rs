@@ -313,6 +313,36 @@ struct StatusResponse {
     email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     email_verified: Option<bool>,
+    /// The Holochain lines this Vault runs, for the SDK and the sites: the
+    /// 0.6 line (the conductor every app talks to today) and, from 1.7.0,
+    /// the 0.7 line beside it. Not identity information, so every origin
+    /// may read it.
+    holochain_lines: Vec<HolochainLine>,
+}
+
+#[derive(Serialize)]
+struct HolochainLine {
+    /// `holochain-0.6` or `holochain-0.7` (the network generation names).
+    generation: &'static str,
+    /// `serving`, `starting` or `off`.
+    state: &'static str,
+}
+
+fn holochain_lines(app_state: &AppState) -> Vec<HolochainLine> {
+    let line_06 = match *app_state.conductor_status.lock().unwrap() {
+        crate::conductor::ConductorStatus::Ready { .. } => "serving",
+        crate::conductor::ConductorStatus::Starting { .. } => "starting",
+        _ => "off",
+    };
+    let line_07 = match crate::conductor::line_07_state() {
+        crate::conductor::Line07State::Serving => "serving",
+        crate::conductor::Line07State::Starting => "starting",
+        crate::conductor::Line07State::Off => "off",
+    };
+    vec![
+        HolochainLine { generation: "holochain-0.6", state: line_06 },
+        HolochainLine { generation: "holochain-0.7", state: line_07 },
+    ]
 }
 
 /// Resolve the caller's origin to the `client_id` of a linked third-party app.
@@ -439,6 +469,7 @@ async fn status_handler(
         web_email: is_flowsta_origin(origin.as_deref()).then_some(web_email_raw.clone()).flatten(),
         email: email_granted.then_some(web_email_raw).flatten(),
         email_verified: email_granted.then_some(true),
+        holochain_lines: holochain_lines(&state.app_state),
     })
 }
 

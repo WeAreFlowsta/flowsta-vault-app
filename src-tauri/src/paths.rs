@@ -22,6 +22,11 @@ pub const LAIR_OLD_PREFIX: &str = "lair.old-";
 /// Key store quarantined after it failed to start.
 pub const LAIR_BROKEN_PREFIX: &str = "lair.broken-";
 pub const CONDUCTOR_DIR: &str = "conductor";
+/// The Holochain 0.7 line's key store and conductor, beside the 0.6 ones,
+/// for the 1.7.0 transition (one lair per line: a conductor accepts only a
+/// lair of its own version).
+pub const LAIR_DIR_07: &str = "lair-07";
+pub const CONDUCTOR_DIR_07: &str = "conductor-07";
 pub const BACKUPS_DIR: &str = "backups";
 pub const LINKED_APPS: &str = "linked-apps.json";
 pub const LINKED_APP_SCOPES: &str = "linked-app-scopes.json";
@@ -86,7 +91,12 @@ pub const IDENTITY_STORE_FILES: &[&str] = &[
 // ---- identity-root helpers -------------------------------------------------
 pub fn vault_file(root: &Path) -> PathBuf { root.join(VAULT_FILE) }
 pub fn lair_dir(root: &Path) -> PathBuf { root.join(LAIR_DIR) }
+pub fn lair_dir_07(root: &Path) -> PathBuf { root.join(LAIR_DIR_07) }
+pub fn conductor_dir_07(root: &Path) -> PathBuf { root.join(CONDUCTOR_DIR_07) }
+pub fn db_key_path_07(root: &Path) -> PathBuf { conductor_dir_07(root).join("databases").join("db.key") }
 pub fn lair_old_dir(root: &Path, unix_secs: u64) -> PathBuf { root.join(format!("{}{}", LAIR_OLD_PREFIX, unix_secs)) }
+/// The 0.7 key store set aside: same prefix, so the sweep and the erase find it.
+pub fn lair_old_dir_07(root: &Path, unix_secs: u64) -> PathBuf { root.join(format!("{}{}-07", LAIR_OLD_PREFIX, unix_secs)) }
 pub fn lair_broken_dir(parent: &Path, unix_secs: u64) -> PathBuf { parent.join(format!("{}{}", LAIR_BROKEN_PREFIX, unix_secs)) }
 pub fn is_lair_leftover_name(name: &str) -> bool { name.starts_with(LAIR_OLD_PREFIX) || name.starts_with(LAIR_BROKEN_PREFIX) }
 pub fn conductor_dir(root: &Path) -> PathBuf { root.join(CONDUCTOR_DIR) }
@@ -366,6 +376,10 @@ mod tests {
         let r = Path::new("/r");
         assert_eq!(db_key_path(r), Path::new("/r/conductor/databases/db.key"));
         assert_eq!(lair_old_dir(r, 7), Path::new("/r/lair.old-7"));
+        assert_eq!(lair_old_dir_07(r, 7), Path::new("/r/lair.old-7-07"));
+        assert!(is_lair_leftover_name("lair.old-7-07"));
+        assert_eq!(conductor_dir_07(r), Path::new("/r/conductor-07"));
+        assert_eq!(lair_dir_07(r), Path::new("/r/lair-07"));
         assert!(is_lair_leftover_name("lair.broken-1") && !is_lair_leftover_name("lair"));
     }
 }

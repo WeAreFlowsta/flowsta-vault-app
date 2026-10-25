@@ -120,13 +120,25 @@ pub fn start_lair_process(
     lair_dir: &Path,
     passphrase: &str,
 ) -> Result<(SidecarChild, String), String> {
+    start_lair_process_with(lair_dir, passphrase, "vault-lair-keystore")
+}
+
+/// Start a lair-keystore process from the named sidecar: `vault-lair-keystore`
+/// (0.6.3, for the 0.6 conductor) or `vault-lair-keystore-07` (0.7.1, for the
+/// 0.7 one). A conductor accepts only a lair of its own version, so the two
+/// lines run two key stores holding the same seed.
+pub fn start_lair_process_with(
+    lair_dir: &Path,
+    passphrase: &str,
+    binary: &str,
+) -> Result<(SidecarChild, String), String> {
     std::fs::create_dir_all(lair_dir)
         .map_err(|e| format!("Failed to create lair directory: {}", e))?;
 
     let config_path = lair_dir.join("lair-keystore-config.yaml");
     let is_first_run = !config_path.exists();
 
-    let lair_bin = crate::resolve_sidecar_bin("vault-lair-keystore");
+    let lair_bin = crate::resolve_sidecar_bin(binary);
     log::info!("Using lair-keystore binary: {:?}", lair_bin);
 
     if is_first_run {
@@ -233,6 +245,92 @@ pub fn start_lair_process(
         spawn_start.elapsed().as_millis()
     );
     Ok((child, connection_url))
+}
+
+// ── The 0.7 lair (lair_keystore_api 0.7.1) ───────────────────────────
+//
+// The 0.7.1 conductor refuses a 0.6.3 lair ("Invalid lair server version"),
+// so the 0.7 line runs its own key store under `lair-07/`, started from the
+// `vault-lair-keystore-07` sidecar and spoken to with the 0.7.1 client crate
+// (renamed `lair_keystore_api_07`). The same seed is imported under the same
+// tag, so the agent key is identical on both lines.
+
+/// Connect to a lair 0.7.1 server with the 0.7.1 client (30 s timeout).
+pub async fn connect_to_lair_07(
+    connection_url: &str,
+    passphrase: &str,
+) -> Result<lair_keystore_api_07::prelude::LairClient, String> {
+    let url = lair_keystore_api_07::dependencies::url::Url::parse(connection_url)
+        .map_err(|e| format!("Invalid lair (0.7) connection URL: {}", e))?;
+    let passphrase_array: lair_keystore_api_07::prelude::SharedLockedArray =
+        Arc::new(std::sync::Mutex::new(
+            lair_keystore_api_07::dependencies::sodoken::LockedArray::from(passphrase.as_bytes().to_vec()),
+        ));
+    let connect = lair_keystore_api_07::ipc_keystore_connect(url, passphrase_array);
+    match tokio::time::timeout(std::time::Duration::from_secs(30), connect).await {
+        Ok(Ok(client)) => Ok(client),
+        Ok(Err(e)) => Err(format!("Failed to connect to lair (0.7): {}", e)),
+        Err(_) => Err("The 0.7 key store is running but did not answer within 30 seconds".to_string()),
+    }
+}
+
+/// Import the seed into the 0.7 lair under `tag`, reusing an entry only
+/// when it holds THIS seed (as the 0.6 import does). Returns the Ed25519
+/// public key, which must equal the 0.6 line's.
+pub async fn import_seed_to_lair_07(
+    client: &lair_keystore_api_07::prelude::LairClient,
+    seed_bytes: &[u8; 32],
+    tag: &str,
+) -> Result<[u8; 32], String> {
+    use lair_keystore_api_07::dependencies::sodoken as sodoken07;
+    use lair_keystore_api_07::prelude::{BinDataSized as BinDataSized07, LairEntryInfo as LairEntryInfo07};
+    if let Ok(LairEntryInfo07::Seed { seed_info, .. }) = client.get_entry(tag.into()).await {
+        let expected = crate::key_derivation::public_key_of_seed(seed_bytes);
+        if *seed_info.ed25519_pub_key.0 != expected {
+            return Err(format!("the 0.7 key store already holds a different key under '{}'", tag));
+        }
+        log::info!("Seed '{}' already exists in lair (0.7), reusing", tag);
+        return Ok(*seed_info.ed25519_pub_key.0);
+    }
+    let helper = match client.new_seed("_import_helper".into(), None, false).await {
+        Ok(h) => h,
+        Err(_) => match client.get_entry("_import_helper".into()).await {
+            Ok(LairEntryInfo07::Seed { seed_info, .. }) => seed_info,
+            _ => return Err("Failed to create or fetch _import_helper seed (0.7)".into()),
+        },
+    };
+    let mut sender_pub = [0u8; sodoken07::crypto_box::XSALSA_PUBLICKEYBYTES];
+    let mut sender_sec =
+        sodoken07::SizedLockedArray::<{ sodoken07::crypto_box::XSALSA_SECRETKEYBYTES }>::new()
+            .map_err(|e| e.to_string())?;
+    sodoken07::crypto_box::xsalsa_keypair(&mut sender_pub, &mut *sender_sec.lock())
+        .map_err(|e| e.to_string())?;
+    let mut nonce = [0u8; sodoken07::crypto_box::XSALSA_NONCEBYTES];
+    sodoken07::random::randombytes_buf(&mut nonce).map_err(|e| e.to_string())?;
+    let recipient_pub_bytes: &[u8; 32] = &*helper.x25519_pub_key.0;
+    let mut cipher = vec![0u8; seed_bytes.len() + sodoken07::crypto_box::XSALSA_MACBYTES];
+    sodoken07::crypto_box::xsalsa_easy(
+        &mut cipher,
+        seed_bytes,
+        &nonce,
+        recipient_pub_bytes,
+        &*sender_sec.lock(),
+    )
+    .map_err(|e| e.to_string())?;
+    let sender_pub_key = BinDataSized07(Arc::new(sender_pub));
+    let info = client
+        .import_seed(
+            sender_pub_key,
+            helper.x25519_pub_key,
+            None,
+            nonce,
+            cipher.into(),
+            tag.into(),
+            false,
+        )
+        .await
+        .map_err(|e| format!("seed import into lair (0.7) failed: {}", e))?;
+    Ok(*info.ed25519_pub_key.0)
 }
 
 /// Remove leftover `lair.old-*` / `lair.broken-*` directories. A password

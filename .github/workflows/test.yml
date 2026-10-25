@@ -39,7 +39,7 @@ jobs:
       - name: Placeholder sidecars and front-end dist for the build script
         run: |
           mkdir -p src-tauri/binaries dist
-          for b in vault-holochain vault-lair-keystore; do
+          for b in vault-holochain vault-lair-keystore vault-holochain-07 vault-lair-keystore-07; do
             f="src-tauri/binaries/$b-x86_64-unknown-linux-gnu"
             [ -f "$f" ] || { printf '#!/bin/sh\nexit 0\n' > "$f"; chmod +x "$f"; }
           done

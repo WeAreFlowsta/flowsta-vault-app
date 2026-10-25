@@ -34,13 +34,17 @@
     "longDescription": "Flowsta Vault holds your Flowsta identity, keys, and data on your own device - no one in control but you. Sign in to apps and websites, approve what each app can see, sign documents with Sign It, and keep encrypted backups plus a portable export of everything you author.",
     "externalBin": [
       "binaries/vault-holochain",
-      "binaries/vault-lair-keystore"
+      "binaries/vault-lair-keystore",
+      "binaries/vault-holochain-07",
+      "binaries/vault-lair-keystore-07"
     ],
     "resources": [
       "resources/flowsta_private_v1_11_happ.happ",
       "resources/flowsta_private_v2_0_happ.happ",
       "resources/flowsta_identity_v1_4_happ.happ",
       "resources/flowsta_signing_v1_4_happ.happ",
+      "resources/flowsta_identity_v1_5_happ.happ",
+      "resources/flowsta_signing_v1_5_happ.happ",
       "resources/signing_coordinator_v1_4.wasm",
       "resources/private_v2_coordinator.wasm"
     ],

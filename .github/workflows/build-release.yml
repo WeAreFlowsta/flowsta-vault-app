@@ -146,6 +146,22 @@ jobs:
             test "$(wc -c < "$dest")" -gt 1000000 || { echo "$bin download too small"; exit 1; }
           done
 
+      # The Holochain 0.7.1 line beside 0.6.1 (the 1.7.0 transition: a 0.7
+      # conductor and its own lair per identity; ProofPoll 0.5.0 ships the
+      # same four-sidecar shape).
+      - name: Fetch Holochain 0.7.1 binaries (Unix)
+        if: runner.os != 'Windows'
+        env:
+          HC_RELEASE_07: holochain-0.7.1
+        run: |
+          base="https://github.com/holochain/holochain/releases/download/${HC_RELEASE_07}"
+          for bin in holochain lair-keystore; do
+            dest="src-tauri/binaries/vault-${bin}-07-${{ matrix.target }}"
+            curl -fsSL "${base}/${bin}-${{ matrix.target }}" -o "$dest"
+            chmod +x "$dest"
+            test "$(wc -c < "$dest")" -gt 1000000 || { echo "$bin (0.7.1) download too small"; exit 1; }
+          done
+
       - name: Fetch Holochain 0.6.1 binaries (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -159,6 +175,20 @@ jobs:
             $dest = "src-tauri/binaries/vault-$bin-$t.exe"
             Invoke-WebRequest "$base/$bin-$t.exe" -OutFile $dest
             if ((Get-Item $dest).Length -lt 1000000) { throw "$bin download too small" }
+          }
+
+      - name: Fetch Holochain 0.7.1 binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          HC_RELEASE_07: holochain-0.7.1
+        run: |
+          $base = "https://github.com/holochain/holochain/releases/download/$env:HC_RELEASE_07"
+          $t = "${{ matrix.target }}"
+          foreach ($bin in "holochain","lair-keystore") {
+            $dest = "src-tauri/binaries/vault-$bin-07-$t.exe"
+            Invoke-WebRequest "$base/$bin-$t.exe" -OutFile $dest
+            if ((Get-Item $dest).Length -lt 1000000) { throw "$bin (0.7.1) download too small" }
           }
 
       - name: Install frontend dependencies

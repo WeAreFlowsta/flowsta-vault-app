@@ -2439,6 +2439,8 @@ fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, 
     for dir in [
         crate::paths::lair_dir(root),
         crate::paths::conductor_dir(root),
+        crate::paths::lair_dir_07(root),
+        crate::paths::conductor_dir_07(root),
         crate::paths::backups_dir(root),
         crate::paths::backup_copies_dir(root),
     ] {
@@ -3470,23 +3472,41 @@ pub(crate) async fn change_vault_password_inner(
     let data_dir = state.identity_root();
     let lair_dir = crate::paths::lair_dir(&data_dir);
     let db_key_path = crate::paths::db_key_path(&data_dir);
+    // The 0.7 line has its own key store and database key, rotated in the
+    // same step; absent on a Vault whose 0.7 line never started.
+    let lair_dir_07 = crate::paths::lair_dir_07(&data_dir);
+    let db_key_path_07 = crate::paths::db_key_path_07(&data_dir);
 
     // 4. Move the lair keystore aside (rename, not delete: atomic, survives
     // the Windows file locks that made a delete fail halfway, and it is
     // what a rollback restores). The next start re-initializes `lair/`
     // under the new passphrase and re-imports the device seed.
+    let set_aside_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let lair_backup = if lair_dir.exists() {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let backup = crate::paths::lair_old_dir(&data_dir, ts);
+        let backup = crate::paths::lair_old_dir(&data_dir, set_aside_ts);
         match std::fs::rename(&lair_dir, &backup) {
             Ok(()) => Some(backup),
             Err(e) => {
                 drop(restart_guard);
                 let _ = ensure_conductor_alive(state, &app_handle).await;
                 return Err(format!("Could not set the key store aside: {}", e));
+            }
+        }
+    } else {
+        None
+    };
+    let lair_backup_07 = if lair_dir_07.exists() {
+        let backup = crate::paths::lair_old_dir_07(&data_dir, set_aside_ts);
+        match std::fs::rename(&lair_dir_07, &backup) {
+            Ok(()) => Some(backup),
+            Err(e) => {
+                restore_lair_dir(&lair_dir, &lair_backup);
+                drop(restart_guard);
+                let _ = ensure_conductor_alive(state, &app_handle).await;
+                return Err(format!("Could not set the 0.7 key store aside: {}", e));
             }
         }
     } else {
@@ -3505,6 +3525,7 @@ pub(crate) async fn change_vault_password_inner(
             .and_then(|r| r);
         if let Err(e) = rekey {
             restore_lair_dir(&lair_dir, &lair_backup);
+            restore_lair_dir(&lair_dir_07, &lair_backup_07);
             drop(restart_guard);
             let _ = ensure_conductor_alive(state, &app_handle).await;
             return Err(format!("Could not re-protect the conductor database: {}", e));
@@ -3513,6 +3534,29 @@ pub(crate) async fn change_vault_password_inner(
         // No conductor databases yet - the key file will be generated
         // under the new (cached) passphrase on the next start.
         log::info!("No db.key found - skipping database key rewrap");
+    }
+    // The 0.7 conductor's database key: the same file format (checked
+    // against a 0.7.1 conductor's file), rotated the same way. A failure
+    // here rolls the whole change back like a 0.6 failure does - the 0.7
+    // line's source chain is never left unopenable.
+    let db_key_present_07 = db_key_path_07.exists();
+    if db_key_present_07 {
+        let (path, current, new) = (db_key_path_07.clone(), current_password.clone(), new_password.clone());
+        let rekey = tokio::task::spawn_blocking(move || rekey_conductor_db_key(&path, &current, &new))
+            .await
+            .map_err(|e| format!("Rekey task failed: {}", e))
+            .and_then(|r| r);
+        if let Err(e) = rekey {
+            if db_key_present {
+                let _ = rekey_conductor_db_key(&db_key_path, &new_password, &current_password)
+                    .map_err(|re| log::error!("rollback: db.key could not be re-wrapped to the current password: {}", re));
+            }
+            restore_lair_dir(&lair_dir, &lair_backup);
+            restore_lair_dir(&lair_dir_07, &lair_backup_07);
+            drop(restart_guard);
+            let _ = ensure_conductor_alive(state, &app_handle).await;
+            return Err(format!("Could not re-protect the 0.7 conductor database: {}", e));
+        }
     }
 
     // 6 + 7. Swap the cached passphrase to NEW and COMMIT the new vault file
@@ -3533,7 +3577,13 @@ pub(crate) async fn change_vault_password_inner(
                 log::error!("rollback: db.key could not be re-wrapped to the current password: {}", re);
             }
         }
+        if db_key_present_07 {
+            if let Err(re) = rekey_conductor_db_key(&db_key_path_07, &new_password, &current_password) {
+                log::error!("rollback: the 0.7 db.key could not be re-wrapped to the current password: {}", re);
+            }
+        }
         restore_lair_dir(&lair_dir, &lair_backup);
+        restore_lair_dir(&lair_dir_07, &lair_backup_07);
         drop(restart_guard);
         let _ = ensure_conductor_alive(state, &app_handle).await;
         return Err(format!("Save failed: {}", e));
@@ -3552,7 +3602,7 @@ pub(crate) async fn change_vault_password_inner(
     drop(restart_guard);
     match ensure_conductor_alive(state, &app_handle).await {
         Ok(()) => {
-            if let Some(backup) = lair_backup {
+            for backup in [lair_backup, lair_backup_07].into_iter().flatten() {
                 if let Err(e) = remove_dir_with_retry(&backup) {
                     // Swept at the next unlock-time start (spawn_conductor_startup).
                     log::warn!("previous keystore {:?} not removed yet: {}", backup, e);
@@ -3574,21 +3624,24 @@ pub(crate) async fn change_vault_password_inner(
                 let _ = tokio::task::spawn_blocking(move || handle.shutdown()).await;
             }
             restore_lair_dir(&lair_dir, &lair_backup);
-            if db_key_present {
-                let (path, current, new) = (db_key_path.clone(), current_password.clone(), new_password.clone());
-                let _ = tokio::task::spawn_blocking(move || {
-                    rekey_conductor_db_key(&path, &new, &current).map_err(|re| {
-                        log::error!("rollback: db.key could not be re-wrapped to the current password: {}", re)
+            restore_lair_dir(&lair_dir_07, &lair_backup_07);
+            for (present, path) in [(db_key_present, &db_key_path), (db_key_present_07, &db_key_path_07)] {
+                if present {
+                    let (path, current, new) = (path.clone(), current_password.clone(), new_password.clone());
+                    let _ = tokio::task::spawn_blocking(move || {
+                        rekey_conductor_db_key(&path, &new, &current).map_err(|re| {
+                            log::error!("rollback: {:?} could not be re-wrapped to the current password: {}", path, re)
+                        })
                     })
-                })
-                .await;
-            } else if db_key_path.exists() {
-                // The failed start was the conductor's first ever: it created
-                // databases under NEW. Nothing existed before - drop them so the
-                // next start creates them under the current password.
-                if let Some(dbs) = db_key_path.parent() {
-                    if let Err(re) = remove_dir_with_retry(dbs) {
-                        log::error!("rollback: could not remove databases created under the new password: {}", re);
+                    .await;
+                } else if path.exists() {
+                    // The failed start was the conductor's first ever: it created
+                    // databases under NEW. Nothing existed before - drop them so the
+                    // next start creates them under the current password.
+                    if let Some(dbs) = path.parent() {
+                        if let Err(re) = remove_dir_with_retry(dbs) {
+                            log::error!("rollback: could not remove databases created under the new password: {}", re);
+                        }
                     }
                 }
             }

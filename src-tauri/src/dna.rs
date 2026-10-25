@@ -21,6 +21,13 @@ pub const BUNDLED_PRIVATE_VERSION: &str = "1.11";
 pub const BUNDLED_IDENTITY_VERSION: &str = "1.4";
 pub const BUNDLED_SIGNING_VERSION: &str = "1.4";
 
+/// The Holochain 0.7 line's DNAs, installed on the 0.7 conductor beside the
+/// 0.6 line during the 1.7.0 transition (new DNA hashes, so new networks).
+pub const BUNDLED_IDENTITY_VERSION_07: &str = "1.5";
+pub const BUNDLED_SIGNING_VERSION_07: &str = "1.5";
+const IDENTITY_HAPP_FILE_07: &str = "flowsta_identity_v1_5_happ.happ";
+const SIGNING_HAPP_FILE_07: &str = "flowsta_signing_v1_5_happ.happ";
+
 /// The encrypted private DNA (opaque Sealed records, per-user network).
 /// Device-hosted vaults only; installed with a per-user network seed
 /// derived from the recovery phrase - never with the manifest's
@@ -1100,4 +1107,72 @@ pub async fn ensure_apps_enabled(
             }
         }
     }
+}
+
+// ── The 0.7 conductor (holochain_client 0.9.1) ───────────────────────
+
+/// Install identity 1.5 and signing 1.5 on the 0.7 conductor under the same
+/// agent key the 0.6 conductor runs as (the key lives in both lairs; the DNA
+/// hashes differ, so one key on two conductors is allowed). Idempotent: an
+/// installed app is re-enabled. Nothing is linked or carried here (B4).
+pub async fn install_dnas_07(
+    admin_port: u16,
+    resource_dir: &Path,
+    agent_key_raw32: &[u8],
+) -> Result<Vec<String>, String> {
+    use holochain_client_07::{AdminWebsocket, InstallAppPayload};
+    use holochain_types_07::app::AppBundleSource;
+    use holochain_types_07::prelude::AgentPubKey;
+
+    let admin_ws = AdminWebsocket::connect(
+        format!("localhost:{}", admin_port),
+        Some(crate::conductor::node_origin()),
+    )
+    .await
+    .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
+    let existing = admin_ws
+        .list_apps(None)
+        .await
+        .map_err(|e| format!("Failed to list apps (0.7): {}", e))?;
+    let agent_key = AgentPubKey::from_raw_32(agent_key_raw32.to_vec());
+    let mut installed = Vec::new();
+    for (app_id, file) in [
+        (make_app_id("identity", BUNDLED_IDENTITY_VERSION_07), IDENTITY_HAPP_FILE_07),
+        (make_app_id("signing", BUNDLED_SIGNING_VERSION_07), SIGNING_HAPP_FILE_07),
+    ] {
+        if existing.iter().any(|a| a.installed_app_id == app_id) {
+            admin_ws
+                .enable_app(app_id.clone())
+                .await
+                .map_err(|e| format!("Failed to re-enable {} (0.7): {}", app_id, e))?;
+            log::info!("[0.7] {} present and enabled", app_id);
+            installed.push(app_id);
+            continue;
+        }
+        let happ_path = resource_dir.join(file);
+        if !happ_path.exists() {
+            return Err(format!("{} not found at {:?}", file, happ_path));
+        }
+        log::info!("[0.7] installing {} from {:?}", app_id, happ_path);
+        let payload = InstallAppPayload {
+            source: AppBundleSource::Path(happ_path),
+            agent_key: Some(agent_key.clone()),
+            installed_app_id: Some(app_id.clone()),
+            network_seed: None,
+            roles_settings: None,
+            ignore_genesis_failure: false,
+            restore_from_dht: false,
+        };
+        admin_ws
+            .install_app(payload)
+            .await
+            .map_err(|e| format!("Failed to install {} (0.7): {}", app_id, e))?;
+        admin_ws
+            .enable_app(app_id.clone())
+            .await
+            .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
+        log::info!("[0.7] {} installed and enabled", app_id);
+        installed.push(app_id);
+    }
+    Ok(installed)
 }

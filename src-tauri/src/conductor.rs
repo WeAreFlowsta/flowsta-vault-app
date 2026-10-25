@@ -15,6 +15,35 @@ use std::sync::Arc;
 /// Tries each in order - allows staging and production vaults to coexist.
 const ADMIN_WS_PORTS: &[u16] = &[4455, 4456, 4457];
 
+/// Candidate admin WebSocket ports for the Holochain 0.7 conductor, the
+/// second line of the 1.7.0 transition. Disjoint from the 0.6 list so a
+/// staging Vault beside a production one still finds two free pairs.
+const ADMIN_WS_PORTS_07: &[u16] = &[4458, 4459, 4460];
+
+/// The 0.7 line of a running Vault: lair 0.7.1 + conductor 0.7.1, holding
+/// the same agent key as the 0.6 line and running identity 1.5 + signing 1.5.
+/// Absent when the line could not start - the Vault keeps working on 0.6.
+pub struct Line07Handle {
+    pub lair_child: SidecarChild,
+    pub conductor_child: SidecarChild,
+    pub admin_port: u16,
+}
+
+impl Line07Handle {
+    fn shutdown(mut self) {
+        log::info!("Shutting down the 0.7 conductor...");
+        if let Err(e) = self.conductor_child.kill() {
+            log::warn!("Failed to kill the 0.7 conductor process: {}", e);
+        }
+        let _ = self.conductor_child.wait();
+        log::info!("Shutting down the 0.7 lair-keystore...");
+        if let Err(e) = self.lair_child.kill() {
+            log::warn!("Failed to kill the 0.7 lair-keystore process: {}", e);
+        }
+        let _ = self.lair_child.wait();
+    }
+}
+
 /// Handle to a running conductor + lair-keystore pair.
 /// Drop this to stop both processes.
 pub struct ConductorHandle {
@@ -24,11 +53,18 @@ pub struct ConductorHandle {
     pub admin_port: u16,
     pub app_port: u16,
     pub seed_info: SeedInfo,
+    /// The 0.7 line, when it started (see `Line07Handle`).
+    pub line_07: Option<Line07Handle>,
 }
 
 impl ConductorHandle {
-    /// Graceful shutdown of conductor + lair.
+    /// Graceful shutdown of conductor + lair (both lines).
     pub fn shutdown(mut self) {
+        if let Some(line) = self.line_07.take() {
+            line.shutdown();
+        }
+        set_line_07_state(Line07State::Off);
+
         log::info!("Shutting down conductor...");
         if let Err(e) = self.conductor_child.kill() {
             log::warn!("Failed to kill conductor process: {}", e);
@@ -45,6 +81,27 @@ impl ConductorHandle {
     }
 }
 
+/// Where the 0.7 line stands, for `/status` and the app. Set by the start
+/// sequence and by shutdown; a Vault built without the 0.7 sidecars reports
+/// `Off` with the reason in the log.
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Line07State {
+    Off,
+    Starting,
+    Serving,
+}
+
+static LINE_07_STATE: std::sync::RwLock<Line07State> = std::sync::RwLock::new(Line07State::Off);
+
+pub fn line_07_state() -> Line07State {
+    *LINE_07_STATE.read().unwrap()
+}
+
+fn set_line_07_state(state: Line07State) {
+    *LINE_07_STATE.write().unwrap() = state;
+}
+
 /// Conductor status reported to the frontend.
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "status")]
@@ -59,9 +116,14 @@ pub enum ConductorStatus {
     Error { message: String },
 }
 
-/// Find an available admin WS port from the candidate list.
+/// Find an available admin WS port from the 0.6 candidate list.
 fn find_available_admin_port() -> Result<u16, String> {
-    for &port in ADMIN_WS_PORTS {
+    find_available_admin_port_in(ADMIN_WS_PORTS)
+}
+
+/// Find an available admin WS port from `candidates`.
+fn find_available_admin_port_in(candidates: &[u16]) -> Result<u16, String> {
+    for &port in candidates {
         match std::net::TcpListener::bind(("127.0.0.1", port)) {
             Ok(_listener) => {
                 // Port is free - listener is dropped here, freeing the port for the conductor.
@@ -79,7 +141,7 @@ fn find_available_admin_port() -> Result<u16, String> {
     }
     Err(format!(
         "All admin WS ports ({:?}) are unavailable",
-        ADMIN_WS_PORTS
+        candidates
     ))
 }
 
@@ -104,6 +166,24 @@ impl BootstrapTarget {
         let signal_url = option_env!("FLOWSTA_SIGNAL_URL")
             .unwrap_or("wss://bootstrap.flowsta.com")
             .to_string();
+        let auth_material = match option_env!("FLOWSTA_AUTH_MATERIAL") {
+            Some(m) if !m.is_empty() => Some(m.to_string()),
+            _ => None,
+        };
+        Self { bootstrap_url, signal_url, auth_material }
+    }
+
+    /// The 0.7 line's rendezvous: a 0.7.1 conductor speaks to a kitsune2
+    /// 0.5.x bootstrap, served on its own host beside the 0.6 one
+    /// (`bootstrap-7.flowsta.com`; the staging build points at the staging
+    /// equivalent). The same auth material gates it; the relay is derived
+    /// from the host as for 0.6. `signal_url` is unused by 0.7 and kept
+    /// only so the struct has one shape.
+    fn primary_07() -> Self {
+        let bootstrap_url = option_env!("FLOWSTA_BOOTSTRAP_URL_07")
+            .unwrap_or("https://bootstrap-7.flowsta.com")
+            .to_string();
+        let signal_url = bootstrap_url.replacen("https://", "wss://", 1);
         let auth_material = match option_env!("FLOWSTA_AUTH_MATERIAL") {
             Some(m) if !m.is_empty() => Some(m.to_string()),
             _ => None,
@@ -340,7 +420,7 @@ network:
   request_timeout_s: 240
 "#,
         data_root = data_root,
-        node_origins = fresh_node_origin(),
+        node_origins = node_origin(),
         admin_port = admin_port,
         lair_url = lair_url,
         bootstrap_url = bootstrap_url,
@@ -354,6 +434,63 @@ network:
         .map_err(|e| format!("Failed to write conductor config: {}", e))?;
 
     log::info!("Conductor config written to {:?}", config_path);
+    Ok(config_path)
+}
+
+/// Generate conductor-config.yaml for the Holochain 0.7.1 conductor.
+///
+/// The 0.7 shape: no `signal_url` (an unknown field fails the parse),
+/// `request_timeout_s` under `network`, `db_sync_level` in place of
+/// `db_sync_strategy`. Same origin as the 0.6 conductor (one value per
+/// Vault start, see `node_origin`), so the app's connections present one
+/// name to both.
+pub fn generate_conductor_config_07(
+    conductor_dir: &Path,
+    lair_connection_url: &str,
+    admin_port: u16,
+    target: &BootstrapTarget,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(conductor_dir)
+        .map_err(|e| format!("Failed to create the 0.7 conductor directory: {}", e))?;
+    let bootstrap_url = target.bootstrap_url.as_str();
+    let relay_url = derive_relay_url(bootstrap_url);
+    let auth_lines = match &target.auth_material {
+        Some(material) if !material.is_empty() => format!(
+            "  base64_auth_material_bootstrap: \"{m}\"\n  base64_auth_material_relay: \"{m}\"\n",
+            m = material,
+        ),
+        _ => String::new(),
+    };
+    let data_root = conductor_dir.display().to_string().replace('\'', "''");
+    let lair_url = lair_connection_url.replace('\'', "''");
+    let config = format!(
+        r#"data_root_path: '{data_root}'
+keystore:
+  type: lair_server
+  connection_url: '{lair_url}'
+admin_interfaces:
+- driver:
+    type: websocket
+    port: {admin_port}
+    allowed_origins: '{node_origins}'
+network:
+  bootstrap_url: {bootstrap_url}
+  relay_url: {relay_url}
+{auth_lines}  request_timeout_s: 240
+db_sync_level: Normal
+"#,
+        data_root = data_root,
+        node_origins = node_origin(),
+        admin_port = admin_port,
+        lair_url = lair_url,
+        bootstrap_url = bootstrap_url,
+        relay_url = relay_url,
+        auth_lines = auth_lines,
+    );
+    let config_path = conductor_dir.join("conductor-config.yaml");
+    write_private(&config_path, &config)
+        .map_err(|e| format!("Failed to write the 0.7 conductor config: {}", e))?;
+    log::info!("0.7 conductor config written to {:?}", config_path);
     Ok(config_path)
 }
 
@@ -421,7 +558,18 @@ pub fn start_conductor_process(
     conductor_dir: &Path,
     passphrase: &str,
 ) -> Result<SidecarChild, String> {
-    log::info!("Starting holochain conductor...");
+    start_conductor_process_with(config_path, conductor_dir, passphrase, "vault-holochain")
+}
+
+/// Start a conductor from the named sidecar: `vault-holochain` (0.6.1) or
+/// `vault-holochain-07` (0.7.1).
+pub fn start_conductor_process_with(
+    config_path: &Path,
+    conductor_dir: &Path,
+    passphrase: &str,
+    binary: &str,
+) -> Result<SidecarChild, String> {
+    log::info!("Starting holochain conductor ({})...", binary);
 
     let stdout_path = conductor_dir.join("holochain-stdout.log");
     let stderr_path = conductor_dir.join("holochain-stderr.log");
@@ -435,7 +583,7 @@ pub fn start_conductor_process(
     let stderr_file = std::fs::File::create(&stderr_path)
         .map_err(|e| format!("Failed to create conductor stderr log: {}", e))?;
 
-    let holochain_bin = crate::resolve_sidecar_bin("vault-holochain");
+    let holochain_bin = crate::resolve_sidecar_bin(binary);
     log::info!("Using holochain binary: {:?}", holochain_bin);
 
     // The conductor logs nothing unless RUST_LOG is set, and its stderr file
@@ -775,6 +923,8 @@ async fn start_holochain_attempt(
     };
     let bootstrap_target = resolve_bootstrap_target().await;
     remember_conductor_rendezvous(&bootstrap_target.bootstrap_url);
+    // One origin per Vault start, shared by both conductors.
+    fresh_node_origin();
     let config_path = match generate_conductor_config(
         &conductor_dir,
         &connection_url,
@@ -905,6 +1055,31 @@ async fn start_holochain_attempt(
     });
     log::info!("Holochain conductor ready (admin: {}, app: {})", admin_port, app_port);
 
+    // 11. The 0.7 line, best effort: the Vault is Ready on 0.6 whatever
+    // happens here. Its lair holds the same seed; its conductor runs
+    // identity 1.5 + signing 1.5 under the same agent key.
+    let line_07 = match start_line_07(
+        &data_dir,
+        &resource_dir,
+        &passphrase,
+        &conductor_seed,
+        &conductor_tag,
+        &seed_info.ed25519_pub_key.0,
+    )
+    .await
+    {
+        Ok(line) => {
+            set_line_07_state(Line07State::Serving);
+            log::info!("Holochain 0.7 conductor ready (admin: {})", line.admin_port);
+            Some(line)
+        }
+        Err(e) => {
+            set_line_07_state(Line07State::Off);
+            log::warn!("[0.7] the 0.7 line did not start (the Vault runs on 0.6 alone): {}", e);
+            None
+        }
+    };
+
     Ok(ConductorHandle {
         lair_child,
         conductor_child,
@@ -912,7 +1087,104 @@ async fn start_holochain_attempt(
         admin_port: admin_port,
         app_port,
         seed_info,
+        line_07,
     })
+}
+
+/// Start the 0.7 line: lair 0.7.1 in `lair-07/`, the same seed imported
+/// under the same tag (refused unless it yields the 0.6 line's key), the
+/// 0.7.1 conductor in `conductor-07/` on a port from `ADMIN_WS_PORTS_07`,
+/// then identity 1.5 + signing 1.5. Any failure kills what it started and
+/// returns the reason; nothing here touches the 0.6 line.
+async fn start_line_07(
+    data_dir: &Path,
+    resource_dir: &Path,
+    passphrase: &str,
+    conductor_seed: &[u8; 32],
+    conductor_tag: &str,
+    expected_pub_key: &[u8; 32],
+) -> Result<Line07Handle, String> {
+    set_line_07_state(Line07State::Starting);
+    let lair_dir = crate::paths::lair_dir_07(data_dir);
+    let (mut lair_child, connection_url) =
+        lair::start_lair_process_with(&lair_dir, passphrase, "vault-lair-keystore-07")?;
+    macro_rules! fail_with_lair_cleanup {
+        ($err:expr) => {{
+            let _ = lair_child.kill();
+            let _ = lair_child.wait();
+            return Err($err);
+        }};
+    }
+    if let Err(e) = lair::wait_for_lair_socket(&connection_url, 15, &mut lair_child, &lair_dir).await {
+        fail_with_lair_cleanup!(e);
+    }
+    let lair_client = {
+        const MAX_ATTEMPTS: u32 = 6;
+        let mut last_err = String::new();
+        let mut connected = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            if let Some(err) = lair::lair_exited(&mut lair_child, &lair_dir) {
+                last_err = err;
+                break;
+            }
+            match lair::connect_to_lair_07(&connection_url, passphrase).await {
+                Ok(c) => { connected = Some(c); break; }
+                Err(e) => {
+                    if let Some(err) = lair::lair_exited(&mut lair_child, &lair_dir) {
+                        last_err = err;
+                        break;
+                    }
+                    last_err = e;
+                    if attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    }
+                }
+            }
+        }
+        match connected {
+            Some(c) => c,
+            None => fail_with_lair_cleanup!(last_err),
+        }
+    };
+    let pub_key = match lair::import_seed_to_lair_07(&lair_client, conductor_seed, conductor_tag).await {
+        Ok(k) => k,
+        Err(e) => fail_with_lair_cleanup!(format!("seed import into the 0.7 key store failed: {}", e)),
+    };
+    if &pub_key != expected_pub_key {
+        fail_with_lair_cleanup!("the 0.7 key store derived a different key from the same seed".to_string());
+    }
+    drop(lair_client);
+
+    let conductor_dir = crate::paths::conductor_dir_07(data_dir);
+    let admin_port = match find_available_admin_port_in(ADMIN_WS_PORTS_07) {
+        Ok(p) => p,
+        Err(e) => fail_with_lair_cleanup!(e),
+    };
+    let target = BootstrapTarget::primary_07();
+    let config_path = match generate_conductor_config_07(&conductor_dir, &connection_url, admin_port, &target) {
+        Ok(p) => p,
+        Err(e) => fail_with_lair_cleanup!(e),
+    };
+    let mut conductor_child =
+        match start_conductor_process_with(&config_path, &conductor_dir, passphrase, "vault-holochain-07") {
+            Ok(c) => c,
+            Err(e) => fail_with_lair_cleanup!(e),
+        };
+    macro_rules! fail_with_full_cleanup {
+        ($err:expr) => {{
+            let _ = conductor_child.kill();
+            let _ = conductor_child.wait();
+            fail_with_lair_cleanup!($err);
+        }};
+    }
+    if let Err(e) = wait_for_admin_ws(admin_port, 30, &mut conductor_child, &conductor_dir).await {
+        fail_with_full_cleanup!(e);
+    }
+    match dna::install_dnas_07(admin_port, resource_dir, &pub_key[..]).await {
+        Ok(apps) => log::info!("[0.7] apps: {}", apps.join(", ")),
+        Err(e) => fail_with_full_cleanup!(format!("0.7 DNA installation failed: {}", e)),
+    }
+    Ok(Line07Handle { lair_child, conductor_child, admin_port })
 }
 
 #[cfg(test)]
@@ -950,6 +1222,7 @@ mod bootstrap_target_tests {
         // A config left by an earlier version, readable by everyone.
         std::fs::write(dir.join("conductor-config.yaml"), "old").unwrap();
         let target = super::BootstrapTarget { bootstrap_url: "https://example.test".into(), signal_url: "wss://example.test".into(), auth_material: None };
+        super::fresh_node_origin();
         let path = super::generate_conductor_config(&dir, "unix:///tmp/x?k=y", 4455, &target).unwrap();
         let first = super::node_origin();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -961,7 +1234,12 @@ mod bootstrap_target_tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        // The 0.7 conductor's config carries the same origin as the 0.6 one.
+        let path_07 = super::generate_conductor_config_07(&dir.join("07"), "unix:///tmp/x7?k=y", 4458, &target).unwrap();
+        let text_07 = std::fs::read_to_string(&path_07).unwrap();
+        assert!(text_07.contains(&format!("allowed_origins: '{}'", first)));
         // The next start gets another one.
+        super::fresh_node_origin();
         super::generate_conductor_config(&dir, "unix:///tmp/x?k=y", 4455, &target).unwrap();
         assert_ne!(super::node_origin(), first);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1007,6 +1285,35 @@ mod bootstrap_target_tests {
             "open fallbacks must not carry auth material"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_07_config_has_the_07_shape() {
+        let dir = std::env::temp_dir().join("flowsta-test-conductor-07");
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = BootstrapTarget {
+            bootstrap_url: "https://bootstrap-7.example.com".into(),
+            signal_url: "wss://bootstrap-7.example.com".into(),
+            auth_material: Some("eyJmb28iOiJiYXIifQ==".into()),
+        };
+        let path = generate_conductor_config_07(&dir, "unix:///tmp/lair07", 4458, &target).unwrap();
+        let cfg = std::fs::read_to_string(path).unwrap();
+        assert!(cfg.contains("bootstrap_url: https://bootstrap-7.example.com"));
+        assert!(cfg.contains("relay_url: https://bootstrap-7.example.com./"));
+        assert!(!cfg.contains("signal_url"), "0.7 rejects signal_url");
+        assert!(cfg.contains("  request_timeout_s: 240"), "request_timeout_s belongs under network in 0.7");
+        assert!(cfg.contains("db_sync_level: Normal"));
+        assert!(!cfg.contains("db_sync_strategy"));
+        assert!(cfg.contains("base64_auth_material_relay: \"eyJmb28iOiJiYXIifQ==\""));
+        assert!(cfg.contains("port: 4458"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_07_ports_never_overlap_the_06_ports() {
+        for p in ADMIN_WS_PORTS_07 {
+            assert!(!ADMIN_WS_PORTS.contains(p));
+        }
     }
 
     #[test]

@@ -44,11 +44,24 @@ pub fn resolve_sidecar_bin(name: &str) -> PathBuf {
     if cfg!(debug_assertions) {
         let manifest = env!("CARGO_MANIFEST_DIR");
         let binaries = std::path::Path::new(manifest).join("binaries");
+        // Exact `name-<triple>` first: `vault-holochain-` is also a prefix of
+        // `vault-holochain-07-<triple>`, and the two lines must never swap.
+        if let Some(triple) = option_env!("VAULT_TARGET_TRIPLE") {
+            let exact = binaries.join(format!("{}-{}", name, triple));
+            if exact.exists() {
+                return exact;
+            }
+        }
         let prefix = format!("{}-", name);
         if let Ok(entries) = std::fs::read_dir(&binaries) {
             for entry in entries.flatten() {
                 if let Some(s) = entry.file_name().to_str() {
-                    if s.starts_with(&prefix) {
+                    let rest = s.strip_prefix(&prefix);
+                    if let Some(rest) = rest {
+                        // Skip the other line's binary when ours has no suffix.
+                        if !name.ends_with("-07") && rest.starts_with("07-") {
+                            continue;
+                        }
                         return entry.path();
                     }
                 }

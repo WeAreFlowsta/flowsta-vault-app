@@ -5,6 +5,20 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **A second Holochain line runs beside the first.** On unlock the Vault
+  now starts a Holochain 0.7.1 conductor and its own key store next to the
+  0.6.1 ones, under the same identity key, running the identity and
+  signing networks of the new line. Nothing moves yet: every app still
+  talks to the 0.6 line, and your records stay where they are. If the new
+  line cannot start, the Vault carries on as before and says so in its
+  log. The status your Vault answers on this computer lists both lines.
+- A password change, a relocation of your data and a full erase handle
+  the new line's key store and database the same way they handle the
+  first line's.
+
 ## [1.7.0-beta1] - 2026-10-24
 
 The Holochain 0.7.1 release. Its first beta carries only the two items

@@ -22,7 +22,7 @@
 //! "vault-lair-keystore"), never by port or directory, and every kill
 //! names one pid.
 
-const SIDECAR_STEMS: &[&str] = &["vault-holochain", "vault-lair-keystore"];
+const SIDECAR_STEMS: &[&str] = &["vault-holochain", "vault-lair-keystore", "vault-holochain-07", "vault-lair-keystore-07"];
 
 /// What we know about a candidate process's parent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
