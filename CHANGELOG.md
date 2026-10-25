@@ -5,7 +5,7 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0-beta2] - 2026-10-26
 
 ### Added
 - **A second Holochain line runs beside the first.** On unlock the Vault
@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A password change, a relocation of your data and a full erase handle
   the new line's key store and database the same way they handle the
   first line's.
+
+### Fixed
+- **Two key stores under one identity no longer collide on macOS.** On a
+  long profile path each key store's socket moved to the same short
+  runtime path, so the second one took over the first's and the conductor
+  could not start on a fresh install. Each key store now has its own.
+- A conductor that answers "cell not running" while it is still joining
+  the network is retried like the older "cell disabled" answer, instead of
+  being treated as a failure.
+- The node-manifest signing dialog waits ten minutes for your decision
+  instead of two.
 
 ## [1.7.0-beta1] - 2026-10-24
 

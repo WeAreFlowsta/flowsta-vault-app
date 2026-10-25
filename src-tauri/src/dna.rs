@@ -25,8 +25,8 @@ pub const BUNDLED_SIGNING_VERSION: &str = "1.4";
 /// 0.6 line during the 1.7.0 transition (new DNA hashes, so new networks).
 pub const BUNDLED_IDENTITY_VERSION_07: &str = "1.5";
 pub const BUNDLED_SIGNING_VERSION_07: &str = "1.5";
-const IDENTITY_HAPP_FILE_07: &str = "flowsta_identity_v1_5_happ.happ";
-const SIGNING_HAPP_FILE_07: &str = "flowsta_signing_v1_5_happ.happ";
+const BUNDLED_IDENTITY_V1_5_HAPP_FILE: &str = "flowsta_identity_v1_5_happ.happ";
+const BUNDLED_SIGNING_V1_5_HAPP_FILE: &str = "flowsta_signing_v1_5_happ.happ";
 
 /// The encrypted private DNA (opaque Sealed records, per-user network).
 /// Device-hosted vaults only; installed with a per-user network seed
@@ -1137,8 +1137,8 @@ pub async fn install_dnas_07(
     let agent_key = AgentPubKey::from_raw_32(agent_key_raw32.to_vec());
     let mut installed = Vec::new();
     for (app_id, file) in [
-        (make_app_id("identity", BUNDLED_IDENTITY_VERSION_07), IDENTITY_HAPP_FILE_07),
-        (make_app_id("signing", BUNDLED_SIGNING_VERSION_07), SIGNING_HAPP_FILE_07),
+        (make_app_id("identity", BUNDLED_IDENTITY_VERSION_07), BUNDLED_IDENTITY_V1_5_HAPP_FILE),
+        (make_app_id("signing", BUNDLED_SIGNING_VERSION_07), BUNDLED_SIGNING_V1_5_HAPP_FILE),
     ] {
         if existing.iter().any(|a| a.installed_app_id == app_id) {
             admin_ws
