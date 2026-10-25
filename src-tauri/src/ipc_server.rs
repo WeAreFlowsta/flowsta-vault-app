@@ -5596,8 +5596,10 @@ async fn sign_node_manifest_handler(
         "manifest-sign-request",
         serde_json::json!({ "id": request_id, "app_name": app_name, "origin": origin, "summary": summary }),
     );
-    // Reading a manifest takes longer than a byte count: two minutes.
-    let waited = tokio::time::timeout(std::time::Duration::from_secs(120), rx).await;
+    // Reading a manifest takes longer than a byte count, and the person may
+    // not be at the screen when the release tool asks: ten minutes (two were
+    // not enough on 2026-10-25; the approval went to a dropped request).
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(600), rx).await;
     restore_window(&state.app_handle, prior);
     let approved = match waited {
         Ok(Ok(result)) => {

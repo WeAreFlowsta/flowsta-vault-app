@@ -1081,7 +1081,7 @@ pub async fn ensure_apps_enabled(
                     }
                     Err(e) => {
                         let err_str = format!("{}", e);
-                        if err_str.contains("CellDisabled") && attempt < MAX_ATTEMPTS {
+                        if (err_str.contains("CellDisabled") || err_str.contains("CellNotRunning")) && attempt < MAX_ATTEMPTS {
                             log::info!(
                                 "ensure_apps_enabled: cells not ready yet (attempt {}/{}), waiting 3s...",
                                 attempt, MAX_ATTEMPTS,

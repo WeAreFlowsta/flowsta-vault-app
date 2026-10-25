@@ -364,6 +364,24 @@ pub(crate) fn socket_path_from_url(connection_url: &str) -> Result<std::path::Pa
 /// path to a short per-user runtime path; the store, pid file and the
 /// connection key (`?k=`) stay exactly as lair wrote them. Idempotent: a
 /// config already pointing at a fitting path is left alone.
+/// The short runtime socket for the key store under `lair_dir`. The 0.6
+/// store (`lair/`) keeps the name derived from its identity root, which
+/// every partitioned Mac already points at; any other store under the same
+/// root (the 0.7 line's `lair-07/`) is named after its own directory. Two
+/// stores under one root must never share a socket: the second removes the
+/// first's "stale" file and binds in its place, and a conductor then shakes
+/// hands with a key store of the other version (ProofPoll 0.5.0-beta.2 on
+/// the first macOS install, 2026-10-25).
+#[cfg(not(windows))]
+pub(crate) fn runtime_socket_path(lair_dir: &Path) -> std::path::PathBuf {
+    let legacy = lair_dir.file_name().map(|n| n == crate::paths::LAIR_DIR).unwrap_or(false);
+    if legacy {
+        crate::paths::short_socket_path(lair_dir.parent().unwrap_or(lair_dir))
+    } else {
+        crate::paths::short_socket_path(lair_dir)
+    }
+}
+
 #[cfg(not(windows))]
 fn ensure_socket_fits(lair_dir: &Path, config_path: &Path) -> Result<(), String> {
     let url = read_connection_url(config_path)?;
@@ -371,8 +389,7 @@ fn ensure_socket_fits(lair_dir: &Path, config_path: &Path) -> Result<(), String>
     if crate::paths::socket_fits(&current) {
         return Ok(());
     }
-    let root = lair_dir.parent().unwrap_or(lair_dir);
-    let short = crate::paths::short_socket_path(root);
+    let short = runtime_socket_path(lair_dir);
     if !crate::paths::socket_fits(&short) {
         return Err(format!("no socket path short enough for the key store ({:?})", short));
     }
@@ -678,6 +695,17 @@ mod socket_tests {
         // second call: already fits, nothing changes
         ensure_socket_fits(&lair, &cfg).unwrap();
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), after);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn two_key_stores_under_one_root_get_different_runtime_sockets() {
+        let root = Path::new("/Users/someone/Library/Application Support/com.flowsta.vault/identities/0123456789abcdef");
+        let legacy = super::runtime_socket_path(&root.join(crate::paths::LAIR_DIR));
+        let line_07 = super::runtime_socket_path(&root.join("lair-07"));
+        assert_ne!(legacy, line_07);
+        assert_eq!(legacy, crate::paths::short_socket_path(root), "the 0.6 store keeps the name existing Macs point at");
+        assert_eq!(line_07, crate::paths::short_socket_path(&root.join("lair-07")));
     }
 
     #[test]

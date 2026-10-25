@@ -6880,7 +6880,7 @@ pub(crate) async fn revoke_signature_inner(
                 if last_err.contains("nauthorized") {
                     invalidate_cell_credentials(state);
                 }
-                let transient = ["auth creds", "CellDisabled", "response timeout",
+                let transient = ["auth creds", "CellDisabled", "CellNotRunning", "response timeout",
                     "channel dropped", "chain head has moved", "InternalError",
                     "nauthorized"]
                     .iter()
@@ -7426,14 +7426,15 @@ pub(crate) async fn commit_signature_to_dht(
             Err(e) => {
                 last_err = format!("Zome call create_signature failed: {}", e);
                 let retriable = last_err.contains("chain head has moved")
-                    || last_err.contains("CellDisabled");
+                    || last_err.contains("CellDisabled")
+                    || last_err.contains("CellNotRunning");
                 log::warn!("create_signature attempt {}/3 failed: {}", attempt, last_err);
                 if !retriable || attempt == 3 {
                     return Err(last_err);
                 }
                 // Cell re-enable (conductor restarted underneath us) takes
                 // seconds; a lost head race resolves immediately.
-                let gap = if last_err.contains("CellDisabled") { 5 } else { 2 };
+                let gap = if last_err.contains("CellDisabled") || last_err.contains("CellNotRunning") { 5 } else { 2 };
                 tokio::time::sleep(std::time::Duration::from_secs(gap)).await;
             }
         }
