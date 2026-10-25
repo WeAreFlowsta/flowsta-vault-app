@@ -1,0 +1,6 @@
+# The Holochain 0.7.1 client crates need a newer compiler than the 0.6 ones
+# (holochain_zome_types 0.7 uses str::floor_char_boundary, stable since 1.93).
+# The default toolchain on the dev box is 1.90 and fails the build; CI uses
+# stable, which is newer than this pin.
+[toolchain]
+channel = "1.99.1"
