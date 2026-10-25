@@ -20,6 +20,7 @@ VITE_WEB_URL=https://ourtest.flowsta.com \
 FLOWSTA_API_URL=https://auth-api-staging.flowsta.com \
 FLOWSTA_BOOTSTRAP_URL=https://bootstrap-staging.flowsta.com \
 FLOWSTA_SIGNAL_URL=wss://bootstrap-staging.flowsta.com \
+FLOWSTA_BOOTSTRAP_URL_07=https://bootstrap-staging-7.flowsta.com \
 FLOWSTA_AUTH_MATERIAL=eyJjbGllbnRfaWQiOiJmbG93c3RhX2FwcF9iZGZmZDBjMTcwOTBiZDRkMzEyMWUwZjZkZGUzMmE0MDJjYWNmMTk3NmNiYjIzNDgzODA1MDAyZTJkNmE0Zjk0In0= \
 npx tauri build --debug --no-bundle "$@"
 
