@@ -5,6 +5,32 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0-beta7] - 2026-10-27
+
+What the beta6 gate found: three computers now run the new network alone.
+
+### Fixed
+- The sidebar said "Holochain - still starting" for the whole session,
+  with a blue dot and the Devices chip never ready, once an identity ran on
+  the new network alone. Everything worked meanwhile; the badge was asking
+  the old network's cells. It asks the network the identity is on, and
+  says "Starting up" until the cells answer.
+- The first reads after opening a Vault on the new network alone raced
+  the cells for a few seconds and skipped the first devices round. The
+  new network now waits for its cells before the Vault is ready, as the
+  old one did.
+
+### Changed
+- Activity says "Your Vault synced to the new network", once per device:
+  the device that wrote records says what it synced, one that found them
+  there says everything was already synced. The old line's signature
+  count read as a loss on the devices that had none of their own to
+  carry.
+- "Switched to <identity>" no longer says "on this device"; the line
+  already names the device it happened on.
+- Settings → Devices says "Syncing your Vault to the new network … Nothing
+  to do." while a move runs.
+
 ## [1.7.0-beta6] - 2026-10-26
 
 What the beta5 gate found, on three computers and one shared identity.
