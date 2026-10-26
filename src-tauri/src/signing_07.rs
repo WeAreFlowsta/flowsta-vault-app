@@ -491,9 +491,11 @@ mod tests {
             original_signed_action: Option<Vec<u8>>,
         }
         let rec = Rec { file_hash: vec![1, 2, 3], signed_at: 42 };
+        // Real-shaped hashes: 39 bytes = a type prefix and 32 bytes of hash.
+        let hash_39 = ActionHash::from_raw_32(vec![5u8; 32]).get_raw_39().to_vec();
         let view = RecordView {
-            action_hash: vec![5u8; 39],
-            author: vec![6u8; 39],
+            action_hash: hash_39.clone(),
+            author: AgentPubKey::from_raw_32(vec![6u8; 32]).get_raw_39().to_vec(),
             timestamp_us: 1_000,
             entry: Some(rmp_serde::to_vec_named(&rec).unwrap()),
             signed_action: vec![9, 9, 9],
@@ -511,7 +513,7 @@ mod tests {
         buf.extend_from_slice(&mp(&Some(view.signed_action.clone())).unwrap());
         let input: Input = rmp_serde::from_slice(&buf).unwrap();
         assert_eq!(input.record, rec);
-        assert_eq!(input.original_action_hash.get_raw_39(), &[5u8; 39]);
+        assert_eq!(input.original_action_hash.get_raw_39(), &hash_39[..]);
         assert_eq!(input.original_timestamp, 1_000);
         assert_eq!(input.original_signed_action, Some(vec![9, 9, 9]));
     }

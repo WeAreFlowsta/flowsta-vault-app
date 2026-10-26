@@ -603,6 +603,19 @@ pub(crate) async fn sealed_store_spec_on(
     spec: StoreSpec,
     supersedes: Option<holochain_types::prelude::ActionHash>,
 ) -> Result<String, String> {
+    let device = if WRITE_WITHOUT_DEVICE.load(std::sync::atomic::Ordering::SeqCst) { None } else { crate::paths::install_id(&state.data_dir) };
+    sealed_store_spec_as(state, line, spec, supersedes, device).await
+}
+
+/// `sealed_store_spec_on` with the writing device named by the caller: the
+/// move copies a record to the other line as the device that wrote it.
+pub(crate) async fn sealed_store_spec_as(
+    state: &Arc<AppState>,
+    line: Line,
+    spec: StoreSpec,
+    supersedes: Option<holochain_types::prelude::ActionHash>,
+    device: Option<String>,
+) -> Result<String, String> {
     use holochain_types::prelude::ActionHash;
 
     let data_key = vault_data_key(state)?;
@@ -620,7 +633,7 @@ pub(crate) async fn sealed_store_spec_on(
         refs: spec.refs,
         id: Some(id),
         updated_at: Some(spec.updated_at.unwrap_or(spec.created_at)),
-        device: if WRITE_WITHOUT_DEVICE.load(std::sync::atomic::Ordering::SeqCst) { None } else { crate::paths::install_id(&state.data_dir) },
+        device,
         deleted: spec.deleted,
     };
     let (cipher, nonce) = seal(&payload, &data_key).map_err(|e| e.to_string())?;

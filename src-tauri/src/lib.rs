@@ -20,6 +20,7 @@ mod lair;
 mod mau;
 mod paths;
 mod migration;
+mod move_07;
 mod peer_owner;
 mod process_ext;
 mod quota_cache;
@@ -510,6 +511,7 @@ pub fn run() {
             devices::device_remove,
             devices::sibling_sync,
             devices::rename_this_device,
+            move_07::move_status,
             device_registry::device_standing,
             device_registry::use_recovery_phrase_once,
             backup_sync::backups_kept_from_devices,

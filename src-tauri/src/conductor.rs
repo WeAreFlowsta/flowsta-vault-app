@@ -1152,6 +1152,7 @@ pub fn attach_line_07(state: Arc<AppState>, starter: Line07Starter) {
                 if attached {
                     set_line_07_state(Line07State::Serving);
                     log::info!("Holochain 0.7 conductor ready (admin: {}, app: {})", admin_port, app_port);
+                    crate::move_07::schedule_pass(state.clone(), "the 0.7 line came up");
                 } else {
                     set_line_07_state(Line07State::Off);
                     log::info!("[0.7] the 0.7 line came up after its 0.6 line had stopped - stopped it again");

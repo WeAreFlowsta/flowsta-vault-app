@@ -318,6 +318,8 @@ struct StatusResponse {
     /// the 0.7 line beside it. Not identity information, so every origin
     /// may read it.
     holochain_lines: Vec<HolochainLine>,
+    /// Which line this identity's records are read and written on.
+    records_on: &'static str,
 }
 
 #[derive(Serialize)]
@@ -470,6 +472,7 @@ async fn status_handler(
         email: email_granted.then_some(web_email_raw).flatten(),
         email_verified: email_granted.then_some(true),
         holochain_lines: holochain_lines(&state.app_state),
+        records_on: crate::hc::active_line(&state.app_state).generation(),
     })
 }
 

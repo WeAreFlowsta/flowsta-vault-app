@@ -1800,6 +1800,9 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
             let wait = match devices_round(&devices_state, &devices_app, full).await {
                 DevicesRound::StoodDown => break,
                 DevicesRound::Done => {
+                    // What the 0.6 cells hold and the 0.7 cells do not,
+                    // carried over (the move, and the catch-up after it).
+                    crate::move_07::schedule_pass(devices_state.clone(), "devices round");
                     pass += 1;
                     DEVICES_ROUND_EVERY
                 }
@@ -1823,6 +1826,12 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
 static DEVICES_ROUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// This device's own record failed to write: the next light pass tries again.
 static OWN_WRITE_DUE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// This device's record should be written at the next pass (its records
+/// just moved to the other line: the record there says so).
+pub(crate) fn own_record_due() {
+    OWN_WRITE_DUE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
 const DEVICES_ROUND_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 const DEVICES_ROUND_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 /// After an app saves a backup, how long to wait for the rest of its burst.
