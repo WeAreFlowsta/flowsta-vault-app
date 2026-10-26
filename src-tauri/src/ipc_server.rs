@@ -331,9 +331,11 @@ struct HolochainLine {
 }
 
 fn holochain_lines(app_state: &AppState) -> Vec<HolochainLine> {
+    let wanted_06 = crate::conductor::line_06_wanted(&app_state.identity_root());
+    let running_06 = app_state.conductor_handle.lock().unwrap().as_ref().map(|h| h.line_06.is_some()).unwrap_or(false);
     let line_06 = match *app_state.conductor_status.lock().unwrap() {
-        crate::conductor::ConductorStatus::Ready { .. } => "serving",
-        crate::conductor::ConductorStatus::Starting { .. } => "starting",
+        crate::conductor::ConductorStatus::Ready { .. } if running_06 => "serving",
+        crate::conductor::ConductorStatus::Starting { .. } if wanted_06 => "starting",
         _ => "off",
     };
     let line_07 = match crate::conductor::line_07_state() {
@@ -2779,9 +2781,11 @@ async fn wait_for_unlock(state: &Arc<AppState>, secs: u64) -> bool {
 async fn wait_for_conductor(state: &Arc<AppState>, secs: u64) -> Option<(u16, u16)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
+        // The 0.6 ports where that line runs; an identity on 0.7 alone
+        // signs through its active line and the ports are not read.
         let ports = {
             let handle = state.conductor_handle.lock().unwrap();
-            handle.as_ref().map(|h| (h.admin_port, h.app_port))
+            handle.as_ref().map(|h| h.ports_06().unwrap_or((0, 0)))
         };
         if ports.is_some() {
             return ports;
@@ -4722,6 +4726,7 @@ async fn dev_devices_handler(
                     false,
                     false,
                     true,
+                    false, // restored by phrase: the identity exists elsewhere
                     state.app_handle.clone(),
                     app,
                 )
@@ -4923,7 +4928,7 @@ async fn dev_setup_identity_handler(
         // The wizard's offline restore: no web fields, marked for reconcile.
         crate::commands::setup_vault_inner(
             phrase.clone(), body.password.clone(), None, None, None, None, None,
-            Some("device-hosted".to_string()), true, false, true,
+            Some("device-hosted".to_string()), true, false, true, false,
             state.app_handle.clone(), &app_state,
         )
         .map_err(|e| fail("setup_failed", e))?
@@ -4938,7 +4943,7 @@ async fn dev_setup_identity_handler(
         crate::commands::setup_vault_inner(
             phrase.clone(), body.password.clone(), None, Some(email), None,
             body.display_name.clone(), reg.profile_picture.clone(),
-            Some("device-hosted".to_string()), false, false, false,
+            Some("device-hosted".to_string()), false, false, false, true,
             state.app_handle.clone(), &app_state,
         )
         .map_err(|e| fail("setup_failed", e))?
@@ -5073,6 +5078,7 @@ async fn dev_setup_legacy_handler(
         false,
         false,
         false,
+        false, // the custodial-era test shape keeps its 0.6 line
         state.app_handle.clone(),
         &app_state,
     )

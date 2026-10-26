@@ -525,13 +525,17 @@ pub async fn round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> R
 
     // Where each sibling device can be reached: the key its conductor runs.
     let devices = crate::devices::devices_in(&records);
+    // ...and the line it listens on (its record's generation).
     let agent_of = |install_id: &str| {
         devices
             .iter()
             .find(|d| d.install_id == install_id && d.removed_at.is_none())
-            .and_then(|d| crate::commands::base64_standard_decode(&d.conductor_key).ok())
-            .filter(|raw| raw.len() == 39)
-            .map(holochain_types::prelude::AgentPubKey::from_raw_39)
+            .and_then(|d| {
+                crate::commands::base64_standard_decode(&d.conductor_key)
+                    .ok()
+                    .filter(|raw| raw.len() == 39)
+                    .map(|raw| (holochain_types::prelude::AgentPubKey::from_raw_39(raw), d.generation.clone()))
+            })
     };
 
     let indexes = indexes_of(&recorded);
@@ -575,7 +579,7 @@ pub async fn round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> R
                     note_still(&install_id, slot.size);
                     continue;
                 }
-                let (Ok(lane), Some(from)) = (lane.as_ref(), agent_of(&install_id)) else {
+                let (Ok(lane), Some((from, generation))) = (lane.as_ref(), agent_of(&install_id)) else {
                     outcome.waiting += 1;
                     note_still(&install_id, slot.size);
                     continue;
@@ -591,7 +595,7 @@ pub async fn round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> R
                     let short: String = install_id.chars().take(8).collect();
                     log::info!("[backups] {}… has not been heard from this session - one short try for its copies each round until it is", short);
                 }
-                match lane.fetch(&root, &from, &client_id, &slot.label, slot.size, &slot.sha256, heard, |_, _| {}).await {
+                match lane.fetch(&root, &from, lane.line_for(&generation), &client_id, &slot.label, slot.size, &slot.sha256, heard, |_, _| {}).await {
                     Ok(bytes) => match store_copy(&root, &install_id, &client_id, &slot, &bytes) {
                         Ok(_) => {
                             budget -= slot.size;

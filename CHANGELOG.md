@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updated devices within a minute. Settings → Devices says when the move
   happened and what it carried; `GET /status` says which line
   (`records_on`) an identity's records are on.
+- **An identity created on this version lives on the new network only.**
+  It never starts the old Holochain line, never writes to it, and its
+  devices find each other and exchange backups over the new network alone.
+  An identity restored from its recovery phrase, added from another device,
+  or brought over from a web account keeps both lines until the move is
+  done, so nothing an older device still holds is left behind.
 - **Rename this device.** Settings → Devices names each device after its
   computer. The name of this device can now be changed there; the other
   devices and the apps that list your devices see the new name within a

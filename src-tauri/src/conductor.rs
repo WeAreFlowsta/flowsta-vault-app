@@ -46,44 +46,89 @@ impl Line07Handle {
     }
 }
 
-/// Handle to a running conductor + lair-keystore pair.
-/// Drop this to stop both processes.
-pub struct ConductorHandle {
+/// The 0.6 line: lair 0.6.3 + conductor 0.6.1, as every identity ran before
+/// 1.7.0. An identity born on 1.7.0 never has one (`line_06_wanted`).
+pub struct Line06Handle {
     pub lair_child: SidecarChild,
     pub conductor_child: SidecarChild,
     pub lair_client: LairClient,
     pub admin_port: u16,
     pub app_port: u16,
-    pub seed_info: SeedInfo,
-    /// The 0.7 line, once `attach_line_07` has brought it up (see
-    /// `Line07Handle`); `None` while it starts or when it could not.
-    pub line_07: Option<Line07Handle>,
-    /// Which 0.6 start this is (see `CONDUCTOR_SESSION`).
-    pub session: u64,
 }
 
-impl ConductorHandle {
-    /// Graceful shutdown of conductor + lair (both lines).
-    pub fn shutdown(mut self) {
-        if let Some(line) = self.line_07.take() {
-            line.shutdown();
-        }
-        set_line_07_state(Line07State::Off);
-
+impl Line06Handle {
+    fn shutdown(mut self) {
         log::info!("Shutting down conductor...");
         if let Err(e) = self.conductor_child.kill() {
             log::warn!("Failed to kill conductor process: {}", e);
         }
         let _ = self.conductor_child.wait();
-
         log::info!("Shutting down lair-keystore...");
         if let Err(e) = self.lair_child.kill() {
             log::warn!("Failed to kill lair-keystore process: {}", e);
         }
         let _ = self.lair_child.wait();
-
         log::info!("Conductor and lair-keystore stopped");
     }
+}
+
+/// Handle to the running conductor lines of one identity. Drop this to
+/// stop every process. At least one line is present once a start succeeded.
+pub struct ConductorHandle {
+    /// The 0.6 line; `None` for an identity born on 1.7.0.
+    pub line_06: Option<Line06Handle>,
+    /// The 0.7 line, once `attach_line_07` has brought it up (see
+    /// `Line07Handle`), or from the start on an identity with no 0.6 line;
+    /// `None` while it starts or when it could not.
+    pub line_07: Option<Line07Handle>,
+    /// The key the conductors run as (the same on both lines).
+    pub agent_key_32: [u8; 32],
+    /// Which start this is (see `CONDUCTOR_SESSION`).
+    pub session: u64,
+}
+
+impl ConductorHandle {
+    /// The 0.6 line's admin and app ports, when it runs.
+    pub fn ports_06(&self) -> Option<(u16, u16)> {
+        self.line_06.as_ref().map(|l| (l.admin_port, l.app_port))
+    }
+    pub fn admin_port_06(&self) -> Option<u16> {
+        self.line_06.as_ref().map(|l| l.admin_port)
+    }
+    /// The admin port the Vault reports as "the conductor": the 0.6 line's
+    /// where it runs, else the 0.7 line's.
+    pub fn primary_admin_port(&self) -> u16 {
+        self.line_06.as_ref().map(|l| l.admin_port).or_else(|| self.line_07.as_ref().map(|l| l.admin_port)).unwrap_or(0)
+    }
+    /// Whether the conductor process this handle stands for is still
+    /// running (the 0.6 one where it exists, else the 0.7 one).
+    pub fn alive(&mut self) -> bool {
+        match (&mut self.line_06, &mut self.line_07) {
+            (Some(l), _) => matches!(l.conductor_child.try_wait(), Ok(None)),
+            (None, Some(l)) => matches!(l.conductor_child.try_wait(), Ok(None)),
+            (None, None) => false,
+        }
+    }
+
+    /// Graceful shutdown of every line.
+    pub fn shutdown(mut self) {
+        if let Some(line) = self.line_07.take() {
+            line.shutdown();
+        }
+        set_line_07_state(Line07State::Off);
+        if let Some(line) = self.line_06.take() {
+            line.shutdown();
+        }
+    }
+}
+
+/// Whether this identity runs a 0.6 line: every identity that existed before
+/// 1.7.0 does (its records live there until the move, and a device that has
+/// not updated keeps writing there); an identity born on 1.7.0 never does
+/// (`move_07::born_on_07`). Decided once per start, from the identity's
+/// folder, never from the network.
+pub fn line_06_wanted(data_dir: &Path) -> bool {
+    !crate::move_07::born_on_07(data_dir)
 }
 
 /// Where the 0.7 line stands, for `/status` and the app. Set by the start
@@ -760,13 +805,32 @@ pub async fn start_holochain(
     // (`vault::conductor_lair_tag`).
     conductor_seed: [u8; 32],
     conductor_tag: String,
-) -> Result<(ConductorHandle, Line07Starter), String> {
+) -> Result<(ConductorHandle, Option<Line07Starter>), String> {
     // A fresh conductor session gets fresh cap grants - drop any cached
     // credentials so the readiness probe re-verifies (and re-fills) them.
     {
         let state = app_handle.state::<Arc<AppState>>();
         state.cell_credentials.lock().unwrap().clear();
         state.cell_credentials_07.lock().unwrap().clear();
+    }
+    if !line_06_wanted(&data_dir) {
+        // Born on 1.7.0: the 0.7 line is the only line, started here and
+        // Ready when it is. Nothing of this identity exists on 0.6.
+        let handle = match start_holochain_07_only(&app_handle, &data_dir, &resource_dir, &passphrase, &conductor_seed, &conductor_tag).await {
+            Ok(h) => h,
+            Err(e) => {
+                log::warn!("[start_holochain] the 0.7 line did not start ({}) - one more try", e);
+                if e.contains(lair::LAIR_STOPPED_MARKER) {
+                    match lair::quarantine_lair_dir(&crate::paths::lair_dir_07(&data_dir)) {
+                        Ok(moved) => log::warn!("[start_holochain] 0.7 key store set aside at {:?} - rebuilding it from the device seed", moved),
+                        Err(qe) => log::error!("[start_holochain] {}", qe),
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                start_holochain_07_only(&app_handle, &data_dir, &resource_dir, &passphrase, &conductor_seed, &conductor_tag).await?
+            }
+        };
+        return Ok((handle, None));
     }
     match start_holochain_attempt(
         app_handle.clone(),
@@ -778,7 +842,7 @@ pub async fn start_holochain(
     )
     .await
     {
-        Ok(h) => return Ok(h),
+        Ok((h, starter)) => return Ok((h, Some(starter))),
         Err(e) => {
             log::warn!(
                 "[start_holochain] first attempt failed: {} - auto-restarting conductor",
@@ -812,7 +876,40 @@ pub async fn start_holochain(
         }
     }
 
-    start_holochain_attempt(app_handle, data_dir, resource_dir, passphrase, conductor_seed, conductor_tag).await
+    start_holochain_attempt(app_handle, data_dir, resource_dir, passphrase, conductor_seed, conductor_tag)
+        .await
+        .map(|(h, starter)| (h, Some(starter)))
+}
+
+/// The start of an identity born on 1.7.0: the 0.7 line alone, Ready when
+/// it is. The same lair, conductor, DNA and app-interface steps
+/// `attach_line_07` runs for an older identity, with the status messages
+/// the 0.6 start shows.
+async fn start_holochain_07_only(
+    app_handle: &tauri::AppHandle,
+    data_dir: &Path,
+    resource_dir: &Path,
+    passphrase: &str,
+    conductor_seed: &[u8; 32],
+    conductor_tag: &str,
+) -> Result<ConductorHandle, String> {
+    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting { message: "Starting the key store...".into() });
+    let expected_pub_key = crate::key_derivation::public_key_of_seed(conductor_seed);
+    let private_v2_seed: Option<String> = {
+        let state = app_handle.state::<Arc<AppState>>();
+        let cfg = state.vault_config.lock().unwrap();
+        cfg.as_ref().and_then(|c| if c.hosting_model.as_deref() == Some("device-hosted") { c.private_network_seed.clone() } else { None })
+    };
+    let target = BootstrapTarget::primary_07();
+    remember_conductor_rendezvous(&target.bootstrap_url);
+    fresh_node_origin();
+    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting { message: "Starting Holochain conductor...".into() });
+    let line = start_line_07(data_dir, resource_dir, passphrase, conductor_seed, conductor_tag, &expected_pub_key, private_v2_seed.as_deref()).await?;
+    set_line_07_state(Line07State::Serving);
+    let session = CONDUCTOR_SESSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let _ = app_handle.emit("conductor-status", ConductorStatus::Ready { admin_port: line.admin_port });
+    log::info!("Holochain 0.7 conductor ready (admin: {}, app: {}) - this identity's only line", line.admin_port, line.app_port);
+    Ok(ConductorHandle { line_06: None, line_07: Some(line), agent_key_32: expected_pub_key, session })
 }
 
 /// One full startup attempt: lair → seed import → conductor → connect → install DNAs.
@@ -1081,13 +1178,9 @@ async fn start_holochain_attempt(
 
     Ok((
         ConductorHandle {
-            lair_child,
-            conductor_child,
-            lair_client,
-            admin_port: admin_port,
-            app_port,
-            seed_info,
+            line_06: Some(Line06Handle { lair_child, conductor_child, lair_client, admin_port, app_port }),
             line_07: None,
+            agent_key_32: *seed_info.ed25519_pub_key.0,
             session,
         },
         starter,

@@ -620,10 +620,10 @@ pub fn announce_again() {
 
 /// Tell one sibling about this device: its own sealed record, straight over
 /// the private network.
-pub async fn announce_to(state: &Arc<AppState>, lane: &crate::backup_lane::Lane, to: &holochain_types::prelude::AgentPubKey) {
+pub async fn announce_to(state: &Arc<AppState>, lane: &crate::backup_lane::Lane, to: &holochain_types::prelude::AgentPubKey, line: crate::hc::Line) {
     let holds = own_holds(state).await;
     match crate::sealed::own_device_piece(state, &holds).await {
-        Ok(Some(piece)) => match lane.send_device(to, piece).await {
+        Ok(Some(piece)) => match lane.send_device(to, piece, line).await {
             Ok(()) => {
                 ANNOUNCED.lock().unwrap().get_or_insert_with(Default::default).insert(key_text(to), std::time::Instant::now());
             }
@@ -644,10 +644,11 @@ pub async fn announce_to(state: &Arc<AppState>, lane: &crate::backup_lane::Lane,
 pub async fn announce_to_siblings(state: &Arc<AppState>) {
     let Ok(me) = own_conductor_key(state) else { return };
     let Ok(devices) = list(state).await else { return };
-    let siblings: Vec<String> = devices
+    // Each sibling with the line it listens on (its record's generation).
+    let siblings: Vec<(String, String)> = devices
         .into_iter()
         .filter(|d| d.conductor_key != me && d.removed_at.is_none())
-        .map(|d| d.conductor_key)
+        .map(|d| (d.conductor_key, d.generation))
         .collect();
     if siblings.is_empty() {
         return;
@@ -660,11 +661,11 @@ pub async fn announce_to_siblings(state: &Arc<AppState>) {
     // that (Your Own AI's Settings > Devices), so a change that waits for it
     // is explained by a dot, not a mystery (10-20).
     let every = std::time::Duration::from_secs(if young || setting_up_here(state) { 55 } else { ANNOUNCE_EVERY_SECS });
-    let due: Vec<String> = {
+    let due: Vec<(String, String)> = {
         let announced = ANNOUNCED.lock().unwrap();
         siblings
             .into_iter()
-            .filter(|k| announced.as_ref().and_then(|a| a.get(k)).map(|at| at.elapsed() >= every).unwrap_or(true))
+            .filter(|(k, _)| announced.as_ref().and_then(|a| a.get(k)).map(|at| at.elapsed() >= every).unwrap_or(true))
             .collect()
     };
     if due.is_empty() {
@@ -677,7 +678,7 @@ pub async fn announce_to_siblings(state: &Arc<AppState>) {
             return;
         }
     };
-    for key in due {
+    for (key, generation) in due {
         let Some(agent) = crate::commands::base64_standard_decode(&key)
             .ok()
             .filter(|raw| raw.len() == 39)
@@ -685,7 +686,7 @@ pub async fn announce_to_siblings(state: &Arc<AppState>) {
         else {
             continue;
         };
-        announce_to(state, &lane, &agent).await;
+        announce_to(state, &lane, &agent, lane.line_for(&generation)).await;
     }
 }
 

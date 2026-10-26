@@ -670,6 +670,7 @@ fn join_identity(
         false,
         false,
         Some(conductor_seed),
+        false, // added to an identity that exists elsewhere
         app_handle,
         state,
     );

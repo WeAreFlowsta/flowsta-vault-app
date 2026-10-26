@@ -887,6 +887,8 @@ pub fn setup_vault(
         pending_registration.unwrap_or(false),
         // Restoring = the identity already exists: this device is added to it.
         joining,
+        // Created here, not restored: born on the 0.7 line.
+        !is_restore.unwrap_or(false),
         app_handle,
         &state,
     )?;
@@ -928,6 +930,7 @@ pub(crate) fn setup_vault_inner(
     pending_reconcile: bool,
     pending_registration: bool,
     joining: bool,
+    born_here: bool,
     app_handle: tauri::AppHandle,
     state: &Arc<AppState>,
 ) -> Result<SetupResult, String> {
@@ -951,6 +954,7 @@ pub(crate) fn setup_vault_inner(
         pending_reconcile,
         pending_registration,
         joining.then(|| crate::device_registry::take_joining_seed().unwrap_or_else(crate::key_derivation::new_conductor_seed)),
+        born_here && !joining,
         app_handle,
         state,
     );
@@ -1010,6 +1014,10 @@ pub(crate) fn setup_vault_from_keys(
     pending_reconcile: bool,
     pending_registration: bool,
     own_conductor_seed: Option<[u8; 32]>,
+    // The identity is created here and now (not restored from a phrase,
+    // not added from another device, not an account from the web): it is
+    // born on the 0.7 line and never has a 0.6 one.
+    born_here: bool,
     app_handle: tauri::AppHandle,
     state: &Arc<AppState>,
 ) -> Result<SetupResult, String> {
@@ -1113,6 +1121,13 @@ pub(crate) fn setup_vault_from_keys(
         *state.backup_key_identity.lock().unwrap() = Some(backup_identity_key);
     }
     write_active_identity_marker(&state.data_dir, &agent_pub_key);
+    if born_here {
+        // Before the first start: the start reads it and runs 0.7 alone.
+        match crate::move_07::mark_born(&state.identity_root()) {
+            Ok(()) => log::info!("Identity born on the 0.7 line - no 0.6 line for it, ever"),
+            Err(e) => log::warn!("The born-on-0.7 marker was not written ({}); this identity runs both lines", e),
+        }
+    }
 
     seed_linked_web_agent_key(state);
     log::info!("Vault created and unlocked. Agent: {}", &agent_pub_key);
@@ -1286,10 +1301,7 @@ pub(crate) fn unlock_vault_inner(
     let kept = state.kept_conductor.lock().unwrap().take();
     let was_kept = kept.is_some();
     let kept_for_this_identity = kept.map(|k| k.agent_pub_key == agent_key_for_marker).unwrap_or(false);
-    let still_running = matches!(
-        state.conductor_handle.lock().unwrap().as_mut().map(|h| h.conductor_child.try_wait()),
-        Some(Ok(None))
-    );
+    let still_running = matches!(state.conductor_handle.lock().unwrap().as_mut().map(|h| h.alive()), Some(true));
     if kept_for_this_identity && still_running {
         log::info!("Unlocked onto the running conductor.");
         this_device_comes_online(conductor_seed.as_ref().map(|(seed, _)| *seed), state);
@@ -1362,7 +1374,7 @@ pub(crate) fn lock_and_keep_syncing(state: &Arc<AppState>, app_handle: tauri::Ap
                 break;
             }
             let stopped = match state.conductor_handle.lock().unwrap().as_mut() {
-                Some(handle) => !matches!(handle.conductor_child.try_wait(), Ok(None)),
+                Some(handle) => !handle.alive(),
                 None => true,
             };
             if stopped {
@@ -1589,20 +1601,14 @@ pub(crate) async fn ensure_conductor_alive(
     let needs_restart = {
         let mut handle_guard = state.conductor_handle.lock().unwrap();
         match handle_guard.as_mut() {
-            Some(h) => match h.conductor_child.try_wait() {
-                Ok(Some(status)) => {
-                    log::warn!(
-                        "[watchdog] conductor process exited (status: {}) - will restart",
-                        status,
-                    );
+            Some(h) => {
+                if h.alive() {
+                    false
+                } else {
+                    log::warn!("[watchdog] conductor process exited - will restart");
                     true
                 }
-                Ok(None) => false, // process still alive
-                Err(e) => {
-                    log::warn!("[watchdog] try_wait failed: {} - assuming dead", e);
-                    true
-                }
-            },
+            }
             None => true, // no handle at all
         }
     };
@@ -1685,12 +1691,14 @@ pub(crate) async fn ensure_conductor_alive(
 
     log::info!(
         "[watchdog] conductor recovered (admin port {})",
-        new_handle.admin_port,
+        new_handle.primary_admin_port(),
     );
-    let port = new_handle.admin_port;
+    let port = new_handle.primary_admin_port();
     *state.conductor_handle.lock().unwrap() = Some(new_handle);
     // The 0.7 line follows from a task; nothing here waits for it.
-    crate::conductor::attach_line_07(state.clone(), line_07);
+    if let Some(line_07) = line_07 {
+        crate::conductor::attach_line_07(state.clone(), line_07);
+    }
     *state.conductor_status.lock().unwrap() = ConductorStatus::Ready { admin_port: port };
     let _ = app_handle.emit(
         "conductor-status",
@@ -2168,7 +2176,7 @@ fn spawn_conductor_startup_inner(
                     .lock()
                     .unwrap()
                     .as_mut()
-                    .and_then(|h| matches!(h.conductor_child.try_wait(), Ok(None)).then_some(h.admin_port));
+                    .and_then(|h| h.alive().then_some(h.primary_admin_port()));
                 let started = match running_port {
                     // The watchdog got here first. What follows a start
                     // still runs once, here.
@@ -2187,11 +2195,14 @@ fn spawn_conductor_startup_inner(
                     .await
                     {
                         Ok((handle, line_07)) => {
-                            let port = handle.admin_port;
+                            let port = handle.primary_admin_port();
                             *state.conductor_handle.lock().unwrap() = Some(handle);
                             // The 0.7 line follows from a task: the Vault is
                             // Ready on 0.6 now, not after the second line.
-                            crate::conductor::attach_line_07(state.clone(), line_07);
+                            // (An identity born on 1.7.0 started on 0.7 alone.)
+                            if let Some(line_07) = line_07 {
+                                crate::conductor::attach_line_07(state.clone(), line_07);
+                            }
                             Ok(port)
                         }
                         Err(e) => Err(e),
@@ -2215,12 +2226,12 @@ fn spawn_conductor_startup_inner(
                         // Non-fatal - if offline or update fails, continue with current DNAs.
                         // Downloads go to data_dir (not resource_dir) to avoid triggering
                         // Tauri dev-mode hot-reload and to use a writable location in production.
-                        let identity_was_updated = check_dna_updates(
-                            &state,
-                            &app_handle_ref,
-                            port,
-                            &state.data_dir,
-                        ).await;
+                        // The updater speaks to the 0.6 line (the 0.7 bundles
+                        // ship in the Vault; the first 0.7 bump gets its own).
+                        let identity_was_updated = match crate::hc::line_ports(&state, crate::hc::Line::V06) {
+                            Ok((admin_06, _)) => check_dna_updates(&state, &app_handle_ref, admin_06, &state.data_dir).await,
+                            Err(_) => false,
+                        };
 
                         // Migrated (device-hosted) vaults skip auto-link but
                         // carry the original web agent key from the migration -
@@ -2386,9 +2397,7 @@ async fn check_dna_updates(
         let handle_guard = state.conductor_handle.lock().unwrap();
         handle_guard
             .as_ref()
-            .map(|h| holochain_types::prelude::AgentPubKey::from_raw_32(
-                h.seed_info.ed25519_pub_key.0.to_vec(),
-            ))
+            .map(|h| holochain_types::prelude::AgentPubKey::from_raw_32(h.agent_key_32.to_vec()))
     };
 
     let agent_key = if let Some(k) = lair_agent_key {
@@ -5889,7 +5898,9 @@ pub async fn sign_file(
     // Extract ports from conductor handle (drop MutexGuard before any await)
     let conductor_ports = {
         let conductor = state.conductor_handle.lock().unwrap();
-        conductor.as_ref().map(|h| (h.admin_port, h.app_port))
+        // The 0.6 line's ports; an identity whose records are on 0.7 alone
+        // takes the 0.7 branch of the call below and never reads them.
+        conductor.as_ref().and_then(|h| h.ports_06().or_else(|| (crate::hc::active_line(&state) == crate::hc::Line::V07).then_some((0, 0))))
     };
 
     // Decode supersedes hex to bytes once (any error → reject upfront so
@@ -6650,11 +6661,7 @@ pub(crate) async fn open_signing_conductor(
             Vec<holochain_client::AppInfo>), String> {
     use holochain_client::AdminWebsocket;
 
-    let conductor_ports = {
-        let conductor = state.conductor_handle.lock().unwrap();
-        conductor.as_ref().map(|h| (h.admin_port, h.app_port))
-    };
-    let (admin_port, app_port) = conductor_ports.ok_or("Conductor not running")?;
+    let (admin_port, app_port) = crate::hc::line_ports(state, crate::hc::Line::V06)?;
 
     let admin_ws = AdminWebsocket::connect(
         format!("localhost:{}", admin_port),
@@ -6741,6 +6748,12 @@ pub async fn get_my_own_signatures(
 pub(crate) async fn get_my_own_signatures_inner(
     state: &Arc<AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    // No 0.6 line (an identity born on 1.7.0): the 0.7 cell is the whole story.
+    if crate::hc::line_ports(state, crate::hc::Line::V06).is_err() {
+        let mut signatures = crate::signing_07::own_signatures(state).await?;
+        apply_superseded_by(&mut signatures);
+        return Ok(signatures);
+    }
     let (admin_ws, app_port, _apps, signing_apps) = open_signing_conductor(state).await?;
     if signing_apps.is_empty() { return Ok(Vec::new()); }
 
@@ -6817,6 +6830,17 @@ pub async fn get_my_linked_signatures(
 pub(crate) async fn get_my_linked_signatures_inner(
     state: &Arc<AppState>,
 ) -> Result<LinkedSignaturesResult, String> {
+    // No 0.6 line (an identity born on 1.7.0): no web account was ever
+    // linked; the other devices' keys are the only linked agents.
+    if crate::hc::line_ports(state, crate::hc::Line::V06).is_err() {
+        let keys = identity_device_keys(state).await;
+        if keys.is_empty() {
+            return Ok(LinkedSignaturesResult { signatures: Vec::new(), has_linked_agents: false });
+        }
+        let mut signatures = crate::signing_07::linked_signatures(state, &keys).await?;
+        apply_superseded_by(&mut signatures);
+        return Ok(LinkedSignaturesResult { signatures, has_linked_agents: true });
+    }
     let (admin_ws, app_port, apps, signing_apps) = open_signing_conductor(state).await?;
     if signing_apps.is_empty() {
         return Ok(LinkedSignaturesResult {
@@ -6983,6 +7007,23 @@ pub async fn get_my_signatures(
 async fn get_my_signatures_inner(
     state: &Arc<AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    // No 0.6 line (an identity born on 1.7.0): own and other-device
+    // records from the 0.7 cell, best effort as below.
+    if crate::hc::line_ports(state, crate::hc::Line::V06).is_err() {
+        let mut signatures = crate::signing_07::own_signatures(state).await?;
+        let keys = identity_device_keys(state).await;
+        if !keys.is_empty() {
+            match crate::signing_07::linked_signatures(state, &keys).await {
+                Ok(linked) => {
+                    let existing: std::collections::HashSet<String> = signatures.iter().filter_map(|s| s.get("action_hash").and_then(|h| h.as_str()).map(String::from)).collect();
+                    signatures.extend(linked.into_iter().filter(|s| s.get("action_hash").and_then(|h| h.as_str()).map(|h| !existing.contains(h)).unwrap_or(false)));
+                }
+                Err(e) => log::warn!("[get_my_signatures] other devices' signatures not read (0.7): {}", e),
+            }
+        }
+        apply_superseded_by(&mut signatures);
+        return Ok(signatures);
+    }
     let (admin_ws, app_port, apps, signing_apps) = open_signing_conductor(state).await?;
     if signing_apps.is_empty() { return Ok(Vec::new()); }
 
@@ -7111,7 +7152,9 @@ async fn revoke_signature_attempt(
 
     let conductor_ports = {
         let conductor = state.conductor_handle.lock().unwrap();
-        conductor.as_ref().map(|h| (h.admin_port, h.app_port))
+        // The 0.6 line's ports; an identity whose records are on 0.7 alone
+        // takes the 0.7 branch of the call below and never reads them.
+        conductor.as_ref().and_then(|h| h.ports_06().or_else(|| (crate::hc::active_line(&state) == crate::hc::Line::V07).then_some((0, 0))))
     };
 
     let (admin_port, app_port) = conductor_ports.ok_or("Conductor not running")?;
@@ -7218,7 +7261,9 @@ pub(crate) async fn set_thumbnail_inner(
 
     let conductor_ports = {
         let conductor = state.conductor_handle.lock().unwrap();
-        conductor.as_ref().map(|h| (h.admin_port, h.app_port))
+        // The 0.6 line's ports; an identity whose records are on 0.7 alone
+        // takes the 0.7 branch of the call below and never reads them.
+        conductor.as_ref().and_then(|h| h.ports_06().or_else(|| (crate::hc::active_line(&state) == crate::hc::Line::V07).then_some((0, 0))))
     };
 
     let (admin_port, app_port) = conductor_ports.ok_or("Conductor not running")?;

@@ -32,6 +32,10 @@ pub struct Marker {
     pub signatures: usize,
     pub revocations: usize,
     pub thumbnails: usize,
+    /// The identity was created on 1.7.0 or later: it never had a 0.6 line
+    /// and nothing was moved.
+    #[serde(default)]
+    pub born: bool,
 }
 
 pub fn marker(root: &Path) -> Option<Marker> {
@@ -42,6 +46,30 @@ pub fn marker(root: &Path) -> Option<Marker> {
 /// Whether this identity's records have moved (its writes go to 0.7).
 pub fn moved(root: &Path) -> bool {
     crate::paths::moved_07_path(root).exists()
+}
+
+/// Whether this identity was born on 1.7.0 (no 0.6 line, ever).
+pub fn born_on_07(root: &Path) -> bool {
+    marker(root).map(|m| m.born).unwrap_or(false)
+}
+
+/// Write the marker for an identity created here on 1.7.0 or later, before
+/// its first start: its writes go to 0.7 from the first one and no 0.6
+/// line is ever started for it.
+pub fn mark_born(root: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    let marker = Marker {
+        v: 1,
+        moved_at_ms: now_ms(),
+        vault_version: env!("CARGO_PKG_VERSION").to_string(),
+        private_records: 0,
+        signatures: 0,
+        revocations: 0,
+        thumbnails: 0,
+        born: true,
+    };
+    let bytes = serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?;
+    crate::vault::write_atomic(&crate::paths::moved_07_path(root), &bytes).map_err(|e| e.to_string())
 }
 
 /// What one pass did.
@@ -201,6 +229,7 @@ pub async fn run_pass(state: &Arc<AppState>, reason: &str) -> PassOutcome {
             signatures: out.signatures_06,
             revocations: out.revocations_carried,
             thumbnails: out.thumbnails_carried,
+            born: false,
         };
         match serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string()).and_then(|b| crate::vault::write_atomic(&crate::paths::moved_07_path(&root), &b).map_err(|e| e.to_string())) {
             Ok(()) => {
@@ -757,16 +786,184 @@ mod tests {
         println!("the move: first pass {:?}, {} s total", out.took_ms, started.elapsed().as_secs());
     }
 
+    /// One device of an identity born on 1.7.0: a real 0.7 lair and
+    /// conductor only, the 0.7 cells installed the way the Vault does it,
+    /// the born marker written before anything else.
+    async fn live_device_07(name: &str, admin_07: u16, seed: &str, conductor_seed: &[u8; 32], config: &crate::vault::VaultConfig) -> LivePair {
+        let auth = std::fs::read_to_string(manifest_dir().join("../scripts/run-test-instance.sh"))
+            .ok()
+            .and_then(|t| t.split("FLOWSTA_AUTH_MATERIAL=").nth(1).map(|r| r.split_whitespace().next().unwrap_or("").to_string()))
+            .unwrap_or_default();
+        let dir = PathBuf::from(format!("/tmp/fvb7-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pass = "live-test";
+        let origin = crate::conductor::node_origin_for_tests();
+        let resources = manifest_dir().join("resources");
+        let lair_07 = dir.join("l7");
+        let (mut lair_child_07, url_07) = crate::lair::start_lair_process_with(&lair_07, pass, "vault-lair-keystore-07").expect("start lair 0.7");
+        crate::lair::wait_for_lair_socket(&url_07, 15, &mut lair_child_07, &lair_07).await.expect("lair 0.7 socket");
+        let key_07 = {
+            let client = crate::lair::connect_to_lair_07(&url_07, pass).await.expect("connect lair 0.7");
+            crate::lair::import_seed_to_lair_07(&client, conductor_seed, "live-device-key").await.expect("import seed 0.7")
+        };
+        let d07 = dir.join("07");
+        let c07 = start_conductor(
+            &d07,
+            "vault-holochain-07-x86_64-unknown-linux-gnu",
+            &format!(
+                "data_root_path: '{d}/data'\nkeystore:\n  type: lair_server\n  connection_url: '{u}'\nadmin_interfaces:\n- driver:\n    type: websocket\n    port: {p}\n    allowed_origins: '{o}'\nnetwork:\n  bootstrap_url: https://bootstrap-staging-7.flowsta.com\n  relay_url: https://bootstrap-staging-7.flowsta.com./\n  base64_auth_material_bootstrap: \"{a}\"\n  base64_auth_material_relay: \"{a}\"\n  request_timeout_s: 240\ndb_sync_level: Normal\n",
+                d = d07.display(), u = url_07.replace('\'', "''"), p = admin_07, o = origin, a = auth,
+            ),
+        );
+        let app_07 = {
+            use holochain_client_07::AdminWebsocket;
+            let mut up = false;
+            for _ in 0..60 {
+                if AdminWebsocket::connect(format!("localhost:{}", admin_07), Some(crate::conductor::node_origin())).await.is_ok() {
+                    up = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            assert!(up, "the 0.7 admin interface");
+            crate::dna::install_dnas_07(admin_07, &resources, &key_07[..], Some(seed)).await.expect("install the 0.7 apps");
+            crate::dna::ensure_signing_coordinators_07(admin_07, &resources).await.expect("signing 1.5 coordinator rev");
+            crate::dna::setup_app_interface_07(admin_07).await.expect("0.7 app interface")
+        };
+        let state = Arc::new(AppState::new(dir.join("vault")));
+        std::fs::create_dir_all(state.identity_root()).unwrap();
+        mark_born(&state.identity_root()).expect("the born marker");
+        *state.vault_config.lock().unwrap() = Some(config.clone());
+        *state.test_conductor_ports_07.lock().unwrap() = Some((admin_07, app_07));
+        LivePair { state, children: vec![c07], lairs: vec![lair_child_07], dir }
+    }
+
+    async fn eventually<F, Fut>(what: &str, seconds: u64, mut check: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let started = std::time::Instant::now();
+        loop {
+            if check().await {
+                println!("  {} after {}s", what, started.elapsed().as_secs());
+                return;
+            }
+            assert!(started.elapsed().as_secs() < seconds, "not within {}s: {}", seconds, what);
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "starts two real 0.7 conductors and uses the staging rendezvous"]
+    async fn live_two_devices_born_on_0_7_share_records_and_pieces_with_no_0_6_line() {
+        let seed = format!("born-{}", hex::encode(crate::key_derivation::new_conductor_seed())[..16].to_string());
+        let identity_public = crate::key_derivation::public_key_of_seed(&[29u8; 32]);
+        let mut config: crate::vault::VaultConfig = serde_json::from_str(
+            r#"{"agent_pub_key":"uhCAkTest","did":"did:flowsta:uhCAkTest","installed_app_ids":[],"created_at":1}"#,
+        )
+        .unwrap();
+        config.data_key = Some(vec![36u8; 32]);
+        config.hosting_model = Some("device-hosted".into());
+        config.agent_pub_key_raw_b64 = Some(crate::key_derivation::base64_standard_encode(
+            &crate::key_derivation::construct_agent_pub_key_bytes(&identity_public),
+        ));
+        // Two devices of one identity, each with its own conductor key.
+        let mut config_a = config.clone();
+        config_a.conductor_seed = Some(vec![30u8; 32]);
+        let mut config_b = config.clone();
+        config_b.conductor_seed = Some(vec![31u8; 32]);
+        config_b.joined_existing = true;
+        let a = live_device_07("a", 46063, &seed, &[30u8; 32], &config_a).await;
+        let b = live_device_07("b", 46064, &seed, &[31u8; 32], &config_b).await;
+
+        // No 0.6 line, by the identity's own marker; writes go to 0.7 from the first.
+        for d in [&a, &b] {
+            assert!(!crate::conductor::line_06_wanted(&d.state.identity_root()));
+            assert_eq!(crate::hc::active_line(&d.state), Line::V07);
+            assert!(crate::hc::line_ports(&d.state, Line::V06).is_err());
+            let out = run_pass(&d.state, "born").await;
+            assert_eq!(out.skipped.as_deref(), Some("the 0.6 line is not running (nothing to carry from)"));
+        }
+        let status = status(&a.state);
+        assert!(status.moved && status.marker.as_ref().map(|m| m.born).unwrap_or(false));
+
+        // Records on 0.7 only, from both devices, reaching each other.
+        crate::sealed::sealed_store_inner(&a.state, "user_profile".into(), serde_json::json!({ "name": "born here" }), vec![], 1_000).await.unwrap();
+        assert!(crate::devices::publish_own(&a.state).await.unwrap());
+        assert!(crate::devices::publish_own(&b.state).await.unwrap());
+        assert_eq!(crate::sealed::sealed_held_on(&a.state, Line::V07).await.unwrap().len(), 2, "the profile and a's device record");
+        let install_a = crate::paths::install_id(&a.state.data_dir).unwrap();
+        let install_b = crate::paths::install_id(&b.state.data_dir).unwrap();
+        let own_a = crate::devices::list(&a.state).await.unwrap();
+        assert_eq!(own_a[0].generation, "holochain-0.7", "a device record names the line it writes on");
+
+        // The lane opens on the one line there is, and the two devices tell
+        // each other directly over it.
+        let lane_a = crate::backup_lane::Lane::open(&a.state).await.expect("a's lane");
+        let lane_b = crate::backup_lane::Lane::open(&b.state).await.expect("b's lane");
+        assert!(lane_a.alive().await && lane_b.alive().await);
+        assert_eq!(lane_a.line_for("holochain-0.7"), Line::V07);
+        assert_eq!(lane_a.line_for("holochain-0.6"), Line::V07, "no 0.6 end: whatever end there is");
+        let started = std::time::Instant::now();
+        loop {
+            crate::devices::announce_to(&a.state, &lane_a, &lane_b.me, Line::V07).await;
+            crate::sealed::forget_recent_versions();
+            let b_lists_a = crate::devices::list(&b.state).await.map(|l| l.iter().any(|d| d.install_id == install_a)).unwrap_or(false);
+            if b_lists_a {
+                println!("  b heard a directly over the 0.7 lane after {}s", started.elapsed().as_secs());
+                break;
+            }
+            assert!(started.elapsed().as_secs() < 300, "b did not hear a over the 0.7 lane within 300 s");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        // And the private network itself carries a's profile to b.
+        eventually("b holds a's profile through the 0.7 private network", 300, || async {
+            crate::sealed::forget_recent_versions();
+            crate::sealed::sealed_list_inner(&b.state).await.map(|l| l.iter().any(|r| r.entry_type == "user_profile")).unwrap_or(false)
+        })
+        .await;
+        let _ = install_b;
+
+        // Sign It on a born identity: the 0.7 cell, read through the path the
+        // app uses when there is no 0.6 line.
+        assert!(crate::commands::get_my_own_signatures_inner(&a.state).await.unwrap().is_empty());
+        let (c07, r07) = crate::signing_07::signing_client(&a.state, Line::V07).await.unwrap();
+        let s1 = sign_on_06(&c07, &r07, 7, 70_000, None).await;
+        let own = crate::commands::get_my_own_signatures_inner(&a.state).await.unwrap();
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0]["action_hash"], hex::encode(&s1));
+        assert_eq!(own[0]["signing_app_id"], "flowsta_signing_v1_5@holochain-0.7");
+        println!("born on 0.7: both devices, {} s total", started.elapsed().as_secs());
+    }
+
     #[test]
     fn the_marker_round_trips() {
         let dir = std::env::temp_dir().join(format!("fv-move-marker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(!moved(&dir));
-        let m = Marker { v: 1, moved_at_ms: 5, vault_version: "1.7.0".into(), private_records: 3, signatures: 2, revocations: 1, thumbnails: 0 };
+        let m = Marker { v: 1, moved_at_ms: 5, vault_version: "1.7.0".into(), private_records: 3, signatures: 2, revocations: 1, thumbnails: 0, born: false };
         crate::vault::write_atomic(&crate::paths::moved_07_path(&dir), &serde_json::to_vec(&m).unwrap()).unwrap();
         assert!(moved(&dir));
         assert_eq!(marker(&dir), Some(m));
+        assert!(!born_on_07(&dir), "a moved identity had a 0.6 line");
+        // A pre-1.7.0 marker shape (no `born`) reads as not born.
+        std::fs::write(crate::paths::moved_07_path(&dir), br#"{"v":1,"moved_at_ms":1,"vault_version":"1.7.0","private_records":0,"signatures":0,"revocations":0,"thumbnails":0}"#).unwrap();
+        assert!(!born_on_07(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_identity_born_on_1_7_0_never_wants_a_0_6_line() {
+        let dir = std::env::temp_dir().join(format!("fv-move-born-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(crate::conductor::line_06_wanted(&dir), "an identity folder without a marker is one from before 1.7.0 (or a restore): the 0.6 line runs");
+        mark_born(&dir).unwrap();
+        assert!(born_on_07(&dir));
+        assert!(moved(&dir), "its writes go to 0.7 from the first one");
+        assert!(!crate::conductor::line_06_wanted(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -472,7 +472,10 @@ pub fn start(state: std::sync::Arc<crate::commands::AppState>) {
                 }
             }
             last_tick = now;
-            let admin_port = state.conductor_handle.lock().unwrap().as_ref().map(|h| h.admin_port);
+            // The keeper speaks the 0.6 line's admin API and rendezvous
+            // format; an identity with no 0.6 line is left to its 0.7
+            // conductor's own bootstrap (a 0.7 keeper is a follow-up).
+            let admin_port = state.conductor_handle.lock().unwrap().as_ref().and_then(|h| h.admin_port_06());
             let Some(admin_port) = admin_port else { continue };
             let origin = crate::conductor::node_origin();
             if let Err(e) = keeper.run_once(admin_port, &origin).await {

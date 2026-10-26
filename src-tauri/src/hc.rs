@@ -79,7 +79,7 @@ pub fn line_ports(state: &AppState, line: Line) -> Result<(u16, u16), String> {
     let handle = state.conductor_handle.lock().unwrap();
     let h = handle.as_ref().ok_or("Conductor not running")?;
     match line {
-        Line::V06 => Ok((h.admin_port, h.app_port)),
+        Line::V06 => h.ports_06().ok_or_else(|| "The 0.6 line is not running".to_string()),
         Line::V07 => {
             let l = h.line_07.as_ref().ok_or("The 0.7 line is not running")?;
             Ok((l.admin_port, l.app_port))

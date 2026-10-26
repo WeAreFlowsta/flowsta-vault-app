@@ -336,17 +336,6 @@ pub(crate) async fn connect_sealed_client(state: &Arc<AppState>, line: Line) -> 
     }
 }
 
-/// The 0.6 line's ports (the backup lane still speaks 0.6 directly).
-pub(crate) fn conductor_ports(state: &AppState) -> Result<(u16, u16), String> {
-    #[cfg(test)]
-    if let Some(ports) = *state.test_conductor_ports.lock().unwrap() {
-        return Ok(ports);
-    }
-    let handle = state.conductor_handle.lock().unwrap();
-    let h = handle.as_ref().ok_or("Conductor not running")?;
-    Ok((h.admin_port, h.app_port))
-}
-
 fn vault_data_key(state: &AppState) -> Result<[u8; 32], String> {
     let config = state.vault_config.lock().unwrap();
     let cfg = config.as_ref().ok_or("vault_locked")?;
@@ -1823,7 +1812,7 @@ mod tests {
         let started = std::time::Instant::now();
         while !crate::devices::was_heard(&lane_a.me) {
             assert!(started.elapsed().as_secs() < 240, "B never heard from A directly within 240 s");
-            crate::devices::announce_to(&a.state, &lane_a, &lane_b.me).await;
+            crate::devices::announce_to(&a.state, &lane_a, &lane_b.me, Line::V06).await;
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
         println!("  B heard A directly after {} s", started.elapsed().as_secs());
@@ -1868,7 +1857,7 @@ mod tests {
         let mut fetched = None;
         while fetched.is_none() {
             assert!(started.elapsed().as_secs() < 300, "the file did not arrive within 300 s");
-            match lane_b.fetch(&root_b, &lane_a.me, "harness_app", "recovery", slot.size, &slot.sha256, true, |done, total| println!("  {} of {} pieces", done, total)).await {
+            match lane_b.fetch(&root_b, &lane_a.me, Line::V06, "harness_app", "recovery", slot.size, &slot.sha256, true, |done, total| println!("  {} of {} pieces", done, total)).await {
                 Ok(bytes) => fetched = Some(bytes),
                 Err(e) => {
                     println!("  not yet ({}); the devices may not have found each other", e);
@@ -1888,7 +1877,7 @@ mod tests {
         assert_eq!(meta.label.as_deref(), Some("recovery"));
 
         // A file the other device does not hold: told at once, nothing kept.
-        let missing = lane_b.fetch(&root_b, &lane_a.me, "harness_app", "nothing", 10, &"0".repeat(64), true, |_, _| {}).await;
+        let missing = lane_b.fetch(&root_b, &lane_a.me, Line::V06, "harness_app", "nothing", 10, &"0".repeat(64), true, |_, _| {}).await;
         assert_eq!(missing.err().as_deref(), Some("the other device no longer holds it"));
     }
 

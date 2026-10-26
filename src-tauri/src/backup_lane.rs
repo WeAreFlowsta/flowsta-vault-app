@@ -11,8 +11,8 @@
 //! follows how long the answers have been taking.
 
 use crate::commands::AppState;
-use holochain_client::{AppWebsocket, ZomeCallTarget};
-use holochain_types::prelude::{AgentPubKey, ExternIO};
+use crate::hc::{AppClient, Line};
+use holochain_types::prelude::AgentPubKey;
 use holochain_types::signal::Signal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -101,41 +101,84 @@ pub fn pieces_held(partial: &Path, total: u32) -> u32 {
     whole
 }
 
-/// One device's end of the lane, for as long as its conductor runs.
-pub struct Lane {
-    ws: AppWebsocket,
+/// One end of the lane on one line: the private cell's client and role.
+struct End {
+    line: Line,
+    client: AppClient,
     role: String,
-    /// The agent this device runs in the private network.
+}
+
+/// One device's end of the lane, for as long as its conductors run: an end
+/// on every line that runs here (0.6 and 0.7 while an identity has both;
+/// 0.7 alone for one born on 1.7.0). A piece goes out on the line the
+/// other device listens on (its device record's generation) and is
+/// answered on the line it arrived on.
+pub struct Lane {
+    ends: Vec<End>,
+    /// The agent this device runs in the private network (the same key on
+    /// both lines).
     pub me: AgentPubKey,
     waiting: Mutex<BTreeMap<String, tokio::sync::mpsc::UnboundedSender<Piece>>>,
     /// The last file served, so a file is read once for all its windows.
     serving: Mutex<Option<(String, Arc<Vec<u8>>)>>,
 }
 
-impl Lane {
-    /// Open the lane: let sibling devices deliver pieces, and listen.
-    pub async fn open(state: &Arc<AppState>) -> Result<Arc<Lane>, String> {
-        let (admin_port, app_port) = crate::sealed::conductor_ports(state)?;
-        let (ws, role) = crate::sealed::connect_sealed_app_ws(state, admin_port, app_port).await?;
-        let lane = Arc::new(Lane {
-            me: ws.my_pub_key.clone(),
-            ws,
-            role,
-            waiting: Mutex::new(BTreeMap::new()),
-            serving: Mutex::new(None),
-        });
-        lane.call("ensure_piece_grant", ExternIO::encode(()).map_err(|e| e.to_string())?).await?;
+/// A piece with the line it arrived on.
+struct Arrived {
+    line: Line,
+    from: AgentPubKey,
+    piece: Piece,
+}
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PieceFrom>();
-        lane.ws
-            .on_signal(move |signal| {
-                if let Signal::App { signal, .. } = signal {
-                    if let Ok(arrived) = signal.into_inner().decode::<PieceFrom>() {
-                        let _ = tx.send(arrived);
-                    }
+impl Lane {
+    /// Open the lane: let sibling devices deliver pieces, and listen, on
+    /// every line that runs.
+    pub async fn open(state: &Arc<AppState>) -> Result<Arc<Lane>, String> {
+        let mut ends = Vec::new();
+        for line in [Line::V06, Line::V07] {
+            if crate::hc::line_ports(state, line).is_err() {
+                continue;
+            }
+            match crate::sealed::connect_sealed_client(state, line).await {
+                Ok((client, role)) => ends.push(End { line, client, role }),
+                Err(e) => log::info!("[backups] the lane did not open on the {} line: {}", line, e.chars().take(120).collect::<String>()),
+            }
+        }
+        let first = ends.first().ok_or("no private cell reachable on any line")?;
+        let me = match &first.client {
+            AppClient::V06(ws) => ws.my_pub_key.clone(),
+            AppClient::V07(ws) => AgentPubKey::from_raw_39(ws.my_pub_key.get_raw_39().to_vec()),
+        };
+        let lane = Arc::new(Lane { ends, me, waiting: Mutex::new(BTreeMap::new()), serving: Mutex::new(None) });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Arrived>();
+        for end in &lane.ends {
+            lane.call_on(end.line, "ensure_piece_grant", rmp_serde::to_vec_named(&()).map_err(|e| e.to_string())?).await?;
+            let tx = tx.clone();
+            let line = end.line;
+            match &end.client {
+                AppClient::V06(ws) => {
+                    ws.on_signal(move |signal| {
+                        if let Signal::App { signal, .. } = signal {
+                            if let Ok(arrived) = signal.into_inner().decode::<PieceFrom>() {
+                                let _ = tx.send(Arrived { line, from: arrived.from, piece: arrived.piece });
+                            }
+                        }
+                    })
+                    .await;
                 }
-            })
-            .await;
+                AppClient::V07(ws) => {
+                    ws.on_signal(move |signal| {
+                        if let holochain_types_07::signal::Signal::App { signal, .. } = signal {
+                            if let Ok(arrived) = signal.into_inner().decode::<PieceFrom>() {
+                                let _ = tx.send(Arrived { line, from: arrived.from, piece: arrived.piece });
+                            }
+                        }
+                    })
+                    .await;
+                }
+            }
+        }
+        drop(tx);
         let weak = Arc::downgrade(&lane);
         let state = state.clone();
         tokio::spawn(async move {
@@ -145,7 +188,7 @@ impl Lane {
                     "want" => {
                         let root = state.identity_root();
                         tokio::spawn(async move {
-                            if let Err(e) = lane.serve(&root, arrived.from, arrived.piece).await {
+                            if let Err(e) = lane.serve(&root, arrived.from, arrived.piece, arrived.line).await {
                                 log::info!("[backups] a piece was not sent: {}", e);
                             }
                         });
@@ -157,7 +200,7 @@ impl Lane {
                     }
                     // A sibling says it is here, with its record: the list
                     // shows it at once, and a sibling new to this device
-                    // hears back about this one.
+                    // hears back about this one, on the line it spoke on.
                     "device" => match crate::sealed::accept_device_piece(&state, &arrived.piece.data) {
                         Ok(got) => {
                             crate::devices::heard_from(&arrived.from);
@@ -171,7 +214,8 @@ impl Lane {
                                 log::info!("[devices] a sibling's record arrived directly ({}...)", got.device.as_deref().unwrap_or("").chars().take(8).collect::<String>());
                                 let state = state.clone();
                                 let to = arrived.from.clone();
-                                tokio::spawn(async move { crate::devices::announce_to(&state, &lane, &to).await });
+                                let line = arrived.line;
+                                tokio::spawn(async move { crate::devices::announce_to(&state, &lane, &to, line).await });
                             }
                         }
                         Err(e) => log::info!("[devices] a device piece was not used: {}", e),
@@ -183,33 +227,50 @@ impl Lane {
         Ok(lane)
     }
 
-    async fn call(&self, function: &str, payload: ExternIO) -> Result<ExternIO, String> {
-        self.ws
-            .call_zome(ZomeCallTarget::RoleName(self.role.clone()), "private_data".into(), function.into(), payload)
-            .await
-            .map_err(|e| format!("{} failed: {:?}", function, e))
-    }
-
-    /// Whether the conductor still answers on this lane.
-    pub async fn alive(&self) -> bool {
-        match ExternIO::encode(()) {
-            Ok(nothing) => self.call("ensure_piece_grant", nothing).await.is_ok(),
-            Err(_) => false,
+    /// The line a sibling device listens on, from its record's generation:
+    /// that line when this lane has an end on it, else whatever end there is.
+    pub fn line_for(&self, generation: &str) -> Line {
+        let wanted = if generation == Line::V07.generation() { Line::V07 } else { Line::V06 };
+        if self.ends.iter().any(|e| e.line == wanted) {
+            wanted
+        } else {
+            self.ends.first().map(|e| e.line).unwrap_or(wanted)
         }
     }
 
+    fn end(&self, line: Line) -> &End {
+        self.ends.iter().find(|e| e.line == line).or_else(|| self.ends.first()).expect("a lane has at least one end")
+    }
+
+    async fn call_on(&self, line: Line, function: &str, payload: Vec<u8>) -> Result<Vec<u8>, String> {
+        let end = self.end(line);
+        end.client.call_zome(&end.role, "private_data", function, payload).await
+    }
+
+    /// Whether every conductor this lane is open on still answers.
+    pub async fn alive(&self) -> bool {
+        let Ok(nothing) = rmp_serde::to_vec_named(&()) else { return false };
+        for end in &self.ends {
+            if self.call_on(end.line, "ensure_piece_grant", nothing.clone()).await.is_err() {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Send this device's sealed device record to a sibling.
-    pub async fn send_device(&self, to: &AgentPubKey, sealed_record: Vec<u8>) -> Result<(), String> {
-        self.send(to, Piece { id: "device".into(), kind: "device".into(), seq: 0, total: 1, data: sealed_record }).await
+    pub async fn send_device(&self, to: &AgentPubKey, sealed_record: Vec<u8>, line: Line) -> Result<(), String> {
+        self.send(to, Piece { id: "device".into(), kind: "device".into(), seq: 0, total: 1, data: sealed_record }, line).await
     }
 
-    async fn send(&self, to: &AgentPubKey, piece: Piece) -> Result<(), String> {
-        let input = ExternIO::encode(SendPieceInput { to: to.clone(), piece }).map_err(|e| e.to_string())?;
-        self.call("send_piece", input).await.map(|_| ())
+    async fn send(&self, to: &AgentPubKey, piece: Piece, line: Line) -> Result<(), String> {
+        let input = rmp_serde::to_vec_named(&SendPieceInput { to: to.clone(), piece }).map_err(|e| e.to_string())?;
+        self.call_on(line, "send_piece", input).await.map(|_| ())
     }
 
-    /// Answer a sibling device's request with the pieces it asked for.
-    async fn serve(&self, identity_root: &Path, to: AgentPubKey, request: Piece) -> Result<(), String> {
+    /// Answer a sibling device's request with the pieces it asked for, on
+    /// the line it asked on.
+    async fn serve(&self, identity_root: &Path, to: AgentPubKey, request: Piece, line: Line) -> Result<(), String> {
         let want: Want = serde_json::from_slice(&request.data).map_err(|e| e.to_string())?;
         let cached = self.serving.lock().unwrap().as_ref().filter(|(sha, _)| *sha == want.sha256).map(|(_, b)| b.clone());
         let bytes = match cached {
@@ -221,12 +282,12 @@ impl Lane {
             }),
         };
         let Some(bytes) = bytes else {
-            return self.send(&to, Piece { id: want.sha256, kind: "none".into(), seq: 0, total: 0, data: Vec::new() }).await;
+            return self.send(&to, Piece { id: want.sha256, kind: "none".into(), seq: 0, total: 0, data: Vec::new() }, line).await;
         };
         let total = pieces_of(bytes.len() as u64);
         for seq in want.from_seq..want.from_seq.saturating_add(want.count.min(WINDOW)).min(total) {
             let piece = Piece { id: want.sha256.clone(), kind: "data".into(), seq, total, data: piece_of(&bytes, seq).to_vec() };
-            self.send(&to, piece).await?;
+            self.send(&to, piece, line).await?;
         }
         Ok(())
     }
@@ -242,6 +303,7 @@ impl Lane {
         &self,
         identity_root: &Path,
         from: &AgentPubKey,
+        line: Line,
         client_id: &str,
         label: &str,
         size: u64,
@@ -276,7 +338,7 @@ impl Lane {
                     }
                     let want = Want { client_id: client_id.into(), label: label.into(), sha256: sha256.into(), from_seq: next, count };
                     let request = Piece { id: sha256.into(), kind: "want".into(), seq: next, total, data: serde_json::to_vec(&want).map_err(|e| e.to_string())? };
-                    self.send(from, request).await?;
+                    self.send(from, request, line).await?;
                     let started = std::time::Instant::now();
                     let wait = if heard { next_wait(last_window) } else { FIRST_WAIT };
                     while (window.len() as u32) < count {
