@@ -41,21 +41,14 @@ export interface MoveStatus {
   line: "V06" | "V07";
 }
 
-/** One line about the move, or nothing to say. */
-export function moveNote(m: MoveStatus | null, now = Date.now()): string {
+/** One line while a move is running or stuck; nothing once it is done (the
+ *  move is an event: the Activity page carries it, with the counts). */
+export function moveNote(m: MoveStatus | null): string {
   if (!m) return "";
   // An identity created on 1.7.0 or later was never anywhere else, and one
   // restored or added on this version had nothing here to move: nothing to say.
   if (m.marker?.born || m.marker?.restored) return "";
-  if (m.moved && m.marker) {
-    const d = new Date(m.marker.moved_at_ms);
-    const when = d.toDateString() === new Date(now).toDateString()
-      ? `today at ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-      : `on ${d.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" })}`;
-    const parts = [`${m.marker.private_records.toLocaleString()} private record${m.marker.private_records === 1 ? "" : "s"}`];
-    if (m.marker.signatures > 0) parts.push(`${m.marker.signatures.toLocaleString()} signature${m.marker.signatures === 1 ? "" : "s"}`);
-    return `Your records moved to the new network ${when}: ${parts.join(", ")}.`;
-  }
+  if (m.moved) return "";
   if (m.running || (m.last_pass && !m.last_pass.error && !m.last_pass.skipped)) {
     const p = m.last_pass;
     const done = p ? p.private_present + p.private_written : 0;
@@ -369,13 +362,13 @@ export const DevicesTab = component$(() => {
       <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
         <div class="mb-4 flex items-center justify-between gap-4">
           <h3 class="text-lg font-semibold text-white">Your devices</h3>
-          {moveNote(moveStatus.value) && (
-            <p class="mt-1 text-xs text-gray-400" data-testid="move-note">{moveNote(moveStatus.value)}</p>
-          )}
           {!adding.value && (
             <GlassButton testId="device-add" onClick$={() => { adding.value = true; error.value = ""; added.value = ""; }}>Add a device</GlassButton>
           )}
         </div>
+        {moveNote(moveStatus.value) && (
+          <p class="-mt-2 mb-4 text-xs text-gray-400" data-testid="move-note">{moveNote(moveStatus.value)}</p>
+        )}
 
         {adding.value && (
           <div class="mb-5 rounded-lg border border-gray-700 bg-gray-900/40 p-4">
