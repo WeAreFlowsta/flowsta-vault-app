@@ -36,6 +36,22 @@ pub struct Marker {
     /// and nothing was moved.
     #[serde(default)]
     pub born: bool,
+    /// The signatures made by the web key this identity came from (a
+    /// migrated account) have been carried to the 0.7 network, or there
+    /// was no web key. Until true the 0.6 line is still needed.
+    #[serde(default)]
+    pub web_era_carried: bool,
+    /// How many web-era records were carried (for the words).
+    #[serde(default)]
+    pub web_era_signatures: usize,
+}
+
+/// Rewrite the marker in place (the fields a later pass learns).
+fn update_marker(root: &Path, change: impl FnOnce(&mut Marker)) -> Result<(), String> {
+    let mut m = marker(root).ok_or("no marker")?;
+    change(&mut m);
+    let bytes = serde_json::to_vec_pretty(&m).map_err(|e| e.to_string())?;
+    crate::vault::write_atomic(&crate::paths::moved_07_path(root), &bytes).map_err(|e| e.to_string())
 }
 
 pub fn marker(root: &Path) -> Option<Marker> {
@@ -67,6 +83,8 @@ pub fn mark_born(root: &Path) -> Result<(), String> {
         revocations: 0,
         thumbnails: 0,
         born: true,
+        web_era_carried: true,
+        web_era_signatures: 0,
     };
     let bytes = serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?;
     crate::vault::write_atomic(&crate::paths::moved_07_path(root), &bytes).map_err(|e| e.to_string())
@@ -92,6 +110,11 @@ pub struct PassOutcome {
     pub revocations_carried: usize,
     pub thumbnails_carried: usize,
     pub signing_complete: bool,
+    /// Records the web key this identity came from signed on 0.6 (a
+    /// migrated account), and how many are on 0.7 after this pass.
+    pub web_era_06: usize,
+    pub web_era_carried: usize,
+    pub web_era_complete: bool,
     /// This pass wrote the marker.
     pub flipped: bool,
     pub error: Option<String>,
@@ -226,6 +249,34 @@ pub async fn run_pass(state: &Arc<AppState>, reason: &str) -> PassOutcome {
         }
     }
 
+    // ── The web key's signatures (a migrated account) ──
+    // Carried by this device as witness; the originals stay where they are.
+    // Does not hold up the flip: the 0.6 line keeps running until this is
+    // done, and the step runs again every round until then.
+    let web_key = state.linked_web_agent_key.lock().unwrap().clone();
+    let web_era_done_before = marker(&root).map(|m| m.web_era_carried).unwrap_or(false);
+    match web_key.as_deref().filter(|_| !web_era_done_before) {
+        None => out.web_era_complete = true,
+        Some(key_b64) => match web_era_pass(state, key_b64, &mut out).await {
+            Ok(()) => {
+                if out.web_era_complete && already_moved {
+                    let (n,) = (out.web_era_carried,);
+                    if let Err(e) = update_marker(&root, |m| {
+                        m.web_era_carried = true;
+                        m.web_era_signatures = n;
+                    }) {
+                        out.error = Some(format!("the marker was not updated: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                // Not fatal to the pass: the own records and the flip stand.
+                log::info!("[move] web-era signatures not carried this pass ({}): {}", out.reason, e.chars().take(160).collect::<String>());
+                out.web_era_complete = false;
+            }
+        },
+    }
+
     // ── The flip ──
     if !already_moved && out.private_complete && out.signing_complete {
         let marker = Marker {
@@ -237,6 +288,8 @@ pub async fn run_pass(state: &Arc<AppState>, reason: &str) -> PassOutcome {
             revocations: out.revocations_carried,
             thumbnails: out.thumbnails_carried,
             born: false,
+            web_era_carried: out.web_era_complete,
+            web_era_signatures: out.web_era_carried,
         };
         match serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string()).and_then(|b| crate::vault::write_atomic(&crate::paths::moved_07_path(&root), &b).map_err(|e| e.to_string())) {
             Ok(()) => {
@@ -269,9 +322,10 @@ fn finish(root: &Path, started: std::time::Instant, out: &mut PassOutcome) {
             out.signatures_carried, out.signatures_06, e
         ),
         (None, true) => log::info!(
-            "[move] identity {}: MOVED to the 0.7 line in {} s - private {}/{} ({} written this pass), signatures {}/{}, revocations {}, thumbnails {}",
+            "[move] identity {}: MOVED to the 0.7 line in {} s - private {}/{} ({} written this pass), signatures {}/{}, revocations {}, thumbnails {}, web-era {}/{}{}",
             id, out.took_ms / 1000, out.private_present + out.private_written, out.private_06, out.private_written,
-            out.signatures_carried, out.signatures_06, out.revocations_carried, out.thumbnails_carried
+            out.signatures_carried, out.signatures_06, out.revocations_carried, out.thumbnails_carried,
+            out.web_era_carried, out.web_era_06, if out.web_era_complete { "" } else { " (not complete yet)" }
         ),
         (None, false) if out.private_written > 0 || out.signatures_carried > 0 => log::info!(
             "[move] identity {}: pass ({}) in {} s - private {}/{} ({} written), signatures {}/{}{}",
@@ -366,6 +420,41 @@ async fn signing_pass(state: &Arc<AppState>, out: &mut PassOutcome) -> Result<()
         }
     }
     out.signing_complete = out.signatures_carried == out.signatures_06;
+    Ok(())
+}
+
+/// The records the web key signed on the 0.6 network, carried to 0.7 with
+/// their revocations and thumbnails, this device as witness. Idempotent per
+/// witness (the DNA); two devices carrying the same record are one record
+/// at read time (`signing_07::merge_own`, the API's dedupe).
+async fn web_era_pass(state: &Arc<AppState>, web_key_b64: &str, out: &mut PassOutcome) -> Result<(), String> {
+    let raw = crate::commands::base64_standard_decode(web_key_b64).map_err(|_| "the cached web key does not decode".to_string())?;
+    if raw.len() != 39 {
+        return Err(format!("the cached web key is {} bytes, expected 39", raw.len()));
+    }
+    let web_key = holochain_types::prelude::AgentPubKey::from_raw_39(raw);
+    let (c06, r06) = match crate::signing_07::signing_client(state, Line::V06).await {
+        Ok(c) => c,
+        Err(e) if e.contains("not installed") || e.contains("not running") => {
+            // No 0.6 signing cell here: nothing to read the web key's records from.
+            return Err(e);
+        }
+        Err(e) => return Err(e),
+    };
+    let (c07, r07) = crate::signing_07::signing_client(state, Line::V07).await?;
+    let theirs = crate::signing_07::records_for_agent_06(&c06, &r06, &web_key).await?;
+    out.web_era_06 = theirs.len();
+    for (record, _entry) in &theirs {
+        let on_07 = crate::signing_07::carry_signature(&c07, &r07, record).await?;
+        out.web_era_carried += 1;
+        for rev in crate::signing_07::revocations_network_06(&c06, &r06, &record.action_hash).await? {
+            crate::signing_07::carry_revocation(&c07, &r07, &on_07, &rev).await?;
+        }
+        if let Some(thumb) = crate::signing_07::thumbnail_06(&c06, &r06, &record.action_hash).await? {
+            crate::signing_07::carry_thumbnail(&c07, &r07, &on_07, &thumb).await?;
+        }
+    }
+    out.web_era_complete = out.web_era_carried == out.web_era_06;
     Ok(())
 }
 
@@ -598,6 +687,12 @@ mod tests {
     }
 
     #[derive(Serialize)]
+    struct RevokeInput {
+        signature_action: holochain_types::prelude::ActionHash,
+        reason: Option<String>,
+    }
+
+    #[derive(Serialize)]
     struct SignAndCreate {
         file_hash: Vec<u8>,
         signed_at: i64,
@@ -643,11 +738,14 @@ mod tests {
         .unwrap();
         config.data_key = Some(vec![35u8; 32]);
         config.hosting_model = Some("device-hosted".into());
+        config.private_network_seed = Some(seed.clone());
         config.agent_pub_key_raw_b64 = Some(crate::key_derivation::base64_standard_encode(
             &crate::key_derivation::construct_agent_pub_key_bytes(&identity_public),
         ));
-        // This device's conductor key: the seed both key stores hold.
-        let conductor_seed = [28u8; 32];
+        // This device's conductor key: the seed both key stores hold. A fresh
+        // key every run: the signing networks are the shared staging ones,
+        // and a key reused across runs gets its earlier records gossiped back.
+        let conductor_seed = crate::key_derivation::new_conductor_seed();
         config.conductor_seed = Some(conductor_seed.to_vec());
         let pair = live_pair("a", 46061, 46062, &seed, &conductor_seed, &config).await;
         let state = &pair.state;
@@ -682,11 +780,6 @@ mod tests {
         let s1 = sign_on_06(&c06, &r06, 1, 10_000, None).await;
         let s2 = sign_on_06(&c06, &r06, 2, 20_000, Some(s1.clone())).await;
         let s3 = sign_on_06(&c06, &r06, 3, 30_000, None).await;
-        #[derive(Serialize)]
-        struct RevokeInput {
-            signature_action: holochain_types::prelude::ActionHash,
-            reason: Option<String>,
-        }
         c06.call_zome(&r06, "signing", "revoke_signature", rmp_serde::to_vec_named(&RevokeInput { signature_action: holochain_types::prelude::ActionHash::from_raw_39(s3.clone()), reason: Some("wrong file".into()) }).unwrap())
             .await
             .expect("revoke on 0.6");
@@ -699,11 +792,47 @@ mod tests {
             .await
             .expect("thumbnail on 0.6");
 
+        // The web key this identity "migrated from": another agent on the
+        // same 0.6 conductor, with its own signing v1.4 cell, two records
+        // and a revocation - cached the way a migrated Vault caches it.
+        let (web_key_b64, w1, w2) = {
+            use holochain_client::{AdminWebsocket, InstallAppPayload};
+            let (admin_06, app_06) = crate::hc::line_ports(state, Line::V06).unwrap();
+            let admin = AdminWebsocket::connect(format!("localhost:{}", admin_06), Some(crate::conductor::node_origin())).await.unwrap();
+            let web_key = admin.generate_agent_pub_key().await.unwrap();
+            let app_id = "flowsta_signing_v1_4_web".to_string();
+            admin
+                .install_app(InstallAppPayload {
+                    source: holochain_types::prelude::AppBundleSource::Path(manifest_dir().join("resources").join("flowsta_signing_v1_4_happ.happ")),
+                    agent_key: Some(web_key.clone()),
+                    installed_app_id: Some(app_id.clone()),
+                    network_seed: None,
+                    roles_settings: None,
+                    ignore_genesis_failure: false,
+                })
+                .await
+                .expect("the web key's signing cell");
+            admin.enable_app(app_id.clone()).await.unwrap();
+            let apps = admin.list_apps(None).await.unwrap();
+            let app = apps.iter().find(|a| a.installed_app_id == app_id).unwrap();
+            let (ws, role) = crate::commands::connect_signing_app_ws(state, &admin, app_06, app).await.expect("the web cell's client");
+            let web = crate::hc::AppClient::V06(ws);
+            let w1 = sign_on_06(&web, &role, 21, 50_000, None).await;
+            let w2 = sign_on_06(&web, &role, 22, 60_000, None).await;
+            web.call_zome(&role, "signing", "revoke_signature", rmp_serde::to_vec_named(&RevokeInput { signature_action: holochain_types::prelude::ActionHash::from_raw_39(w2.clone()), reason: Some("web-era revocation".into()) }).unwrap())
+                .await
+                .expect("revoke on the web cell");
+            (crate::key_derivation::base64_standard_encode(web_key.get_raw_39()), w1, w2)
+        };
+        *state.linked_web_agent_key.lock().unwrap() = Some(web_key_b64.clone());
+
         // ── The pass ──
         let started = std::time::Instant::now();
         let out = run_pass(state, "test").await;
         println!("first pass in {:?}: {:#?}", started.elapsed(), out);
         assert_eq!(out.error, None);
+        assert_eq!((out.web_era_06, out.web_era_carried), (2, 2), "the web key's two records carried by this device");
+        assert!(out.web_era_complete);
         assert_eq!(out.private_06, 43);
         assert_eq!(out.private_written, 43);
         assert!(out.private_complete);
@@ -716,6 +845,29 @@ mod tests {
         assert!(moved(&root));
         let m = marker(&root).unwrap();
         assert_eq!((m.private_records, m.signatures, m.revocations, m.thumbnails), (43, 3, 1, 1));
+        assert!(m.web_era_carried && m.web_era_signatures == 2, "the marker records the web-era carry");
+        let web_key = holochain_types::prelude::AgentPubKey::from_raw_39(crate::commands::base64_standard_decode(&web_key_b64).unwrap());
+        // A network read with the 15 s budget the app gives it; the app's
+        // signatures page retries, so does this.
+        let mut web_on_07 = Vec::new();
+        let read_started = std::time::Instant::now();
+        loop {
+            match crate::signing_07::linked_signatures(state, &[web_key.clone()]).await {
+                Ok(list) if list.len() == 2 => { web_on_07 = list; break; }
+                Ok(list) => println!("  the web key's records on 0.7: {} so far", list.len()),
+                Err(e) => println!("  the web key's records on 0.7 not read yet: {}", e),
+            }
+            assert!(read_started.elapsed().as_secs() < 240, "the web key's two records did not read from 0.7 within 240 s");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        println!("  the web key's records read from 0.7 after {}s", read_started.elapsed().as_secs());
+        let originals: std::collections::HashSet<String> = web_on_07.iter().map(|s| s["original_action_hash"].as_str().unwrap().to_string()).collect();
+        assert_eq!(originals, [hex::encode(&w1), hex::encode(&w2)].into_iter().collect());
+        // The web-era revocation travelled with it (read with the enrichment the own view uses).
+        let (c07w, r07w) = crate::signing_07::signing_client(state, Line::V07).await.unwrap();
+        let w2_on_07 = web_on_07.iter().find(|s| s["original_action_hash"] == hex::encode(&w2)).unwrap()["action_hash"].as_str().unwrap().to_string();
+        let revs = c07w.call_zome(&r07w, "signing", "get_revocations_for_signature", rmp_serde::to_vec_named(&holochain_types::prelude::ActionHash::from_raw_39(hex::decode(&w2_on_07).unwrap())).unwrap()).await.unwrap();
+        assert_eq!(crate::hc::records(Line::V07, &revs).unwrap().len(), 1, "the carried revocation hangs off the carried signature");
         assert_eq!(crate::hc::active_line(state), Line::V07);
 
         // What 0.7 holds is what 0.6 held: same ids, same versions, same devices.
@@ -754,7 +906,9 @@ mod tests {
         assert_eq!(again.private_written, 0);
         assert_eq!(again.private_present, 43);
         assert!(again.private_complete && again.signing_complete && !again.flipped);
+        assert_eq!(again.web_era_06, 0, "the web-era step does not run again once the marker says it is done");
         assert_eq!(marker(&root), Some(m.clone()), "the marker is written once");
+        assert_eq!(crate::signing_07::linked_signatures(state, &[web_key.clone()]).await.unwrap().len(), 2, "carrying the web key's records again adds nothing");
         assert_eq!(crate::signing_07::own_signatures(state).await.unwrap().len(), 3, "carries are idempotent");
 
         // ── After the flip: writes go to 0.7, 0.6 is untouched ──
@@ -873,17 +1027,21 @@ mod tests {
         .unwrap();
         config.data_key = Some(vec![36u8; 32]);
         config.hosting_model = Some("device-hosted".into());
+        config.private_network_seed = Some(seed.clone());
         config.agent_pub_key_raw_b64 = Some(crate::key_derivation::base64_standard_encode(
             &crate::key_derivation::construct_agent_pub_key_bytes(&identity_public),
         ));
-        // Two devices of one identity, each with its own conductor key.
+        // Two devices of one identity, each with its own conductor key, fresh
+        // every run (the signing network is the shared staging one).
+        let seed_a = crate::key_derivation::new_conductor_seed();
+        let seed_b = crate::key_derivation::new_conductor_seed();
         let mut config_a = config.clone();
-        config_a.conductor_seed = Some(vec![30u8; 32]);
+        config_a.conductor_seed = Some(seed_a.to_vec());
         let mut config_b = config.clone();
-        config_b.conductor_seed = Some(vec![31u8; 32]);
+        config_b.conductor_seed = Some(seed_b.to_vec());
         config_b.joined_existing = true;
-        let a = live_device_07("a", 46063, &seed, &[30u8; 32], &config_a).await;
-        let b = live_device_07("b", 46064, &seed, &[31u8; 32], &config_b).await;
+        let a = live_device_07("a", 46063, &seed, &seed_a, &config_a).await;
+        let b = live_device_07("b", 46064, &seed, &seed_b, &config_b).await;
 
         // No 0.6 line, by the identity's own marker; writes go to 0.7 from the first.
         for d in [&a, &b] {
@@ -951,11 +1109,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(!moved(&dir));
-        let m = Marker { v: 1, moved_at_ms: 5, vault_version: "1.7.0".into(), private_records: 3, signatures: 2, revocations: 1, thumbnails: 0, born: false };
+        let m = Marker { v: 1, moved_at_ms: 5, vault_version: "1.7.0".into(), private_records: 3, signatures: 2, revocations: 1, thumbnails: 0, born: false, web_era_carried: false, web_era_signatures: 0 };
         crate::vault::write_atomic(&crate::paths::moved_07_path(&dir), &serde_json::to_vec(&m).unwrap()).unwrap();
         assert!(moved(&dir));
         assert_eq!(marker(&dir), Some(m));
         assert!(!born_on_07(&dir), "a moved identity had a 0.6 line");
+        update_marker(&dir, |m| { m.web_era_carried = true; m.web_era_signatures = 4; }).unwrap();
+        let m2 = marker(&dir).unwrap();
+        assert!(m2.web_era_carried && m2.web_era_signatures == 4 && m2.private_records == 3, "a later fact lands beside the others");
         // A pre-1.7.0 marker shape (no `born`) reads as not born.
         std::fs::write(crate::paths::moved_07_path(&dir), br#"{"v":1,"moved_at_ms":1,"vault_version":"1.7.0","private_records":0,"signatures":0,"revocations":0,"thumbnails":0}"#).unwrap();
         assert!(!born_on_07(&dir));

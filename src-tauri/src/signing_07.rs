@@ -456,6 +456,47 @@ pub(crate) async fn carry_thumbnail(client: &AppClient, role: &str, signature_on
     Ok(h.get_raw_39().to_vec())
 }
 
+/// The records one agent signed on the v1.4 network, oldest first: the web
+/// key a migrated identity came from. A network read with a budget (the
+/// pass runs in the background and tries again next round).
+pub(crate) async fn records_for_agent_06(client: &AppClient, role: &str, agent: &AgentPubKey) -> Result<Vec<(RecordView, SignatureEntry)>, String> {
+    let call = client.call_zome(role, "signing", "get_signatures_for_agent", mp(agent)?);
+    let bytes = match tokio::time::timeout(CARRY_READ_WAIT, call).await {
+        Ok(r) => r?,
+        Err(_) => return Err(format!("get_signatures_for_agent timed out after {} s (0.6)", CARRY_READ_WAIT.as_secs())),
+    };
+    let records = crate::hc::records(client.line(), &bytes)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut entries: Vec<(RecordView, SignatureEntry)> = records
+        .into_iter()
+        .filter(|r| seen.insert(r.action_hash.clone()))
+        .filter_map(|r| r.entry_as::<SignatureEntry>().ok().map(|e| (r, e)))
+        .collect();
+    entries.sort_by_key(|(_, e)| e.signed_at);
+    Ok(entries)
+}
+
+/// Every revocation of one v1.4 signature, whoever wrote it (a network
+/// read): for the web key's records, whose revocations the web key made.
+pub(crate) async fn revocations_network_06(client: &AppClient, role: &str, signature_action: &[u8]) -> Result<Vec<Revocation06>, String> {
+    let call = client.call_zome(role, "signing", "get_revocations_for_signature", mp(&ActionHash::from_raw_39(signature_action.to_vec()))?);
+    let bytes = match tokio::time::timeout(CARRY_READ_WAIT, call).await {
+        Ok(r) => r?,
+        Err(_) => return Err(format!("get_revocations_for_signature timed out after {} s (0.6)", CARRY_READ_WAIT.as_secs())),
+    };
+    let records = crate::hc::records(client.line(), &bytes)?;
+    Ok(records
+        .into_iter()
+        .filter_map(|record| {
+            let e = record.entry_as::<RevocationEntry>().ok()?;
+            Some(Revocation06 { record, revoked_at: e.revoked_at, reason: e.reason })
+        })
+        .collect())
+}
+
+/// How long the carry waits for a network read of the 0.6 cell.
+const CARRY_READ_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The person's own v1.4 records (native ones; a v1.4 cell carries none),
 /// oldest first, as the carry wants them.
 pub(crate) async fn own_records_06(client: &AppClient, role: &str) -> Result<Vec<(RecordView, SignatureEntry)>, String> {
