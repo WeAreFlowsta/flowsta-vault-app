@@ -1752,6 +1752,8 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
 }
 
 static DEVICES_ROUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// This device's own record failed to write: the next light pass tries again.
+static OWN_WRITE_DUE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 const DEVICES_ROUND_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 const DEVICES_ROUND_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 /// After an app saves a backup, how long to wait for the rest of its burst.
@@ -1803,12 +1805,24 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
     // everything over without a step failing; then the marker is written
     // and the Overview's banner goes.
     let mut complete = full;
+    // How long each step took, said in the log when a round runs long
+    // (10-26: the first round after an upgrade took six minutes on Windows,
+    // four of them in steps that logged nothing).
+    let round_started = std::time::Instant::now();
+    let mut lap_started = std::time::Instant::now();
+    let mut laps: Vec<(&str, u128)> = Vec::new();
+    let mut lap = |name: &'static str| {
+        laps.push((name, lap_started.elapsed().as_millis()));
+        lap_started = std::time::Instant::now();
+    };
     {
         // What the other devices hold about the identity's devices, before
         // anything below reads the list.
         crate::devices::ask_network_for_devices(devices_state).await;
+        lap("ask");
         // And tell them about this one, directly (each minute at first).
         crate::devices::announce_to_siblings(devices_state).await;
+        lap("announce");
         // Removed by another device of the identity: stand down. Nothing is
         // erased; the lock screen offers what comes next.
         let removed = match crate::devices::removed_here_now(devices_state).await {
@@ -1826,7 +1840,12 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             let _ = devices_app.emit("device-removed", serde_json::json!({}));
             return DevicesRound::StoodDown;
         }
-        if full {
+        lap("removed check");
+        // The own record goes out on full rounds, and again on the next
+        // light pass (a minute) when a write failed: the first write after
+        // an upgrade timed out on a cold cell and waited five minutes for
+        // the next full round (Windows, 10-26).
+        if full || OWN_WRITE_DUE.swap(false, std::sync::atomic::Ordering::SeqCst) {
             match crate::devices::publish_own(devices_state).await {
                 Ok(true) => {
                     log::info!("This device's record was written");
@@ -1834,8 +1853,15 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                     let _ = devices_app.emit("devices-changed", serde_json::json!({ "added": Vec::<String>::new() }));
                 }
                 Ok(false) => {}
-                Err(e) => { complete = false; log::info!("This device's record was not written: {}", e); }
+                Err(e) => {
+                    complete = false;
+                    OWN_WRITE_DUE.store(true, std::sync::atomic::Ordering::SeqCst);
+                    log::info!("This device's record was not written (tried again next minute): {}", e);
+                }
             }
+        }
+        lap("own record");
+        if full {
             // The first device's picture reaches the others as a record.
             match ensure_profile_picture_record(devices_state).await {
                 Ok(true) => log::info!("This device's profile picture was written"),
@@ -1843,6 +1869,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                 Err(e) => log::info!("Profile picture not written: {}", e),
             }
         }
+        lap("picture");
         match apply_profile_from_other_devices(devices_state).await {
             Ok(true) => {
                 log::info!("Profile updated from another device");
@@ -1851,6 +1878,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             Ok(false) => {}
             Err(e) => { complete = false; log::info!("Profile not checked against other devices: {}", e); }
         }
+        lap("profile");
         // Records from another device have arrived: the restore-or-fresh
         // question answers itself (the data is coming from the devices).
         if restore_choice_pending_path(&devices_state.identity_root()).exists() {
@@ -1892,6 +1920,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             Ok(_) => {}
             Err(e) => log::info!("Devices not checked: {}", e),
         }
+        lap("notices");
         // Activity: this device's lines go out; the other devices' come in.
         match crate::activity_sync::round(devices_state).await {
             Ok(true) => {
@@ -1900,6 +1929,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             Ok(false) => {}
             Err(e) => log::info!("Activity not synced: {}", e),
         }
+        lap("activity");
         // Connections and remembered sites follow the identity.
         match crate::connections_sync::round(devices_state).await {
             Ok(true) => {
@@ -1908,6 +1938,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             Ok(false) => {}
             Err(e) => { complete = false; log::info!("Connections not checked: {}", e); }
         }
+        lap("connections");
         // App backups, every pass: say what this device holds, and copy
         // what another device announced since the last pass (10-20: a change
         // waited for two five-minute rounds). Copies that keep failing - the
@@ -1938,6 +1969,12 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             }
             Err(e) => { complete = false; log::info!("Backups not checked: {}", e); }
         }
+        lap("backups");
+    }
+    let round_took = round_started.elapsed();
+    if round_took > std::time::Duration::from_secs(30) {
+        let parts: Vec<String> = laps.iter().filter(|(_, ms)| *ms >= 1000).map(|(n, ms)| format!("{} {}s", n, ms / 1000)).collect();
+        log::info!("[devices] a slow {} round ({}s): {}", if full { "full" } else { "light" }, round_took.as_secs(), parts.join(", "));
     }
     if complete {
         let (joined, profile_seen) = {
