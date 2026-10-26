@@ -306,12 +306,15 @@ async fn download_happ_bundle(
     expected_sha256: Option<&str>,
     dest_path: &Path,
 ) -> Result<(), String> {
+    // The lookup hash is a stable pseudonym of the identity (derived from the
+    // phrase). In a query string it would land in proxy and server request
+    // logs, so it travels in a header; the API accepts both for Vaults
+    // before 1.7.0.
     let url = format!(
-        "{}/api/v1/vault/dna-bundle/{}/{}?recovery_lookup_hash={}",
+        "{}/api/v1/vault/dna-bundle/{}/{}",
         api_url.trim_end_matches('/'),
         dna_type,
         version,
-        recovery_lookup_hash,
     );
 
     log::info!("Downloading {} DNA v{} bundle...", dna_type, version);
@@ -323,6 +326,7 @@ async fn download_happ_bundle(
 
     let resp = client
         .get(&url)
+        .header("X-Recovery-Lookup-Hash", recovery_lookup_hash)
         .send()
         .await
         .map_err(|e| format!("Download failed: {}", e))?;
