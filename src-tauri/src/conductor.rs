@@ -27,6 +27,8 @@ pub struct Line07Handle {
     pub lair_child: SidecarChild,
     pub conductor_child: SidecarChild,
     pub admin_port: u16,
+    /// The app interface the Vault's zome calls on this line go through.
+    pub app_port: u16,
 }
 
 impl Line07Handle {
@@ -764,6 +766,7 @@ pub async fn start_holochain(
     {
         let state = app_handle.state::<Arc<AppState>>();
         state.cell_credentials.lock().unwrap().clear();
+        state.cell_credentials_07.lock().unwrap().clear();
     }
     match start_holochain_attempt(
         app_handle.clone(),
@@ -1071,6 +1074,7 @@ async fn start_holochain_attempt(
         conductor_seed,
         conductor_tag,
         expected_pub_key: *seed_info.ed25519_pub_key.0,
+        private_v2_seed,
         session,
     };
     set_line_07_state(Line07State::Starting);
@@ -1104,6 +1108,10 @@ pub struct Line07Starter {
     conductor_seed: [u8; 32],
     conductor_tag: String,
     expected_pub_key: [u8; 32],
+    /// The identity's private-network seed (device-hosted vaults): the 0.7
+    /// private cell is installed with it, as the 0.6 one was. None for a
+    /// custodial-linked vault, which has no private cell on either line.
+    private_v2_seed: Option<String>,
     session: u64,
 }
 
@@ -1121,11 +1129,13 @@ pub fn attach_line_07(state: Arc<AppState>, starter: Line07Starter) {
             &starter.conductor_seed,
             &starter.conductor_tag,
             &starter.expected_pub_key,
+            starter.private_v2_seed.as_deref(),
         )
         .await
         {
             Ok(line) => {
                 let admin_port = line.admin_port;
+                let app_port = line.app_port;
                 let attached = {
                     let mut guard = state.conductor_handle.lock().unwrap();
                     match guard.as_mut() {
@@ -1141,7 +1151,7 @@ pub fn attach_line_07(state: Arc<AppState>, starter: Line07Starter) {
                 };
                 if attached {
                     set_line_07_state(Line07State::Serving);
-                    log::info!("Holochain 0.7 conductor ready (admin: {})", admin_port);
+                    log::info!("Holochain 0.7 conductor ready (admin: {}, app: {})", admin_port, app_port);
                 } else {
                     set_line_07_state(Line07State::Off);
                     log::info!("[0.7] the 0.7 line came up after its 0.6 line had stopped - stopped it again");
@@ -1167,6 +1177,7 @@ async fn start_line_07(
     conductor_seed: &[u8; 32],
     conductor_tag: &str,
     expected_pub_key: &[u8; 32],
+    private_v2_seed: Option<&str>,
 ) -> Result<Line07Handle, String> {
     set_line_07_state(Line07State::Starting);
     let lair_dir = crate::paths::lair_dir_07(data_dir);
@@ -1244,11 +1255,15 @@ async fn start_line_07(
     if let Err(e) = wait_for_admin_ws(admin_port, 30, &mut conductor_child, &conductor_dir).await {
         fail_with_full_cleanup!(e);
     }
-    match dna::install_dnas_07(admin_port, resource_dir, &pub_key[..]).await {
+    match dna::install_dnas_07(admin_port, resource_dir, &pub_key[..], private_v2_seed).await {
         Ok(apps) => log::info!("[0.7] apps: {}", apps.join(", ")),
         Err(e) => fail_with_full_cleanup!(format!("0.7 DNA installation failed: {}", e)),
     }
-    Ok(Line07Handle { lair_child, conductor_child, admin_port })
+    let app_port = match dna::setup_app_interface_07(admin_port).await {
+        Ok(p) => p,
+        Err(e) => fail_with_full_cleanup!(format!("0.7 app interface setup failed: {}", e)),
+    };
+    Ok(Line07Handle { lair_child, conductor_child, admin_port, app_port })
 }
 
 #[cfg(test)]

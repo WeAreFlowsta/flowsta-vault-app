@@ -12,6 +12,7 @@ mod pairing;
 mod devices;
 mod dna;
 mod dna_updater;
+mod hc;
 pub mod file_analyzer;
 mod ipc_server;
 mod key_derivation;

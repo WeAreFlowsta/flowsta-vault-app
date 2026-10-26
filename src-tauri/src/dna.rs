@@ -27,6 +27,19 @@ pub const BUNDLED_IDENTITY_VERSION_07: &str = "1.5";
 pub const BUNDLED_SIGNING_VERSION_07: &str = "1.5";
 const BUNDLED_IDENTITY_V1_5_HAPP_FILE: &str = "flowsta_identity_v1_5_happ.happ";
 const BUNDLED_SIGNING_V1_5_HAPP_FILE: &str = "flowsta_signing_v1_5_happ.happ";
+/// The 0.7 line's private cell: private v2.1 (the v2.0 shape rebuilt for
+/// Holochain 0.7.1; canonical bundle in `reference/DNA_VERSION_HISTORY.md`,
+/// copied, never rebuilt). Installed per identity with the same per-user
+/// network seed as the 0.6 cell; the DNA hash keeps the two networks apart.
+pub const BUNDLED_PRIVATE_V2_VERSION_07: &str = "2.1";
+const BUNDLED_PRIVATE_V2_1_HAPP_FILE: &str = "flowsta_private_v2_1_happ.happ";
+/// Bundle revision of the v2.1 cell (see `BUNDLED_PRIVATE_V2_REVISION`).
+pub const BUNDLED_PRIVATE_V2_1_REVISION: u32 = 1;
+
+/// Installed app id of the 0.7 private cell: "flowsta_private_v2_1_r1".
+pub fn private_v2_app_id_07() -> String {
+    format!("{}_r{}", make_app_id("private", BUNDLED_PRIVATE_V2_VERSION_07), BUNDLED_PRIVATE_V2_1_REVISION)
+}
 
 /// The encrypted private DNA (opaque Sealed records, per-user network).
 /// Device-hosted vaults only; installed with a per-user network seed
@@ -1119,6 +1132,7 @@ pub async fn install_dnas_07(
     admin_port: u16,
     resource_dir: &Path,
     agent_key_raw32: &[u8],
+    private_v2_seed: Option<&str>,
 ) -> Result<Vec<String>, String> {
     use holochain_client_07::{AdminWebsocket, InstallAppPayload};
     use holochain_types_07::app::AppBundleSource;
@@ -1174,5 +1188,70 @@ pub async fn install_dnas_07(
         log::info!("[0.7] {} installed and enabled", app_id);
         installed.push(app_id);
     }
+    // The private cell, with the identity's own network seed (device-hosted
+    // vaults only). Nothing is written to it here: the move (move_07) fills
+    // it from the 0.6 cell and compares counts before any write goes to it.
+    if let Some(seed) = private_v2_seed {
+        let app_id = private_v2_app_id_07();
+        if let Some(app) = existing.iter().find(|a| a.installed_app_id == app_id) {
+            if app.agent_pub_key != agent_key {
+                return Err(format!(
+                    "The 0.7 private data cell on this device belongs to a different conductor key ({}). Nothing was changed.",
+                    app.agent_pub_key
+                ));
+            }
+            admin_ws
+                .enable_app(app_id.clone())
+                .await
+                .map_err(|e| format!("Failed to re-enable {} (0.7): {}", app_id, e))?;
+            log::info!("[0.7] {} present and enabled", app_id);
+            installed.push(app_id);
+        } else {
+            let happ_path = resource_dir.join(BUNDLED_PRIVATE_V2_1_HAPP_FILE);
+            if !happ_path.exists() {
+                return Err(format!("{} not found at {:?}", BUNDLED_PRIVATE_V2_1_HAPP_FILE, happ_path));
+            }
+            log::info!("[0.7] installing {} from {:?} with the identity's network seed", app_id, happ_path);
+            let payload = InstallAppPayload {
+                source: AppBundleSource::Path(happ_path),
+                agent_key: Some(agent_key.clone()),
+                installed_app_id: Some(app_id.clone()),
+                network_seed: Some(seed.to_string()),
+                roles_settings: None,
+                ignore_genesis_failure: false,
+                restore_from_dht: false,
+            };
+            admin_ws
+                .install_app(payload)
+                .await
+                .map_err(|e| format!("Failed to install {} (0.7): {}", app_id, e))?;
+            admin_ws
+                .enable_app(app_id.clone())
+                .await
+                .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
+            log::info!("[0.7] {} installed and enabled", app_id);
+            installed.push(app_id);
+        }
+    }
     Ok(installed)
+}
+
+/// Attach the 0.7 conductor's app interface (the twin of
+/// `setup_app_interface`): a free port, this start's origin only.
+pub async fn setup_app_interface_07(admin_port: u16) -> Result<u16, String> {
+    use holochain_client_07::{AdminWebsocket, AllowedOrigins};
+    let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+        .await
+        .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
+    let app_port = admin_ws
+        .attach_app_interface(
+            0,
+            None,
+            AllowedOrigins::Origins([crate::conductor::node_origin()].into_iter().collect()),
+            None,
+        )
+        .await
+        .map_err(|e| format!("Failed to attach the 0.7 app interface: {}", e))?;
+    log::info!("[0.7] app interface attached on port {}", app_port);
+    Ok(app_port)
 }

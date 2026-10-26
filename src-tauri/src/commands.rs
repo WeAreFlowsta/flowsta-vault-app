@@ -279,6 +279,9 @@ pub struct AppState {
     /// Live tests point the record layer at a conductor they started themselves.
     #[cfg(test)]
     pub test_conductor_ports: Mutex<Option<(u16, u16)>>,
+    /// The same for a 0.7 conductor a live test started.
+    #[cfg(test)]
+    pub test_conductor_ports_07: Mutex<Option<(u16, u16)>>,
     /// Current conductor status (for frontend polling).
     pub conductor_status: Mutex<ConductorStatus>,
     /// MAU tracking state (loaded on unlock, encrypted on disk).
@@ -361,6 +364,8 @@ pub struct AppState {
     /// head has moved"). Cleared on lock and on conductor start; filled
     /// once per cell and reused everywhere.
     pub cell_credentials: Mutex<HashMap<holochain_types::prelude::CellId, CachedCellCredentials>>,
+    /// The same for the cells on the 0.7 line (its own key type).
+    pub cell_credentials_07: Mutex<HashMap<holochain_types_07::prelude::CellId, CachedCellCredentials07>>,
     /// Committing operations write to the device's source chains - run them
     /// one at a time (shared by the IPC bridge and in-app commands). Two
     /// concurrent publishes would fight over the chain head and one fails.
@@ -394,6 +399,65 @@ impl CachedCellCredentials {
             cap_secret: c.cap_secret,
         }
     }
+}
+
+/// The 0.7 line's copy of `CachedCellCredentials` (its own types).
+pub struct CachedCellCredentials07 {
+    pub signing_agent_key: holochain_types_07::prelude::AgentPubKey,
+    pub keypair: ed25519_dalek::SigningKey,
+    pub cap_secret: holochain_types_07::prelude::CapSecret,
+}
+
+impl CachedCellCredentials07 {
+    pub(crate) fn to_signing(&self) -> holochain_client_07::SigningCredentials {
+        holochain_client_07::SigningCredentials {
+            signing_agent_key: self.signing_agent_key.clone(),
+            keypair: self.keypair.clone(),
+            cap_secret: self.cap_secret,
+        }
+    }
+    pub(crate) fn from_signing(c: &holochain_client_07::SigningCredentials) -> Self {
+        Self {
+            signing_agent_key: c.signing_agent_key.clone(),
+            keypair: c.keypair.clone(),
+            cap_secret: c.cap_secret,
+        }
+    }
+}
+
+/// `cell_credentials_cached` for a cell on the 0.7 line: one cap grant per
+/// cell per conductor session, single-flighted the same way.
+pub(crate) async fn cell_credentials_cached_07(
+    state: &Arc<AppState>,
+    admin_ws: &holochain_client_07::AdminWebsocket,
+    cell_id: &holochain_types_07::prelude::CellId,
+) -> Result<holochain_client_07::SigningCredentials, String> {
+    {
+        let cache = state.cell_credentials_07.lock().unwrap();
+        if let Some(c) = cache.get(cell_id) {
+            return Ok(c.to_signing());
+        }
+    }
+    let _fill = state.credentials_fill_lock.lock().await;
+    {
+        let cache = state.cell_credentials_07.lock().unwrap();
+        if let Some(c) = cache.get(cell_id) {
+            return Ok(c.to_signing());
+        }
+    }
+    let creds = admin_ws
+        .authorize_signing_credentials(holochain_client_07::AuthorizeSigningCredentialsPayload {
+            cell_id: cell_id.clone(),
+            functions: None,
+        })
+        .await
+        .map_err(|e| format!("auth creds (0.7): {}", e))?;
+    state
+        .cell_credentials_07
+        .lock()
+        .unwrap()
+        .insert(cell_id.clone(), CachedCellCredentials07::from_signing(&creds));
+    Ok(creds)
 }
 
 /// Authorize-once-per-session: return cached credentials for the cell, or
@@ -439,6 +503,7 @@ pub(crate) async fn cell_credentials_cached(
 /// the next attempt re-authorizes.
 pub(crate) fn invalidate_cell_credentials(state: &Arc<AppState>) {
     state.cell_credentials.lock().unwrap().clear();
+    state.cell_credentials_07.lock().unwrap().clear();
 }
 
 impl AppState {
@@ -505,6 +570,8 @@ impl AppState {
             backup_lane: tokio::sync::Mutex::new(None),
             #[cfg(test)]
             test_conductor_ports: Mutex::new(None),
+            #[cfg(test)]
+            test_conductor_ports_07: Mutex::new(None),
             conductor_status: Mutex::new(ConductorStatus::Stopped),
             mau_state: crate::mau::MauState::new(),
             verified_apps: Mutex::new(verified_apps),
@@ -526,6 +593,7 @@ impl AppState {
             registration_conflict: Mutex::new(false),
             dev_relock_passphrase: Mutex::new(None),
             cell_credentials: Mutex::new(HashMap::new()),
+            cell_credentials_07: Mutex::new(HashMap::new()),
             credentials_fill_lock: tokio::sync::Mutex::new(()),
             commit_serial: tokio::sync::Mutex::new(()),
         }
@@ -1431,6 +1499,7 @@ fn lock_secrets(state: &Arc<AppState>) {
     // Cached cap-grant credentials don't either (a reset/re-create after
     // this lock would otherwise reuse grants from a dead chain).
     state.cell_credentials.lock().unwrap().clear();
+    state.cell_credentials_07.lock().unwrap().clear();
 
     // Clear MAU state before clearing vault config (needs device_seed)
     crate::mau::clear_mau_state(&state);
