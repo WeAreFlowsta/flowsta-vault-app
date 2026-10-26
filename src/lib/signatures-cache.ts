@@ -39,6 +39,22 @@ export function setActiveSignatureAgent(agentKey: string): void {
   }
 }
 
+/**
+ * One row per signature across the two Holochain lines. A record carried
+ * to the 0.7 line is a new record there (its own action hash) that names
+ * the 0.6 original in `original_action_hash`; the Vault's merge returns
+ * the carried copy in place of the original, but a list that was cached
+ * before the move still holds the original under its 0.6 hash. Drop every
+ * row another row names as its original, so the two never count twice.
+ */
+export function dropCarriedOriginals<T extends { action_hash?: string; original_action_hash?: string }>(sigs: T[]): T[] {
+  const originals = new Set(
+    sigs.map((s) => s.original_action_hash).filter((h): h is string => typeof h === "string" && h.length > 0),
+  );
+  if (originals.size === 0) return sigs;
+  return sigs.filter((s) => !s.action_hash || !originals.has(s.action_hash));
+}
+
 export function persistSignaturesCache(sigs: unknown[]): void {
   if (!activeAgent) return; // no identity registered - don't cache
   try {

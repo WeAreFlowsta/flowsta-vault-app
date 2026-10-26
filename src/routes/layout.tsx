@@ -10,7 +10,7 @@ import { StatusIndicator } from "~/components/vault/StatusIndicator";
 import { DevicesChip } from "~/components/vault/DevicesChip";
 import type { ConnectionStatus } from "~/components/vault/StatusIndicator";
 import { connectionStatusContext, autoLockContext, signaturesContext, pendingSignPathsContext } from "~/lib/context";
-import { hydrateSignaturesCache, persistSignaturesCache, setActiveSignatureAgent } from "~/lib/signatures-cache";
+import { dropCarriedOriginals, hydrateSignaturesCache, persistSignaturesCache, setActiveSignatureAgent } from "~/lib/signatures-cache";
 import { GlassButton } from "~/components/common/GlassButton";
 import Callout from "~/components/dashboard/Callout";
 
@@ -196,12 +196,15 @@ export default component$(() => {
         const newHashes = new Set(
           enriched.map((s: any) => s.action_hash).filter(Boolean) as string[],
         );
-        const merged = [
+        // A carried copy from the 0.7 line retires the cached 0.6
+        // original it names: the move changes a record's hash, not its
+        // count.
+        const merged = dropCarriedOriginals([
           ...enriched,
           ...signaturesSig.value.filter(
             (s: any) => s.action_hash && !newHashes.has(s.action_hash),
           ),
-        ];
+        ]);
         signaturesSig.value = merged;
         persistSignaturesCache(merged);
       };
@@ -551,7 +554,9 @@ export default component$(() => {
       // Only what one of this identity's own keys signed is ever shown,
       // whatever an earlier session left in the cache.
       const mine = await invoke<string[]>("my_signing_keys").then((k) => new Set(k)).catch(() => null);
-      const cached = hydrateSignaturesCache<any>().filter((s: any) => !mine || !s.agent_pub_key || mine.has(s.agent_pub_key));
+      const cached = dropCarriedOriginals(
+        hydrateSignaturesCache<any>().filter((s: any) => !mine || !s.agent_pub_key || mine.has(s.agent_pub_key)),
+      );
       if (cached.length > 0 && signaturesSig.value.length === 0) {
         signaturesSig.value = cached;
         signaturesLoaded.value = true;
