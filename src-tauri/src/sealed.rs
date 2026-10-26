@@ -14,6 +14,7 @@
 //! The zome never sees plaintext: seal before create_sealed, unseal after
 //! get_all_sealed.
 
+use crate::hc::{AppClient, Line, RecordView};
 use lair_keystore_api::dependencies::sodoken;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -280,27 +281,15 @@ pub(crate) async fn connect_sealed_app_ws(
 /// ModuleBuild failure (bad wasm) is permanent - no retry.
 async fn sealed_zome_call(
     state: &Arc<AppState>,
-    admin_port: u16,
-    app_port: u16,
+    line: Line,
     zome_fn: &str,
     input: Vec<u8>,
-) -> Result<holochain_types::prelude::ExternIO, String> {
-    use holochain_client::ZomeCallTarget;
-    use holochain_types::prelude::ExternIO;
-
+) -> Result<Vec<u8>, String> {
     let mut last_err = String::new();
     for attempt in 1..=3u32 {
         let result = async {
-            let (app_ws, role_name) = connect_sealed_app_ws(state, admin_port, app_port).await?;
-            app_ws
-                .call_zome(
-                    ZomeCallTarget::RoleName(role_name),
-                    "private_data".into(),
-                    zome_fn.into(),
-                    ExternIO::from(input.clone()),
-                )
-                .await
-                .map_err(|e| format!("{} failed: {:?}", zome_fn, e))
+            let (client, role_name) = connect_sealed_client(state, line).await?;
+            client.call_zome(&role_name, "private_data", zome_fn, input.clone()).await
         }
         .await;
         match result {
@@ -330,6 +319,24 @@ async fn sealed_zome_call(
     Err(last_err)
 }
 
+/// The private cell's app client on one line: the 0.6 one through
+/// `connect_sealed_app_ws`, the 0.7 one (private v2.1) through `hc`.
+pub(crate) async fn connect_sealed_client(state: &Arc<AppState>, line: Line) -> Result<(AppClient, String), String> {
+    let (admin_port, app_port) = crate::hc::line_ports(state, line)?;
+    match line {
+        Line::V06 => {
+            let (ws, role) = connect_sealed_app_ws(state, admin_port, app_port).await?;
+            Ok((AppClient::V06(ws), role))
+        }
+        Line::V07 => {
+            let (ws, role) =
+                crate::hc::connect_app_07(state, admin_port, app_port, &crate::dna::private_v2_app_id_07(), "flowsta_private_v2").await?;
+            Ok((AppClient::V07(ws), role))
+        }
+    }
+}
+
+/// The 0.6 line's ports (the backup lane still speaks 0.6 directly).
 pub(crate) fn conductor_ports(state: &AppState) -> Result<(u16, u16), String> {
     #[cfg(test)]
     if let Some(ports) = *state.test_conductor_ports.lock().unwrap() {
@@ -406,9 +413,68 @@ struct ListAtWire {
     network: bool,
 }
 
-#[derive(Deserialize)]
-struct ListedWire {
-    record: holochain_types::prelude::Record,
+/// `get_all_sealed_at` output, decoded with the line's record type.
+fn decode_listed(line: Line, bytes: &[u8]) -> Result<Vec<RecordView>, String> {
+    #[derive(Deserialize)]
+    struct Listed06 {
+        record: holochain_types::prelude::Record,
+    }
+    #[derive(Deserialize)]
+    struct Listed07 {
+        record: holochain_types_07::prelude::Record,
+    }
+    match line {
+        Line::V06 => rmp_serde::from_slice::<Vec<Listed06>>(bytes)
+            .map(|l| l.iter().map(|x| crate::hc::view_06(&x.record)).collect())
+            .map_err(|e| format!("Records decode failed: {}", e)),
+        Line::V07 => rmp_serde::from_slice::<Vec<Listed07>>(bytes)
+            .map(|l| l.iter().map(|x| crate::hc::view_07(&x.record)).collect())
+            .map_err(|e| format!("Records decode failed: {}", e)),
+    }
+}
+
+/// `list_sealed_at` output, decoded with the line's record type: the
+/// targets, each with its record when the cell sent one and whether the
+/// link was retired (`left`), and whether more follow.
+#[allow(clippy::type_complexity)]
+fn decode_listed_refs(
+    line: Line,
+    bytes: &[u8],
+) -> Result<(Vec<(holochain_types::prelude::ActionHash, Option<RecordView>, bool)>, bool), String> {
+    #[derive(Deserialize)]
+    struct Ref06 {
+        target: holochain_types::prelude::ActionHash,
+        record: Option<holochain_types::prelude::Record>,
+        #[serde(default)]
+        left: bool,
+    }
+    #[derive(Deserialize)]
+    struct Refs06 {
+        refs: Vec<Ref06>,
+        more: bool,
+    }
+    #[derive(Deserialize)]
+    struct Ref07 {
+        target: holochain_types::prelude::ActionHash,
+        record: Option<holochain_types_07::prelude::Record>,
+        #[serde(default)]
+        left: bool,
+    }
+    #[derive(Deserialize)]
+    struct Refs07 {
+        refs: Vec<Ref07>,
+        more: bool,
+    }
+    match line {
+        Line::V06 => {
+            let l: Refs06 = rmp_serde::from_slice(bytes).map_err(|e| format!("Records decode failed: {}", e))?;
+            Ok((l.refs.into_iter().map(|r| (r.target, r.record.as_ref().map(crate::hc::view_06), r.left)).collect(), l.more))
+        }
+        Line::V07 => {
+            let l: Refs07 = rmp_serde::from_slice(bytes).map_err(|e| format!("Records decode failed: {}", e))?;
+            Ok((l.refs.into_iter().map(|r| (r.target, r.record.as_ref().map(crate::hc::view_07), r.left)).collect(), l.more))
+        }
+    }
 }
 
 /// `list_sealed_at` (coordinator revision 4): the links, with records only
@@ -420,20 +486,6 @@ struct ListRefsWire<'a> {
     tag_prefix: Vec<u8>,
     known: &'a [holochain_types::prelude::ActionHash],
     limit: u32,
-}
-
-#[derive(Deserialize)]
-struct ListedRefWire {
-    target: holochain_types::prelude::ActionHash,
-    record: Option<holochain_types::prelude::Record>,
-    #[serde(default)]
-    left: bool,
-}
-
-#[derive(Deserialize)]
-struct ListedRefsWire {
-    refs: Vec<ListedRefWire>,
-    more: bool,
 }
 
 /// The cell still runs the original coordinator (the hot-swap at start did
@@ -533,16 +585,26 @@ pub(crate) async fn sealed_store_first(
 /// before devices were named did.
 pub(crate) static WRITE_WITHOUT_DEVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Seal one version and write it at the shared base; `supersedes` retires
-/// that earlier version in the same call.
+/// Seal one version and write it at the shared base of the identity's
+/// active line; `supersedes` retires that earlier version in the same call.
 pub(crate) async fn sealed_store_spec(
     state: &Arc<AppState>,
     spec: StoreSpec,
     supersedes: Option<holochain_types::prelude::ActionHash>,
 ) -> Result<String, String> {
-    use holochain_types::prelude::{ActionHash, Record};
+    sealed_store_spec_on(state, crate::hc::active_line(state), spec, supersedes).await
+}
 
-    let (admin_port, app_port) = conductor_ports(state)?;
+/// `sealed_store_spec` on a named line (the move writes to 0.7 while the
+/// identity's writes still go to 0.6).
+pub(crate) async fn sealed_store_spec_on(
+    state: &Arc<AppState>,
+    line: Line,
+    spec: StoreSpec,
+    supersedes: Option<holochain_types::prelude::ActionHash>,
+) -> Result<String, String> {
+    use holochain_types::prelude::ActionHash;
+
     let data_key = vault_data_key(state)?;
     let base = sealed_base(state)?;
 
@@ -578,7 +640,7 @@ pub(crate) async fn sealed_store_spec(
     };
     let input = input.map_err(|e| e.to_string())?;
 
-    let result = match sealed_zome_call(state, admin_port, app_port, fn_name, input).await {
+    let result = match sealed_zome_call(state, line, fn_name, input).await {
         Ok(r) => r,
         Err(e) if is_missing_function(&e) => {
             // Original coordinator: its own-agent functions are equivalent
@@ -596,15 +658,14 @@ pub(crate) async fn sealed_store_spec(
                 ),
                 None => ("create_sealed", rmp_serde::to_vec_named(&wire)),
             };
-            sealed_zome_call(state, admin_port, app_port, fn_name, input.map_err(|e| e.to_string())?).await?
+            sealed_zome_call(state, line, fn_name, input.map_err(|e| e.to_string())?).await?
         }
         Err(e) => return Err(e),
     };
 
     forget_recent_versions();
-    let record: Record = rmp_serde::from_slice(result.as_bytes())
-        .map_err(|e| format!("Record decode failed: {}", e))?;
-    Ok(hex::encode(record.action_address().get_raw_39()))
+    let record = crate::hc::record(line, &result).map_err(|e| format!("Record decode failed: {}", e))?;
+    Ok(hex::encode(record.action_hash))
 }
 
 /// Fetch and decrypt every live sealed record. Records that fail to
@@ -685,6 +746,7 @@ pub(crate) async fn sealed_delete_inner(state: &Arc<AppState>, action_hash_hex: 
 /// on lock: it holds decrypted records.
 struct RecentVersions {
     root: std::path::PathBuf,
+    line: Line,
     read_at: std::time::Instant,
     versions: Vec<StoredVersion>,
 }
@@ -700,23 +762,27 @@ pub(crate) fn forget_recent_versions() {
 /// Versions that fail to decrypt (foreign, corrupt, or a plaintext marker)
 /// are skipped with a warning, never fatal.
 pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredVersion>, String> {
-    use holochain_types::prelude::Record;
+    sealed_versions_on(state, crate::hc::active_line(state)).await
+}
 
-    let (admin_port, app_port) = conductor_ports(state)?;
+/// `sealed_versions` from a named line's cell (the move reads 0.6 and 0.7
+/// side by side).
+pub(crate) async fn sealed_versions_on(state: &Arc<AppState>, line: Line) -> Result<Vec<StoredVersion>, String> {
+    crate::hc::line_ports(state, line)?;
     let data_key = vault_data_key(state)?;
     let base = sealed_base(state)?;
     let root = state.identity_root();
-    if let Some(versions) = recent_versions(&root) {
+    if let Some(versions) = recent_versions(&root, line) {
         return Ok(versions);
     }
     // One read at a time; a caller that waited takes the answer of the read
     // it waited for.
     let _one = FULL_READ.lock().await;
-    if let Some(versions) = recent_versions(&root) {
+    if let Some(versions) = recent_versions(&root, line) {
         return Ok(versions);
     }
 
-    let records: Vec<Record> = read_records(state, admin_port, app_port, base, &data_key, &root).await?;
+    let records: Vec<RecordView> = read_records(state, line, base, &data_key, &root).await?;
 
     let mut versions = decode_versions(&records, &data_key);
     // Device and removal records the other devices answered with that have
@@ -734,6 +800,7 @@ pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredV
     if vault_data_key(state).is_ok() && state.identity_root() == root {
         *RECENT_VERSIONS.lock().unwrap() = Some(RecentVersions {
             root,
+            line,
             read_at: std::time::Instant::now(),
             versions: versions.clone(),
         });
@@ -741,12 +808,12 @@ pub(crate) async fn sealed_versions(state: &Arc<AppState>) -> Result<Vec<StoredV
     Ok(versions)
 }
 
-fn recent_versions(root: &std::path::Path) -> Option<Vec<StoredVersion>> {
+fn recent_versions(root: &std::path::Path, line: Line) -> Option<Vec<StoredVersion>> {
     RECENT_VERSIONS
         .lock()
         .unwrap()
         .as_ref()
-        .filter(|recent| recent.root == root && recent.read_at.elapsed() < RECENT_FOR)
+        .filter(|recent| recent.root == root && recent.line == line && recent.read_at.elapsed() < RECENT_FOR)
         .map(|recent| recent.versions.clone())
 }
 
@@ -765,9 +832,25 @@ static FULL_READ: std::sync::LazyLock<tokio::sync::Mutex<()>> = std::sync::LazyL
 /// again.
 struct HeldRecords {
     root: std::path::PathBuf,
-    records: std::collections::HashMap<holochain_types::prelude::ActionHash, holochain_types::prelude::Record>,
+    records: std::collections::HashMap<holochain_types::prelude::ActionHash, RecordView>,
 }
-static HELD_RECORDS: std::sync::Mutex<Option<HeldRecords>> = std::sync::Mutex::new(None);
+/// One slot per line: the 0.6 cell's records and the 0.7 cell's are
+/// different records (different action hashes) of the same identity.
+static HELD_RECORDS_06: std::sync::Mutex<Option<HeldRecords>> = std::sync::Mutex::new(None);
+static HELD_RECORDS_07: std::sync::Mutex<Option<HeldRecords>> = std::sync::Mutex::new(None);
+fn held_slot(line: Line) -> &'static std::sync::Mutex<Option<HeldRecords>> {
+    match line {
+        Line::V06 => &HELD_RECORDS_06,
+        Line::V07 => &HELD_RECORDS_07,
+    }
+}
+/// Forget the held records of both lines (tests; an identity change reads
+/// the right file again by itself).
+#[cfg(test)]
+fn forget_held_records() {
+    *HELD_RECORDS_06.lock().unwrap() = None;
+    *HELD_RECORDS_07.lock().unwrap() = None;
+}
 
 #[cfg(test)]
 static LIST_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -779,24 +862,28 @@ static RECORDS_FROM_CELL: std::sync::atomic::AtomicUsize = std::sync::atomic::At
 /// first read keeps what each call brought.
 const GETS_PER_CALL: u32 = 100;
 
-pub(crate) fn held_records_path(root: &std::path::Path) -> std::path::PathBuf {
-    root.join("sealed-records.bin")
+pub(crate) fn held_records_path(root: &std::path::Path, line: Line) -> std::path::PathBuf {
+    root.join(format!("sealed-records{}.bin", line.file_suffix()))
 }
 
-/// The held records for this identity, from its file the first time.
-fn ensure_held(root: &std::path::Path, data_key: &[u8; 32]) {
-    let mut held = HELD_RECORDS.lock().unwrap();
+/// The held records for this identity on this line, from its file the
+/// first time.
+fn ensure_held(root: &std::path::Path, line: Line, data_key: &[u8; 32]) {
+    let mut held = held_slot(line).lock().unwrap();
     if held.as_ref().map(|h| h.root == root).unwrap_or(false) {
         return;
     }
-    let records = load_held_file(&held_records_path(root), data_key)
+    let records = load_held_file(&held_records_path(root, line), data_key)
         .into_iter()
-        .map(|r| (r.action_address().clone(), r))
+        .map(|r| (holochain_types::prelude::ActionHash::from_raw_39(r.action_hash.clone()), r))
         .collect();
     *held = Some(HeldRecords { root: root.to_path_buf(), records });
 }
 
-fn load_held_file(path: &std::path::Path, data_key: &[u8; 32]) -> Vec<holochain_types::prelude::Record> {
+/// The kept records: the line-free view (1.7.0 on), or the 0.6 `Record`
+/// list a Vault before 1.7.0 wrote (read once more and kept in the new
+/// shape by the next save, so an update never re-reads a whole cell).
+fn load_held_file(path: &std::path::Path, data_key: &[u8; 32]) -> Vec<RecordView> {
     let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
     };
@@ -811,10 +898,19 @@ fn load_held_file(path: &std::path::Path, data_key: &[u8; 32]) -> Vec<holochain_
         log::info!("[records] the kept records did not open; reading them again");
         return Vec::new();
     }
-    rmp_serde::from_slice(&plain).unwrap_or_default()
+    if let Ok(views) = rmp_serde::from_slice::<Vec<RecordView>>(&plain) {
+        return views;
+    }
+    match rmp_serde::from_slice::<Vec<holochain_types::prelude::Record>>(&plain) {
+        Ok(records) => {
+            log::info!("[records] kept records in the pre-1.7.0 shape: {} read", records.len());
+            records.iter().map(crate::hc::view_06).collect()
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
-fn save_held_file(path: &std::path::Path, records: &[holochain_types::prelude::Record], data_key: &[u8; 32]) -> Result<(), String> {
+fn save_held_file(path: &std::path::Path, records: &[RecordView], data_key: &[u8; 32]) -> Result<(), String> {
     let plain = rmp_serde::to_vec_named(records).map_err(|e| e.to_string())?;
     let mut nonce = [0u8; NONCE_BYTES];
     sodoken::random::randombytes_buf(&mut nonce).map_err(|e| e.to_string())?;
@@ -829,21 +925,20 @@ fn save_held_file(path: &std::path::Path, records: &[holochain_types::prelude::R
 /// holds: the links each time, a record only the first time.
 async fn read_records(
     state: &Arc<AppState>,
-    admin_port: u16,
-    app_port: u16,
+    line: Line,
     base: holochain_types::prelude::AgentPubKey,
     data_key: &[u8; 32],
     root: &std::path::Path,
-) -> Result<Vec<holochain_types::prelude::Record>, String> {
+) -> Result<Vec<RecordView>, String> {
     use holochain_types::prelude::ActionHash;
 
-    ensure_held(root, data_key);
+    ensure_held(root, line, data_key);
     // Targets this device does not hold yet: not asked for again in this read.
     let mut absent: std::collections::HashSet<ActionHash> = std::collections::HashSet::new();
     let mut added = 0usize;
     let targets: Vec<ActionHash> = loop {
         let known: Vec<ActionHash> = {
-            let held = HELD_RECORDS.lock().unwrap();
+            let held = held_slot(line).lock().unwrap();
             let held = held.as_ref().filter(|h| h.root == root).ok_or("identity changed during the read")?;
             held.records.keys().chain(absent.iter()).cloned().collect()
         };
@@ -851,37 +946,37 @@ async fn read_records(
             .map_err(|e| e.to_string())?;
         #[cfg(test)]
         LIST_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let listed: ListedRefsWire = match sealed_zome_call(state, admin_port, app_port, "list_sealed_at", input).await {
-            Ok(result) => rmp_serde::from_slice(result.as_bytes()).map_err(|e| format!("Records decode failed: {}", e))?,
-            Err(e) if is_missing_function(&e) => return read_records_one_by_one(state, admin_port, app_port, base).await,
+        let (refs, more) = match sealed_zome_call(state, line, "list_sealed_at", input).await {
+            Ok(result) => decode_listed_refs(line, &result)?,
+            Err(e) if is_missing_function(&e) => return read_records_one_by_one(state, line, base).await,
             Err(e) => return Err(e),
         };
-        let mut held = HELD_RECORDS.lock().unwrap();
+        let mut held = held_slot(line).lock().unwrap();
         let held = held.as_mut().filter(|h| h.root == root).ok_or("identity changed during the read")?;
-        let mut targets = Vec::with_capacity(listed.refs.len());
-        for r in listed.refs {
-            match r.record {
-                Some(record) if record.action_address() == &r.target => {
-                    held.records.insert(r.target.clone(), record);
+        let mut targets = Vec::with_capacity(refs.len());
+        for (target, record, left) in refs {
+            match record {
+                Some(record) if record.action_hash == target.get_raw_39() => {
+                    held.records.insert(target.clone(), record);
                     added += 1;
                     #[cfg(test)]
                     RECORDS_FROM_CELL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 Some(_) => {}
-                None if !r.left && !held.records.contains_key(&r.target) => {
-                    absent.insert(r.target.clone());
+                None if !left && !held.records.contains_key(&target) => {
+                    absent.insert(target.clone());
                 }
                 None => {}
             }
-            targets.push(r.target);
+            targets.push(target);
         }
-        if !listed.more {
+        if !more {
             break targets;
         }
     };
 
     let (records, kept, pruned) = {
-        let mut held = HELD_RECORDS.lock().unwrap();
+        let mut held = held_slot(line).lock().unwrap();
         let held = held.as_mut().filter(|h| h.root == root).ok_or("identity changed during the read")?;
         let live: std::collections::HashSet<&ActionHash> = targets.iter().collect();
         let before = held.records.len();
@@ -892,14 +987,14 @@ async fn read_records(
     };
     // Never recreates an identity's folder (an erase may have just removed it).
     if (added > 0 || pruned > 0) && root.is_dir() {
-        let list: Option<Vec<holochain_types::prelude::Record>> = HELD_RECORDS
+        let list: Option<Vec<RecordView>> = held_slot(line)
             .lock()
             .unwrap()
             .as_ref()
             .filter(|h| h.root == root)
             .map(|h| h.records.values().cloned().collect());
         if let Some(list) = list {
-            if let Err(e) = save_held_file(&held_records_path(root), &list, data_key) {
+            if let Err(e) = save_held_file(&held_records_path(root, line), &list, data_key) {
                 log::info!("[records] not kept on disk: {}", e);
             }
         }
@@ -918,21 +1013,40 @@ const OPS_AHEAD_MARGIN: u64 = 50;
 /// this device holds - kitsune2's own measure of how far a sync has got.
 /// None when the conductor does not say (no sibling seen yet, or busy).
 pub(crate) async fn private_ops_behind(state: &Arc<AppState>) -> Option<bool> {
-    use holochain_client::{AdminWebsocket, CellInfo};
-
-    let (admin_port, _) = conductor_ports(state).ok()?;
-    let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
-        .await
-        .ok()?;
-    let apps = admin_ws.list_apps(None).await.ok()?;
-    let app = apps.iter().find(|a| a.installed_app_id == crate::dna::private_v2_app_id())?;
-    let dna_hash = app.cell_info.values().flatten().find_map(|c| match c {
-        CellInfo::Provisioned(p) => Some(p.cell_id.dna_hash().clone()),
-        _ => None,
-    })?;
-    let metrics = admin_ws.dump_network_metrics(Some(dna_hash), false).await.ok()?;
-    let gossip = metrics.into_values().next()?.gossip_state_summary;
-    ops_behind(gossip.local_op_count, gossip.peer_meta.values().filter_map(|p| p.dht_op_count))
+    let line = crate::hc::active_line(state);
+    let (admin_port, _) = crate::hc::line_ports(state, line).ok()?;
+    match line {
+        Line::V06 => {
+            use holochain_client::{AdminWebsocket, CellInfo};
+            let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+                .await
+                .ok()?;
+            let apps = admin_ws.list_apps(None).await.ok()?;
+            let app = apps.iter().find(|a| a.installed_app_id == crate::dna::private_v2_app_id())?;
+            let dna_hash = app.cell_info.values().flatten().find_map(|c| match c {
+                CellInfo::Provisioned(p) => Some(p.cell_id.dna_hash().clone()),
+                _ => None,
+            })?;
+            let metrics = admin_ws.dump_network_metrics(Some(dna_hash), false).await.ok()?;
+            let gossip = metrics.into_values().next()?.gossip_state_summary;
+            ops_behind(gossip.local_op_count, gossip.peer_meta.values().filter_map(|p| p.dht_op_count))
+        }
+        Line::V07 => {
+            use holochain_client_07::{AdminWebsocket, CellInfo};
+            let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+                .await
+                .ok()?;
+            let apps = admin_ws.list_apps(None).await.ok()?;
+            let app = apps.iter().find(|a| a.installed_app_id == crate::dna::private_v2_app_id_07())?;
+            let dna_hash = app.cell_info.values().flatten().find_map(|c| match c {
+                CellInfo::Provisioned(p) => Some(p.cell_id.dna_hash().clone()),
+                _ => None,
+            })?;
+            let metrics = admin_ws.dump_network_metrics(Some(dna_hash), false).await.ok()?;
+            let gossip = metrics.into_values().next()?.gossip_state_summary;
+            ops_behind(gossip.local_op_count, gossip.peer_meta.values().filter_map(|p| p.dht_op_count))
+        }
+    }
 }
 
 fn ops_behind(local: u64, sibling_counts: impl Iterator<Item = u64>) -> Option<bool> {
@@ -948,28 +1062,22 @@ fn ops_behind(local: u64, sibling_counts: impl Iterator<Item = u64>) -> Option<b
 /// A cell still on an older coordinator: every record, one `get` each.
 async fn read_records_one_by_one(
     state: &Arc<AppState>,
-    admin_port: u16,
-    app_port: u16,
+    line: Line,
     base: holochain_types::prelude::AgentPubKey,
-) -> Result<Vec<holochain_types::prelude::Record>, String> {
+) -> Result<Vec<RecordView>, String> {
     let input = rmp_serde::to_vec_named(&ListAtWire { base, tag_prefix: Vec::new(), network: false })
         .map_err(|e| e.to_string())?;
-    match sealed_zome_call(state, admin_port, app_port, "get_all_sealed_at", input).await {
-        Ok(result) => Ok(rmp_serde::from_slice::<Vec<ListedWire>>(result.as_bytes())
-            .map_err(|e| format!("Records decode failed: {}", e))?
-            .into_iter()
-            .map(|l| l.record)
-            .collect()),
+    match sealed_zome_call(state, line, "get_all_sealed_at", input).await {
+        Ok(result) => decode_listed(line, &result),
         Err(e) if is_missing_function(&e) => {
             let result = sealed_zome_call(
                 state,
-                admin_port,
-                app_port,
+                line,
                 "get_all_sealed",
                 rmp_serde::to_vec_named(&()).map_err(|e| e.to_string())?,
             )
             .await?;
-            rmp_serde::from_slice(result.as_bytes()).map_err(|e| format!("Records decode failed: {}", e))
+            crate::hc::records(line, &result).map_err(|e| format!("Records decode failed: {}", e))
         }
         Err(e) => Err(e),
     }
@@ -986,18 +1094,14 @@ static NETWORK_DEVICE_VERSIONS: std::sync::Mutex<Option<(std::path::PathBuf, Vec
 /// written its own since - would otherwise arrive only with the background
 /// sync. Returns how many versions were read.
 pub(crate) async fn fetch_device_records(state: &Arc<AppState>) -> Result<usize, String> {
-    let (admin_port, app_port) = conductor_ports(state)?;
+    let line = crate::hc::active_line(state);
     let data_key = vault_data_key(state)?;
     let base = sealed_base(state)?;
     let root = state.identity_root();
     let input = rmp_serde::to_vec_named(&ListAtWire { base, tag_prefix: device_records_tag(&data_key), network: true })
         .map_err(|e| e.to_string())?;
-    let result = sealed_zome_call(state, admin_port, app_port, "get_all_sealed_at", input).await?;
-    let records: Vec<holochain_types::prelude::Record> = rmp_serde::from_slice::<Vec<ListedWire>>(result.as_bytes())
-        .map_err(|e| format!("Records decode failed: {}", e))?
-        .into_iter()
-        .map(|l| l.record)
-        .collect();
+    let result = sealed_zome_call(state, line, "get_all_sealed_at", input).await?;
+    let records = decode_listed(line, &result)?;
     let versions: Vec<StoredVersion> = decode_versions(&records, &data_key)
         .into_iter()
         .filter(|v| v.payload.entry_type == crate::devices::DEVICE_ENTRY_TYPE || v.payload.entry_type == crate::devices::REMOVAL_ENTRY_TYPE)
@@ -1132,11 +1236,10 @@ pub(crate) fn forget_network_device_versions() {
     crate::devices::forget_network_asked();
 }
 
-fn decode_versions(records: &[holochain_types::prelude::Record], data_key: &[u8; 32]) -> Vec<StoredVersion> {
-    use holochain_types::prelude::Entry;
+fn decode_versions(records: &[RecordView], data_key: &[u8; 32]) -> Vec<StoredVersion> {
     let mut versions = Vec::with_capacity(records.len());
     for record in records {
-        let Some(Entry::App(entry_bytes)) = record.entry().as_option() else {
+        let Some(entry_bytes) = record.entry.as_ref() else {
             continue;
         };
         #[derive(Deserialize)]
@@ -1146,7 +1249,7 @@ fn decode_versions(records: &[holochain_types::prelude::Record], data_key: &[u8;
             #[serde(with = "serde_bytes")]
             nonce: Vec<u8>,
         }
-        let sealed: SealedEntryWire = match rmp_serde::from_slice(entry_bytes.bytes()) {
+        let sealed: SealedEntryWire = match rmp_serde::from_slice(entry_bytes) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Skipping undecodable sealed entry: {}", e);
@@ -1167,7 +1270,7 @@ fn decode_versions(records: &[holochain_types::prelude::Record], data_key: &[u8;
             }
         };
         versions.push(StoredVersion {
-            action_hash: record.action_address().get_raw_39().to_vec(),
+            action_hash: record.action_hash.clone(),
             payload,
         });
     }
@@ -1258,7 +1361,12 @@ pub(crate) fn import_decision(
 
 /// This device's newest version per logical id, for `import_decision`.
 pub(crate) async fn sealed_held(state: &Arc<AppState>) -> Result<std::collections::HashMap<String, StoredVersion>, String> {
-    let (winners, _superseded) = latest_versions(sealed_versions(state).await?);
+    sealed_held_on(state, crate::hc::active_line(state)).await
+}
+
+/// `sealed_held` from a named line's cell.
+pub(crate) async fn sealed_held_on(state: &Arc<AppState>, line: Line) -> Result<std::collections::HashMap<String, StoredVersion>, String> {
+    let (winners, _superseded) = latest_versions(sealed_versions_on(state, line).await?);
     Ok(winners.into_iter().map(|v| (v.payload.logical_id(), v)).collect())
 }
 
@@ -1944,18 +2052,18 @@ mod tests {
         assert_eq!(LIST_CALLS.load(SeqCst) - calls, 1, "one read at a time, the others take its answer");
 
         // A restart: memory gone, the kept file opens instead of the cell.
-        *HELD_RECORDS.lock().unwrap() = None;
+        forget_held_records();
         forget_recent_versions();
-        assert!(held_records_path(&b.state.identity_root()).exists());
+        assert!(held_records_path(&b.state.identity_root(), Line::V06).exists());
         let from_cell = RECORDS_FROM_CELL.load(SeqCst);
         assert_eq!(sealed_list_inner(&b.state).await.unwrap().len(), N);
         assert_eq!(RECORDS_FROM_CELL.load(SeqCst), from_cell, "the kept records were used after the restart");
         // The file opens only with the identity's key.
-        assert!(load_held_file(&held_records_path(&b.state.identity_root()), &[34u8; 32]).is_empty());
+        assert!(load_held_file(&held_records_path(&b.state.identity_root(), Line::V06), &[34u8; 32]).is_empty());
 
         // Nothing kept at all: another device's records, a hundred per call.
-        *HELD_RECORDS.lock().unwrap() = None;
-        std::fs::remove_file(held_records_path(&b.state.identity_root())).unwrap();
+        forget_held_records();
+        std::fs::remove_file(held_records_path(&b.state.identity_root(), Line::V06)).unwrap();
         forget_recent_versions();
         let (calls, from_cell) = (LIST_CALLS.load(SeqCst), RECORDS_FROM_CELL.load(SeqCst));
         assert_eq!(sealed_list_inner(&b.state).await.unwrap().len(), N);

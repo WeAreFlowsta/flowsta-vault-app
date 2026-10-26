@@ -15,7 +15,7 @@ use crate::commands::AppState;
 use std::sync::Arc;
 
 /// Which Holochain line a conductor speaks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Line {
     /// Holochain 0.6.1: private v2.0, identity 1.4, signing 1.4.
     V06,
@@ -47,6 +47,18 @@ impl std::fmt::Display for Line {
             Line::V06 => "0.6",
             Line::V07 => "0.7",
         })
+    }
+}
+
+/// The line an identity's records live on now: 0.7 once the move has
+/// written its marker, 0.6 before (and for every Vault that never updated).
+/// The marker is the only switch; nothing else decides which line a read
+/// or write goes to.
+pub fn active_line(state: &AppState) -> Line {
+    if crate::paths::moved_07_path(&state.identity_root()).exists() {
+        Line::V07
+    } else {
+        Line::V06
     }
 }
 
@@ -115,21 +127,40 @@ impl AppClient {
     }
 }
 
-/// What the Vault needs from a record, whichever line produced it.
-#[derive(Clone, Debug)]
+/// What the Vault needs from a record, whichever line produced it. Kept on
+/// disk as the held-records file (serde), so the shape is a format.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RecordView {
     /// The action hash, 39 raw bytes.
+    #[serde(with = "serde_bytes")]
     pub action_hash: Vec<u8>,
     /// The author's agent key, 39 raw bytes.
+    #[serde(with = "serde_bytes")]
     pub author: Vec<u8>,
     /// Action timestamp, microseconds since the epoch.
     pub timestamp_us: i64,
     /// The app entry's msgpack bytes, when the record carries an entry.
+    #[serde(default, with = "serde_bytes_opt")]
     pub entry: Option<Vec<u8>>,
     /// The signed action as that line encodes it (msgpack): the proof a
     /// carried record travels with.
+    #[serde(with = "serde_bytes")]
     pub signed_action: Vec<u8>,
     pub line: Line,
+}
+
+/// `serde_bytes` for an `Option<Vec<u8>>`.
+mod serde_bytes_opt {
+    pub fn serialize<S: serde::Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(b) => s.serialize_some(&serde_bytes::Bytes::new(b)),
+            None => s.serialize_none(),
+        }
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+        let v: Option<serde_bytes::ByteBuf> = serde::Deserialize::deserialize(d)?;
+        Ok(v.map(|b| b.into_vec()))
+    }
 }
 
 impl RecordView {

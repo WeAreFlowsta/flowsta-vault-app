@@ -115,6 +115,9 @@ pub fn removed_marker_path(root: &Path) -> PathBuf { root.join(REMOVED_MARKER) }
 /// Written on a device that joined an identity once its first full round
 /// has applied the other devices' profile, connections and backups.
 pub fn setup_done_path(root: &Path) -> PathBuf { root.join("setup-done") }
+/// Written when an identity's records have moved to the 0.7 line and its
+/// writes go there (see `move_07`). Absent = everything on 0.6, as before.
+pub fn moved_07_path(root: &Path) -> PathBuf { root.join("moved-07") }
 pub fn known_devices_path(root: &Path) -> PathBuf { root.join(KNOWN_DEVICES) }
 pub fn shared_connections_path(root: &Path) -> PathBuf { root.join(SHARED_CONNECTIONS) }
 pub fn activity_synced_path(root: &Path) -> PathBuf { root.join(ACTIVITY_SYNCED) }

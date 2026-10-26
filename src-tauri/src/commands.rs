@@ -2546,7 +2546,8 @@ fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, 
         note(name, std::fs::remove_file(crate::paths::store_path(root, name)));
         note(name, std::fs::remove_file(root.join(format!("{}.bak", name))));
     }
-    note("kept records", std::fs::remove_file(crate::sealed::held_records_path(root)));
+    note("kept records", std::fs::remove_file(crate::sealed::held_records_path(root, crate::hc::Line::V06)));
+    note("kept records (0.7)", std::fs::remove_file(crate::sealed::held_records_path(root, crate::hc::Line::V07)));
     for dir in [
         crate::paths::lair_dir(root),
         crate::paths::conductor_dir(root),
