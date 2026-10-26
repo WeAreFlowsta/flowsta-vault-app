@@ -14,8 +14,25 @@ import { connectionStatusContext, signaturesContext } from "~/lib/context";
 import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATCH } from "~/lib/email";
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 import { ActivityRow } from "~/components/vault/ActivityRow";
-import { sizeText, type DevicesProgress } from "~/components/vault/DevicesTab";
+import { sizeText, type DevicesProgress, type DeviceRow } from "~/components/vault/DevicesTab";
 import { buildFeed, timeAgo, recentlyRestored, type ActivityLogEntry } from "~/lib/activity";
+
+/** One line per other device while nothing has arrived from it: where the
+ *  things are and what would make them come (the 10-23 spec). The other
+ *  device's own choice to stop syncing while locked is not in its record
+ *  yet, so that case reads as "last seen". */
+export function whereThingsAre(d: DeviceRow, now = Date.now()): string {
+  const when = (ms: number) => new Date(ms).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const recent = (d.at ?? 0) > now - 10 * 60 * 1000;
+  switch (d.state) {
+    case "needs_update": return `${d.name} needs the Vault update to sync.`;
+    case "not_seen_since": return `Your things are on ${d.name}, last seen ${when(d.at ?? 0)}. Open Flowsta Vault there (it can stay locked) and they arrive.`;
+    case "setting_up": return `${d.name} is still being set up itself.`;
+    default: return recent
+      ? `Waiting for ${d.name}, online a moment ago...`
+      : `Your things are on ${d.name}, last seen ${when(d.at ?? 0)}. Open Flowsta Vault there (it can stay locked) and they arrive.`;
+  }
+}
 
 declare const __API_URL__: string;
 declare const __WEB_URL__: string;
@@ -90,10 +107,24 @@ export default component$(() => {
   // How far it has got: this device's records and the backups it fetches,
   // against what the other devices say they hold.
   const setupProgress = useSignal<DevicesProgress | null>(null);
+  // Which other devices the identity has (its device records) and whether
+  // anything from them has arrived. The banner shows only while there is a
+  // device to wait for: `joined_existing` is true for every phrase restore,
+  // so an identity restored on its only device used to say "on its way"
+  // for ten minutes with nothing coming (Eric, staging, 2026-10-23).
+  const siblingSync = useSignal<{ joined: boolean; other_devices: string[]; records_arrived: boolean } | null>(null);
+  const otherDevices = useSignal<DeviceRow[]>([]);
   const checkSettingUp = $(async () => {
     try {
       settingUp.value = await invoke<boolean>("joined_setup_pending");
-      if (settingUp.value) setupProgress.value = await invoke<DevicesProgress>("devices_progress").catch(() => null);
+      if (settingUp.value) {
+        setupProgress.value = await invoke<DevicesProgress>("devices_progress").catch(() => null);
+        // Null until the cells answer: the banner stays while it is unknown
+        // whether there is another device, and goes once it is known there is none.
+        siblingSync.value = await invoke<{ joined: boolean; other_devices: string[]; records_arrived: boolean }>("sibling_sync").catch(() => null);
+        otherDevices.value = (await invoke<DeviceRow[]>("devices_list").catch(() => [] as DeviceRow[]))
+          .filter((d) => d.state !== "this_device" && d.state !== "this_device_setting_up" && d.state !== "removed");
+      }
     } catch { /* locked */ }
   });
   // Defined before the task below uses it: the optimizer does not pass a
@@ -559,7 +590,7 @@ export default component$(() => {
       {/* A restored vault holds no email: Flowsta keeps only its hash, so the
           person re-enters the address and the server confirms it. Until
           then no app can be offered the email. */}
-      {identity.value && identity.value.hosting_model === "device-hosted" && identity.value.joined_existing && (!identity.value.web_email || settingUp.value) && (
+      {identity.value && identity.value.hosting_model === "device-hosted" && identity.value.joined_existing && (!identity.value.web_email || settingUp.value) && (siblingSync.value === null || siblingSync.value.other_devices.length > 0) && (
         <Callout intent="info" title="Your private data is on its way" class="mb-6">
           <p class="flex items-center gap-2">
             <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
@@ -579,7 +610,13 @@ export default component$(() => {
               const got = p.mine.backups_wanted - p.mine.backups_pending;
               rows.push({ label: "App backups", done: got, of: p.mine.backups_wanted, text: `${sizeText(got)} of ${sizeText(p.mine.backups_wanted)}` });
             }
-            if (rows.length === 0) return <p class="mt-2 text-xs text-gray-400" data-testid="setup-progress">Waiting to hear from your other devices...</p>;
+            if (rows.length === 0) {
+              // Nothing has arrived yet: name the device the things are on and
+              // what it is doing, so "waiting" reads as something to act on.
+              const lines = otherDevices.value.map(whereThingsAre);
+              if (lines.length === 0) return <p class="mt-2 text-xs text-gray-400" data-testid="setup-progress">Waiting to hear from your other devices...</p>;
+              return <div class="mt-2 space-y-1 text-xs text-gray-400" data-testid="setup-progress">{lines.map((l) => <p key={l}>{l}</p>)}</div>;
+            }
             return (
               <div class="mt-3 space-y-2" data-testid="setup-progress">
                 {rows.map((r) => (
@@ -597,6 +634,11 @@ export default component$(() => {
             );
           })()}
         </Callout>
+      )}
+      {identity.value && identity.value.hosting_model === "device-hosted" && identity.value.joined_existing && settingUp.value && siblingSync.value && siblingSync.value.other_devices.length === 0 && !siblingSync.value.records_arrived && (
+        <p class="mb-6 text-xs text-gray-400" data-testid="only-device-note">
+          This is this identity's only device. Import Data brings back an export; anything a lost device still holds arrives if it is ever opened again.
+        </p>
       )}
       {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && !identity.value.joined_existing && (
         <Callout intent="info" title="Add the email you registered with" class="mb-6">
