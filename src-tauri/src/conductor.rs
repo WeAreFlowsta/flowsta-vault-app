@@ -53,8 +53,11 @@ pub struct ConductorHandle {
     pub admin_port: u16,
     pub app_port: u16,
     pub seed_info: SeedInfo,
-    /// The 0.7 line, when it started (see `Line07Handle`).
+    /// The 0.7 line, once `attach_line_07` has brought it up (see
+    /// `Line07Handle`); `None` while it starts or when it could not.
     pub line_07: Option<Line07Handle>,
+    /// Which 0.6 start this is (see `CONDUCTOR_SESSION`).
+    pub session: u64,
 }
 
 impl ConductorHandle {
@@ -755,7 +758,7 @@ pub async fn start_holochain(
     // (`vault::conductor_lair_tag`).
     conductor_seed: [u8; 32],
     conductor_tag: String,
-) -> Result<ConductorHandle, String> {
+) -> Result<(ConductorHandle, Line07Starter), String> {
     // A fresh conductor session gets fresh cap grants - drop any cached
     // credentials so the readiness probe re-verifies (and re-fills) them.
     {
@@ -820,7 +823,7 @@ async fn start_holochain_attempt(
     passphrase: String,
     conductor_seed: [u8; 32],
     conductor_tag: String,
-) -> Result<ConductorHandle, String> {
+) -> Result<(ConductorHandle, Line07Starter), String> {
     // Emit status: starting lair
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
         message: "Starting lair-keystore...".into(),
@@ -1055,40 +1058,101 @@ async fn start_holochain_attempt(
     });
     log::info!("Holochain conductor ready (admin: {}, app: {})", admin_port, app_port);
 
-    // 11. The 0.7 line, best effort: the Vault is Ready on 0.6 whatever
-    // happens here. Its lair holds the same seed; its conductor runs
-    // identity 1.5 + signing 1.5 under the same agent key.
-    let line_07 = match start_line_07(
-        &data_dir,
-        &resource_dir,
-        &passphrase,
-        &conductor_seed,
-        &conductor_tag,
-        &seed_info.ed25519_pub_key.0,
-    )
-    .await
-    {
-        Ok(line) => {
-            set_line_07_state(Line07State::Serving);
-            log::info!("Holochain 0.7 conductor ready (admin: {})", line.admin_port);
-            Some(line)
-        }
-        Err(e) => {
-            set_line_07_state(Line07State::Off);
-            log::warn!("[0.7] the 0.7 line did not start (the Vault runs on 0.6 alone): {}", e);
-            None
-        }
+    // 11. The 0.7 line is started by the caller from a task, AFTER this
+    // handle is stored: the Vault is Ready on 0.6 the moment the 0.6 line
+    // is, and nothing waits for the second line (its first-run install on
+    // Windows took 13 s; a hung 0.7 lair or admin socket could take ~50 s).
+    // The starter carries what the line needs; `attach_line_07` runs it.
+    let session = CONDUCTOR_SESSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let starter = Line07Starter {
+        data_dir,
+        resource_dir,
+        passphrase,
+        conductor_seed,
+        conductor_tag,
+        expected_pub_key: *seed_info.ed25519_pub_key.0,
+        session,
     };
+    set_line_07_state(Line07State::Starting);
 
-    Ok(ConductorHandle {
-        lair_child,
-        conductor_child,
-        lair_client,
-        admin_port: admin_port,
-        app_port,
-        seed_info,
-        line_07,
-    })
+    Ok((
+        ConductorHandle {
+            lair_child,
+            conductor_child,
+            lair_client,
+            admin_port: admin_port,
+            app_port,
+            seed_info,
+            line_07: None,
+            session,
+        },
+        starter,
+    ))
+}
+
+/// Numbers each 0.6 conductor start, so a 0.7 line that comes up late
+/// attaches only to the 0.6 line it was started for.
+static CONDUCTOR_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// What the 0.7 line needs to start, handed back beside the 0.6 handle.
+/// The caller stores that handle, then `attach_line_07` starts this line
+/// from a task and attaches it to the same handle.
+pub struct Line07Starter {
+    data_dir: PathBuf,
+    resource_dir: PathBuf,
+    passphrase: String,
+    conductor_seed: [u8; 32],
+    conductor_tag: String,
+    expected_pub_key: [u8; 32],
+    session: u64,
+}
+
+/// Start the 0.7 line in the background and attach it to the running 0.6
+/// handle. Best effort: the Vault is Ready on 0.6 whatever happens here.
+/// If the 0.6 line it belongs to is gone by the time it is up (locked,
+/// restarted under a new password), the new line is stopped again.
+pub fn attach_line_07(state: Arc<AppState>, starter: Line07Starter) {
+    tauri::async_runtime::spawn(async move {
+        let session = starter.session;
+        match start_line_07(
+            &starter.data_dir,
+            &starter.resource_dir,
+            &starter.passphrase,
+            &starter.conductor_seed,
+            &starter.conductor_tag,
+            &starter.expected_pub_key,
+        )
+        .await
+        {
+            Ok(line) => {
+                let admin_port = line.admin_port;
+                let attached = {
+                    let mut guard = state.conductor_handle.lock().unwrap();
+                    match guard.as_mut() {
+                        Some(h) if h.session == session && h.line_07.is_none() => {
+                            h.line_07 = Some(line);
+                            true
+                        }
+                        _ => {
+                            let _ = tokio::task::spawn_blocking(move || line.shutdown());
+                            false
+                        }
+                    }
+                };
+                if attached {
+                    set_line_07_state(Line07State::Serving);
+                    log::info!("Holochain 0.7 conductor ready (admin: {})", admin_port);
+                } else {
+                    set_line_07_state(Line07State::Off);
+                    log::info!("[0.7] the 0.7 line came up after its 0.6 line had stopped - stopped it again");
+                }
+            }
+            Err(e) => {
+                set_line_07_state(Line07State::Off);
+                log::warn!("[0.7] the 0.7 line did not start (the Vault runs on 0.6 alone): {}", e);
+            }
+        }
+    });
 }
 
 /// Start the 0.7 line: lair 0.7.1 in `lair-07/`, the same seed imported

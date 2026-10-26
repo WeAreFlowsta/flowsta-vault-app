@@ -1593,7 +1593,7 @@ pub(crate) async fn ensure_conductor_alive(
     let resource_dir = resolve_resource_dir(app_handle, &state.data_dir);
 
     log::info!("[watchdog] running start_holochain to bring conductor back");
-    let new_handle = match crate::conductor::start_holochain(
+    let (new_handle, line_07) = match crate::conductor::start_holochain(
         app_handle.clone(),
         data_dir,
         resource_dir,
@@ -1620,6 +1620,8 @@ pub(crate) async fn ensure_conductor_alive(
     );
     let port = new_handle.admin_port;
     *state.conductor_handle.lock().unwrap() = Some(new_handle);
+    // The 0.7 line follows from a task; nothing here waits for it.
+    crate::conductor::attach_line_07(state.clone(), line_07);
     *state.conductor_status.lock().unwrap() = ConductorStatus::Ready { admin_port: port };
     let _ = app_handle.emit(
         "conductor-status",
@@ -2069,9 +2071,12 @@ fn spawn_conductor_startup_inner(
                     )
                     .await
                     {
-                        Ok(handle) => {
+                        Ok((handle, line_07)) => {
                             let port = handle.admin_port;
                             *state.conductor_handle.lock().unwrap() = Some(handle);
+                            // The 0.7 line follows from a task: the Vault is
+                            // Ready on 0.6 now, not after the second line.
+                            crate::conductor::attach_line_07(state.clone(), line_07);
                             Ok(port)
                         }
                         Err(e) => Err(e),
