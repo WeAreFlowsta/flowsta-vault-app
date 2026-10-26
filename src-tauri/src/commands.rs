@@ -8434,10 +8434,13 @@ pub(crate) enum ProfileWriteError {
 /// Write display name / picture into the sealed store (canonical) and
 /// mirror into the vault config. Shared by the IPC /profile-update route
 /// (web-delegated, post-approval) and the in-app editor command below.
+/// `reset_picture` clears the picture record (an empty picture, the
+/// custom flag off) so every device goes back to the Vault's default face.
 pub(crate) async fn write_profile_records(
     state: &Arc<AppState>,
     display_name: Option<String>,
     picture: Option<String>,
+    reset_picture: bool,
 ) -> Result<(), ProfileWriteError> {
     fn unix_now() -> i64 {
         std::time::SystemTime::now()
@@ -8501,10 +8504,10 @@ pub(crate) async fn write_profile_records(
         }
     }
 
-    if let Some(ref pic) = picture {
+    if picture.is_some() || reset_picture {
         let body = serde_json::json!({
-            "profile_picture": pic,
-            "has_custom_picture": true,
+            "profile_picture": picture.clone().unwrap_or_default(),
+            "has_custom_picture": picture.is_some(),
             "updated_at": now_us,
         });
         let current = existing.iter().find(|r| r.entry_type == "profile_picture");
@@ -8545,7 +8548,9 @@ pub(crate) async fn write_profile_records(
             if let Some(ref name) = display_name {
                 cfg.display_name = Some(name.clone());
             }
-            if let Some(ref pic) = picture {
+            if reset_picture {
+                cfg.profile_picture = None;
+            } else if let Some(ref pic) = picture {
                 cfg.profile_picture = Some(pic.clone());
             }
             if let Some(pw) = passphrase {
@@ -8652,9 +8657,9 @@ pub(crate) async fn apply_profile_from_other_devices(state: &Arc<AppState>) -> R
             }
         }
         if let Some(record) = picture {
-            if let Some(pic) = text(&record.body, "profile_picture") {
-                cfg.profile_picture = Some(pic);
-            }
+            // An empty picture is a reset made on another device: back to
+            // the default face here too.
+            cfg.profile_picture = text(&record.body, "profile_picture");
         }
         cfg.profile_applied_at = Some(newest);
         if let Some(pw) = passphrase {
@@ -8718,7 +8723,7 @@ pub async fn update_local_profile(
     if state.vault_config.lock().unwrap().is_none() {
         return Err("Vault is locked.".into());
     }
-    write_profile_records(state.inner(), display_name, picture)
+    write_profile_records(state.inner(), display_name, picture, false)
         .await
         .map_err(|e| match e {
             ProfileWriteError::NotReady(m) => {

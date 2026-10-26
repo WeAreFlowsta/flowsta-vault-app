@@ -3522,6 +3522,11 @@ struct ProfileUpdateRequest {
     /// Data URI (or https URL) for the profile picture.
     #[serde(default)]
     profile_picture: Option<String>,
+    /// Back to the Vault's own default face: the picture record is cleared
+    /// and the custom-picture flag with it. Until 1.7.0 the dashboard's
+    /// "Reset to identicon" had to write the identicon image in as a picture.
+    #[serde(default)]
+    reset_picture: bool,
     #[serde(default)]
     job: bool,
 }
@@ -3656,12 +3661,14 @@ async fn profile_update_core(
             ));
         }
     }
-    if display_name.is_none() && picture.is_none() {
+    // A reset only counts when no new picture comes with it.
+    let reset_picture = req.reset_picture && picture.is_none();
+    if display_name.is_none() && picture.is_none() && !reset_picture {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(IpcError {
                 error: "nothing_to_update".into(),
-                description: Some("Provide display_name and/or profile_picture.".into()),
+                description: Some("Provide display_name, profile_picture or reset_picture.".into()),
             }),
         ));
     }
@@ -3694,7 +3701,7 @@ async fn profile_update_core(
             id: request_id.clone(),
             origin: origin.clone(),
             display_name: display_name.clone(),
-            picture_changed: picture.is_some(),
+            picture_changed: picture.is_some() || reset_picture,
             responder: tx,
         });
     }
@@ -3706,7 +3713,8 @@ async fn profile_update_core(
             "id": request_id,
             "origin": origin,
             "display_name": display_name,
-            "picture_changed": picture.is_some(),
+            "picture_changed": picture.is_some() || reset_picture,
+            "picture_reset": reset_picture,
         }),
     );
 
@@ -3762,7 +3770,7 @@ async fn profile_update_core(
     );
 
     set_job_stage(&state, &job_id, "publishing");
-    crate::commands::write_profile_records(&state.app_state, display_name.clone(), picture.clone())
+    crate::commands::write_profile_records(&state.app_state, display_name.clone(), picture.clone(), reset_picture)
         .await
         .map_err(|e| match e {
             crate::commands::ProfileWriteError::NotReady(msg) => (

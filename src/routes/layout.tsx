@@ -383,6 +383,7 @@ export default component$(() => {
     origin: string | null;
     display_name: string | null;
     picture_changed: boolean;
+    picture_reset?: boolean;
   } | null>(null);
 
   // Generic /sign approval (linked apps signing outside the linking ceremony)
@@ -795,6 +796,7 @@ export default component$(() => {
       origin: string | null;
       display_name: string | null;
       picture_changed: boolean;
+      picture_reset?: boolean;
     }>("profile-update-request", (event) => {
       pendingProfileUpdate.value = event.payload;
     });
@@ -2446,7 +2448,7 @@ export default component$(() => {
               {pendingProfileUpdate.value.picture_changed && (
                 <div class="flex justify-between">
                   <span class="text-xs text-gray-500">Profile picture</span>
-                  <span class="text-xs text-white">will be replaced</span>
+                  <span class="text-xs text-white">{pendingProfileUpdate.value.picture_reset ? "back to the default" : "will be replaced"}</span>
                 </div>
               )}
             </div>
