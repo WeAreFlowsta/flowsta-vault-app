@@ -22,8 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It never starts the old Holochain line, never writes to it, and its
   devices find each other and exchange backups over the new network alone.
   An identity restored from its recovery phrase, added from another device,
-  or brought over from a web account keeps both lines until the move is
-  done, so nothing an older device still holds is left behind.
+  or brought over from a web account also starts on the new network, and
+  runs the old line only while something of it is still there: a device of
+  the identity that has not updated, or the signatures a web account made
+  before it moved into a Vault, which the Vault carries across itself. Once
+  every device has moved, the old line stops starting on its own.
+- **Your devices are on the public record.** The identity's enrollment key
+  and every device removal are published on the new identity network, so
+  a device can check its own standing without asking Flowsta, and a removed
+  device stands down the moment it reads it.
 - **Rename this device.** Settings → Devices names each device after its
   computer. The name of this device can now be changed there; the other
   devices and the apps that list your devices see the new name within a
