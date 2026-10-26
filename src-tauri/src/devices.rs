@@ -106,7 +106,13 @@ pub enum DeviceState {
 
 /// The state of `device` as the device `viewer_install_id` sees it now.
 /// `viewer_latest_change` is the newest version time the viewer holds.
-pub fn device_state(device: &DeviceRecord, viewer_install_id: &str, viewer_latest_change: u64, now_ms: u64) -> DeviceState {
+/// `last_heard_ms` is when the viewer last heard the device directly (its
+/// announcement arrived), which can be much later than the time inside the
+/// device's own record: a record is rewritten on a change, a version change
+/// or once a day, an announcement comes every minute or two. The state's
+/// `at` is the later of the two (10-26: Linux said "last heard from Oct 25"
+/// of a Windows it had heard a minute earlier).
+pub fn device_state(device: &DeviceRecord, viewer_install_id: &str, viewer_latest_change: u64, now_ms: u64, last_heard_ms: Option<u64>) -> DeviceState {
     if device.removed_at.is_some() {
         return DeviceState::Removed;
     }
@@ -116,16 +122,17 @@ pub fn device_state(device: &DeviceRecord, viewer_install_id: &str, viewer_lates
     if device.generation != NETWORK_GENERATION {
         return DeviceState::NeedsUpdate;
     }
-    if now_ms.saturating_sub(device.seen_at) > NOT_SEEN_AFTER_MS {
-        return DeviceState::NotSeenSince { at: device.seen_at };
+    let at = last_heard_ms.map(|h| h.max(device.seen_at)).unwrap_or(device.seen_at);
+    if now_ms.saturating_sub(at) > NOT_SEEN_AFTER_MS {
+        return DeviceState::NotSeenSince { at };
     }
     if device.setting_up {
-        return DeviceState::SettingUp { at: device.seen_at };
+        return DeviceState::SettingUp { at };
     }
     if device.latest_change >= viewer_latest_change {
-        DeviceState::UpToDate { at: device.seen_at }
+        DeviceState::UpToDate { at }
     } else {
-        DeviceState::LastSynced { at: device.seen_at }
+        DeviceState::LastSynced { at }
     }
 }
 
@@ -752,6 +759,10 @@ pub struct DeviceRow {
     pub name: String,
     pub platform: String,
     pub added_at: u64,
+    /// When the device last wrote its own record (ms).
+    pub record_at: u64,
+    /// When this device last heard it directly this session (ms), if it has.
+    pub heard_at: Option<u64>,
     #[serde(flatten)]
     pub state: DeviceState,
 }
@@ -769,12 +780,17 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
     let now = now_ms();
     let mut rows: Vec<DeviceRow> = devices_in(&records)
         .into_iter()
-        .map(|d| DeviceRow {
-            state: device_state(&d, &me, mine, now),
-            install_id: d.install_id,
-            name: d.name,
-            platform: d.platform,
-            added_at: d.added_at,
+        .map(|d| {
+            let heard = heard_at(&d.install_id).map(|secs| secs * 1000);
+            DeviceRow {
+                state: device_state(&d, &me, mine, now, heard),
+                install_id: d.install_id,
+                name: d.name,
+                platform: d.platform,
+                added_at: d.added_at,
+                record_at: d.seen_at,
+                heard_at: heard,
+            }
         })
         .collect();
     // A device that joined lists itself before its first record exists
@@ -786,6 +802,8 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
             name: device_name(),
             platform: std::env::consts::OS.to_string(),
             added_at: now,
+            record_at: now,
+            heard_at: None,
             state: DeviceState::ThisDeviceSettingUp,
         });
     }
@@ -891,10 +909,10 @@ mod tests {
         d.setting_up = true;
         // Its newest record is newer than anything here: still receiving.
         d.latest_change = 9_000;
-        assert_eq!(device_state(&d, "me", 500, now), DeviceState::SettingUp { at: d.seen_at });
+        assert_eq!(device_state(&d, "me", 500, now, None), DeviceState::SettingUp { at: d.seen_at });
         // Once set up it compares like any device.
         d.setting_up = false;
-        assert_eq!(device_state(&d, "me", 500, now), DeviceState::UpToDate { at: d.seen_at });
+        assert_eq!(device_state(&d, "me", 500, now, None), DeviceState::UpToDate { at: d.seen_at });
         // The flag changing is a reason to write the record again.
         let mut done = d.clone();
         d.setting_up = true;
@@ -916,27 +934,42 @@ mod tests {
     fn each_device_reads_as_one_plain_state() {
         let now = 100 * DAY + 1000;
         let d = device("other");
-        assert_eq!(device_state(&d, "other", 500, now), DeviceState::ThisDevice);
-        assert_eq!(device_state(&d, "me", 500, now), DeviceState::UpToDate { at: d.seen_at });
-        assert_eq!(device_state(&d, "me", 400, now), DeviceState::UpToDate { at: d.seen_at }, "it holds newer than I do");
-        assert_eq!(device_state(&d, "me", 900, now), DeviceState::LastSynced { at: 100 * DAY });
-        assert_eq!(device_state(&d, "me", 900, now + 4 * DAY), DeviceState::NotSeenSince { at: 100 * DAY });
+        assert_eq!(device_state(&d, "other", 500, now, None), DeviceState::ThisDevice);
+        assert_eq!(device_state(&d, "me", 500, now, None), DeviceState::UpToDate { at: d.seen_at });
+        assert_eq!(device_state(&d, "me", 400, now, None), DeviceState::UpToDate { at: d.seen_at }, "it holds newer than I do");
+        assert_eq!(device_state(&d, "me", 900, now, None), DeviceState::LastSynced { at: 100 * DAY });
+        assert_eq!(device_state(&d, "me", 900, now + 4 * DAY, None), DeviceState::NotSeenSince { at: 100 * DAY });
+    }
+
+    #[test]
+    fn a_device_heard_directly_reads_from_that_time_not_its_old_record() {
+        // Its record is a day old (it writes one on a change or once a day),
+        // but its announcement arrived a minute ago: it is here now.
+        let d = device("other");
+        let heard = 101 * DAY;
+        let now = heard + 60_000;
+        assert_eq!(device_state(&d, "me", 900, now, Some(heard)), DeviceState::LastSynced { at: heard });
+        assert_eq!(device_state(&d, "me", 500, now, Some(heard)), DeviceState::UpToDate { at: heard });
+        // Heard four days after its record: not "not seen since" the record.
+        assert_eq!(device_state(&d, "me", 500, 104 * DAY + 1000, Some(104 * DAY)), DeviceState::UpToDate { at: 104 * DAY });
+        // An old hello never makes a record look older than it is.
+        assert_eq!(device_state(&d, "me", 500, 100 * DAY + 1000, Some(90 * DAY)), DeviceState::UpToDate { at: 100 * DAY });
     }
 
     #[test]
     fn a_device_on_another_generation_needs_the_update_whatever_else_is_true() {
         let mut d = device("other");
         d.generation = "holochain-0.7".into();
-        assert_eq!(device_state(&d, "me", 0, 100 * DAY), DeviceState::NeedsUpdate);
-        assert_eq!(device_state(&d, "me", 0, 200 * DAY), DeviceState::NeedsUpdate, "not 'not seen': it may be in use every day");
+        assert_eq!(device_state(&d, "me", 0, 100 * DAY, None), DeviceState::NeedsUpdate);
+        assert_eq!(device_state(&d, "me", 0, 200 * DAY, None), DeviceState::NeedsUpdate, "not 'not seen': it may be in use every day");
     }
 
     #[test]
     fn a_removed_device_reads_as_removed_even_to_itself() {
         let mut d = device("other");
         d.removed_at = Some(5);
-        assert_eq!(device_state(&d, "me", 0, 100 * DAY), DeviceState::Removed);
-        assert_eq!(device_state(&d, "other", 0, 100 * DAY), DeviceState::Removed);
+        assert_eq!(device_state(&d, "me", 0, 100 * DAY, None), DeviceState::Removed);
+        assert_eq!(device_state(&d, "other", 0, 100 * DAY, None), DeviceState::Removed);
     }
 
     #[test]

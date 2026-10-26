@@ -15,7 +15,12 @@ export interface DeviceRow {
   platform: string;
   added_at: number;
   state: "this_device" | "this_device_setting_up" | "up_to_date" | "setting_up" | "last_synced" | "not_seen_since" | "needs_update" | "removed";
+  /** The later of the device's own record time and when this Vault last heard it directly (ms). */
   at?: number;
+  /** When the device last wrote its own record (ms). */
+  record_at?: number;
+  /** When this Vault last heard it directly this session (ms), if it has. */
+  heard_at?: number;
 }
 
 /** What a device holds (devices_progress): its private records and the
@@ -86,18 +91,29 @@ function day(ms: number): string {
 export const RECENT_MS = 10 * 60 * 1000;
 export const isCatchingUp = (d: DeviceRow, now = Date.now()) => d.state === "last_synced" && now - (d.at ?? 0) <= RECENT_MS;
 
+/** "heard just now" / "heard 3 min ago" when this Vault heard the device
+ *  directly after its record was written: the time on the row is the hello,
+ *  and the line says the record is older (10-26: a day-old record read as
+ *  "last heard from Oct 25" of a device online right then). */
+function heardNote(d: DeviceRow, now = Date.now()): string {
+  if (!d.heard_at || !d.record_at || d.heard_at <= d.record_at + 60_000) return "";
+  const mins = Math.floor((now - d.heard_at) / 60_000);
+  const ago = mins < 1 ? "just now" : mins < 60 ? `${mins} min ago` : `${Math.floor(mins / 60)} h ago`;
+  return ` - heard ${ago}, its record is from ${dayAndTime(d.record_at)}`;
+}
+
 /** How current a device is, in plain words. */
 export function deviceLine(d: DeviceRow): string {
   switch (d.state) {
     case "this_device": return "This device";
     case "this_device_setting_up": return "This device - being set up";
-    case "up_to_date": return d.at ? `Up to date - last seen ${dayAndTime(d.at)}` : "Up to date";
+    case "up_to_date": return d.at ? (heardNote(d) ? `Up to date${heardNote(d)}` : `Up to date - last seen ${dayAndTime(d.at)}`) : "Up to date";
     case "setting_up": return "Receiving your private data";
     // Its newest record is older than this device's: it is behind. (It said
     // "Has everything up to <when it last checked in>" - the opposite.) A
     // recent one is catching up with this device, which it names (10-18:
     // "Syncing a recent change" read as this device fetching from it).
-    case "last_synced": return isCatchingUp(d) ? "Catching up with a change made here" : `Not up to date - last heard from ${dayAndTime(d.at ?? 0)}`;
+    case "last_synced": return isCatchingUp(d) ? "Catching up with a change made here" : heardNote(d) ? `Not up to date${heardNote(d)}` : `Not up to date - last heard from ${dayAndTime(d.at ?? 0)}`;
     case "not_seen_since": return `Not seen since ${day(d.at ?? 0)}`;
     case "needs_update": return "Needs the Vault update to sync";
     case "removed": return "Removed";
