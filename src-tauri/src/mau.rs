@@ -208,6 +208,16 @@ mod store_tests {
         // encrypted under a seed-derived key: another identity's seed cannot read it
         assert!(load_mau_store(root, &[12u8; 32]).is_err());
     }
+
+    #[test]
+    fn a_skip_the_server_will_never_accept_is_dropped_and_a_passing_one_retried() {
+        assert!(skip_is_permanent("Unknown or inactive client_id"));
+        assert!(skip_is_permanent("Invalid month_year format"));
+        assert!(skip_is_permanent("Missing required fields"));
+        assert!(!skip_is_permanent("MAU limit reached for free tier"));
+        assert!(!skip_is_permanent("Processing failed"));
+        assert!(!skip_is_permanent("no reason given"));
+    }
 }
 
 pub fn load_mau_state(app_state: &AppState) {
@@ -475,6 +485,15 @@ pub fn mark_events_synced(app_state: &AppState, client_id_months: &[(String, Str
     }
 }
 
+/// Whether a reason the server gave for skipping an event means retrying
+/// can never help (api `developerMau.js`: an unknown or inactive app, or a
+/// shape it refuses). "MAU limit reached" and "Processing failed" are not
+/// permanent: a new month or a healthy server takes the event.
+pub(crate) fn skip_is_permanent(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    r.contains("unknown or inactive client_id") || r.contains("invalid month_year") || r.contains("missing required fields")
+}
+
 /// Sync pending MAU events to the Flowsta API.
 /// Returns the number of events synced, or an error.
 pub async fn sync_mau_to_api(app_state: &AppState) -> Result<usize, String> {
@@ -537,19 +556,24 @@ pub async fn sync_mau_to_api(app_state: &AppState) -> Result<usize, String> {
 
     let synced_count = body["synced"].as_u64().unwrap_or(0) as usize;
 
-    // Mark synced only what the server accepted: events it skipped
-    // ("Unknown or inactive client_id", "MAU limit reached", "Processing
-    // failed") come back in `errors[].client_id` and must be retried.
-    let skipped: std::collections::HashSet<String> = body["errors"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|e| e.get("client_id").and_then(|c| c.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    if !skipped.is_empty() {
-        log::warn!("MAU sync: server skipped {} event(s) - kept for retry", skipped.len());
+    // Mark synced only what the server accepted. It names each event it
+    // skipped in `errors[]` with the reason. A reason that never clears on
+    // retry (the app was removed or never registered; a shape the server
+    // refuses) drops the event, said once in the log with the reason; a
+    // reason that can clear ("MAU limit reached", "Processing failed")
+    // keeps it for the next sync. Until 1.7.0 every skip was retried every
+    // half hour forever with no reason in the log.
+    let mut skipped: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for e in body["errors"].as_array().into_iter().flatten() {
+        let Some(client_id) = e.get("client_id").and_then(|c| c.as_str()) else { continue };
+        let reason = e.get("error").and_then(|r| r.as_str()).unwrap_or("no reason given");
+        let short: String = client_id.chars().take(12).collect();
+        if skip_is_permanent(reason) {
+            log::warn!("MAU sync: the server refuses the event for {}… and always will ({}) - dropped", short, reason);
+        } else {
+            log::info!("MAU sync: the server skipped the event for {}… ({}) - kept for retry", short, reason);
+            skipped.insert(client_id.to_string());
+        }
     }
     let synced_pairs: Vec<(String, String)> = pending
         .iter()
