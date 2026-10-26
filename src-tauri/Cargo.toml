@@ -89,6 +89,7 @@ lair_keystore_api_07 = { package = "lair_keystore_api", version = "=0.7.1" }
 # Building CoordinatorBundle for UpdateCoordinators hot-swaps (same version
 # holochain_types 0.6.1 uses).
 mr_bundle = "=0.6.1"
+mr_bundle_07 = { package = "mr_bundle", version = "=0.7.1" }
 
 # Save dialog
 tauri-plugin-dialog = "2"

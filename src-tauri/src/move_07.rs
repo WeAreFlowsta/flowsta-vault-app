@@ -120,9 +120,15 @@ pub fn schedule_pass(state: Arc<AppState>, reason: &'static str) {
         *running = Some(root.clone());
     }
     tauri::async_runtime::spawn(async move {
+        struct Done;
+        impl Drop for Done {
+            fn drop(&mut self) {
+                *RUNNING.lock().unwrap() = None;
+            }
+        }
+        let _done = Done;
         let outcome = run_pass(&state, reason).await;
         *LAST_PASS.lock().unwrap() = Some((root, outcome));
-        *RUNNING.lock().unwrap() = None;
     });
 }
 
@@ -386,6 +392,369 @@ mod tests {
         assert!(spec.body.is_null());
         let live = spec_of(&version("b", 2000, 2));
         assert_eq!(live.body, serde_json::json!({ "n": 1 }));
+    }
+
+    // ── Live: a 0.6 conductor and a 0.7 conductor, the bundled binaries ──
+    //
+    // cargo test --lib move_07::tests::live -- --ignored --nocapture --test-threads=1
+
+    struct LivePair {
+        state: Arc<AppState>,
+        children: Vec<std::process::Child>,
+        lairs: Vec<crate::process_ext::SidecarChild>,
+        dir: PathBuf,
+    }
+    impl Drop for LivePair {
+        fn drop(&mut self) {
+            for c in &mut self.children {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            for l in &mut self.lairs {
+                let _ = l.kill();
+                let _ = l.wait();
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn manifest_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn start_conductor(dir: &Path, binary: &str, config: &str) -> std::process::Child {
+        use std::io::Write;
+        let binary = manifest_dir().join("binaries").join(binary);
+        assert!(binary.exists(), "the bundled conductor binary {} is needed for this test", binary.display());
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::create_dir_all(dir.join("ks")).unwrap();
+        let config_path = dir.join("conductor-config.yaml");
+        std::fs::write(&config_path, config).unwrap();
+        let mut child = std::process::Command::new(&binary)
+            .arg("--piped")
+            .arg("-c")
+            .arg(&config_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::fs::File::create(dir.join("holochain.log")).unwrap())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start the conductor");
+        child.stdin.take().unwrap().write_all(b"live-test\n").unwrap();
+        child
+    }
+
+    /// One identity's two lines on this machine, as the Vault runs them:
+    /// the real lair sidecars with ONE seed imported into both (the same
+    /// agent key on both lines), the 0.6 conductor with private v2.0 +
+    /// signing v1.4, the 0.7 conductor with private v2.1 + signing v1.5.
+    async fn live_pair(name: &str, admin_06: u16, admin_07: u16, seed: &str, conductor_seed: &[u8; 32], config: &crate::vault::VaultConfig) -> LivePair {
+        let auth = std::fs::read_to_string(manifest_dir().join("../scripts/run-test-instance.sh"))
+            .ok()
+            .and_then(|t| t.split("FLOWSTA_AUTH_MATERIAL=").nth(1).map(|r| r.split_whitespace().next().unwrap_or("").to_string()))
+            .unwrap_or_default();
+        // Short paths: the key stores' socket paths have a length limit.
+        let dir = PathBuf::from(format!("/tmp/fvmv-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pass = "live-test";
+        let origin = crate::conductor::node_origin_for_tests();
+        let resources = manifest_dir().join("resources");
+        let tag = "live-device-key";
+
+        // The 0.6 key store, the seed imported.
+        let lair_06 = dir.join("l6");
+        let (mut lair_child_06, url_06) = crate::lair::start_lair_process_with(&lair_06, pass, "vault-lair-keystore").expect("start lair 0.6");
+        crate::lair::wait_for_lair_socket(&url_06, 15, &mut lair_child_06, &lair_06).await.expect("lair 0.6 socket");
+        let key_06 = {
+            let client = crate::lair::connect_to_lair(&url_06, pass).await.expect("connect lair 0.6");
+            let info = crate::lair::import_seed_to_lair(&client, conductor_seed, tag).await.expect("import seed 0.6");
+            *info.ed25519_pub_key.0
+        };
+        // The 0.7 key store, the same seed: the same key.
+        let lair_07 = dir.join("l7");
+        let (mut lair_child_07, url_07) = crate::lair::start_lair_process_with(&lair_07, pass, "vault-lair-keystore-07").expect("start lair 0.7");
+        crate::lair::wait_for_lair_socket(&url_07, 15, &mut lair_child_07, &lair_07).await.expect("lair 0.7 socket");
+        let key_07 = {
+            let client = crate::lair::connect_to_lair_07(&url_07, pass).await.expect("connect lair 0.7");
+            crate::lair::import_seed_to_lair_07(&client, conductor_seed, tag).await.expect("import seed 0.7")
+        };
+        assert_eq!(key_06, key_07, "one seed, one key on both lines");
+
+        let d06 = dir.join("06");
+        let d07 = dir.join("07");
+        let c06 = start_conductor(
+            &d06,
+            "vault-holochain-x86_64-unknown-linux-gnu",
+            &format!(
+                "data_root_path: '{d}/data'\nkeystore:\n  type: lair_server\n  connection_url: '{u}'\nadmin_interfaces:\n- driver:\n    type: websocket\n    port: {p}\n    allowed_origins: '{o}'\nnetwork:\n  bootstrap_url: https://bootstrap-staging.flowsta.com\n  signal_url: wss://bootstrap-staging.flowsta.com\n  relay_url: https://bootstrap-staging.flowsta.com./\n  base64_auth_material_bootstrap: \"{a}\"\n  base64_auth_material_relay: \"{a}\"\n  request_timeout_s: 240\n",
+                d = d06.display(), u = url_06.replace('\'', "''"), p = admin_06, o = origin, a = auth,
+            ),
+        );
+        let c07 = start_conductor(
+            &d07,
+            "vault-holochain-07-x86_64-unknown-linux-gnu",
+            &format!(
+                "data_root_path: '{d}/data'\nkeystore:\n  type: lair_server\n  connection_url: '{u}'\nadmin_interfaces:\n- driver:\n    type: websocket\n    port: {p}\n    allowed_origins: '{o}'\nnetwork:\n  bootstrap_url: https://bootstrap-staging-7.flowsta.com\n  relay_url: https://bootstrap-staging-7.flowsta.com./\n  base64_auth_material_bootstrap: \"{a}\"\n  base64_auth_material_relay: \"{a}\"\n  request_timeout_s: 240\ndb_sync_level: Normal\n",
+                d = d07.display(), u = url_07.replace('\'', "''"), p = admin_07, o = origin, a = auth,
+            ),
+        );
+
+        // 0.6: private v2.0 + signing v1.4 under the key.
+        let app_06 = {
+            use holochain_client::{AdminWebsocket, InstallAppPayload};
+            let mut admin = None;
+            for _ in 0..60 {
+                if let Ok(ws) = AdminWebsocket::connect(format!("localhost:{}", admin_06), Some(crate::conductor::node_origin())).await {
+                    admin = Some(ws);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            let admin = admin.expect("the 0.6 admin interface");
+            let key = holochain_types::prelude::AgentPubKey::from_raw_32(key_06.to_vec());
+            for (app_id, file, seed) in [
+                (crate::dna::private_v2_app_id(), "flowsta_private_v2_0_happ.happ", Some(seed.to_string())),
+                (crate::signing_07::signing_app_id(Line::V06), "flowsta_signing_v1_4_happ.happ", None),
+            ] {
+                admin
+                    .install_app(InstallAppPayload {
+                        source: holochain_types::prelude::AppBundleSource::Path(resources.join(file)),
+                        agent_key: Some(key.clone()),
+                        installed_app_id: Some(app_id.clone()),
+                        network_seed: seed,
+                        roles_settings: None,
+                        ignore_genesis_failure: false,
+                    })
+                    .await
+                    .unwrap_or_else(|e| panic!("install {} on 0.6: {}", app_id, e));
+                admin.enable_app(app_id).await.expect("enable (0.6)");
+            }
+            crate::dna::ensure_private_v2_coordinators(admin_06, &resources).await.expect("private coordinator rev");
+            crate::dna::ensure_signing_coordinators(admin_06, &resources, &dir).await.expect("signing coordinator rev");
+            crate::dna::setup_app_interface(admin_06).await.expect("0.6 app interface")
+        };
+
+        // 0.7: private v2.1 + signing v1.5 under the same key, the way the
+        // Vault installs them.
+        let app_07 = {
+            use holochain_client_07::AdminWebsocket;
+            let mut up = false;
+            for _ in 0..60 {
+                if AdminWebsocket::connect(format!("localhost:{}", admin_07), Some(crate::conductor::node_origin())).await.is_ok() {
+                    up = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            assert!(up, "the 0.7 admin interface");
+            let apps = crate::dna::install_dnas_07(admin_07, &resources, &key_07[..], Some(seed)).await.expect("install the 0.7 apps");
+            assert_eq!(apps.len(), 3, "identity 1.5, signing 1.5, private 2.1");
+            crate::dna::ensure_signing_coordinators_07(admin_07, &resources).await.expect("signing 1.5 coordinator rev");
+            crate::dna::setup_app_interface_07(admin_07).await.expect("0.7 app interface")
+        };
+
+        let state = Arc::new(AppState::new(dir.join("vault")));
+        std::fs::create_dir_all(state.identity_root()).unwrap();
+        *state.vault_config.lock().unwrap() = Some(config.clone());
+        *state.test_conductor_ports.lock().unwrap() = Some((admin_06, app_06));
+        *state.test_conductor_ports_07.lock().unwrap() = Some((admin_07, app_07));
+        LivePair { state, children: vec![c06, c07], lairs: vec![lair_child_06, lair_child_07], dir }
+    }
+
+    #[derive(Serialize)]
+    struct SignAndCreate {
+        file_hash: Vec<u8>,
+        signed_at: i64,
+        intent: Option<String>,
+        ai_generation: Option<String>,
+        content_rights: Option<()>,
+        integrity_report: Option<()>,
+        perceptual_hash: Option<()>,
+        supersedes: Option<holochain_types::prelude::ActionHash>,
+        expires_at: Option<i64>,
+        tags: Option<Vec<String>>,
+        comment: Option<String>,
+    }
+
+    async fn sign_on_06(client: &crate::hc::AppClient, role: &str, byte: u8, signed_at: i64, supersedes: Option<Vec<u8>>) -> Vec<u8> {
+        let input = rmp_serde::to_vec_named(&SignAndCreate {
+            file_hash: vec![byte; 32],
+            signed_at,
+            intent: Some("Authorship".into()),
+            ai_generation: None,
+            content_rights: None,
+            integrity_report: None,
+            perceptual_hash: None,
+            supersedes: supersedes.map(holochain_types::prelude::ActionHash::from_raw_39),
+            expires_at: None,
+            tags: None,
+            comment: Some(format!("file {}", byte)),
+        })
+        .unwrap();
+        let out = client.call_zome(role, "signing", "sign_and_create", input).await.expect("sign_and_create");
+        let h: holochain_types::prelude::ActionHash = rmp_serde::from_slice(&out).unwrap();
+        h.get_raw_39().to_vec()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "starts a real 0.6 conductor and a real 0.7 conductor"]
+    async fn live_the_move_carries_records_and_signatures_and_flips_once() {
+        let seed = format!("move-{}", hex::encode(crate::key_derivation::new_conductor_seed())[..16].to_string());
+        let identity_public = crate::key_derivation::public_key_of_seed(&[27u8; 32]);
+        let mut config: crate::vault::VaultConfig = serde_json::from_str(
+            r#"{"agent_pub_key":"uhCAkTest","did":"did:flowsta:uhCAkTest","installed_app_ids":[],"created_at":1}"#,
+        )
+        .unwrap();
+        config.data_key = Some(vec![35u8; 32]);
+        config.hosting_model = Some("device-hosted".into());
+        config.agent_pub_key_raw_b64 = Some(crate::key_derivation::base64_standard_encode(
+            &crate::key_derivation::construct_agent_pub_key_bytes(&identity_public),
+        ));
+        // This device's conductor key: the seed both key stores hold.
+        let conductor_seed = [28u8; 32];
+        config.conductor_seed = Some(conductor_seed.to_vec());
+        let pair = live_pair("a", 46061, 46062, &seed, &conductor_seed, &config).await;
+        let state = &pair.state;
+        let root = state.identity_root();
+        assert_eq!(crate::hc::active_line(state), Line::V06);
+
+        // ── Before: the identity's life on 0.6 ──
+        // Private records: a profile, forty log entries, an edit, a deletion,
+        // and a record another device wrote (kept as that device's).
+        let profile = crate::sealed::sealed_store_inner(state, "user_profile".into(), serde_json::json!({ "name": "first" }), vec![], 1_000).await.unwrap();
+        for i in 0..40u64 {
+            crate::sealed::sealed_store_inner(state, "login_activity".into(), serde_json::json!({ "n": i }), vec![], 2_000 + i).await.unwrap();
+        }
+        crate::sealed::sealed_replace_inner(state, &profile, "user_profile".into(), serde_json::json!({ "name": "edited" }), vec![], 1_000).await.unwrap();
+        let gone = crate::sealed::sealed_store_inner(state, "dashboard_activity".into(), serde_json::json!({ "x": 1 }), vec![], 3_000).await.unwrap();
+        crate::sealed::sealed_delete_inner(state, &gone).await.unwrap();
+        crate::sealed::sealed_store_spec_as(
+            state,
+            Line::V06,
+            StoreSpec { entry_type: "login_activity".into(), body: serde_json::json!({ "from": "b" }), refs: vec![], created_at: 4_000, id: None, updated_at: None, deleted: false },
+            None,
+            Some("device-b".into()),
+        )
+        .await
+        .unwrap();
+        crate::sealed::forget_recent_versions();
+        let (winners_06, _) = latest_versions(crate::sealed::sealed_versions_on(state, Line::V06).await.unwrap());
+        assert_eq!(winners_06.len(), 43, "profile, 40 logs, the deleted record (one logical id), device b's record");
+
+        // Signatures: three, one superseding another, one revoked, one with a thumbnail.
+        let (c06, r06) = crate::signing_07::signing_client(state, Line::V06).await.unwrap();
+        let s1 = sign_on_06(&c06, &r06, 1, 10_000, None).await;
+        let s2 = sign_on_06(&c06, &r06, 2, 20_000, Some(s1.clone())).await;
+        let s3 = sign_on_06(&c06, &r06, 3, 30_000, None).await;
+        #[derive(Serialize)]
+        struct RevokeInput {
+            signature_action: holochain_types::prelude::ActionHash,
+            reason: Option<String>,
+        }
+        c06.call_zome(&r06, "signing", "revoke_signature", rmp_serde::to_vec_named(&RevokeInput { signature_action: holochain_types::prelude::ActionHash::from_raw_39(s3.clone()), reason: Some("wrong file".into()) }).unwrap())
+            .await
+            .expect("revoke on 0.6");
+        #[derive(Serialize)]
+        struct SetThumbnailInput {
+            signature_action: holochain_types::prelude::ActionHash,
+            thumbnail: String,
+        }
+        c06.call_zome(&r06, "signing", "set_thumbnail", rmp_serde::to_vec_named(&SetThumbnailInput { signature_action: holochain_types::prelude::ActionHash::from_raw_39(s2.clone()), thumbnail: "data:image/png;base64,AAAA".into() }).unwrap())
+            .await
+            .expect("thumbnail on 0.6");
+
+        // ── The pass ──
+        let started = std::time::Instant::now();
+        let out = run_pass(state, "test").await;
+        println!("first pass in {:?}: {:#?}", started.elapsed(), out);
+        assert_eq!(out.error, None);
+        assert_eq!(out.private_06, 43);
+        assert_eq!(out.private_written, 43);
+        assert!(out.private_complete);
+        assert_eq!(out.signatures_06, 3);
+        assert_eq!(out.signatures_carried, 3);
+        assert_eq!(out.revocations_carried, 1);
+        assert_eq!(out.thumbnails_carried, 1);
+        assert!(out.signing_complete);
+        assert!(out.flipped);
+        assert!(moved(&root));
+        let m = marker(&root).unwrap();
+        assert_eq!((m.private_records, m.signatures, m.revocations, m.thumbnails), (43, 3, 1, 1));
+        assert_eq!(crate::hc::active_line(state), Line::V07);
+
+        // What 0.7 holds is what 0.6 held: same ids, same versions, same devices.
+        let held_07 = crate::sealed::sealed_held_on(state, Line::V07).await.unwrap();
+        assert_eq!(held_07.len(), 43);
+        for v in &winners_06 {
+            let on_07 = held_07.get(&v.payload.logical_id()).expect("every 0.6 record is on 0.7");
+            assert_eq!(on_07.payload.version_time(), v.payload.version_time());
+            assert_eq!(on_07.payload.deleted, v.payload.deleted);
+            assert_eq!(on_07.payload.device, v.payload.device, "the writing device is kept");
+            assert_ne!(on_07.action_hash, v.action_hash, "a new action on the new network");
+        }
+        assert_eq!(held_07.get("user_profile").unwrap().payload.deleted, false);
+        let edited: serde_json::Value = rmp_serde::from_slice(&held_07.get("user_profile").unwrap().payload.body).unwrap();
+        assert_eq!(edited["name"], "edited");
+        let from_b = held_07.values().find(|v| v.payload.device.as_deref() == Some("device-b")).expect("device b's record");
+        assert_eq!(from_b.payload.created_at, 4_000);
+
+        // The signatures on 0.7: three carried records, the chain whole, the
+        // revocation and the thumbnail with them.
+        let own_07 = crate::signing_07::own_signatures(state).await.unwrap();
+        assert_eq!(own_07.len(), 3);
+        let by_original = |h: &[u8]| own_07.iter().find(|s| s["original_action_hash"] == hex::encode(h)).expect("carried");
+        assert_eq!(by_original(&s3)["revoked"], true);
+        assert_eq!(by_original(&s3)["revocation_reason"], "wrong file");
+        assert_eq!(by_original(&s2)["thumbnail"], "data:image/png;base64,AAAA");
+        assert_eq!(by_original(&s1)["thumbnail"], serde_json::Value::Null);
+        assert_eq!(by_original(&s2)["supersedes"], hex::encode(&s1), "the record is byte-identical: its supersedes names the 0.6 hash");
+        let merged = crate::signing_07::merge_own(Vec::new(), own_07.clone());
+        let s2_merged = merged.iter().find(|s| s["original_action_hash"] == hex::encode(&s2)).unwrap();
+        assert_eq!(s2_merged["supersedes"], by_original(&s1)["action_hash"], "the view re-points the chain at the carried copy");
+
+        // ── A second pass carries nothing and flips nothing ──
+        let again = run_pass(state, "test again").await;
+        assert_eq!(again.error, None);
+        assert_eq!(again.private_written, 0);
+        assert_eq!(again.private_present, 43);
+        assert!(again.private_complete && again.signing_complete && !again.flipped);
+        assert_eq!(marker(&root), Some(m.clone()), "the marker is written once");
+        assert_eq!(crate::signing_07::own_signatures(state).await.unwrap().len(), 3, "carries are idempotent");
+
+        // ── After the flip: writes go to 0.7, 0.6 is untouched ──
+        crate::sealed::sealed_store_inner(state, "login_activity".into(), serde_json::json!({ "after": true }), vec![], 5_000).await.unwrap();
+        crate::sealed::forget_recent_versions();
+        assert_eq!(crate::sealed::sealed_held_on(state, Line::V07).await.unwrap().len(), 44);
+        assert_eq!(latest_versions(crate::sealed::sealed_versions_on(state, Line::V06).await.unwrap()).0.len(), 43, "nothing new on 0.6");
+        let (admin_06, app_06) = crate::hc::line_ports(state, Line::V06).unwrap();
+        let s4 = crate::commands::commit_signature_to_dht(state, admin_06, app_06, &[4u8; 32], 40_000, Some("authorship"), None, None, None, None, Some("after the move"), None)
+            .await
+            .expect("the Vault's Sign It write after the flip");
+        let own_after = crate::signing_07::own_signatures(state).await.unwrap();
+        assert_eq!(own_after.len(), 4);
+        assert!(own_after.iter().any(|s| s["action_hash"] == s4 && s.get("original_action_hash").is_none()), "a native 0.7 record, written by the Vault's own path");
+        let (c06b, r06b) = crate::signing_07::signing_client(state, Line::V06).await.unwrap();
+        assert_eq!(crate::signing_07::own_records_06(&c06b, &r06b).await.unwrap().len(), 3, "nothing new on the 0.6 signing cell");
+
+        // ── A device that has not updated writes on 0.6: the next pass carries it ──
+        crate::sealed::sealed_store_spec_as(
+            state,
+            Line::V06,
+            StoreSpec { entry_type: "login_activity".into(), body: serde_json::json!({ "late": true }), refs: vec![], created_at: 6_000, id: None, updated_at: None, deleted: false },
+            None,
+            Some("device-b".into()),
+        )
+        .await
+        .unwrap();
+        crate::sealed::forget_recent_versions();
+        let late = run_pass(state, "catch-up").await;
+        assert_eq!(late.error, None);
+        assert_eq!(late.private_written, 1);
+        assert!(late.private_complete && !late.flipped);
+        let held = crate::sealed::sealed_held_on(state, Line::V07).await.unwrap();
+        assert!(held.values().any(|v| v.payload.created_at == 6_000 && v.payload.device.as_deref() == Some("device-b")));
+        assert_eq!(held.len(), 45);
+        println!("the move: first pass {:?}, {} s total", out.took_ms, started.elapsed().as_secs());
     }
 
     #[test]

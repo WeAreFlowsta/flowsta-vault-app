@@ -40,8 +40,15 @@ pub fn signing_app_label(line: Line) -> String {
 pub(crate) async fn signing_client(state: &Arc<AppState>, line: Line) -> Result<(AppClient, String), String> {
     match line {
         Line::V06 => {
-            let (admin_ws, app_port, _apps, signing_apps) = crate::commands::open_signing_conductor(state).await?;
-            let app = signing_apps.first().ok_or("Signing DNA not installed")?;
+            use holochain_client::AdminWebsocket;
+            let (admin_port, app_port) = crate::hc::line_ports(state, line)?;
+            let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+                .await
+                .map_err(|e| format!("Admin WS: {}", e))?;
+            crate::dna::ensure_apps_enabled(&admin_ws, state).await;
+            let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
+            let app_id = signing_app_id(line);
+            let app = apps.iter().find(|a| a.installed_app_id == app_id).ok_or_else(|| format!("{} is not installed", app_id))?;
             let (ws, role) = crate::commands::connect_signing_app_ws(state, &admin_ws, app_port, app)
                 .await
                 .ok_or_else(|| format!("connect_signing_app_ws failed for {}", app.installed_app_id))?;
@@ -437,8 +444,14 @@ pub(crate) async fn carry_thumbnail(client: &AppClient, role: &str, signature_on
 pub(crate) async fn own_records_06(client: &AppClient, role: &str) -> Result<Vec<(RecordView, SignatureEntry)>, String> {
     let bytes = client.call_zome(role, "signing", "get_my_signatures", mp(&())?).await?;
     let records = crate::hc::records(client.line(), &bytes)?;
-    let mut entries: Vec<(RecordView, SignatureEntry)> =
-        records.into_iter().filter_map(|r| r.entry_as::<SignatureEntry>().ok().map(|e| (r, e))).collect();
+    // A record reached through two links (the zome's own signing path links
+    // it twice) is one record.
+    let mut seen = std::collections::HashSet::new();
+    let mut entries: Vec<(RecordView, SignatureEntry)> = records
+        .into_iter()
+        .filter(|r| seen.insert(r.action_hash.clone()))
+        .filter_map(|r| r.entry_as::<SignatureEntry>().ok().map(|e| (r, e)))
+        .collect();
     entries.sort_by_key(|(_, e)| e.signed_at);
     Ok(entries)
 }

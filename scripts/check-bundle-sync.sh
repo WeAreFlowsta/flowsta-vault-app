@@ -29,7 +29,7 @@ for r in sorted(cfg['bundle']['resources']):
 # version-suffixed constants like `BUNDLED_SIGNING_V1_3_HAPP_FILE` match.
 # The hot-swap coordinator wasms ship alongside the happs and are
 # referenced by their own constants — hold them to the same agreement.
-constants=$(grep -E '^(pub )?const (BUNDLED_[A-Z0-9_]+_HAPP_FILE|SIGNING_COORDINATOR_WASM|PRIVATE_V2_COORDINATOR_WASM): &str =' src-tauri/src/dna.rs \
+constants=$(grep -E '^(pub )?const (BUNDLED_[A-Z0-9_]+_HAPP_FILE|[A-Z0-9_]*COORDINATOR_WASM[A-Z0-9_]*): &str =' src-tauri/src/dna.rs \
   | grep -oE '"[^"]+"' | tr -d '"' | sort -u)
 
 on_disk=$(ls src-tauri/resources/*.happ src-tauri/resources/*.wasm 2>/dev/null | xargs -n1 basename | sort -u)

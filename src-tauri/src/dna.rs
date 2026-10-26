@@ -117,6 +117,13 @@ fn make_happ_filename(dna_type: &str, version: &str) -> String {
 pub const SIGNING_COORDINATOR_REV: u32 = 3;
 const SIGNING_COORDINATOR_WASM: &str = "signing_coordinator_v1_4.wasm";
 
+/// The signing v1.5 cell's coordinator revision (the 0.7 line). Rev 2:
+/// `get_carried` reads LOCAL - the carries asked the network whether this
+/// agent had carried a record already and waited the full request timeout
+/// per record on a cold conductor (the 1.7.0 live test, 2026-10-26).
+pub const SIGNING_COORDINATOR_REV_07: u32 = 2;
+const SIGNING_COORDINATOR_WASM_07: &str = "signing_coordinator_v1_5.wasm";
+
 /// Hot-swap the signing cell's coordinator zome to the bundled revision.
 /// Runs on EVERY conductor start: the conductor's coordinator store lives
 /// in the conductor dir, and the bundled happ carries the ORIGINAL (rev 1)
@@ -1234,6 +1241,50 @@ pub async fn install_dnas_07(
         }
     }
     Ok(installed)
+}
+
+/// Hot-swap the signing v1.5 cell's coordinator to the bundled revision on
+/// every 0.7 start (the twin of `ensure_signing_coordinators`: the canonical
+/// bundle carries rev 1 and is never rebuilt; the admin call is cheap and
+/// idempotent, so it is applied unconditionally and never gated by a marker).
+pub async fn ensure_signing_coordinators_07(admin_port: u16, resource_dir: &Path) -> Result<(), String> {
+    use holochain_client_07::{AdminWebsocket, CellInfo};
+    use holochain_types_07::prelude::{CoordinatorBundle, CoordinatorManifest, CoordinatorSource, UpdateCoordinatorsPayload, ZomeDependency, ZomeManifest};
+
+    let wasm = std::fs::read(resource_dir.join(SIGNING_COORDINATOR_WASM_07))
+        .map_err(|e| format!("read {}: {}", SIGNING_COORDINATOR_WASM_07, e))?;
+    let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+        .await
+        .map_err(|e| format!("Admin WS (0.7): {}", e))?;
+    let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps (0.7): {}", e))?;
+    let signing_app_id = make_app_id("signing", BUNDLED_SIGNING_VERSION_07);
+    let Some(app) = apps.iter().find(|a| a.installed_app_id == signing_app_id) else {
+        return Ok(());
+    };
+    let cell_id = app
+        .cell_info
+        .values()
+        .flat_map(|cells| cells.iter())
+        .find_map(|c| match c {
+            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        })
+        .ok_or("No provisioned signing cell (0.7)")?;
+    let zome = ZomeManifest {
+        name: "signing".into(),
+        hash: None,
+        path: "signing_coordinator.wasm".into(),
+        dependencies: Some(vec![ZomeDependency { name: "signing_integrity".into() }]),
+    };
+    let resource_id = zome.resource_id();
+    let manifest = CoordinatorManifest { zomes: vec![zome] };
+    let bundle = mr_bundle_07::Bundle::new(manifest, [(resource_id, wasm.into())]).map_err(|e| format!("coordinator bundle (0.7): {}", e))?;
+    admin_ws
+        .update_coordinators(UpdateCoordinatorsPayload { cell_id, source: CoordinatorSource::Bundle(Box::new(CoordinatorBundle::from(bundle))) })
+        .await
+        .map_err(|e| format!("update_coordinators (0.7): {}", e))?;
+    log::info!("[0.7] signing coordinator ensured at rev {} on {}", SIGNING_COORDINATOR_REV_07, signing_app_id);
+    Ok(())
 }
 
 /// Attach the 0.7 conductor's app interface (the twin of

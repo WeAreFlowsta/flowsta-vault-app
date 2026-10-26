@@ -1260,6 +1260,10 @@ async fn start_line_07(
         Ok(apps) => log::info!("[0.7] apps: {}", apps.join(", ")),
         Err(e) => fail_with_full_cleanup!(format!("0.7 DNA installation failed: {}", e)),
     }
+    // Non-fatal, like the 0.6 line's: retried at the next start.
+    if let Err(e) = dna::ensure_signing_coordinators_07(admin_port, resource_dir).await {
+        log::warn!("[0.7] signing coordinator hot-swap failed (non-fatal): {}", e);
+    }
     let app_port = match dna::setup_app_interface_07(admin_port).await {
         Ok(p) => p,
         Err(e) => fail_with_full_cleanup!(format!("0.7 app interface setup failed: {}", e)),
