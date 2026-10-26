@@ -225,6 +225,17 @@ pub fn run() {
                 log::info!("Log dir: {:?}", log_dir);
             }
 
+            // A Vault of this same data directory is already running and the
+            // single-instance plugin missed it (Windows: three Vaults on
+            // 27777-27779 by 10-25, one from login plus manual launches).
+            // Show that one and leave; another account's Vault, or a
+            // staging one, has another data directory and is not this.
+            if let Some(port) = instance_guard::running_vault_of(&data_dir) {
+                log::warn!("[instance] this Vault is already running (port {}) - showing it and exiting", port);
+                instance_guard::show_running_vault(port);
+                std::process::exit(0);
+            }
+
             // Sidecars a dead earlier launch left behind (macOS kills a
             // running app whose bundle was replaced; crashes; forced quits)
             // would make this launch take the next admin port and run a
@@ -496,6 +507,7 @@ pub fn run() {
             commands::joined_setup_pending,
             devices::device_remove,
             devices::sibling_sync,
+            devices::rename_this_device,
             device_registry::device_standing,
             device_registry::use_recovery_phrase_once,
             backup_sync::backups_kept_from_devices,

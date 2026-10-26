@@ -518,12 +518,6 @@ struct Met {
 }
 static MET: tokio::sync::Mutex<Option<Met>> = tokio::sync::Mutex::const_new(None);
 
-fn device_name() -> String {
-    sysinfo::System::host_name()
-        .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "New device".to_string())
-}
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -560,7 +554,7 @@ pub(crate) async fn pair_begin_inner(
     let install_id = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
     let conductor_seed = crate::key_derivation::new_conductor_seed();
     let intro = DeviceIntro {
-        name: device_name(),
+        name: crate::devices::this_device_name(&state.data_dir),
         platform: std::env::consts::OS.to_string(),
         install_id,
         device_key: crate::key_derivation::base64_standard_encode(&crate::key_derivation::public_key_of_seed(&conductor_seed)),
@@ -611,7 +605,7 @@ pub(crate) async fn pair_confirm_begin_inner(api_url: String, app_handle: tauri:
     };
     pair_cancel().await?;
     let intro = DeviceIntro {
-        name: device_name(),
+        name: crate::devices::this_device_name(&state.data_dir),
         platform: std::env::consts::OS.to_string(),
         install_id: crate::paths::install_id(&state.data_dir).ok_or("no install id")?,
         device_key: crate::key_derivation::base64_standard_encode(&crate::key_derivation::public_key_of_seed(&conductor_seed)),

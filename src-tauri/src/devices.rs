@@ -14,6 +14,7 @@ use crate::commands::AppState;
 use crate::sealed::{SealedListItem, StoreSpec};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::path::Path;
 
 /// Devices on different network generations cannot sync with each other.
 /// Bumped with a breaking conductor upgrade.
@@ -230,11 +231,44 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn device_name() -> String {
-    sysinfo::System::host_name()
+/// The name the person gave this device, if any (Settings → Devices).
+pub fn given_device_name(device_root: &Path) -> Option<String> {
+    std::fs::read_to_string(crate::paths::device_name_path(device_root))
+        .ok()
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "This device".to_string())
+}
+
+/// What this device is called to the identity's other devices: the name the
+/// person gave it, else the computer's hostname. Hostnames name the machine
+/// ("WhitedoveDM", "DESKTOP-7F3K2") and two accounts on one PC share one,
+/// so a rename exists (10-21).
+pub fn this_device_name(device_root: &Path) -> String {
+    given_device_name(device_root).unwrap_or_else(|| {
+        sysinfo::System::host_name()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "This device".to_string())
+    })
+}
+
+/// Name this device. The record carries the new name to the other devices
+/// at once (its name changed, so it is written again), and they hear it
+/// directly; apps read it through `GET /devices` and `other_devices`.
+#[tauri::command]
+pub async fn rename_this_device(state: tauri::State<'_, Arc<AppState>>, name: String) -> Result<String, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 40 {
+        return Err("A device name is 1 to 40 characters.".into());
+    }
+    crate::vault::write_atomic(&crate::paths::device_name_path(&state.data_dir), name.as_bytes()).map_err(|e| e.to_string())?;
+    if state.vault_config.lock().unwrap().is_some() {
+        match publish_own(state.inner()).await {
+            Ok(_) => announce_again(),
+            Err(e) => log::info!("Device renamed to {:?}; its record follows at the next round: {}", name, e),
+        }
+    }
+    Ok(name)
 }
 
 /// This device's record as it stands now, keeping what an earlier record of
@@ -256,7 +290,7 @@ fn own_record(state: &AppState, existing: Option<&DeviceRecord>, latest_change: 
     Ok(DeviceRecord {
         install_id,
         conductor_key,
-        name: existing.map(|e| e.name.clone()).unwrap_or_else(device_name),
+        name: given_device_name(&state.data_dir).or_else(|| existing.map(|e| e.name.clone())).unwrap_or_else(|| this_device_name(&state.data_dir)),
         platform: std::env::consts::OS.to_string(),
         vault_version: env!("CARGO_PKG_VERSION").to_string(),
         generation: NETWORK_GENERATION.to_string(),
@@ -489,7 +523,6 @@ pub fn heard_from(agent: &holochain_types::prelude::AgentPubKey) {
 }
 
 /// Whether a sibling has reached this device directly this session.
-#[cfg(test)]
 pub fn was_heard(agent: &holochain_types::prelude::AgentPubKey) -> bool {
     HEARD.lock().unwrap().as_ref().map(|h| h.contains(&key_text(agent))).unwrap_or(false)
 }
@@ -799,7 +832,7 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
     if !rows.iter().any(|r| r.install_id == me) {
         rows.push(DeviceRow {
             install_id: me.clone(),
-            name: device_name(),
+            name: this_device_name(&state.data_dir),
             platform: std::env::consts::OS.to_string(),
             added_at: now,
             record_at: now,

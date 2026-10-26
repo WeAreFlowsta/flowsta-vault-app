@@ -142,6 +142,62 @@ pub fn reap_orphaned_sidecars() -> u32 {
     reaped
 }
 
+/// A Vault of this same install already running: the port its IPC server
+/// bound and the id it minted (`paths::ipc_port_path`, written at bind). A
+/// probe of its `/status` answering with that id is that Vault. A stale
+/// file points at nothing, or at another account's Vault with another id,
+/// and both read as "not running".
+pub(crate) fn running_vault_of(data_dir: &std::path::Path) -> Option<u16> {
+    let text = std::fs::read_to_string(crate::paths::ipc_port_path(data_dir)).ok()?;
+    let (port, id) = parse_port_file(&text)?;
+    let answer = local_http(port, "GET", "/status")?;
+    answers_as(&answer, &id).then_some(port)
+}
+
+/// Ask the running Vault to show its window (`POST /show`, local callers only).
+pub(crate) fn show_running_vault(port: u16) {
+    let _ = local_http(port, "POST", "/show");
+}
+
+pub(crate) fn parse_port_file(text: &str) -> Option<(u16, String)> {
+    let mut lines = text.lines();
+    let port: u16 = lines.next()?.trim().parse().ok()?;
+    let id = lines.next()?.trim().to_string();
+    (!id.is_empty()).then_some((port, id))
+}
+
+pub(crate) fn answers_as(status_body: &str, instance_id: &str) -> bool {
+    status_body.contains(&format!("\"instance_id\":\"{}\"", instance_id))
+}
+
+/// One short plain-HTTP exchange with the loopback server, without the
+/// async runtime (this runs in setup, before anything else starts).
+fn local_http(port: u16, method: &str, path: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(800)).ok()?;
+    stream.set_read_timeout(Some(std::time::Duration::from_millis(1500))).ok()?;
+    stream.set_write_timeout(Some(std::time::Duration::from_millis(800))).ok()?;
+    write!(stream, "{} {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", method, path, port).ok()?;
+    let mut out = String::new();
+    let _ = stream.read_to_string(&mut out);
+    Some(out)
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    #[test]
+    fn the_port_file_names_a_port_and_an_id_and_the_status_must_carry_that_id() {
+        assert_eq!(parse_port_file("27777\nabc123\n"), Some((27777, "abc123".to_string())));
+        assert_eq!(parse_port_file("27777\n"), None, "no id, no match");
+        assert_eq!(parse_port_file("port\nabc"), None);
+        let body = "HTTP/1.1 200 OK\r\n\r\n{\"unlocked\":true,\"instance_id\":\"abc123\",\"version\":\"1.7.0\"}";
+        assert!(answers_as(body, "abc123"));
+        assert!(!answers_as(body, "abc124"), "another install's Vault on that port is not this one");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

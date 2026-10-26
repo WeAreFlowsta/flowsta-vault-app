@@ -134,6 +134,10 @@ function claimError(e: unknown): string {
 export const DevicesTab = component$(() => {
   const devices = useSignal<DeviceRow[] | null>(null);
   const checking = useSignal(false);
+  // Renaming this device (the record's name, shown on every device).
+  const renaming = useSignal(false);
+  const renameValue = useSignal("");
+  const renameError = useSignal("");
   // A device this one knows has not been heard from yet this session (the
   // first quarter hour after unlock): the list is not confirmed yet.
   const reaching = useSignal(false);
@@ -424,10 +428,50 @@ export const DevicesTab = component$(() => {
             {devices.value.map((d) => (
               <li key={d.install_id} class="flex items-center justify-between gap-4 py-3">
                 <div class="min-w-0">
-                  <p class={["truncate text-sm font-medium", d.state === "removed" ? "text-gray-500" : "text-white"].join(" ")}>
-                    {d.name}
-                    <span class="ml-2 text-xs font-normal text-gray-500">{PLATFORM_NAMES[d.platform] || d.platform}</span>
-                  </p>
+                  {d.state === "this_device" && renaming.value ? (
+                    <form
+                      preventdefault:submit
+                      class="flex flex-wrap items-center gap-2"
+                      onSubmit$={async () => {
+                        try {
+                          renameError.value = "";
+                          await invoke("rename_this_device", { name: renameValue.value });
+                          renaming.value = false;
+                          devices.value = await invoke<DeviceRow[]>("devices_list").catch(() => devices.value);
+                        } catch (e) {
+                          renameError.value = String(e).replace(/^Error:\s*/, "");
+                        }
+                      }}
+                    >
+                      <input
+                        type="text"
+                        maxLength={40}
+                        value={renameValue.value}
+                        onInput$={(_, el) => (renameValue.value = el.value)}
+                        class="w-48 rounded-md border border-gray-600 bg-gray-900 px-2 py-1 text-sm text-white"
+                        aria-label="Device name"
+                        data-testid="device-rename-input"
+                      />
+                      <PillButton type="submit" variant="primary">Save</PillButton>
+                      <PillButton type="button" onClick$={() => { renaming.value = false; renameError.value = ""; }}>Cancel</PillButton>
+                      {renameError.value && <span class="text-xs text-amber-300">{renameError.value}</span>}
+                    </form>
+                  ) : (
+                    <p class={["truncate text-sm font-medium", d.state === "removed" ? "text-gray-500" : "text-white"].join(" ")}>
+                      {d.name}
+                      <span class="ml-2 text-xs font-normal text-gray-500">{PLATFORM_NAMES[d.platform] || d.platform}</span>
+                      {d.state === "this_device" && (
+                        <button
+                          type="button"
+                          class="ml-2 text-xs font-normal text-sky-300 hover:underline"
+                          data-testid="device-rename"
+                          onClick$={() => { renameValue.value = d.name; renaming.value = true; }}
+                        >
+                          Rename
+                        </button>
+                      )}
+                    </p>
+                  )}
                   <p class={["text-xs", d.state === "up_to_date" || d.state === "this_device" ? "text-green-400" : d.state === "removed" || d.state === "this_device_setting_up" || isCatchingUp(d) ? "text-gray-400" : "text-amber-300"].join(" ")}>
                     {deviceLine(d)}
                   </p>

@@ -631,7 +631,17 @@ async fn sign_handler(
             Err(_) => {
                 let mut pending = state.app_state.pending_raw_sign.lock().unwrap();
                 *pending = None;
-                false
+                // No answer is a timeout, as on every other dialog route; a
+                // denial is the person's answer. (Until 1.7.0 both were 403.)
+                return Err((
+                    StatusCode::REQUEST_TIMEOUT,
+                    Json(IpcError {
+                        error: "timeout".into(),
+                        description: Some(
+                            "No response in Flowsta Vault - request timed out. Please try again.".into(),
+                        ),
+                    }),
+                ));
             }
         };
         if !approved {
@@ -3506,6 +3516,25 @@ async fn sign_document_core(
     })
 }
 
+// ── POST /show - a second launch of this Vault asks this one to show ────────
+
+/// Local callers only (a second launch of the same install; a page always
+/// sends an Origin): bring the window to the front. Nothing else happens.
+async fn show_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<IpcError>)> {
+    if extract_origin(&headers).is_some() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError { error: "tier_forbidden".into(), description: Some("Local callers only.".into()) }),
+        ));
+    }
+    log::info!("[instance] a second launch asked this Vault to show its window");
+    let _ = raise_window(&state.app_handle);
+    Ok(Json(serde_json::json!({ "shown": true })))
+}
+
 // ── POST /profile-update - web dashboard delegating a profile write ─────────
 //
 // Device-hosted accounts keep their canonical profile in the encrypted
@@ -5865,8 +5894,14 @@ pub async fn start_ipc_server(
         ])
         .max_age(std::time::Duration::from_secs(3600));
 
+    // Written at bind: a second launch of this same install reads it and
+    // hands over to this one (`instance_guard::running_vault_of`).
+    let port_file = crate::paths::ipc_port_path(&ipc_state.app_state.data_dir);
+    let instance_id = ipc_state.instance_id.clone();
+
     let app = Router::new()
         .route("/status", get(status_handler))
+        .route("/show", post(show_handler))
         .route("/sign", post(sign_handler))
         .route("/sign-node-manifest", post(sign_node_manifest_handler))
         .route("/authenticate", post(authenticate_handler))
@@ -5935,6 +5970,9 @@ pub async fn start_ipc_server(
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 log::info!("IPC server listening on http://127.0.0.1:{}", port);
+                if let Err(e) = std::fs::write(&port_file, format!("{}\n{}\n", port, instance_id)) {
+                    log::warn!("[instance] the port file was not written: {}", e);
+                }
                 spawn_with_identity(async move {
                     let svc = app.into_make_service_with_connect_info::<crate::peer_owner::Peer>();
                     if let Err(e) = axum::serve(listener, svc).await {

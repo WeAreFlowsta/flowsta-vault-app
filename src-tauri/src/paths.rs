@@ -264,6 +264,12 @@ pub fn bump_identity_epoch(device_root: &Path) -> u64 {
 }
 pub fn settings_path(device_root: &Path) -> PathBuf { device_root.join(SETTINGS_FILE) }
 pub fn install_id_path(device_root: &Path) -> PathBuf { device_root.join(INSTALL_ID_FILE) }
+/// The name the person gave this device (Settings → Devices); absent, the
+/// computer's hostname names it.
+pub fn device_name_path(device_root: &Path) -> PathBuf { device_root.join("device-name") }
+/// The port this install's IPC server bound and the id it minted, written
+/// at bind so a second launch of the same install finds the first.
+pub fn ipc_port_path(device_root: &Path) -> PathBuf { device_root.join("ipc-port") }
 
 /// This install's id (32 hex characters), created on first use.
 pub fn install_id(device_root: &Path) -> Option<String> {
