@@ -4476,9 +4476,9 @@ async fn dev_status_handler(
     let conductor = state.app_state.conductor_status.lock().unwrap().clone();
     // "ready" above is the admin API; the cells can lag it by minutes on a
     // returning identity (CellDisabled until the space joins). The matrix
-    // measures that lag through this flag: set once the readiness probe in
-    // ensure_apps_enabled has stored the signing cell's credentials.
-    let cells_ready = !state.app_state.cell_credentials.lock().unwrap().is_empty();
+    // measures that lag through this flag: set once the readiness probe on
+    // the primary line has stored the signing cell's credentials.
+    let cells_ready = crate::commands::primary_cells_ready(&state.app_state);
     let old_keystores = std::fs::read_dir(&state.app_state.identity_root())
         .map(|rd| {
             rd.flatten()

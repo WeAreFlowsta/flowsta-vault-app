@@ -1579,9 +1579,29 @@ pub fn joined_setup_pending(state: State<'_, Arc<AppState>>) -> Result<bool, Str
 /// time over the whole database, and every zome call meanwhile returns
 /// `CellDisabled`. The first authorized credential is the first answer;
 /// the cache is emptied at every conductor start and at lock.
+///
+/// The answer is the PRIMARY line's: the 0.6 cache for an identity that has
+/// not moved, the 0.7 cache for one that has (or was born on 1.7.0). A
+/// 0.7-only start never fills the 0.6 cache, so reading that one alone kept
+/// the badge on "still starting" for the whole session (beta6, every OS).
+pub fn primary_cells_ready(state: &AppState) -> bool {
+    let primary_07 = state
+        .conductor_handle
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|h| h.primary == crate::hc::Line::V07)
+        .unwrap_or(false);
+    if primary_07 {
+        !state.cell_credentials_07.lock().unwrap().is_empty()
+    } else {
+        !state.cell_credentials.lock().unwrap().is_empty()
+    }
+}
+
 #[tauri::command]
 pub fn cells_ready(state: State<'_, Arc<AppState>>) -> bool {
-    !state.cell_credentials.lock().unwrap().is_empty()
+    primary_cells_ready(&state)
 }
 
 /// Runtime conductor watchdog. Checks whether the conductor process is
