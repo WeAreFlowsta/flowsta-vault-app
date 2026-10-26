@@ -5,6 +5,25 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0-beta6] - 2026-10-26
+
+What the beta5 gate found, on three computers and one shared identity.
+
+### Fixed
+- The Overview and the Sign It list counted a signature twice after the
+  move on a computer that had listed it before: the cached entry from the
+  old network stayed beside its copy on the new one. The copy now retires
+  the old entry, in the list and in the cache it loads from.
+- A file signed just now showed as "File" until the next refresh said
+  "Image" (or "Audio", "Video"). The new row carries its kind from the
+  start.
+- Settings → Devices spoke about the move beside the heading for good.
+  It now says "Moving your records … N of M" under the heading only while
+  a move runs; the finished move is a line in Activity.
+- The log line for a catch-up pass that completed the carry of a web
+  account's signatures was missing; every pass that writes anything now
+  logs what it carried and whether the move is complete.
+
 ## [1.7.0-beta5] - 2026-10-26
 
 The beta that moves the Vault to Holochain 0.7.1. (beta4 was never cut: the small fixes planned for it ship here, with the move.)
