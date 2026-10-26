@@ -420,6 +420,13 @@ pub async fn register_this_device(state: &Arc<AppState>, api_url: &str) -> Resul
     let sent = send_registration(base, &body).await;
     match sent {
         Ok(known) => {
+            // The same statement on identity 1.5, where readers need no API.
+            if let Some(seed) = enrollment_seed.as_ref() {
+                match crate::identity_07::publish_enrollment_key(state, &keys.identity_seed, seed, now_ms() as i64).await {
+                    Ok(_) => {}
+                    Err(e) => log::info!("[identity 1.5] enrollment key not published yet: {}", e.chars().take(140).collect::<String>()),
+                }
+            }
             forget_enrollment_seed();
             hold_approval(None);
             Ok(known)

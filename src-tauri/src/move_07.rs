@@ -1175,6 +1175,18 @@ mod tests {
         assert_eq!(own[0]["action_hash"], hex::encode(&s1));
         assert_eq!(own[0]["signing_app_id"], "flowsta_signing_v1_5@holochain-0.7");
 
+        // ── The identity's device statements on identity 1.5 ──
+        let enrollment_seed = crate::key_derivation::new_conductor_seed();
+        assert!(crate::identity_07::publish_enrollment_key(&a.state, &[29u8; 32], &enrollment_seed, 1_790_000_000_000).await.expect("enrollment key published"));
+        assert!(!crate::identity_07::publish_enrollment_key(&a.state, &[29u8; 32], &enrollment_seed, 1_790_000_000_000).await.unwrap(), "published once");
+        let key_b = crate::key_derivation::public_key_of_seed(&seed_b);
+        // A network read on identity 1.5; a cold conductor answers late, the
+        // device's round asks again each minute.
+        eventually("identity 1.5 answers that b is not removed", 240, || async { crate::identity_07::removed_on_07(&a.state, &key_b).await == Some(false) }).await;
+        crate::identity_07::publish_removal(&a.state, &[29u8; 32], &key_b, 1_790_000_001_000).await.expect("removal published");
+        eventually("b reads its own removal from identity 1.5", 240, || async { crate::identity_07::removed_on_07(&b.state, &key_b).await == Some(true) }).await;
+        assert!(crate::devices::removed_here_now(&b.state).await.unwrap(), "and stands down on it");
+
         // ── The restore rule, from the same records ──
         // A device restored on this version shares the identity's 0.7 cell:
         // it sees a's and b's records, both on 0.7, so it wants no 0.6 line.

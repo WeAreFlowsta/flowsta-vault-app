@@ -448,7 +448,18 @@ pub async fn removed_here_now(state: &Arc<AppState>) -> Result<bool, String> {
     let records = crate::sealed::sealed_list_inner(state).await?;
     let install_id = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
     let current = own_record(state, None, 0)?;
-    Ok(removed_here(&devices_in(&records), &install_id, &current.conductor_key))
+    if removed_here(&devices_in(&records), &install_id, &current.conductor_key) {
+        return Ok(true);
+    }
+    // And the identity's public word on identity 1.5, when the 0.7 line is up.
+    let own_key: Option<[u8; 32]> = state.vault_config.lock().unwrap().as_ref().and_then(|c| c.conductor_seed_bytes()).map(|s| crate::key_derivation::public_key_of_seed(&s));
+    if let Some(key) = own_key {
+        if crate::identity_07::removed_on_07(state, &key).await == Some(true) {
+            log::info!("[identity 1.5] this device is removed, by the identity's own record");
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The identity's devices as this device knows them.
@@ -898,6 +909,17 @@ pub(crate) async fn device_remove_inner(api_url: String, install_id: String, sta
         Err(e) => return Err(e),
     }
     let now = now_ms();
+    // The identity's own record of it on identity 1.5, where readers need
+    // no API (best effort: the registry above is the enforcement in 1.7.0).
+    {
+        let identity_seed: Option<[u8; 32]> = state.vault_config.lock().unwrap().as_ref().and_then(|c| c.device_seed.as_deref()).and_then(|s| s.try_into().ok());
+        let target_32: Option<[u8; 32]> = crate::commands::base64_standard_decode(&target).ok().and_then(|b| b.try_into().ok());
+        if let (Some(identity_seed), Some(target_32)) = (identity_seed, target_32) {
+            if let Err(e) = crate::identity_07::publish_removal(state, &identity_seed, &target_32, now as i64).await {
+                log::info!("[identity 1.5] the removal was not published there: {}", e.chars().take(140).collect::<String>());
+            }
+        }
+    }
     // The removal is its own record (nothing the removed device writes can
     // overwrite it), and the device's record says so too.
     let removal = DeviceRemoval { install_id: device.install_id.clone(), conductor_key: device.conductor_key.clone(), removed_at: now, removed_by: me.clone() };

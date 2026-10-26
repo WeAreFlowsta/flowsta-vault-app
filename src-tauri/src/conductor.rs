@@ -355,6 +355,13 @@ pub(crate) fn rendezvous_servers() -> Vec<(String, Option<String>)> {
     servers
 }
 
+/// The 0.7 line's rendezvous: its bootstrap host (`bootstrap-7`), with the
+/// auth material; the fleet's fallbacks serve the 0.6 line only.
+pub(crate) fn rendezvous_servers_07() -> Vec<(String, Option<String>)> {
+    let primary = BootstrapTarget::primary_07();
+    vec![(primary.bootstrap_url, primary.auth_material)]
+}
+
 /// Is a bootstrap server answering? kitsune2-bootstrap-srv serves
 /// GET /health directly (200, no auth) - verified against the live
 /// fleet; community nodes run the same binary, so the probe is

@@ -285,39 +285,12 @@ impl Keeper {
 
     /// Read the conductor's own notes and peers, compare with every server,
     /// register and feed in what is missing.
-    pub(crate) async fn run_once(&mut self, admin_port: u16, origin: &str) -> Result<Round, String> {
-        let admin = holochain_client::AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(origin.to_string()))
-            .await
-            .map_err(|e| format!("admin: {e}"))?;
-        let apps = admin
-            .list_apps(Some(holochain_client::AppStatusFilter::Enabled))
-            .await
-            .map_err(|e| format!("list apps: {e}"))?;
-        let mut own_agents: HashSet<String> = HashSet::new();
-        let mut spaces: HashSet<String> = HashSet::new();
-        for app in &apps {
-            for cells in app.cell_info.values() {
-                for cell in cells {
-                    let id = match cell {
-                        holochain_client::CellInfo::Provisioned(c) => &c.cell_id,
-                        holochain_client::CellInfo::Cloned(c) => &c.cell_id,
-                        _ => continue,
-                    };
-                    spaces.insert(id_core(id.dna_hash().get_raw_39()));
-                    own_agents.insert(id_core(id.agent_pubkey().get_raw_39()));
-                }
-            }
-        }
+    pub(crate) async fn run_once(&mut self, line: crate::hc::Line, admin_port: u16, conductor: Option<String>) -> Result<Round, String> {
+        let (spaces, own_agents, raw_notes) = conductor_view(line, admin_port).await?;
         if spaces.is_empty() {
             return Ok(Round::default());
         }
-        let notes: Vec<Note> = admin
-            .agent_info(None)
-            .await
-            .map_err(|e| format!("agent info: {e}"))?
-            .iter()
-            .filter_map(|s| parse_note(s))
-            .collect();
+        let notes: Vec<Note> = raw_notes.iter().filter_map(|s| parse_note(s)).collect();
         let (own, known): (Vec<Note>, Vec<Note>) = notes.into_iter().partition(|n| own_agents.contains(&n.agent));
         let now_us = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -330,7 +303,6 @@ impl Keeper {
         let mut reached: HashSet<String> = HashSet::new();
         let mut put_on: Vec<String> = Vec::new();
         let mut put_elsewhere_on: Vec<String> = Vec::new();
-        let conductor = crate::conductor::conductor_rendezvous();
         for space in &spaces {
             let own_here: Vec<Note> = own.iter().filter(|n| n.space == *space).cloned().collect();
             for (index, server) in self.servers.iter_mut().enumerate() {
@@ -373,7 +345,7 @@ impl Keeper {
 
         let to_add: Vec<String> = newest_per_agent(notes_to_add(&listings, &own_agents, &known)).into_iter().map(|n| n.raw.clone()).collect();
         if !to_add.is_empty() {
-            admin.add_agent_info(to_add.clone()).await.map_err(|e| format!("add agent info: {e}"))?;
+            add_agent_infos(line, admin_port, to_add.clone()).await?;
             round.added = to_add.len();
         }
 
@@ -444,6 +416,91 @@ pub(crate) fn servers() -> Vec<Server> {
         .collect()
 }
 
+/// The 0.7 line's rendezvous (its own bootstrap host; the fleet serves both
+/// lines).
+pub(crate) fn servers_07() -> Vec<Server> {
+    crate::conductor::rendezvous_servers_07()
+        .iter()
+        .filter_map(|(url, auth)| Server::new(url, auth.as_deref()))
+        .collect()
+}
+
+/// What one line's conductor knows: the spaces (DNA hashes) its enabled
+/// cells are in, the agents it runs, and its agent-info notes as raw
+/// strings. The same shape on both client lines.
+async fn conductor_view(line: crate::hc::Line, admin_port: u16) -> Result<(HashSet<String>, HashSet<String>, Vec<String>), String> {
+    let mut own_agents: HashSet<String> = HashSet::new();
+    let mut spaces: HashSet<String> = HashSet::new();
+    let raw = match line {
+        crate::hc::Line::V06 => {
+            let admin = holochain_client::AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+                .await
+                .map_err(|e| format!("admin: {e}"))?;
+            let apps = admin.list_apps(Some(holochain_client::AppStatusFilter::Enabled)).await.map_err(|e| format!("list apps: {e}"))?;
+            for app in &apps {
+                for cells in app.cell_info.values() {
+                    for cell in cells {
+                        let id = match cell {
+                            holochain_client::CellInfo::Provisioned(c) => &c.cell_id,
+                            holochain_client::CellInfo::Cloned(c) => &c.cell_id,
+                            _ => continue,
+                        };
+                        spaces.insert(id_core(id.dna_hash().get_raw_39()));
+                        own_agents.insert(id_core(id.agent_pubkey().get_raw_39()));
+                    }
+                }
+            }
+            if spaces.is_empty() {
+                Vec::new()
+            } else {
+                admin.agent_info(None).await.map_err(|e| format!("agent info: {e}"))?
+            }
+        }
+        crate::hc::Line::V07 => {
+            let admin = holochain_client_07::AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+                .await
+                .map_err(|e| format!("admin (0.7): {e}"))?;
+            let apps = admin.list_apps(Some(holochain_client_07::AppStatusFilter::Enabled)).await.map_err(|e| format!("list apps (0.7): {e}"))?;
+            for app in &apps {
+                for cells in app.cell_info.values() {
+                    for cell in cells {
+                        let id = match cell {
+                            holochain_client_07::CellInfo::Provisioned(c) => &c.cell_id,
+                            holochain_client_07::CellInfo::Cloned(c) => &c.cell_id,
+                            _ => continue,
+                        };
+                        spaces.insert(id_core(id.dna_hash().get_raw_39()));
+                        own_agents.insert(id_core(id.agent_pubkey().get_raw_39()));
+                    }
+                }
+            }
+            if spaces.is_empty() {
+                Vec::new()
+            } else {
+                admin.agent_info(None).await.map_err(|e| format!("agent info (0.7): {e}"))?
+            }
+        }
+    };
+    Ok((spaces, own_agents, raw))
+}
+
+async fn add_agent_infos(line: crate::hc::Line, admin_port: u16, infos: Vec<String>) -> Result<(), String> {
+    match line {
+        crate::hc::Line::V06 => {
+            let admin = holochain_client::AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+                .await
+                .map_err(|e| format!("admin: {e}"))?;
+            admin.add_agent_info(infos).await.map_err(|e| format!("add agent info: {e}"))
+        }
+        crate::hc::Line::V07 => {
+            let admin = holochain_client_07::AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+                .await
+                .map_err(|e| format!("admin (0.7): {e}"))?;
+            admin.add_agent_info(infos).await.map_err(|e| format!("add agent info (0.7): {e}"))
+        }
+    }
+}
+
 /// A gap this long between two ticks means the machine was asleep.
 const WOKE_AFTER: std::time::Duration = std::time::Duration::from_secs(150);
 
@@ -454,12 +511,17 @@ const WOKE_AFTER: std::time::Duration = std::time::Duration::from_secs(150);
 /// do when this build has no rendezvous.
 pub fn start(state: std::sync::Arc<crate::commands::AppState>) {
     let servers = servers();
-    if servers.is_empty() {
+    let servers_07 = servers_07();
+    if servers.is_empty() && servers_07.is_empty() {
         log::info!("[rendezvous] no rendezvous configured - nothing to keep");
         return;
     }
     tauri::async_runtime::spawn(async move {
+        // One keeper per line: kitsune2 0.5.2 re-queues a failed PUT with
+        // the identical signed note until it expires, as 0.4.1 did, so the
+        // 0.7 line needs the same guard against a stranded registration.
         let mut keeper = Keeper::new(servers);
+        let mut keeper_07 = Keeper::new(servers_07);
         let mut last_tick = std::time::SystemTime::now();
         let mut wait = std::time::Duration::from_secs(70);
         loop {
@@ -472,14 +534,23 @@ pub fn start(state: std::sync::Arc<crate::commands::AppState>) {
                 }
             }
             last_tick = now;
-            // The keeper speaks the 0.6 line's admin API and rendezvous
-            // format; an identity with no 0.6 line is left to its 0.7
-            // conductor's own bootstrap (a 0.7 keeper is a follow-up).
-            let admin_port = state.conductor_handle.lock().unwrap().as_ref().and_then(|h| h.admin_port_06());
-            let Some(admin_port) = admin_port else { continue };
-            let origin = crate::conductor::node_origin();
-            if let Err(e) = keeper.run_once(admin_port, &origin).await {
-                log::debug!("[rendezvous] round skipped: {}", e);
+            let (port_06, port_07) = {
+                let guard = state.conductor_handle.lock().unwrap();
+                match guard.as_ref() {
+                    Some(h) => (h.admin_port_06(), h.line_07.as_ref().map(|l| l.admin_port)),
+                    None => (None, None),
+                }
+            };
+            if let Some(port) = port_06 {
+                if let Err(e) = keeper.run_once(crate::hc::Line::V06, port, crate::conductor::conductor_rendezvous()).await {
+                    log::debug!("[rendezvous] round skipped: {}", e);
+                }
+            }
+            if let Some(port) = port_07 {
+                let conductor_07 = crate::conductor::rendezvous_servers_07().first().map(|(url, _)| url.clone());
+                if let Err(e) = keeper_07.run_once(crate::hc::Line::V07, port, conductor_07).await {
+                    log::debug!("[rendezvous 0.7] round skipped: {}", e);
+                }
             }
         }
     });
