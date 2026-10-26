@@ -762,7 +762,7 @@ export default component$(() => {
         invoke("sync_quota_to_server", { apiUrl, count: 1 }).catch((err) => {
           console.warn("quota sync failed:", err);
         });
-        const enrichedResult = { ...result, fileName: fileName.value, thumbnail: thumbnailData.value };
+        const enrichedResult = { ...result, fileName: fileName.value, thumbnail: thumbnailData.value, perceptual_hash: perceptualHash.value || null };
         // ADD to the shared store, never truncate it (views slice for display).
         recentSignatures.value = [
           enrichedResult,
