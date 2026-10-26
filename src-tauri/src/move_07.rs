@@ -400,11 +400,11 @@ fn finish(root: &Path, started: std::time::Instant, out: &mut PassOutcome) {
             out.signatures_carried, out.signatures_06, out.revocations_carried, out.thumbnails_carried,
             out.web_era_carried, out.web_era_06, if out.web_era_complete { "" } else { " (not complete yet)" }
         ),
-        (None, false) if out.private_written > 0 || out.signatures_carried > 0 => log::info!(
-            "[move] identity {}: pass ({}) in {} s - private {}/{} ({} written), signatures {}/{}{}",
+        (None, false) if out.private_written > 0 || out.signatures_carried > 0 || out.web_era_carried > 0 => log::info!(
+            "[move] identity {}: pass ({}) in {} s - private {}/{} ({} written), signatures {}/{}, web-era {}/{}{}",
             id, out.reason, out.took_ms / 1000, out.private_present + out.private_written, out.private_06, out.private_written,
-            out.signatures_carried, out.signatures_06,
-            if out.private_complete && out.signing_complete { "" } else { " - not complete yet" }
+            out.signatures_carried, out.signatures_06, out.web_era_carried, out.web_era_06,
+            if out.private_complete && out.signing_complete && out.web_era_complete { "" } else { " - not complete yet" }
         ),
         _ => log::debug!("[move] identity {}: pass ({}) found nothing to carry", id, out.reason),
     }
