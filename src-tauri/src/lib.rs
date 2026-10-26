@@ -29,6 +29,7 @@ mod instance_guard;
 mod relay_login;
 mod rendezvous_keeper;
 mod sealed;
+mod signing_07;
 mod vault;
 
 use commands::AppState;

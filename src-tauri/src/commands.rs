@@ -6080,7 +6080,7 @@ async fn fetch_thumbnail_for_action(
 /// Authorise + connect an AppWebsocket for the given signing app version.
 /// Returns `(app_ws, role_name)` on success, or None (with a logged warning)
 /// if any step fails - caller should skip this version.
-async fn connect_signing_app_ws(
+pub(crate) async fn connect_signing_app_ws(
     state: &Arc<AppState>,
     admin_ws: &holochain_client::AdminWebsocket,
     app_port: u16,
@@ -6634,7 +6634,7 @@ fn is_conductor_unreachable_error(err: &str) -> bool {
 /// filter to the bundled signing-DNA version. Returns the admin WS, the
 /// app port, the full app list (linked-agent discovery needs identity
 /// app entries), and the filtered signing apps.
-async fn open_signing_conductor(
+pub(crate) async fn open_signing_conductor(
     state: &Arc<AppState>,
 ) -> Result<(holochain_client::AdminWebsocket, u16,
             Vec<holochain_client::AppInfo>,
@@ -6743,6 +6743,10 @@ pub(crate) async fn get_my_own_signatures_inner(
     let mut signatures: Vec<serde_json::Value> = Vec::new();
     for r in results {
         signatures.extend(r?);
+    }
+    if crate::hc::active_line(state) == crate::hc::Line::V07 {
+        let from_07 = crate::signing_07::own_signatures(state).await?;
+        signatures = crate::signing_07::merge_own(signatures, from_07);
     }
     log::info!(
         "[get_my_own_signatures] {} sig(s) from {} version(s)",
@@ -6898,6 +6902,10 @@ pub(crate) async fn get_my_linked_signatures_inner(
     for r in results {
         signatures.extend(r?);
     }
+    if crate::hc::active_line(state) == crate::hc::Line::V07 {
+        let from_07 = crate::signing_07::linked_signatures(state, &linked_keys).await?;
+        signatures = crate::signing_07::merge_own(signatures, from_07);
+    }
     log::info!("[get_my_linked_signatures] {} sig(s)", signatures.len());
     apply_superseded_by(&mut signatures);
     Ok(LinkedSignaturesResult {
@@ -6983,6 +6991,12 @@ async fn get_my_signatures_inner(
         .filter_map(|r| r.ok())
         .flatten()
         .collect();
+    if crate::hc::active_line(state) == crate::hc::Line::V07 {
+        match crate::signing_07::own_signatures(state).await {
+            Ok(from_07) => signatures = crate::signing_07::merge_own(signatures, from_07),
+            Err(e) => log::warn!("[get_my_signatures] the 0.7 cell did not answer (0.6 view only): {}", e),
+        }
+    }
     log::info!(
         "Loaded {} own signatures from {} signing DNA version(s)",
         signatures.len(), signing_apps.len(),
@@ -6994,10 +7008,16 @@ async fn get_my_signatures_inner(
             signing_apps.iter()
                 .map(|app| query_linked_sigs_for_version(state, &admin_ws, app_port, app, &linked_keys)),
         ).await;
-        let linked_sigs: Vec<serde_json::Value> = linked_results.into_iter()
+        let mut linked_sigs: Vec<serde_json::Value> = linked_results.into_iter()
             .filter_map(|r| r.ok())
             .flatten()
             .collect();
+        if crate::hc::active_line(state) == crate::hc::Line::V07 {
+            match crate::signing_07::linked_signatures(state, &linked_keys).await {
+                Ok(from_07) => linked_sigs = crate::signing_07::merge_own(linked_sigs, from_07),
+                Err(e) => log::warn!("[get_my_signatures] linked signatures on the 0.7 cell not read: {}", e),
+            }
+        }
         if !linked_sigs.is_empty() {
             log::info!("Found {} signatures from linked agents", linked_sigs.len());
             let existing: std::collections::HashSet<String> = signatures.iter()
@@ -7074,6 +7094,11 @@ async fn revoke_signature_attempt(
     use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
         ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
     use holochain_types::prelude::ExternIO;
+
+    if crate::hc::active_line(state) == crate::hc::Line::V07 {
+        let bytes = hex::decode(&action_hash_hex).map_err(|_| "Invalid action hash hex".to_string())?;
+        return crate::signing_07::revoke_signature(state, bytes, reason).await;
+    }
 
     let conductor_ports = {
         let conductor = state.conductor_handle.lock().unwrap();
@@ -7176,6 +7201,11 @@ pub(crate) async fn set_thumbnail_inner(
     use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
         ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
     use holochain_types::prelude::ExternIO;
+
+    if crate::hc::active_line(state) == crate::hc::Line::V07 {
+        let bytes = hex::decode(&action_hash_hex).map_err(|e| format!("Invalid action hash hex: {}", e))?;
+        return crate::signing_07::set_thumbnail(state, bytes, thumbnail).await;
+    }
 
     let conductor_ports = {
         let conductor = state.conductor_handle.lock().unwrap();
@@ -7317,6 +7347,11 @@ pub(crate) async fn commit_signature_to_dht(
         ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
     use holochain_types::prelude::ExternIO;
 
+    // An identity whose records have moved signs on the 0.7 line.
+    if crate::hc::active_line(state) == crate::hc::Line::V07 {
+        return commit_signature_07(state, file_hash, signed_at, intent, ai_generation, content_rights, integrity_report, perceptual_hash, comment, supersedes).await;
+    }
+
     let signing_app_id = crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION);
 
     // Connect to admin WS
@@ -7401,6 +7436,74 @@ pub(crate) async fn commit_signature_to_dht(
         crate::key_derivation::sign_with_device_seed(&seed, file_hash)
     };
 
+    let payload_mp = signature_payload_mp(agent_key, &signature[..], file_hash, signed_at, intent, ai_generation, content_rights, integrity_report, perceptual_hash, comment, supersedes)?;
+
+    // Retry ONLY the definitively-not-committed failures: a "chain head
+    // has moved" bundle was rejected outright (a concurrent write won the
+    // head - rebuild on the new head and try again), and CellDisabled never
+    // executed. Timeouts are deliberately NOT retried here - an ambiguous
+    // commit retried blindly could publish the signature twice.
+    let mut result = None;
+    let mut last_err = String::new();
+    for attempt in 1..=3u32 {
+        match app_ws
+            .call_zome(
+                ZomeCallTarget::RoleName(role_name.clone().into()),
+                "signing".into(),
+                "create_signature".into(),
+                ExternIO::from(payload_mp.clone()),
+            )
+            .await
+        {
+            Ok(r) => {
+                result = Some(r);
+                break;
+            }
+            Err(e) => {
+                last_err = format!("Zome call create_signature failed: {}", e);
+                let retriable = last_err.contains("chain head has moved")
+                    || last_err.contains("CellDisabled")
+                    || last_err.contains("CellNotRunning");
+                log::warn!("create_signature attempt {}/3 failed: {}", attempt, last_err);
+                if !retriable || attempt == 3 {
+                    return Err(last_err);
+                }
+                // Cell re-enable (conductor restarted underneath us) takes
+                // seconds; a lost head race resolves immediately.
+                let gap = if last_err.contains("CellDisabled") || last_err.contains("CellNotRunning") { 5 } else { 2 };
+                tokio::time::sleep(std::time::Duration::from_secs(gap)).await;
+            }
+        }
+    }
+    let result = result.ok_or(last_err)?;
+
+    // Result is MessagePack-encoded ActionHash - deserialize to get raw 39 bytes
+    let action_hash: holochain_types::prelude::ActionHash =
+        rmp_serde::from_slice(result.as_bytes())
+            .map_err(|e| format!("Failed to decode ActionHash from zome result: {}", e))?;
+    let action_hash_hex = hex::encode(action_hash.get_raw_39());
+    log::info!("Signature committed to DHT, action_hash: {}", action_hash_hex);
+
+    Ok(action_hash_hex)
+}
+
+
+/// The msgpack of a `SignatureRecord` as the signing DNA (v1.4 and v1.5)
+/// reads it: the mirror structs below match the DNA's types exactly
+/// (PascalCase enum variants). Shared by the write on either line.
+pub(crate) fn signature_payload_mp(
+    agent_key: holochain_types::prelude::AgentPubKey,
+    signature: &[u8],
+    file_hash: &[u8],
+    signed_at: i64,
+    intent: Option<&str>,
+    ai_generation: Option<&str>,
+    content_rights: Option<&serde_json::Value>,
+    integrity_report: Option<&serde_json::Value>,
+    perceptual_hash: Option<&serde_json::Value>,
+    comment: Option<&str>,
+    supersedes: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
     // Build a struct that mirrors the DNA's SignatureRecord
     // Mirror structs matching the signing DNA's types exactly (PascalCase enum variants)
     #[derive(serde::Serialize)]
@@ -7571,54 +7674,35 @@ pub(crate) async fn commit_signature_to_dht(
     // Encode with MessagePack using the same encoder Holochain uses
     let payload_mp = rmp_serde::to_vec_named(&payload)
         .map_err(|e| format!("MessagePack serialization failed: {}", e))?;
+    Ok(payload_mp)
+}
 
-    // Retry ONLY the definitively-not-committed failures: a "chain head
-    // has moved" bundle was rejected outright (a concurrent write won the
-    // head - rebuild on the new head and try again), and CellDisabled never
-    // executed. Timeouts are deliberately NOT retried here - an ambiguous
-    // commit retried blindly could publish the signature twice.
-    let mut result = None;
-    let mut last_err = String::new();
-    for attempt in 1..=3u32 {
-        match app_ws
-            .call_zome(
-                ZomeCallTarget::RoleName(role_name.clone().into()),
-                "signing".into(),
-                "create_signature".into(),
-                ExternIO::from(payload_mp.clone()),
-            )
-            .await
-        {
-            Ok(r) => {
-                result = Some(r);
-                break;
-            }
-            Err(e) => {
-                last_err = format!("Zome call create_signature failed: {}", e);
-                let retriable = last_err.contains("chain head has moved")
-                    || last_err.contains("CellDisabled")
-                    || last_err.contains("CellNotRunning");
-                log::warn!("create_signature attempt {}/3 failed: {}", attempt, last_err);
-                if !retriable || attempt == 3 {
-                    return Err(last_err);
-                }
-                // Cell re-enable (conductor restarted underneath us) takes
-                // seconds; a lost head race resolves immediately.
-                let gap = if last_err.contains("CellDisabled") || last_err.contains("CellNotRunning") { 5 } else { 2 };
-                tokio::time::sleep(std::time::Duration::from_secs(gap)).await;
-            }
-        }
-    }
-    let result = result.ok_or(last_err)?;
-
-    // Result is MessagePack-encoded ActionHash - deserialize to get raw 39 bytes
-    let action_hash: holochain_types::prelude::ActionHash =
-        rmp_serde::from_slice(result.as_bytes())
-            .map_err(|e| format!("Failed to decode ActionHash from zome result: {}", e))?;
-    let action_hash_hex = hex::encode(action_hash.get_raw_39());
-    log::info!("Signature committed to DHT, action_hash: {}", action_hash_hex);
-
-    Ok(action_hash_hex)
+/// The Sign It write on the 0.7 line: the same record, signed by the same
+/// key, committed to the signing v1.5 cell.
+async fn commit_signature_07(
+    state: &Arc<AppState>,
+    file_hash: &[u8],
+    signed_at: i64,
+    intent: Option<&str>,
+    ai_generation: Option<&str>,
+    content_rights: Option<&serde_json::Value>,
+    integrity_report: Option<&serde_json::Value>,
+    perceptual_hash: Option<&serde_json::Value>,
+    comment: Option<&str>,
+    supersedes: Option<&[u8]>,
+) -> Result<String, String> {
+    let (agent_key, signature) = {
+        let config = state.vault_config.lock().unwrap();
+        let config = config.as_ref().ok_or("Vault is locked")?;
+        let seed = config.conductor_seed_bytes().ok_or("No device seed available")?;
+        let pub_key = crate::key_derivation::public_key_of_seed(&seed);
+        (
+            holochain_types::prelude::AgentPubKey::from_raw_32(pub_key.to_vec()),
+            crate::key_derivation::sign_with_device_seed(&seed, file_hash),
+        )
+    };
+    let payload_mp = signature_payload_mp(agent_key, &signature[..], file_hash, signed_at, intent, ai_generation, content_rights, integrity_report, perceptual_hash, comment, supersedes)?;
+    crate::signing_07::create_signature(state, payload_mp).await
 }
 
 // ============================================
