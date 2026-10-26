@@ -1747,7 +1747,7 @@ mod tests {
         let mut fetched = None;
         while fetched.is_none() {
             assert!(started.elapsed().as_secs() < 300, "the file did not arrive within 300 s");
-            match lane_b.fetch(&root_b, &lane_a.me, "harness_app", "recovery", slot.size, &slot.sha256, |done, total| println!("  {} of {} pieces", done, total)).await {
+            match lane_b.fetch(&root_b, &lane_a.me, "harness_app", "recovery", slot.size, &slot.sha256, true, |done, total| println!("  {} of {} pieces", done, total)).await {
                 Ok(bytes) => fetched = Some(bytes),
                 Err(e) => {
                     println!("  not yet ({}); the devices may not have found each other", e);
@@ -1767,7 +1767,7 @@ mod tests {
         assert_eq!(meta.label.as_deref(), Some("recovery"));
 
         // A file the other device does not hold: told at once, nothing kept.
-        let missing = lane_b.fetch(&root_b, &lane_a.me, "harness_app", "nothing", 10, &"0".repeat(64), |_, _| {}).await;
+        let missing = lane_b.fetch(&root_b, &lane_a.me, "harness_app", "nothing", 10, &"0".repeat(64), true, |_, _| {}).await;
         assert_eq!(missing.err().as_deref(), Some("the other device no longer holds it"));
     }
 

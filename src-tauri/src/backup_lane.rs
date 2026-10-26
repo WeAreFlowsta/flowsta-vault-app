@@ -234,6 +234,10 @@ impl Lane {
     /// Fetch one backup file from a sibling device. `size` and `sha256` are
     /// what that device's index says. Returns the file's bytes; the pieces
     /// of a fetch that stops stay on disk for the next try.
+    /// `heard`: the device has reached this one directly this session. A
+    /// device never heard from (closed, asleep, off) gets ONE short try,
+    /// not three windows of up to 180 s each - the Mac's round spent 20
+    /// minutes on a sleeping sibling (10-26).
     pub async fn fetch(
         &self,
         identity_root: &Path,
@@ -242,6 +246,7 @@ impl Lane {
         label: &str,
         size: u64,
         sha256: &str,
+        heard: bool,
         progress: impl Fn(u32, u32),
     ) -> Result<Vec<u8>, String> {
         use std::io::Write;
@@ -262,14 +267,18 @@ impl Lane {
                 let mut tries = 0;
                 while (window.len() as u32) < count {
                     tries += 1;
-                    if tries > TRIES_PER_WINDOW {
-                        return Err("the other device stopped answering".to_string());
+                    if tries > if heard { TRIES_PER_WINDOW } else { 1 } {
+                        return Err(if heard {
+                            "the other device stopped answering".to_string()
+                        } else {
+                            "the other device has not been heard from this session".to_string()
+                        });
                     }
                     let want = Want { client_id: client_id.into(), label: label.into(), sha256: sha256.into(), from_seq: next, count };
                     let request = Piece { id: sha256.into(), kind: "want".into(), seq: next, total, data: serde_json::to_vec(&want).map_err(|e| e.to_string())? };
                     self.send(from, request).await?;
                     let started = std::time::Instant::now();
-                    let wait = next_wait(last_window);
+                    let wait = if heard { next_wait(last_window) } else { FIRST_WAIT };
                     while (window.len() as u32) < count {
                         let Some(left) = wait.checked_sub(started.elapsed()) else { break };
                         match tokio::time::timeout(left, rx.recv()).await {

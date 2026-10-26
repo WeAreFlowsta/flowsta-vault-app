@@ -491,6 +491,9 @@ pub(crate) fn fresh_announcements(before: Option<&std::collections::HashSet<Stri
 /// One round: say what this device holds (always), and copy what the other
 /// devices hold - every missing copy when `fetch_all`, else only the ones
 /// announced since the last round.
+/// Devices said once this session to be unheard-from (short backup tries).
+static QUIET_SAID: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
 pub async fn round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> Result<RoundOutcome, String> {
     let records = crate::sealed::sealed_list_inner(state).await?;
     let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
@@ -583,7 +586,12 @@ pub async fn round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> R
                     continue;
                 }
                 let lane: &Arc<crate::backup_lane::Lane> = lane;
-                match lane.fetch(&root, &from, &client_id, &slot.label, slot.size, &slot.sha256, |_, _| {}).await {
+                let heard = crate::devices::was_heard(&from);
+                if !heard && QUIET_SAID.lock().unwrap().get_or_insert_with(Default::default).insert(install_id.clone()) {
+                    let short: String = install_id.chars().take(8).collect();
+                    log::info!("[backups] {}… has not been heard from this session - one short try for its copies each round until it is", short);
+                }
+                match lane.fetch(&root, &from, &client_id, &slot.label, slot.size, &slot.sha256, heard, |_, _| {}).await {
                     Ok(bytes) => match store_copy(&root, &install_id, &client_id, &slot, &bytes) {
                         Ok(_) => {
                             budget -= slot.size;
