@@ -1247,7 +1247,7 @@ pub(crate) fn unlock_vault_inner(
             .or(config.web_email.clone())
             .unwrap_or_else(|| "another identity".to_string());
         log::info!("Identity switch on unlock: {} → {}", from, to);
-        state.activity.record("identity_switched", format!("Switched to {} on this device", to), Some(format!("from {}", from)), None, None);
+        state.activity.record("identity_switched", format!("Switched to {}", to), Some(format!("from {}", from)), None, None);
     }
     result.switched_from = switched_from;
 

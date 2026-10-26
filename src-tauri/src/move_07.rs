@@ -370,10 +370,23 @@ pub async fn run_pass(state: &Arc<AppState>, reason: &str) -> PassOutcome {
                 crate::sealed::forget_recent_versions();
                 crate::devices::announce_again();
                 crate::commands::own_record_due();
+                // One entry per device, since every device does its own
+                // move and the feed is shared: the device that wrote records
+                // says what it synced; one that found them there says so,
+                // without counts that read as "this device lost six".
+                let detail = if out.private_written > 0 || out.signatures_carried > 0 {
+                    format!(
+                        "{} record{} and {} signature{} synced",
+                        out.private_06, if out.private_06 == 1 { "" } else { "s" },
+                        out.signatures_carried, if out.signatures_carried == 1 { "" } else { "s" }
+                    )
+                } else {
+                    "Everything was already synced".to_string()
+                };
                 state.activity.record(
                     "records_moved",
-                    "Your records moved to the new network",
-                    Some(format!("{} private records, {} signatures", out.private_06, out.signatures_06)),
+                    "Your Vault synced to the new network",
+                    Some(detail),
                     None,
                     None,
                 );

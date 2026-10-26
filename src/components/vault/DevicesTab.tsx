@@ -52,9 +52,9 @@ export function moveNote(m: MoveStatus | null): string {
   if (m.running || (m.last_pass && !m.last_pass.error && !m.last_pass.skipped)) {
     const p = m.last_pass;
     const done = p ? p.private_present + p.private_written : 0;
-    return p && p.private_06 > 0 ? `Moving your records to the new network: ${Math.min(done, p.private_06).toLocaleString()} of ${p.private_06.toLocaleString()} so far.` : "Moving your records to the new network...";
+    return p && p.private_06 > 0 ? `Syncing your Vault to the new network: ${Math.min(done, p.private_06).toLocaleString()} of ${p.private_06.toLocaleString()} records so far. Nothing to do.` : "Syncing your Vault to the new network. Nothing to do.";
   }
-  if (m.last_pass?.error) return "Your records have not moved to the new network yet; the Vault tries again every minute.";
+  if (m.last_pass?.error) return "Your Vault has not synced to the new network yet. It tries again every minute, nothing to do.";
   return "";
 }
 

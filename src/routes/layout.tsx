@@ -1746,7 +1746,7 @@ export default component$(() => {
                   : conductorStatus.value === "error"
                     ? "Holochain stopped"
                     : conductorStatus.value === "ready" && !cellsReady.value
-                      ? "Holochain - still starting"
+                      ? "Starting up"
                       : "Holochain"}
               </span>
             </div>
