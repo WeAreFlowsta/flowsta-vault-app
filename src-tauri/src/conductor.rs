@@ -1068,6 +1068,10 @@ async fn start_holochain_07_only(
     fresh_node_origin();
     let _ = app_handle.emit("conductor-status", ConductorStatus::Starting { message: "Starting Holochain conductor...".into() });
     let line = start_line_07(data_dir, resource_dir, passphrase, conductor_seed, conductor_tag, &expected_pub_key, private_v2_seed.as_deref()).await?;
+    {
+        let state = app_handle.state::<Arc<AppState>>();
+        crate::dna::ensure_cells_ready_07(line.admin_port, &state).await;
+    }
     set_line_07_state(Line07State::Serving);
     let session = CONDUCTOR_SESSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let _ = app_handle.emit("conductor-status", ConductorStatus::Ready { admin_port: line.admin_port });
@@ -1446,6 +1450,7 @@ pub fn attach_line_07(state: Arc<AppState>, starter: Line07Starter) {
                 if attached {
                     set_line_07_state(Line07State::Serving);
                     log::info!("Holochain 0.7 conductor ready (admin: {}, app: {})", admin_port, app_port);
+                    crate::dna::ensure_cells_ready_07(admin_port, &state).await;
                     crate::move_07::schedule_pass(state.clone(), "the 0.7 line came up");
                 } else {
                     set_line_07_state(Line07State::Off);

@@ -1353,3 +1353,78 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<u16, String> {
     log::info!("[0.7] app interface attached on port {}", app_port);
     Ok(app_port)
 }
+
+/// Wait until the 0.7 line's cells answer (the twin of the readiness probe
+/// in `ensure_apps_enabled`): a freshly started conductor lists its apps as
+/// enabled while the cells are still coming up, and the first reads of a
+/// 0.7-only start hit `CellNotRunning` for about ten seconds - in the beta6
+/// gate the sealed reads failed three times and the first devices round was
+/// skipped on both boxes. One cap grant on the signing cell, retried every
+/// 3 s for up to 45 s, cached so no caller authorizes again this session.
+pub async fn ensure_cells_ready_07(admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>) {
+    use holochain_client_07::{AdminWebsocket, AuthorizeSigningCredentialsPayload, CellInfo};
+    let admin_ws = match AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin())).await {
+        Ok(a) => a,
+        Err(e) => {
+            log::warn!("[0.7] readiness check: admin WS: {}", e);
+            return;
+        }
+    };
+    let apps = match admin_ws.list_apps(None).await {
+        Ok(a) => a,
+        Err(e) => {
+            log::warn!("[0.7] readiness check: list_apps: {}", e);
+            return;
+        }
+    };
+    let signing_app_id = make_app_id("signing", BUNDLED_SIGNING_VERSION_07);
+    let Some(cell_id) = apps
+        .iter()
+        .find(|a| a.installed_app_id == signing_app_id)
+        .and_then(|app| {
+            app.cell_info.values().flat_map(|cells| cells.iter()).find_map(|c| match c {
+                CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+                _ => None,
+            })
+        })
+    else {
+        return;
+    };
+    // Single-flight with every other 0.7 credential fill, and a cache hit
+    // means the cells were verified earlier this session.
+    let _fill = state.credentials_fill_lock.lock().await;
+    if state.cell_credentials_07.lock().unwrap().contains_key(&cell_id) {
+        return;
+    }
+    const MAX_ATTEMPTS: u32 = 15;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match admin_ws
+            .authorize_signing_credentials(AuthorizeSigningCredentialsPayload { cell_id: cell_id.clone(), functions: None })
+            .await
+        {
+            Ok(creds) => {
+                state
+                    .cell_credentials_07
+                    .lock()
+                    .unwrap()
+                    .insert(cell_id.clone(), crate::commands::CachedCellCredentials07::from_signing(&creds));
+                if attempt > 1 {
+                    log::info!("[0.7] cells ready after {} s", (attempt - 1) * 3);
+                } else {
+                    log::info!("[0.7] cells ready");
+                }
+                return;
+            }
+            Err(e) => {
+                let text = format!("{}", e);
+                if (text.contains("CellNotRunning") || text.contains("CellDisabled")) && attempt < MAX_ATTEMPTS {
+                    log::info!("[0.7] cells not ready yet (attempt {}/{}), waiting 3 s", attempt, MAX_ATTEMPTS);
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                } else {
+                    log::warn!("[0.7] cell readiness check failed: {}", e);
+                    return;
+                }
+            }
+        }
+    }
+}
