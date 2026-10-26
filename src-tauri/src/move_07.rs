@@ -168,10 +168,16 @@ pub async fn run_pass(state: &Arc<AppState>, reason: &str) -> PassOutcome {
     let mut out = PassOutcome { reason: reason.to_string(), started_ms: now_ms(), ..Default::default() };
     let already_moved = moved(&root);
 
-    let (device_hosted, unlocked) = {
+    // The private step needs a private cell on both lines, which exists only
+    // for a device-hosted identity that holds its private-network seed and
+    // data key (an identity from before 1.6.0 whose owner never re-entered
+    // the phrase has neither, on either line: it carries signatures only).
+    let (has_private_cell, unlocked) = {
         let cfg = state.vault_config.lock().unwrap();
         (
-            cfg.as_ref().map(|c| c.hosting_model.as_deref() == Some("device-hosted")).unwrap_or(false),
+            cfg.as_ref()
+                .map(|c| c.hosting_model.as_deref() == Some("device-hosted") && c.private_network_seed.is_some() && c.data_key.is_some())
+                .unwrap_or(false),
             cfg.is_some(),
         )
     };
@@ -189,7 +195,7 @@ pub async fn run_pass(state: &Arc<AppState>, reason: &str) -> PassOutcome {
     }
 
     // ── Private records ──
-    if device_hosted {
+    if has_private_cell {
         match private_pass(state, &mut out).await {
             Ok(()) => {}
             Err(e) => {
@@ -199,8 +205,9 @@ pub async fn run_pass(state: &Arc<AppState>, reason: &str) -> PassOutcome {
             }
         }
     } else {
-        // A custodial-linked vault has no private cell on either line
-        // (its records cross with the account, B6).
+        // No private cell on either line: a custodial-linked vault (its
+        // records cross with the account) or a pre-1.6.0 identity without
+        // its seed. Nothing private to move; the signatures still are.
         out.private_complete = true;
     }
 

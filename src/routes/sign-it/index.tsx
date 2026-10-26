@@ -1604,7 +1604,7 @@ export default component$(() => {
                 </div>
                 {sig.action_hash && (
                   <div class="shrink-0 flex flex-wrap gap-2">
-                    {((sig as any).signing_app_id === "flowsta_signing_v1_3" || (sig as any).signing_app_id === "flowsta_signing_v1_4") && (
+                    {/^flowsta_signing_v1_(3|4|5)(@|$)/.test(String((sig as any).signing_app_id ?? "")) && (
                       <PillButton accent="amber"
                         onClick$={() => { editThumbTarget.value = sig; }}
                       >

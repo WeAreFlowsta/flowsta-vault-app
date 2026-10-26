@@ -287,7 +287,13 @@ pub(crate) async fn linked_signatures(state: &Arc<AppState>, linked_keys: &[Agen
     let label = signing_app_label(Line::V07);
     let mut all = Vec::new();
     for key in linked_keys {
-        let bytes = client.call_zome(&role, "signing", "get_signatures_for_agent", mp(key)?).await?;
+        // A network read: a cold conductor must not hold the list for the
+        // websocket's five minutes (the v1.4 rev 2 lesson).
+        let call = client.call_zome(&role, "signing", "get_signatures_for_agent", mp(key)?);
+        let bytes = match tokio::time::timeout(ENRICH_WAIT, call).await {
+            Ok(r) => r?,
+            Err(_) => return Err(format!("get_signatures_for_agent timed out after {} s (0.7)", ENRICH_WAIT.as_secs())),
+        };
         let records = crate::hc::records(Line::V07, &bytes)?;
         for record in records {
             let Ok(entry) = record.entry_as::<SignatureEntry>() else { continue };
@@ -304,6 +310,17 @@ pub(crate) async fn linked_signatures(state: &Arc<AppState>, linked_keys: &[Agen
 /// a `supersedes` that names a carried original is re-pointed at the
 /// carried copy so the chain reads whole.
 pub(crate) fn merge_own(mut from_06: Vec<serde_json::Value>, from_07: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    // Two devices of one identity may each have carried the same record
+    // (the DNA's idempotency is per witness): one copy per original stays,
+    // the first seen.
+    let mut originals_seen = std::collections::HashSet::new();
+    let from_07: Vec<serde_json::Value> = from_07
+        .into_iter()
+        .filter(|s| match s.get("original_action_hash").and_then(|v| v.as_str()) {
+            Some(o) => originals_seen.insert(o.to_string()),
+            None => true,
+        })
+        .collect();
     let carried: std::collections::HashMap<String, String> = from_07
         .iter()
         .filter_map(|s| Some((s.get("original_action_hash")?.as_str()?.to_string(), s.get("action_hash")?.as_str()?.to_string())))
@@ -477,6 +494,16 @@ mod tests {
         let hashes: Vec<&str> = all.iter().map(|s| s["action_hash"].as_str().unwrap()).collect();
         assert_eq!(hashes, vec!["a7", "b7", "cc"]);
         // b7's supersedes named the 0.6 hash of aa; it now names aa's carried copy.
+        assert_eq!(all[1]["supersedes"], "a7");
+    }
+
+    #[test]
+    fn two_carried_copies_of_one_original_are_one_record() {
+        // Device a and device b each carried the web key's record aa.
+        let from_07 = vec![sig("a7", None, Some("aa")), sig("b7", None, Some("aa")), sig("c7", Some("aa"), Some("cc"))];
+        let all = merge_own(vec![sig("aa", None, None), sig("cc", Some("aa"), None)], from_07);
+        let hashes: Vec<&str> = all.iter().map(|s| s["action_hash"].as_str().unwrap()).collect();
+        assert_eq!(hashes, vec!["a7", "c7"]);
         assert_eq!(all[1]["supersedes"], "a7");
     }
 

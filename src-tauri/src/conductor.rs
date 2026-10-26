@@ -110,6 +110,22 @@ impl ConductorHandle {
         }
     }
 
+    /// Whether the 0.7 conductor process still runs: `None` when there is
+    /// no 0.7 line on this handle.
+    pub fn line_07_alive(&mut self) -> Option<bool> {
+        self.line_07.as_mut().map(|l| matches!(l.conductor_child.try_wait(), Ok(None)))
+    }
+
+    /// Take a 0.7 line whose conductor has died out of the handle (its lair
+    /// is stopped with it) so a fresh one can be attached. `/status` shows
+    /// the line off meanwhile.
+    pub fn drop_dead_line_07(&mut self) {
+        if let Some(line) = self.line_07.take() {
+            line.shutdown();
+        }
+        set_line_07_state(Line07State::Off);
+    }
+
     /// Graceful shutdown of every line.
     pub fn shutdown(mut self) {
         if let Some(line) = self.line_07.take() {
@@ -1206,6 +1222,30 @@ pub struct Line07Starter {
     /// custodial-linked vault, which has no private cell on either line.
     private_v2_seed: Option<String>,
     session: u64,
+}
+
+/// A starter for the 0.7 line of the identity that is unlocked now, from
+/// the Vault's state: for the watchdog, when a 0.7 conductor died
+/// mid-session and the one the start sequence made was used up.
+pub fn line_07_starter_from_state(state: &AppState, resource_dir: PathBuf, passphrase: String) -> Option<Line07Starter> {
+    let (conductor_seed, conductor_tag, private_v2_seed) = {
+        let cfg = state.vault_config.lock().unwrap();
+        let cfg = cfg.as_ref()?;
+        let (seed, tag) = crate::commands::conductor_start_params(cfg)?;
+        let private_v2_seed = if cfg.hosting_model.as_deref() == Some("device-hosted") { cfg.private_network_seed.clone() } else { None };
+        (seed, tag, private_v2_seed)
+    };
+    let session = state.conductor_handle.lock().unwrap().as_ref()?.session;
+    Some(Line07Starter {
+        data_dir: state.identity_root(),
+        resource_dir,
+        passphrase,
+        conductor_seed,
+        conductor_tag,
+        expected_pub_key: crate::key_derivation::public_key_of_seed(&conductor_seed),
+        private_v2_seed,
+        session,
+    })
 }
 
 /// Start the 0.7 line in the background and attach it to the running 0.6

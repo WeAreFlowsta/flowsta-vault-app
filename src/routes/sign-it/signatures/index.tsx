@@ -173,7 +173,7 @@ export default component$(() => {
                       )}
                       {sig.action_hash && (
                         <div class="ml-auto flex flex-wrap gap-2">
-                          {(sig.signing_app_id === "flowsta_signing_v1_3" || sig.signing_app_id === "flowsta_signing_v1_4") && (
+                          {/^flowsta_signing_v1_(3|4|5)(@|$)/.test(String(sig.signing_app_id ?? "")) && (
                             <PillButton accent="amber"
                               onClick$={() => { editThumbTarget.value = sig; }}
                             >

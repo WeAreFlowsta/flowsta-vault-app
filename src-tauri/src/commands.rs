@@ -1613,8 +1613,41 @@ pub(crate) async fn ensure_conductor_alive(
         }
     };
 
-    if !needs_restart {
+    // The 0.7 line beside a living 0.6 one: a conductor that died
+    // mid-session (a moved identity's writes all fail while it is down,
+    // and nothing else notices).
+    let line_07_dead = !needs_restart
+        && matches!(state.conductor_handle.lock().unwrap().as_mut().map(|h| h.line_07_alive()), Some(Some(false)));
+
+    if !needs_restart && !line_07_dead {
         log::info!("[watchdog] conductor is alive (recovered by an earlier caller)");
+        return Ok(());
+    }
+
+    // Extract the cached passphrase. Briefly copies the bytes into a
+    // `String` for the duration of the start_holochain call; the
+    // long-lived copy stays in the `LockedArray`.
+    let passphrase = {
+        let mut guard = state.unlock_passphrase.lock().unwrap();
+        let arr = guard
+            .as_mut()
+            .ok_or("[watchdog] cannot restart: vault is locked (no cached passphrase)")?;
+        let bytes_locked = arr.lock();
+        // Do NOT include the FromUtf8Error in the message - its Display can
+        // echo the offending (passphrase) bytes into the log.
+        String::from_utf8(bytes_locked.to_vec())
+            .map_err(|_| "[watchdog] cached passphrase is not valid UTF-8".to_string())?
+    };
+
+    if line_07_dead {
+        log::warn!("[watchdog] the 0.7 conductor exited - restarting that line");
+        if let Some(h) = state.conductor_handle.lock().unwrap().as_mut() {
+            h.drop_dead_line_07();
+        }
+        let resource_dir = resolve_resource_dir(app_handle, &state.data_dir);
+        let starter = crate::conductor::line_07_starter_from_state(state, resource_dir, passphrase)
+            .ok_or("[watchdog] no 0.7 starter (vault config not available)")?;
+        crate::conductor::attach_line_07(state.clone(), starter);
         return Ok(());
     }
 
@@ -1634,21 +1667,6 @@ pub(crate) async fn ensure_conductor_alive(
             message: "Recovering conductor...".into(),
         },
     );
-
-    // Extract the cached passphrase. Briefly copies the bytes into a
-    // `String` for the duration of the start_holochain call; the
-    // long-lived copy stays in the `LockedArray`.
-    let passphrase = {
-        let mut guard = state.unlock_passphrase.lock().unwrap();
-        let arr = guard
-            .as_mut()
-            .ok_or("[watchdog] cannot restart: vault is locked (no cached passphrase)")?;
-        let bytes_locked = arr.lock();
-        // Do NOT include the FromUtf8Error in the message - its Display can
-        // echo the offending (passphrase) bytes into the log.
-        String::from_utf8(bytes_locked.to_vec())
-            .map_err(|_| "[watchdog] cached passphrase is not valid UTF-8".to_string())?
-    };
 
     // The conductor's own seed and key-store tag, from vault_config.
     let from_config = state.vault_config.lock().unwrap().as_ref().map(conductor_start_params);
@@ -1808,6 +1826,14 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
             let wait = match devices_round(&devices_state, &devices_app, full).await {
                 DevicesRound::StoodDown => break,
                 DevicesRound::Done => {
+                    // A 0.7 conductor that died since the last round is
+                    // brought back (the watchdog's cheap check).
+                    let line_07_dead = matches!(devices_state.conductor_handle.lock().unwrap().as_mut().map(|h| h.line_07_alive()), Some(Some(false)));
+                    if line_07_dead {
+                        if let Err(e) = ensure_conductor_alive(&devices_state, &devices_app).await {
+                            log::warn!("[devices] the 0.7 line was not brought back: {}", e);
+                        }
+                    }
                     // What the 0.6 cells hold and the 0.7 cells do not,
                     // carried over (the move, and the catch-up after it).
                     crate::move_07::schedule_pass(devices_state.clone(), "devices round");
@@ -5955,7 +5981,7 @@ pub async fn sign_file(
         // frontend uses this field to decide which per-signature actions to
         // show (Edit Thumbnail is gated on v1.3+); without it, freshly-signed
         // entries spliced into the list lose those actions.
-        "signing_app_id": crate::dna::make_app_id("signing", crate::dna::BUNDLED_SIGNING_VERSION),
+        "signing_app_id": crate::signing_07::signing_app_label(crate::hc::active_line(&state)),
         "intent": intent,
         "ai_generation": ai_generation,
         "content_rights": content_rights,
