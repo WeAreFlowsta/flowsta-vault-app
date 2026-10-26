@@ -31,6 +31,37 @@ export interface Holds {
   backups_pending: number;
   setting_up: boolean;
 }
+/** Where this identity's records are (move_status): the line they are on,
+ *  and what the move to the 0.7 line carried and when, once it has. */
+export interface MoveStatus {
+  moved: boolean;
+  marker: { moved_at_ms: number; private_records: number; signatures: number; revocations: number; thumbnails: number } | null;
+  running: boolean;
+  last_pass: { private_06: number; private_present: number; private_written: number; signatures_06: number; signatures_carried: number; error: string | null; skipped: string | null } | null;
+  line: "V06" | "V07";
+}
+
+/** One line about the move, or nothing to say. */
+export function moveNote(m: MoveStatus | null, now = Date.now()): string {
+  if (!m) return "";
+  if (m.moved && m.marker) {
+    const d = new Date(m.marker.moved_at_ms);
+    const when = d.toDateString() === new Date(now).toDateString()
+      ? `today at ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+      : `on ${d.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" })}`;
+    const parts = [`${m.marker.private_records.toLocaleString()} private record${m.marker.private_records === 1 ? "" : "s"}`];
+    if (m.marker.signatures > 0) parts.push(`${m.marker.signatures.toLocaleString()} signature${m.marker.signatures === 1 ? "" : "s"}`);
+    return `Your records moved to the new network ${when}: ${parts.join(", ")}.`;
+  }
+  if (m.running || (m.last_pass && !m.last_pass.error && !m.last_pass.skipped)) {
+    const p = m.last_pass;
+    const done = p ? p.private_present + p.private_written : 0;
+    return p && p.private_06 > 0 ? `Moving your records to the new network: ${Math.min(done, p.private_06).toLocaleString()} of ${p.private_06.toLocaleString()} so far.` : "Moving your records to the new network...";
+  }
+  if (m.last_pass?.error) return "Your records have not moved to the new network yet; the Vault tries again every minute.";
+  return "";
+}
+
 export interface DevicesProgress {
   setting_up: boolean;
   mine: Holds;
@@ -143,6 +174,8 @@ export const DevicesTab = component$(() => {
   const reaching = useSignal(false);
   // How far a device being set up has got (its own word, sent directly).
   const progress = useSignal<DevicesProgress | null>(null);
+  /** Where this identity's records are, and what the move carried. */
+  const moveStatus = useSignal<MoveStatus | null>(null);
   // False on an identity set up before 1.6.0 until the phrase is typed once.
   const handoverReady = useSignal(true);
   const adding = useSignal(false);
@@ -195,6 +228,7 @@ export const DevicesTab = component$(() => {
   const load = $(async () => {
     try {
       devices.value = await invoke<DeviceRow[]>("devices_list");
+      moveStatus.value = await invoke<MoveStatus>("move_status").catch(() => null);
       reaching.value = await invoke<boolean>("devices_checking").catch(() => false);
       progress.value = await invoke<DevicesProgress>("devices_progress").catch(() => null);
       // The chip shows the same list at the same moment.
@@ -332,6 +366,9 @@ export const DevicesTab = component$(() => {
       <div class="rounded-lg border border-gray-700 bg-[#15203a] p-6">
         <div class="mb-4 flex items-center justify-between gap-4">
           <h3 class="text-lg font-semibold text-white">Your devices</h3>
+          {moveNote(moveStatus.value) && (
+            <p class="mt-1 text-xs text-gray-400" data-testid="move-note">{moveNote(moveStatus.value)}</p>
+          )}
           {!adding.value && (
             <GlassButton testId="device-add" onClick$={() => { adding.value = true; error.value = ""; added.value = ""; }}>Add a device</GlassButton>
           )}

@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Your records move to the new network.** The Vault now runs its records
+  on the Holochain 0.7 line. On the first unlock after this update, with
+  both lines running, your private records and your own Sign It signatures
+  (with their revocations and thumbnails) are copied to the new network,
+  the counts are compared, and only then does this identity start writing
+  there. Nothing on the old line is changed or removed; a device that has
+  not updated keeps working on it, and what it writes there reaches the
+  updated devices within a minute. Settings → Devices says when the move
+  happened and what it carried; `GET /status` says which line
+  (`records_on`) an identity's records are on.
 - **Rename this device.** Settings → Devices names each device after its
   computer. The name of this device can now be changed there; the other
   devices and the apps that list your devices see the new name within a
