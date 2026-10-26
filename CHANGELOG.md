@@ -5,7 +5,9 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0-beta5] - 2026-10-26
+
+The beta that moves the Vault to Holochain 0.7.1. (beta4 was never cut: the small fixes planned for it ship here, with the move.)
 
 ### Added
 - **Your records move to the new network.** The Vault now runs its records
