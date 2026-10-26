@@ -331,11 +331,14 @@ struct HolochainLine {
 }
 
 fn holochain_lines(app_state: &AppState) -> Vec<HolochainLine> {
-    let wanted_06 = crate::conductor::line_06_wanted(&app_state.identity_root());
+    // The 0.6 line is the primary of an identity that has not moved (its
+    // state is the conductor's), a background line of one that has
+    // (serving when attached, off otherwise), and never there for a born one.
+    let primary_06 = !crate::move_07::moved(&app_state.identity_root());
     let running_06 = app_state.conductor_handle.lock().unwrap().as_ref().map(|h| h.line_06.is_some()).unwrap_or(false);
     let line_06 = match *app_state.conductor_status.lock().unwrap() {
-        crate::conductor::ConductorStatus::Ready { .. } if running_06 => "serving",
-        crate::conductor::ConductorStatus::Starting { .. } if wanted_06 => "starting",
+        _ if running_06 => "serving",
+        crate::conductor::ConductorStatus::Starting { .. } if primary_06 => "starting",
         _ => "off",
     };
     let line_07 = match crate::conductor::line_07_state() {

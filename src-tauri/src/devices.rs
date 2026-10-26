@@ -725,7 +725,23 @@ pub async fn list(state: &Arc<AppState>) -> Result<Vec<DeviceRecord>, String> {
 /// Write this device's record when it is missing, changed or a day old.
 /// Returns whether a record was written.
 pub async fn publish_own(state: &Arc<AppState>) -> Result<bool, String> {
-    let records = crate::sealed::sealed_list_inner(state).await?;
+    let active = crate::hc::active_line(state);
+    let written = publish_own_on(state, active).await?;
+    // While a moved identity's 0.6 line runs, its device record goes there
+    // too: a device still on 1.6.1 then lists this one as needing the
+    // update to sync, instead of a record that goes stale.
+    if written && active == crate::hc::Line::V07 && crate::hc::line_ports(state, crate::hc::Line::V06).is_ok() {
+        if let Err(e) = publish_own_on(state, crate::hc::Line::V06).await {
+            log::info!("[devices] this device's record was not written on the 0.6 line too: {}", e.chars().take(120).collect::<String>());
+        }
+    }
+    Ok(written)
+}
+
+/// Write this device's record on one line when it is missing, changed or
+/// a day old there.
+async fn publish_own_on(state: &Arc<AppState>, line: crate::hc::Line) -> Result<bool, String> {
+    let records = crate::sealed::sealed_list_on(state, line).await?;
     let install_id = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
     let existing_item = records
         .iter()
@@ -741,8 +757,9 @@ pub async fn publish_own(state: &Arc<AppState>) -> Result<bool, String> {
             .filter(|b| b.len() == 39)
             .map(holochain_types::prelude::ActionHash::from_raw_39)
     });
-    crate::sealed::sealed_store_spec(
+    crate::sealed::sealed_store_spec_on(
         state,
+        line,
         StoreSpec {
             entry_type: DEVICE_ENTRY_TYPE.to_string(),
             body: serde_json::to_value(&current).map_err(|e| e.to_string())?,
@@ -884,11 +901,28 @@ pub(crate) async fn device_remove_inner(api_url: String, install_id: String, sta
     // The removal is its own record (nothing the removed device writes can
     // overwrite it), and the device's record says so too.
     let removal = DeviceRemoval { install_id: device.install_id.clone(), conductor_key: device.conductor_key.clone(), removed_at: now, removed_by: me.clone() };
-    crate::sealed::sealed_store_spec(
+    let removed = DeviceRecord { removed_at: Some(now), removed_by: Some(me), seen_at: device.seen_at, ..device.clone() };
+    let active = crate::hc::active_line(state);
+    write_removal_on(state, active, &removal, &removed).await?;
+    // On the 0.6 line too while it runs: a removed device still on 1.6.1
+    // must hear that it was removed.
+    if active == crate::hc::Line::V07 && crate::hc::line_ports(state, crate::hc::Line::V06).is_ok() {
+        if let Err(e) = write_removal_on(state, crate::hc::Line::V06, &removal, &removed).await {
+            log::warn!("[devices] the removal was not written on the 0.6 line too: {}", e.chars().take(120).collect::<String>());
+        }
+    }
+    state.activity.record("device_removed", format!("Removed {} from your devices", device.name), None, None, None);
+    Ok(())
+}
+
+async fn write_removal_on(state: &Arc<AppState>, line: crate::hc::Line, removal: &DeviceRemoval, removed: &DeviceRecord) -> Result<(), String> {
+    let now = removal.removed_at;
+    crate::sealed::sealed_store_spec_on(
         state,
+        line,
         StoreSpec {
             entry_type: REMOVAL_ENTRY_TYPE.to_string(),
-            body: serde_json::to_value(&removal).map_err(|e| e.to_string())?,
+            body: serde_json::to_value(removal).map_err(|e| e.to_string())?,
             refs: Vec::new(),
             created_at: now,
             id: Some(removal_logical_id(&removal.install_id, &removal.conductor_key)),
@@ -898,12 +932,12 @@ pub(crate) async fn device_remove_inner(api_url: String, install_id: String, sta
         None,
     )
     .await?;
-    let removed = DeviceRecord { removed_at: Some(now), removed_by: Some(me), seen_at: device.seen_at, ..device.clone() };
-    crate::sealed::sealed_store_spec(
+    crate::sealed::sealed_store_spec_on(
         state,
+        line,
         StoreSpec {
             entry_type: DEVICE_ENTRY_TYPE.to_string(),
-            body: serde_json::to_value(&removed).map_err(|e| e.to_string())?,
+            body: serde_json::to_value(removed).map_err(|e| e.to_string())?,
             refs: Vec::new(),
             created_at: removed.added_at,
             id: Some(device_logical_id(&removed.install_id)),
@@ -913,7 +947,6 @@ pub(crate) async fn device_remove_inner(api_url: String, install_id: String, sta
         None,
     )
     .await?;
-    state.activity.record("device_removed", format!("Removed {} from your devices", device.name), None, None, None);
     Ok(())
 }
 

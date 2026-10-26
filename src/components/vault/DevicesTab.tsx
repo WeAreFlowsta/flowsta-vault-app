@@ -35,7 +35,7 @@ export interface Holds {
  *  and what the move to the 0.7 line carried and when, once it has. */
 export interface MoveStatus {
   moved: boolean;
-  marker: { moved_at_ms: number; private_records: number; signatures: number; revocations: number; thumbnails: number; born?: boolean } | null;
+  marker: { moved_at_ms: number; private_records: number; signatures: number; revocations: number; thumbnails: number; born?: boolean; restored?: boolean; web_era_carried?: boolean; web_era_signatures?: number } | null;
   running: boolean;
   last_pass: { private_06: number; private_present: number; private_written: number; signatures_06: number; signatures_carried: number; error: string | null; skipped: string | null } | null;
   line: "V06" | "V07";
@@ -44,8 +44,9 @@ export interface MoveStatus {
 /** One line about the move, or nothing to say. */
 export function moveNote(m: MoveStatus | null, now = Date.now()): string {
   if (!m) return "";
-  // An identity created on 1.7.0 or later was never anywhere else: nothing to say.
-  if (m.marker?.born) return "";
+  // An identity created on 1.7.0 or later was never anywhere else, and one
+  // restored or added on this version had nothing here to move: nothing to say.
+  if (m.marker?.born || m.marker?.restored) return "";
   if (m.moved && m.marker) {
     const d = new Date(m.marker.moved_at_ms);
     const when = d.toDateString() === new Date(now).toDateString()

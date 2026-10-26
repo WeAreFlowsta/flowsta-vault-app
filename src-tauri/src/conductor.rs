@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::process_ext::{SidecarChild, SidecarCommand};
 use tauri::{Emitter, Manager};
 use crate::commands::AppState;
+use crate::hc::Line;
 use std::sync::Arc;
 
 /// Candidate admin WebSocket ports for the conductor.
@@ -75,12 +76,17 @@ impl Line06Handle {
 /// Handle to the running conductor lines of one identity. Drop this to
 /// stop every process. At least one line is present once a start succeeded.
 pub struct ConductorHandle {
-    /// The 0.6 line; `None` for an identity born on 1.7.0.
+    /// The 0.6 line: the primary line of an identity that has not moved
+    /// yet; attached later, when wanted, to one that has; never present for
+    /// one born on 1.7.0.
     pub line_06: Option<Line06Handle>,
-    /// The 0.7 line, once `attach_line_07` has brought it up (see
-    /// `Line07Handle`), or from the start on an identity with no 0.6 line;
+    /// The 0.7 line: attached from a task to an identity that has not moved
+    /// yet; the primary line of one that has (or was born on 1.7.0);
     /// `None` while it starts or when it could not.
     pub line_07: Option<Line07Handle>,
+    /// The line the Vault is Ready on and the watchdog watches: 0.6 until
+    /// the identity's records have moved, 0.7 after (and from birth).
+    pub primary: Line,
     /// The key the conductors run as (the same on both lines).
     pub agent_key_32: [u8; 32],
     /// Which start this is (see `CONDUCTOR_SESSION`).
@@ -95,18 +101,30 @@ impl ConductorHandle {
     pub fn admin_port_06(&self) -> Option<u16> {
         self.line_06.as_ref().map(|l| l.admin_port)
     }
-    /// The admin port the Vault reports as "the conductor": the 0.6 line's
-    /// where it runs, else the 0.7 line's.
+    /// The admin port the Vault reports as "the conductor": the primary line's.
     pub fn primary_admin_port(&self) -> u16 {
-        self.line_06.as_ref().map(|l| l.admin_port).or_else(|| self.line_07.as_ref().map(|l| l.admin_port)).unwrap_or(0)
+        match self.primary {
+            Line::V06 => self.line_06.as_ref().map(|l| l.admin_port),
+            Line::V07 => self.line_07.as_ref().map(|l| l.admin_port),
+        }
+        .unwrap_or(0)
     }
-    /// Whether the conductor process this handle stands for is still
-    /// running (the 0.6 one where it exists, else the 0.7 one).
+    /// Whether the primary line's conductor process still runs.
     pub fn alive(&mut self) -> bool {
-        match (&mut self.line_06, &mut self.line_07) {
-            (Some(l), _) => matches!(l.conductor_child.try_wait(), Ok(None)),
-            (None, Some(l)) => matches!(l.conductor_child.try_wait(), Ok(None)),
-            (None, None) => false,
+        match self.primary {
+            Line::V06 => self.line_06.as_mut().map(|l| matches!(l.conductor_child.try_wait(), Ok(None))).unwrap_or(false),
+            Line::V07 => self.line_07.as_mut().map(|l| matches!(l.conductor_child.try_wait(), Ok(None))).unwrap_or(false),
+        }
+    }
+    /// Whether the 0.6 conductor process still runs: `None` without a 0.6 line.
+    pub fn line_06_alive(&mut self) -> Option<bool> {
+        self.line_06.as_mut().map(|l| matches!(l.conductor_child.try_wait(), Ok(None)))
+    }
+    /// Take a 0.6 line whose conductor has died out of the handle (the next
+    /// devices round attaches a fresh one if it is still wanted).
+    pub fn drop_dead_line_06(&mut self) {
+        if let Some(line) = self.line_06.take() {
+            line.shutdown();
         }
     }
 
@@ -138,13 +156,27 @@ impl ConductorHandle {
     }
 }
 
-/// Whether this identity runs a 0.6 line: every identity that existed before
-/// 1.7.0 does (its records live there until the move, and a device that has
-/// not updated keeps writing there); an identity born on 1.7.0 never does
-/// (`move_07::born_on_07`). Decided once per start, from the identity's
-/// folder, never from the network.
-pub fn line_06_wanted(data_dir: &Path) -> bool {
-    !crate::move_07::born_on_07(data_dir)
+/// Whether this identity's 0.6 line should run, from local facts alone:
+/// - no marker: an identity from before 1.7.0 whose records have not moved
+///   yet (or a pre-1.7.0 folder restored by hand) - yes, it is the primary;
+/// - born on 1.7.0 - never;
+/// - the signatures of the web key it came from are not carried yet - yes;
+/// - a device record it holds on 0.7 names a device still on 0.6 - yes;
+/// - otherwise no. A restored identity that has heard nothing yet decides
+///   after its first round (`move_07::line_06_wanted_now`).
+/// Never from the network; the decision is written into the marker.
+pub fn line_06_wanted(data_dir: &Path, data_key: Option<&[u8; 32]>) -> bool {
+    let Some(m) = crate::move_07::marker(data_dir) else { return true };
+    if m.born {
+        return false;
+    }
+    if !m.web_era_carried {
+        return true;
+    }
+    let Some(key) = data_key else { return false };
+    crate::sealed::held_devices_on_07(data_dir, key)
+        .iter()
+        .any(|d| d.removed_at.is_none() && d.generation != Line::V07.generation())
 }
 
 /// Where the 0.7 line stands, for `/status` and the app. Set by the start
@@ -821,17 +853,25 @@ pub async fn start_holochain(
     // (`vault::conductor_lair_tag`).
     conductor_seed: [u8; 32],
     conductor_tag: String,
-) -> Result<(ConductorHandle, Option<Line07Starter>), String> {
+) -> Result<(ConductorHandle, Option<LineStarter>), String> {
     // A fresh conductor session gets fresh cap grants - drop any cached
     // credentials so the readiness probe re-verifies (and re-fills) them.
-    {
+    let (data_key, private_v2_seed) = {
         let state = app_handle.state::<Arc<AppState>>();
         state.cell_credentials.lock().unwrap().clear();
         state.cell_credentials_07.lock().unwrap().clear();
-    }
-    if !line_06_wanted(&data_dir) {
-        // Born on 1.7.0: the 0.7 line is the only line, started here and
-        // Ready when it is. Nothing of this identity exists on 0.6.
+        let cfg = state.vault_config.lock().unwrap();
+        let key: Option<[u8; 32]> = cfg.as_ref().and_then(|c| c.data_key.as_deref()).and_then(|k| k.try_into().ok());
+        let seed = cfg.as_ref().and_then(|c| if c.hosting_model.as_deref() == Some("device-hosted") { c.private_network_seed.clone() } else { None });
+        (key, seed)
+    };
+    if crate::move_07::moved(&data_dir) {
+        // The identity's records are on 0.7 (moved, restored on this
+        // version, or born here): the 0.7 line is the primary one, Ready
+        // when it is. The 0.6 line follows from a task only when something
+        // on it is still wanted (`line_06_wanted`), never for a born identity.
+        let wanted_06 = line_06_wanted(&data_dir, data_key.as_ref());
+        crate::move_07::record_line_06_decision(&data_dir, wanted_06);
         let handle = match start_holochain_07_only(&app_handle, &data_dir, &resource_dir, &passphrase, &conductor_seed, &conductor_tag).await {
             Ok(h) => h,
             Err(e) => {
@@ -846,7 +886,14 @@ pub async fn start_holochain(
                 start_holochain_07_only(&app_handle, &data_dir, &resource_dir, &passphrase, &conductor_seed, &conductor_tag).await?
             }
         };
-        return Ok((handle, None));
+        let starter = wanted_06.then(|| {
+            log::info!("[0.6] this identity still has something on the 0.6 line - attaching it");
+            LineStarter::V06(Line06Starter { data_dir, resource_dir, passphrase, conductor_seed, conductor_tag, private_v2_seed, session: handle.session })
+        });
+        if starter.is_none() {
+            log::info!("[0.6] not started: nothing of this identity is on the 0.6 line");
+        }
+        return Ok((handle, starter));
     }
     match start_holochain_attempt(
         app_handle.clone(),
@@ -858,7 +905,7 @@ pub async fn start_holochain(
     )
     .await
     {
-        Ok((h, starter)) => return Ok((h, Some(starter))),
+        Ok((h, starter)) => return Ok((h, Some(LineStarter::V07(starter)))),
         Err(e) => {
             log::warn!(
                 "[start_holochain] first attempt failed: {} - auto-restarting conductor",
@@ -894,7 +941,100 @@ pub async fn start_holochain(
 
     start_holochain_attempt(app_handle, data_dir, resource_dir, passphrase, conductor_seed, conductor_tag)
         .await
-        .map(|(h, starter)| (h, Some(starter)))
+        .map(|(h, starter)| (h, Some(LineStarter::V07(starter))))
+}
+
+/// The line a start hands back to be attached from a task: the 0.7 line
+/// beside a 0.6 primary, or the 0.6 line beside a 0.7 primary.
+pub enum LineStarter {
+    V06(Line06Starter),
+    V07(Line07Starter),
+}
+
+/// What the 0.6 line needs to start beside a running 0.7 primary.
+pub struct Line06Starter {
+    data_dir: PathBuf,
+    resource_dir: PathBuf,
+    passphrase: String,
+    conductor_seed: [u8; 32],
+    conductor_tag: String,
+    private_v2_seed: Option<String>,
+    session: u64,
+}
+
+/// Attach whichever line a start handed back.
+pub fn attach_line(state: Arc<AppState>, starter: LineStarter) {
+    match starter {
+        LineStarter::V07(s) => attach_line_07(state, s),
+        LineStarter::V06(s) => attach_line_06(state, s),
+    }
+}
+
+static ATTACHING_06: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Start the 0.6 line in the background beside a running 0.7 primary and
+/// attach it. Best effort; nothing waits for it. No status messages: the
+/// Vault is Ready already.
+pub fn attach_line_06(state: Arc<AppState>, starter: Line06Starter) {
+    if ATTACHING_06.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        struct Done;
+        impl Drop for Done {
+            fn drop(&mut self) {
+                ATTACHING_06.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _done = Done;
+        let session = starter.session;
+        match start_line_06(None, &starter.data_dir, &starter.resource_dir, &starter.passphrase, &starter.conductor_seed, &starter.conductor_tag, starter.private_v2_seed.as_deref()).await {
+            Ok((line, _key)) => {
+                let admin_port = line.admin_port;
+                let attached = {
+                    let mut guard = state.conductor_handle.lock().unwrap();
+                    match guard.as_mut() {
+                        Some(h) if h.session == session && h.line_06.is_none() => {
+                            h.line_06 = Some(line);
+                            true
+                        }
+                        _ => {
+                            let _ = tokio::task::spawn_blocking(move || line.shutdown());
+                            false
+                        }
+                    }
+                };
+                if attached {
+                    log::info!("Holochain 0.6 conductor attached (admin: {}) - what it still holds is carried to 0.7 each round", admin_port);
+                    crate::move_07::schedule_pass(state.clone(), "the 0.6 line came up");
+                } else {
+                    log::info!("[0.6] the 0.6 line came up after its 0.7 line had stopped - stopped it again");
+                }
+            }
+            Err(e) => log::warn!("[0.6] the 0.6 line did not start (the Vault runs on 0.7 alone; tried again next round): {}", e),
+        }
+    });
+}
+
+/// Attach the 0.6 line to the identity unlocked now, from the Vault's
+/// state (the devices round found a reason: a device record naming 0.6,
+/// or nothing heard yet on a restored identity).
+pub fn attach_line_06_now(state: Arc<AppState>, resource_dir: PathBuf, passphrase: String, reason: &str) {
+    let (conductor_seed, conductor_tag, private_v2_seed) = {
+        let cfg = state.vault_config.lock().unwrap();
+        let Some(cfg) = cfg.as_ref() else { return };
+        let Some((seed, tag)) = crate::commands::conductor_start_params(cfg) else { return };
+        let private_v2_seed = if cfg.hosting_model.as_deref() == Some("device-hosted") { cfg.private_network_seed.clone() } else { None };
+        (seed, tag, private_v2_seed)
+    };
+    let session = match state.conductor_handle.lock().unwrap().as_ref() {
+        Some(h) if h.line_06.is_none() => h.session,
+        _ => return,
+    };
+    let data_dir = state.identity_root();
+    log::info!("[0.6] attaching the 0.6 line: {}", reason);
+    crate::move_07::record_line_06_decision(&data_dir, true);
+    attach_line_06(state.clone(), Line06Starter { data_dir, resource_dir, passphrase, conductor_seed, conductor_tag, private_v2_seed, session });
 }
 
 /// The start of an identity born on 1.7.0: the 0.7 line alone, Ready when
@@ -924,24 +1064,38 @@ async fn start_holochain_07_only(
     set_line_07_state(Line07State::Serving);
     let session = CONDUCTOR_SESSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let _ = app_handle.emit("conductor-status", ConductorStatus::Ready { admin_port: line.admin_port });
-    log::info!("Holochain 0.7 conductor ready (admin: {}, app: {}) - this identity's only line", line.admin_port, line.app_port);
-    Ok(ConductorHandle { line_06: None, line_07: Some(line), agent_key_32: expected_pub_key, session })
+    log::info!("Holochain 0.7 conductor ready (admin: {}, app: {}) - this identity's primary line", line.admin_port, line.app_port);
+    Ok(ConductorHandle { line_06: None, line_07: Some(line), primary: Line::V07, agent_key_32: expected_pub_key, session })
 }
 
 /// One full startup attempt: lair → seed import → conductor → connect → install DNAs.
 ///
 /// Called after vault unlock. Runs in a background task.
 /// Emits Tauri events for frontend status updates.
-async fn start_holochain_attempt(
-    app_handle: tauri::AppHandle,
-    data_dir: PathBuf,
-    resource_dir: PathBuf,
-    passphrase: String,
-    conductor_seed: [u8; 32],
-    conductor_tag: String,
-) -> Result<(ConductorHandle, Line07Starter), String> {
+/// Start the 0.6 line: lair 0.6.3 in `lair/`, the seed imported, the
+/// 0.6.1 conductor in `conductor/`, the 0.6 DNAs, the coordinator hot-swaps,
+/// the app interface. `app_handle` = the primary start, which narrates its
+/// steps to the window; `None` = attached in the background beside a 0.7
+/// primary, silently. Returns the line and the key it runs as.
+async fn start_line_06(
+    app_handle: Option<&tauri::AppHandle>,
+    data_dir: &Path,
+    resource_dir: &Path,
+    passphrase: &str,
+    conductor_seed: &[u8; 32],
+    conductor_tag: &str,
+    private_v2_seed: Option<&str>,
+) -> Result<(Line06Handle, [u8; 32]), String> {
+    macro_rules! say {
+        ($status:expr) => {
+            if let Some(h) = app_handle {
+                let _ = h.emit("conductor-status", $status);
+            }
+        };
+    }
+    let private_v2_seed: Option<String> = private_v2_seed.map(str::to_string);
     // Emit status: starting lair
-    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+    say!(ConductorStatus::Starting {
         message: "Starting lair-keystore...".into(),
     });
 
@@ -971,7 +1125,7 @@ async fn start_holochain_attempt(
     // still races and gets ConnectionReset. Retry the connect (against the same
     // healthy lair process) with a short backoff before giving up - this is the
     // common cold-start failure on slower/dev machines.
-    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+    say!(ConductorStatus::Starting {
         message: "Connecting to lair-keystore...".into(),
     });
     let lair_client = {
@@ -1011,7 +1165,7 @@ async fn start_holochain_attempt(
     log::info!("Connected to lair-keystore");
 
     // 4. Import device seed (if not already imported).
-    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+    say!(ConductorStatus::Starting {
         message: "Importing device key...".into(),
     });
     let seed_info = match lair::import_seed_to_lair(&lair_client, &conductor_seed, &conductor_tag)
@@ -1032,7 +1186,7 @@ async fn start_holochain_attempt(
     );
 
     // 5. Generate conductor config.
-    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+    say!(ConductorStatus::Starting {
         message: "Starting Holochain conductor...".into(),
     });
     let conductor_dir = crate::paths::conductor_dir(&data_dir);
@@ -1062,7 +1216,7 @@ async fn start_holochain_attempt(
 
     // 7. Wait for admin WebSocket to be ready (conductor takes 5-15s).
     //    Also monitors the conductor process - returns immediately with log output if it dies.
-    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+    say!(ConductorStatus::Starting {
         message: "Waiting for conductor...".into(),
     });
     if let Err(e) = wait_for_admin_ws(admin_port, 30, &mut conductor_child, &conductor_dir).await {
@@ -1072,7 +1226,7 @@ async fn start_holochain_attempt(
     }
 
     // 8. Install Flowsta DNAs (idempotent - skips if already installed).
-    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+    say!(ConductorStatus::Starting {
         message: "Installing DNAs...".into(),
     });
     // Helper: kill both processes on DNA install failure.
@@ -1089,17 +1243,6 @@ async fn start_holochain_attempt(
     // Device-hosted vaults also get the encrypted private DNA v2, installed
     // with the per-user network seed from the vault config (derived from the
     // recovery phrase at setup). Custodial-linked vaults skip it.
-    let private_v2_seed: Option<String> = {
-        let state = app_handle.state::<Arc<AppState>>();
-        let cfg = state.vault_config.lock().unwrap();
-        cfg.as_ref().and_then(|c| {
-            if c.hosting_model.as_deref() == Some("device-hosted") {
-                c.private_network_seed.clone()
-            } else {
-                None
-            }
-        })
-    };
     let install_result = dna::install_dnas(
         admin_port,
         &resource_dir,
@@ -1160,7 +1303,7 @@ async fn start_holochain_attempt(
     }
 
     // 9. Attach app interface for zome calls (e.g. pairing code generation).
-    let _ = app_handle.emit("conductor-status", ConductorStatus::Starting {
+    say!(ConductorStatus::Starting {
         message: "Setting up app interface...".into(),
     });
     let app_port = match dna::setup_app_interface(admin_port).await {
@@ -1169,16 +1312,33 @@ async fn start_holochain_attempt(
     };
 
     // 10. Emit ready status.
-    let _ = app_handle.emit("conductor-status", ConductorStatus::Ready {
+    say!(ConductorStatus::Ready {
         admin_port: admin_port,
     });
     log::info!("Holochain conductor ready (admin: {}, app: {})", admin_port, app_port);
 
-    // 11. The 0.7 line is started by the caller from a task, AFTER this
-    // handle is stored: the Vault is Ready on 0.6 the moment the 0.6 line
-    // is, and nothing waits for the second line (its first-run install on
-    // Windows took 13 s; a hung 0.7 lair or admin socket could take ~50 s).
-    // The starter carries what the line needs; `attach_line_07` runs it.
+    Ok((Line06Handle { lair_child, conductor_child, lair_client, admin_port, app_port }, *seed_info.ed25519_pub_key.0))
+}
+
+/// One full primary start on the 0.6 line (an identity whose records have
+/// not moved yet), with the 0.7 line's starter beside it.
+async fn start_holochain_attempt(
+    app_handle: tauri::AppHandle,
+    data_dir: PathBuf,
+    resource_dir: PathBuf,
+    passphrase: String,
+    conductor_seed: [u8; 32],
+    conductor_tag: String,
+) -> Result<(ConductorHandle, Line07Starter), String> {
+    let private_v2_seed: Option<String> = {
+        let state = app_handle.state::<Arc<AppState>>();
+        let cfg = state.vault_config.lock().unwrap();
+        cfg.as_ref().and_then(|c| if c.hosting_model.as_deref() == Some("device-hosted") { c.private_network_seed.clone() } else { None })
+    };
+    let (line, agent_key_32) = start_line_06(Some(&app_handle), &data_dir, &resource_dir, &passphrase, &conductor_seed, &conductor_tag, private_v2_seed.as_deref()).await?;
+    // The 0.7 line is started by the caller from a task, AFTER this handle
+    // is stored: the Vault is Ready on 0.6 the moment the 0.6 line is, and
+    // nothing waits for the second line.
     let session = CONDUCTOR_SESSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let starter = Line07Starter {
         data_dir,
@@ -1186,19 +1346,13 @@ async fn start_holochain_attempt(
         passphrase,
         conductor_seed,
         conductor_tag,
-        expected_pub_key: *seed_info.ed25519_pub_key.0,
+        expected_pub_key: agent_key_32,
         private_v2_seed,
         session,
     };
     set_line_07_state(Line07State::Starting);
-
     Ok((
-        ConductorHandle {
-            line_06: Some(Line06Handle { lair_child, conductor_child, lair_client, admin_port, app_port }),
-            line_07: None,
-            agent_key_32: *seed_info.ed25519_pub_key.0,
-            session,
-        },
+        ConductorHandle { line_06: Some(line), line_07: None, primary: Line::V06, agent_key_32, session },
         starter,
     ))
 }

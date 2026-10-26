@@ -44,6 +44,17 @@ pub struct Marker {
     /// How many web-era records were carried (for the words).
     #[serde(default)]
     pub web_era_signatures: usize,
+    /// The identity was restored from its phrase, added from another device
+    /// or brought over from a web account ON this version: nothing of it
+    /// was on this device's 0.6 line; its records are read and written on
+    /// 0.7 from the first, and the 0.6 line is attached only when a device
+    /// record names 0.6 or nothing has been heard from any other device.
+    #[serde(default)]
+    pub restored: bool,
+    /// What the last start decided about the 0.6 line (the one bit a later
+    /// Vault without the 0.6 kit reads before starting anything).
+    #[serde(default)]
+    pub line_06_needed: Option<bool>,
 }
 
 /// Rewrite the marker in place (the fields a later pass learns).
@@ -85,9 +96,69 @@ pub fn mark_born(root: &Path) -> Result<(), String> {
         born: true,
         web_era_carried: true,
         web_era_signatures: 0,
+        restored: false,
+        line_06_needed: Some(false),
     };
     let bytes = serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?;
     crate::vault::write_atomic(&crate::paths::moved_07_path(root), &bytes).map_err(|e| e.to_string())
+}
+
+/// Write the marker for an identity restored, joined or brought over from
+/// the web on this version, before its first start: 0.7 is its primary
+/// line from the first write; the 0.6 line is attached when wanted
+/// (`line_06_wanted`, `line_06_wanted_now`). `web_key_present` = a migrated
+/// account whose web-era signatures still have to be carried from 0.6.
+pub fn mark_restored(root: &Path, web_key_present: bool) -> Result<(), String> {
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    let marker = Marker {
+        v: 1,
+        moved_at_ms: now_ms(),
+        vault_version: env!("CARGO_PKG_VERSION").to_string(),
+        private_records: 0,
+        signatures: 0,
+        revocations: 0,
+        thumbnails: 0,
+        born: false,
+        web_era_carried: !web_key_present,
+        web_era_signatures: 0,
+        restored: true,
+        line_06_needed: None,
+    };
+    let bytes = serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?;
+    crate::vault::write_atomic(&crate::paths::moved_07_path(root), &bytes).map_err(|e| e.to_string())
+}
+
+/// What a start decided about the 0.6 line, kept in the marker.
+pub fn record_line_06_decision(root: &Path, wanted: bool) {
+    if let Err(e) = update_marker(root, |m| m.line_06_needed = Some(wanted)) {
+        log::debug!("[move] the 0.6 decision was not recorded: {}", e);
+    }
+}
+
+/// From the live records (a devices round just ran), whether the 0.6 line
+/// is wanted now for an identity that runs on 0.7 without it: a device
+/// record that names 0.6, the web-era carry still owed, or a restored
+/// identity that has heard from no other device yet (its others may all be
+/// on 1.6.1). `None` = no marker or born: not this function's call.
+pub async fn line_06_wanted_now(state: &Arc<AppState>) -> Option<bool> {
+    let root = state.identity_root();
+    let m = marker(&root)?;
+    if m.born {
+        return None;
+    }
+    if !m.web_era_carried {
+        return Some(true);
+    }
+    let records = crate::sealed::sealed_list_inner(state).await.ok()?;
+    let me = crate::paths::install_id(&state.data_dir).unwrap_or_default();
+    let others: Vec<crate::devices::DeviceRecord> = crate::devices::devices_in(&records)
+        .into_iter()
+        .filter(|d| d.install_id != me && d.removed_at.is_none())
+        .collect();
+    if others.iter().any(|d| d.generation != Line::V07.generation()) {
+        return Some(true);
+    }
+    Some(m.restored && others.is_empty())
 }
 
 /// What one pass did.
@@ -290,6 +361,8 @@ pub async fn run_pass(state: &Arc<AppState>, reason: &str) -> PassOutcome {
             born: false,
             web_era_carried: out.web_era_complete,
             web_era_signatures: out.web_era_carried,
+            restored: false,
+            line_06_needed: Some(true),
         };
         match serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string()).and_then(|b| crate::vault::write_atomic(&crate::paths::moved_07_path(&root), &b).map_err(|e| e.to_string())) {
             Ok(()) => {
@@ -1045,7 +1118,7 @@ mod tests {
 
         // No 0.6 line, by the identity's own marker; writes go to 0.7 from the first.
         for d in [&a, &b] {
-            assert!(!crate::conductor::line_06_wanted(&d.state.identity_root()));
+            assert!(!crate::conductor::line_06_wanted(&d.state.identity_root(), Some(&[36u8; 32])));
             assert_eq!(crate::hc::active_line(&d.state), Line::V07);
             assert!(crate::hc::line_ports(&d.state, Line::V06).is_err());
             let out = run_pass(&d.state, "born").await;
@@ -1058,8 +1131,9 @@ mod tests {
         crate::sealed::sealed_store_inner(&a.state, "user_profile".into(), serde_json::json!({ "name": "born here" }), vec![], 1_000).await.unwrap();
         assert!(crate::devices::publish_own(&a.state).await.unwrap());
         assert!(crate::devices::publish_own(&b.state).await.unwrap());
-        assert_eq!(crate::sealed::sealed_held_on(&a.state, Line::V07).await.unwrap().len(), 2, "the profile and a's device record");
         let install_a = crate::paths::install_id(&a.state.data_dir).unwrap();
+        let held_a = crate::sealed::sealed_held_on(&a.state, Line::V07).await.unwrap();
+        assert!(held_a.contains_key("user_profile") && held_a.contains_key(&crate::devices::device_logical_id(&install_a)), "the profile and a's device record (b's may have arrived already)");
         let install_b = crate::paths::install_id(&b.state.data_dir).unwrap();
         let own_a = crate::devices::list(&a.state).await.unwrap();
         assert_eq!(own_a[0].generation, "holochain-0.7", "a device record names the line it writes on");
@@ -1100,6 +1174,50 @@ mod tests {
         assert_eq!(own.len(), 1);
         assert_eq!(own[0]["action_hash"], hex::encode(&s1));
         assert_eq!(own[0]["signing_app_id"], "flowsta_signing_v1_5@holochain-0.7");
+
+        // ── The restore rule, from the same records ──
+        // A device restored on this version shares the identity's 0.7 cell:
+        // it sees a's and b's records, both on 0.7, so it wants no 0.6 line.
+        let restored = Arc::new(AppState::new(a.dir.join("restored-vault")));
+        std::fs::create_dir_all(restored.identity_root()).unwrap();
+        mark_restored(&restored.identity_root(), false).unwrap();
+        *restored.vault_config.lock().unwrap() = Some(config_a.clone());
+        *restored.test_conductor_ports_07.lock().unwrap() = *a.state.test_conductor_ports_07.lock().unwrap();
+        assert_eq!(crate::hc::active_line(&restored), Line::V07);
+        assert!(!crate::conductor::line_06_wanted(&restored.identity_root(), Some(&[36u8; 32])), "nothing owed, nothing held: 0.7 first");
+        crate::sealed::forget_recent_versions();
+        assert_eq!(line_06_wanted_now(&restored).await, Some(false), "every other device it sees is on 0.7");
+        // A record of a device still on 1.6.1 (as the catch-up would carry it) changes the answer.
+        let old_device = crate::devices::DeviceRecord {
+            install_id: "old-1-6-1-device".into(),
+            conductor_key: crate::key_derivation::base64_standard_encode(&crate::key_derivation::construct_agent_pub_key_bytes(&[41u8; 32])),
+            name: "Old laptop".into(),
+            platform: "linux".into(),
+            vault_version: "1.6.1".into(),
+            generation: "holochain-0.6".into(),
+            added_at: 1_000,
+            seen_at: 2_000,
+            latest_change: 0,
+            removed_at: None,
+            removed_by: None,
+            setting_up: false,
+        };
+        crate::sealed::sealed_store_spec_as(
+            &a.state,
+            Line::V07,
+            StoreSpec { entry_type: crate::devices::DEVICE_ENTRY_TYPE.into(), body: serde_json::to_value(&old_device).unwrap(), refs: vec![], created_at: 1_000, id: Some(crate::devices::device_logical_id("old-1-6-1-device")), updated_at: Some(2_000), deleted: false },
+            None,
+            Some("old-1-6-1-device".into()),
+        )
+        .await
+        .unwrap();
+        crate::sealed::forget_recent_versions();
+        assert_eq!(line_06_wanted_now(&restored).await, Some(true), "a device record naming 0.6 wants the 0.6 line");
+        // And a restored identity that has heard from nobody wants it too (its others may all be on 1.6.1).
+        let alone = Arc::new(AppState::new(a.dir.join("alone-vault")));
+        std::fs::create_dir_all(alone.identity_root()).unwrap();
+        mark_restored(&alone.identity_root(), false).unwrap();
+        assert_eq!(super::status(&alone).line, Line::V07);
         println!("born on 0.7: both devices, {} s total", started.elapsed().as_secs());
     }
 
@@ -1109,7 +1227,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(!moved(&dir));
-        let m = Marker { v: 1, moved_at_ms: 5, vault_version: "1.7.0".into(), private_records: 3, signatures: 2, revocations: 1, thumbnails: 0, born: false, web_era_carried: false, web_era_signatures: 0 };
+        let m = Marker { v: 1, moved_at_ms: 5, vault_version: "1.7.0".into(), private_records: 3, signatures: 2, revocations: 1, thumbnails: 0, born: false, web_era_carried: false, web_era_signatures: 0, restored: false, line_06_needed: None };
         crate::vault::write_atomic(&crate::paths::moved_07_path(&dir), &serde_json::to_vec(&m).unwrap()).unwrap();
         assert!(moved(&dir));
         assert_eq!(marker(&dir), Some(m));
@@ -1124,14 +1242,25 @@ mod tests {
     }
 
     #[test]
-    fn an_identity_born_on_1_7_0_never_wants_a_0_6_line() {
+    fn the_0_6_line_is_wanted_from_the_marker_and_the_held_device_records() {
         let dir = std::env::temp_dir().join(format!("fv-move-born-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(crate::conductor::line_06_wanted(&dir), "an identity folder without a marker is one from before 1.7.0 (or a restore): the 0.6 line runs");
+        let key = [40u8; 32];
+        // No marker: an identity from before 1.7.0 that has not moved - 0.6 is its primary.
+        assert!(crate::conductor::line_06_wanted(&dir, Some(&key)));
+        // Born: never.
         mark_born(&dir).unwrap();
-        assert!(born_on_07(&dir));
-        assert!(moved(&dir), "its writes go to 0.7 from the first one");
-        assert!(!crate::conductor::line_06_wanted(&dir));
+        assert!(born_on_07(&dir) && moved(&dir));
+        assert!(!crate::conductor::line_06_wanted(&dir, Some(&key)));
+        // Restored from a web account: the web-era carry is owed → wanted.
+        mark_restored(&dir, true).unwrap();
+        assert!(marker(&dir).unwrap().restored && !marker(&dir).unwrap().web_era_carried);
+        assert!(crate::conductor::line_06_wanted(&dir, Some(&key)));
+        // Restored, nothing owed, nothing held yet: 0.7 first; the first round decides.
+        mark_restored(&dir, false).unwrap();
+        assert!(!crate::conductor::line_06_wanted(&dir, Some(&key)));
+        record_line_06_decision(&dir, false);
+        assert_eq!(marker(&dir).unwrap().line_06_needed, Some(false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

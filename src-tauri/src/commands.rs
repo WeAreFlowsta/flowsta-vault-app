@@ -1045,6 +1045,7 @@ pub(crate) fn setup_vault_from_keys(
     let label_username = web_username.clone();
     let label_picture = profile_picture.clone();
     let label_email = web_email.clone();
+    let web_agent_pub_key_present = web_agent_pub_key.is_some();
     // Create vault config
     let config = VaultConfig {
         agent_pub_key: agent_pub_key.clone(),
@@ -1126,6 +1127,15 @@ pub(crate) fn setup_vault_from_keys(
         match crate::move_07::mark_born(&state.identity_root()) {
             Ok(()) => log::info!("Identity born on the 0.7 line - no 0.6 line for it, ever"),
             Err(e) => log::warn!("The born-on-0.7 marker was not written ({}); this identity runs both lines", e),
+        }
+    } else {
+        // Restored, joined or brought over from the web on this version:
+        // 0.7 is the primary line from the first write; the 0.6 line is
+        // attached when a device record names it or nothing has been heard
+        // (and until a web account's signatures are carried).
+        match crate::move_07::mark_restored(&state.identity_root(), web_agent_pub_key_present) {
+            Ok(()) => log::info!("Identity restored on the 0.7 line{}", if web_agent_pub_key_present { " - its web key's signatures will be carried from 0.6" } else { "" }),
+            Err(e) => log::warn!("The restored marker was not written ({}); this identity starts on 0.6 as before", e),
         }
     }
 
@@ -1714,8 +1724,8 @@ pub(crate) async fn ensure_conductor_alive(
     let port = new_handle.primary_admin_port();
     *state.conductor_handle.lock().unwrap() = Some(new_handle);
     // The 0.7 line follows from a task; nothing here waits for it.
-    if let Some(line_07) = line_07 {
-        crate::conductor::attach_line_07(state.clone(), line_07);
+    if let Some(starter) = line_07 {
+        crate::conductor::attach_line(state.clone(), starter);
     }
     *state.conductor_status.lock().unwrap() = ConductorStatus::Ready { admin_port: port };
     let _ = app_handle.emit(
@@ -1832,6 +1842,33 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                     if line_07_dead {
                         if let Err(e) = ensure_conductor_alive(&devices_state, &devices_app).await {
                             log::warn!("[devices] the 0.7 line was not brought back: {}", e);
+                        }
+                    }
+                    // The 0.6 line beside a 0.7 primary: a dead one is let
+                    // go; a wanted one is attached (a device record naming
+                    // 0.6, the web-era carry owed, or a restored identity
+                    // that has heard from nobody).
+                    {
+                        let (primary_07, has_06, dead_06) = {
+                            let mut guard = devices_state.conductor_handle.lock().unwrap();
+                            match guard.as_mut() {
+                                Some(h) => (h.primary == crate::hc::Line::V07, h.line_06.is_some(), h.line_06_alive() == Some(false)),
+                                None => (false, false, false),
+                            }
+                        };
+                        if dead_06 {
+                            log::warn!("[0.6] the 0.6 conductor exited - let go; attached again next round if still wanted");
+                            if let Some(h) = devices_state.conductor_handle.lock().unwrap().as_mut() {
+                                h.drop_dead_line_06();
+                            }
+                        } else if primary_07 && !has_06 {
+                            if crate::move_07::line_06_wanted_now(&devices_state).await == Some(true) {
+                                let passphrase = devices_state.unlock_passphrase.lock().unwrap().as_mut().and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok());
+                                if let Some(passphrase) = passphrase {
+                                    let resource_dir = resolve_resource_dir(&devices_app, &devices_state.data_dir);
+                                    crate::conductor::attach_line_06_now(devices_state.clone(), resource_dir, passphrase, "a device still on 0.6, or nothing heard yet");
+                                }
+                            }
                         }
                     }
                     // What the 0.6 cells hold and the 0.7 cells do not,
@@ -2226,8 +2263,8 @@ fn spawn_conductor_startup_inner(
                             // The 0.7 line follows from a task: the Vault is
                             // Ready on 0.6 now, not after the second line.
                             // (An identity born on 1.7.0 started on 0.7 alone.)
-                            if let Some(line_07) = line_07 {
-                                crate::conductor::attach_line_07(state.clone(), line_07);
+                            if let Some(starter) = line_07 {
+                                crate::conductor::attach_line(state.clone(), starter);
                             }
                             Ok(port)
                         }

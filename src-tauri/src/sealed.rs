@@ -1377,7 +1377,27 @@ pub(crate) async fn sealed_held_on(state: &Arc<AppState>, line: Line) -> Result<
 pub(crate) async fn sealed_list_inner(
     state: &Arc<AppState>,
 ) -> Result<Vec<SealedListItem>, String> {
-    let (winners, _superseded) = latest_versions(sealed_versions(state).await?);
+    sealed_list_on(state, crate::hc::active_line(state)).await
+}
+
+/// `sealed_list_inner` from a named line's cell.
+pub(crate) async fn sealed_list_on(state: &Arc<AppState>, line: Line) -> Result<Vec<SealedListItem>, String> {
+    let (winners, _superseded) = latest_versions(sealed_versions_on(state, line).await?);
+    Ok(list_items(winners))
+}
+
+/// The device records this identity holds on its 0.7 line, from the kept
+/// file alone (no conductor needed): what a start reads to decide whether
+/// the 0.6 line is still wanted.
+pub(crate) fn held_devices_on_07(root: &std::path::Path, data_key: &[u8; 32]) -> Vec<crate::devices::DeviceRecord> {
+    let held = load_held_file(&held_records_path(root, Line::V07), data_key);
+    let (winners, _) = latest_versions(decode_versions(&held, data_key));
+    crate::devices::devices_in(&list_items(winners))
+}
+
+/// The newest version of each logical id as items, deletions left out,
+/// newest first.
+pub(crate) fn list_items(winners: Vec<StoredVersion>) -> Vec<SealedListItem> {
     let mut items: Vec<SealedListItem> = winners
         .into_iter()
         .filter(|v| !v.payload.deleted)
@@ -1398,7 +1418,7 @@ pub(crate) async fn sealed_list_inner(
         .collect();
     // Newest first - the natural reading order for activity-style data.
     items.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.action_hash.cmp(&a.action_hash)));
-    Ok(items)
+    items
 }
 
 #[cfg(test)]
