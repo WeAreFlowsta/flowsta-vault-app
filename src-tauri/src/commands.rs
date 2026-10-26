@@ -2562,10 +2562,15 @@ pub(crate) fn remove_identity_inner(state: &Arc<AppState>) -> Result<usize, Stri
     // read what follows as still-A.
     let _ = crate::paths::bump_identity_epoch(&device_root);
 
-    let remaining = crate::identities::list_on_disk(&device_root, &device_root)
+    let mut remaining = crate::identities::list_on_disk(&device_root, &device_root)
         .into_iter()
         .filter(|e| std::path::Path::new(&e.root) != root.as_path())
         .collect::<Vec<_>>();
+    // An identity partitioned by 1.4.0 and never unlocked since has no
+    // label, so no marker can name it and the next launch would show the
+    // setup wizard. Choose one with a label first; the unlabelled one stays
+    // on disk and returns to the picker once another is unlocked.
+    remaining.sort_by_key(|e| e.label.as_ref().map(|l| l.agent_pub_key.is_empty()).unwrap_or(true));
     let next_root = match remaining.first() {
         Some(next) if next.key != crate::identities::LEGACY_KEY => {
             let next_root = std::path::PathBuf::from(&next.root);
