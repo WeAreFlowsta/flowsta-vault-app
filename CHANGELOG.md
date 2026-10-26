@@ -5,6 +5,56 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Rename this device.** Settings → Devices names each device after its
+  computer. The name of this device can now be changed there; the other
+  devices and the apps that list your devices see the new name within a
+  minute.
+- Flowsta's dashboard can take your picture back to the Vault's own default
+  face on every device, instead of writing a generated image in as a
+  picture.
+
+### Fixed
+- The Vault is ready the moment its first Holochain line is, and the
+  second line follows in the background. Until now apps asking the Vault
+  waited for both, which on a first run took up to half a minute more.
+- A second copy of the Vault launched for the same account now brings the
+  running one to the front and leaves, instead of running beside it on the
+  next port. On Windows up to three had stacked up over weeks.
+- "Your private data is on its way" showed on an identity restored on its
+  only device, with nothing coming. It now shows only while there is
+  another device to wait for, names that device and says what would make
+  the things arrive; the only device says so in one quiet line.
+- Settings → Devices said "last heard from" with the time inside the other
+  device's own record, which can be a day old while that device is online
+  right now. The row now uses the later of the two and says which it is.
+- The first round after an update could take minutes on a cold network and
+  its first write of this device's record could time out and wait five
+  minutes for the next full round. A failed write is tried again the next
+  minute, and a slow round logs how long each of its steps took.
+- Fetching another device's app backups waited up to three minutes per
+  copy for a device that is closed or asleep. A device not heard from this
+  session gets one short try each round until it is.
+- A usage event the server will never accept was retried every half hour
+  for good, without a reason in the log. It is now dropped once, with the
+  server's reason logged; events the server may accept later are kept.
+- Signing in or registering with a device clock that is off: the Vault
+  signs again with the server's time and retries once, so a wrong clock no
+  longer blocks a person.
+- An app's signing request with no answer in time is now reported as a
+  timeout, like every other request that waits for your approval, not as a
+  denial.
+- Removing an identity picks a remaining one the next launch can find, so
+  the setup wizard no longer appears when an identity last unlocked on an
+  old version is the one left.
+- The identity's recovery lookup hash no longer travels in a web address
+  when a network bundle is downloaded; it goes in a request header, out of
+  request logs.
+- Two certificate-verification libraries updated to their patched point
+  releases.
+
 ## [1.7.0-beta3] - 2026-10-26
 
 ### Added
