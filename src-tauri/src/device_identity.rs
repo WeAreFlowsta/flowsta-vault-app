@@ -108,6 +108,33 @@ fn server_date_header(resp: &reqwest::Response) -> Option<String> {
     resp.headers().get(reqwest::header::DATE).and_then(|v| v.to_str().ok()).map(String::from)
 }
 
+/// The server's clock, from its `Date` response header, as unix seconds.
+fn server_unix_secs(server_date: Option<&str>) -> Option<u64> {
+    server_date
+        .and_then(|date| httpdate::parse_http_date(date).ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// A device clock never blocks a person (field report, 2026-09-25): when
+/// the API refuses a signed request as `stale_timestamp` and says what
+/// time it is, the request is signed again with the server's time and sent
+/// once more. Replay protection is unchanged - every retry is a fresh
+/// signature and the server keeps its five-minute window. Returns the
+/// timestamp to retry with, or None when no retry can help.
+fn retry_timestamp(status: reqwest::StatusCode, error: Option<&str>, server_date: Option<&str>, already_retried: bool, context: &str) -> Option<u64> {
+    if status.is_success() || error != Some("stale_timestamp") || already_retried {
+        return None;
+    }
+    let server = server_unix_secs(server_date)?;
+    log::warn!("[{}] clock skew {}s - retried with the server's time", context, unix_now_secs() as i64 - server as i64);
+    Some(server)
+}
+
 /// Register a Vault-created identity as a new Flowsta account.
 /// Creates NO cells anywhere - the API stores only the pubkey + credential.
 #[tauri::command]
@@ -134,24 +161,11 @@ pub async fn register_device_identity(
         .map_err(|e| format!("Device seed derivation failed: {}", e))?;
 
     let email_hash = hex::encode(Sha256::digest(email.to_lowercase().as_bytes()));
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
-
-    // Canonical registration message - signed raw (no MessagePack).
-    let canonical = format!(
-        "flowsta-register-identity:v1:{}:{}:{}:{}",
-        agent_b64, lookup_hash, email_hash, ts
-    );
-    let signature = hex::encode(sign_with_device_seed(&device_seed, canonical.as_bytes()));
     // The identity's enrollment key (see device_registry.rs): its public
     // half goes with the account, so only the phrase or a device of the
     // identity can add a device from the start.
     let enrollment_seed = derive_seed(&mnemonic, crate::key_derivation::ENROLLMENT_CONSTANT)
         .map_err(|e| format!("Enrollment key derivation failed: {}", e))?;
-    let (enrollment_key, enrollment_signature) =
-        crate::device_registry::enrollment_fields(&pub_key_bytes, &enrollment_seed, ts);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -161,28 +175,46 @@ pub async fn register_device_identity(
         "{}/auth/register-device-identity",
         api_url.trim_end_matches('/')
     );
-    let resp = client
-        .post(&url)
-        .json(&serde_json::json!({
-            "agent_pub_key": agent_b64,
-            "email": email,
-            "display_name": display_name,
-            "recovery_lookup_hash": lookup_hash,
-            "timestamp": ts,
-            "signature": signature,
-            "enrollment_key": enrollment_key,
-            "enrollment_signature": enrollment_signature,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("api_unreachable: registration request failed: {}", e))?;
+    let mut ts = unix_now_secs();
+    let mut retried = false;
+    let (status, server_date, body) = loop {
+        // Canonical registration message - signed raw (no MessagePack).
+        let canonical = format!(
+            "flowsta-register-identity:v1:{}:{}:{}:{}",
+            agent_b64, lookup_hash, email_hash, ts
+        );
+        let signature = hex::encode(sign_with_device_seed(&device_seed, canonical.as_bytes()));
+        let (enrollment_key, enrollment_signature) =
+            crate::device_registry::enrollment_fields(&pub_key_bytes, &enrollment_seed, ts);
+        let resp = client
+            .post(&url)
+            .json(&serde_json::json!({
+                "agent_pub_key": agent_b64,
+                "email": email,
+                "display_name": display_name,
+                "recovery_lookup_hash": lookup_hash,
+                "timestamp": ts,
+                "signature": signature,
+                "enrollment_key": enrollment_key,
+                "enrollment_signature": enrollment_signature,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("api_unreachable: registration request failed: {}", e))?;
 
-    let status = resp.status();
-    let server_date = server_date_header(&resp);
-    let body: ApiEnvelope = resp
-        .json()
-        .await
-        .map_err(|e| format!("Registration response parse failed: {}", e))?;
+        let status = resp.status();
+        let server_date = server_date_header(&resp);
+        let body: ApiEnvelope = resp
+            .json()
+            .await
+            .map_err(|e| format!("Registration response parse failed: {}", e))?;
+        if let Some(server_ts) = retry_timestamp(status, body.error.as_deref(), server_date.as_deref(), retried, "register") {
+            ts = server_ts;
+            retried = true;
+            continue;
+        }
+        break (status, server_date, body);
+    };
 
     if !status.is_success() {
         if body.error.as_deref() == Some("stale_timestamp") {
@@ -551,44 +583,50 @@ async fn register_deferred(state: &Arc<AppState>, api_url: &str) -> Result<(), S
 
     let email = email.trim().to_string();
     let email_hash = hex::encode(Sha256::digest(email.to_lowercase().as_bytes()));
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
     let lookup_hash = lookup_hash.to_lowercase();
-    let canonical = format!(
-        "flowsta-register-identity:v1:{}:{}:{}:{}",
-        agent_b64, lookup_hash, email_hash, ts
-    );
-    let signature = hex::encode(sign_with_device_seed(&device_seed, canonical.as_bytes()));
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client build failed: {}", e))?;
-    let resp = client
-        .post(format!(
-            "{}/auth/register-device-identity",
-            api_url.trim_end_matches('/')
-        ))
-        .json(&serde_json::json!({
-            "agent_pub_key": agent_b64,
-            "email": email,
-            "display_name": display_name,
-            "recovery_lookup_hash": lookup_hash,
-            "timestamp": ts,
-            "signature": signature,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("api_unreachable: registration request failed: {}", e))?;
+    let mut ts = unix_now_secs();
+    let mut retried = false;
+    let (status, server_date, body) = loop {
+        let canonical = format!(
+            "flowsta-register-identity:v1:{}:{}:{}:{}",
+            agent_b64, lookup_hash, email_hash, ts
+        );
+        let signature = hex::encode(sign_with_device_seed(&device_seed, canonical.as_bytes()));
+        let resp = client
+            .post(format!(
+                "{}/auth/register-device-identity",
+                api_url.trim_end_matches('/')
+            ))
+            .json(&serde_json::json!({
+                "agent_pub_key": agent_b64,
+                "email": email,
+                "display_name": display_name,
+                "recovery_lookup_hash": lookup_hash,
+                "timestamp": ts,
+                "signature": signature,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("api_unreachable: registration request failed: {}", e))?;
 
-    let status = resp.status();
-    let server_date = server_date_header(&resp);
-    let body: ApiEnvelope = resp
-        .json()
-        .await
-        .map_err(|e| format!("Registration response parse failed: {}", e))?;
+        let status = resp.status();
+        let server_date = server_date_header(&resp);
+        let body: ApiEnvelope = resp
+            .json()
+            .await
+            .map_err(|e| format!("Registration response parse failed: {}", e))?;
+        if let Some(server_ts) = retry_timestamp(status, body.error.as_deref(), server_date.as_deref(), retried, "reconcile") {
+            ts = server_ts;
+            retried = true;
+            continue;
+        }
+        break (status, server_date, body);
+    };
 
     if body.error.as_deref() == Some("stale_timestamp") {
         log::warn!("[reconcile] stale_timestamp - {}", clock_skew_message(server_date.as_deref()));
@@ -966,5 +1004,19 @@ mod clock_skew_tests {
         // no header or an unparseable one: the plain sentence
         assert!(clock_skew_message(None).starts_with("Your device's clock does not match"));
         assert!(clock_skew_message(Some("garbage")).starts_with("Your device's clock does not match"));
+    }
+
+    #[test]
+    fn a_stale_timestamp_with_a_server_date_is_retried_once_with_the_servers_time() {
+        let bad = reqwest::StatusCode::UNAUTHORIZED;
+        let date = http_date(-10 * 60);
+        let server = server_unix_secs(Some(&date)).unwrap();
+        assert_eq!(retry_timestamp(bad, Some("stale_timestamp"), Some(&date), false, "t"), Some(server));
+        // Once only; never without the server's time; never for another error or a success.
+        assert_eq!(retry_timestamp(bad, Some("stale_timestamp"), Some(&date), true, "t"), None);
+        assert_eq!(retry_timestamp(bad, Some("stale_timestamp"), None, false, "t"), None);
+        assert_eq!(retry_timestamp(bad, Some("stale_timestamp"), Some("garbage"), false, "t"), None);
+        assert_eq!(retry_timestamp(bad, Some("email_already_registered"), Some(&date), false, "t"), None);
+        assert_eq!(retry_timestamp(reqwest::StatusCode::OK, Some("stale_timestamp"), Some(&date), false, "t"), None);
     }
 }
