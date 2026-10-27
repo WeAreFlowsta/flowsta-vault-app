@@ -1207,8 +1207,15 @@ async fn start_line_06(
     };
     let bootstrap_target = resolve_bootstrap_target().await;
     remember_conductor_rendezvous(&bootstrap_target.bootstrap_url);
-    // One origin per Vault start, shared by both conductors.
-    fresh_node_origin();
+    // One origin per Vault start, shared by both conductors: the primary
+    // start makes it; a 0.6 line attached beside a running 0.7 primary
+    // keeps the one in force. A fresh origin here left the 0.7 conductor
+    // refusing every connection with 400 from that moment (an identity
+    // restored by phrase on 1.7.0 whose devices round attached 0.6 a
+    // minute later - the beta9 devices leg).
+    if app_handle.is_some() || node_origin().is_empty() {
+        fresh_node_origin();
+    }
     let config_path = match generate_conductor_config(
         &conductor_dir,
         &connection_url,

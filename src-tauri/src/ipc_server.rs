@@ -4491,12 +4491,28 @@ async fn dev_status_handler(
     let email_grants: Vec<String> = state.app_state.email_grants.lock().unwrap().keys().cloned().collect();
     let activity = state.app_state.activity.kinds_newest_first(10);
     let activity_last = state.app_state.activity.recent(1).into_iter().next();
+    let enrollment_07 = {
+        let root = state.app_state.identity_root();
+        if root.join("enrollment-published-07").exists() {
+            "published"
+        } else if root.join("enrollment-pending-07").exists() {
+            "pending"
+        } else {
+            "none"
+        }
+    };
     Ok(axum::response::IntoResponse::into_response(Json(
         serde_json::json!({
             "harness": true, "conductor": conductor, "cells_ready": cells_ready, "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity, "activity_last": activity_last,
             // Phase 2 partitioning: where this identity's files live.
             "layout": if state.app_state.identity_root() == state.app_state.data_dir { "legacy" } else { "partitioned" },
             "identity_root": state.app_state.identity_root().display().to_string(),
+            // 1.7.0: which lines serve, where the identity stands in the
+            // move, and whether its enrollment key is on identity 1.5 -
+            // the matrix asserts these on a born, a moved and a mixed pair.
+            "holochain_lines": holochain_lines(&state.app_state),
+            "move": crate::move_07::status(&state.app_state),
+            "enrollment_07": enrollment_07,
         }),
     )))
 }

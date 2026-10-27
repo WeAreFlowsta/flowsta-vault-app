@@ -5,6 +5,17 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0-beta10] - 2026-10-27
+
+What the automated legs found on beta9.
+
+### Fixed
+- An identity restored by phrase on 1.7.0 lost its connection to the new
+  network a minute after it came up, until the app was closed. Its devices
+  round attached the old network's line to look for older records, and
+  that start made a fresh connection origin the running new-network
+  conductor did not accept. The attached line keeps the origin in force.
+
 ## [1.7.0-beta9] - 2026-10-27
 
 What the beta8 runs found.

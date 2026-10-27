@@ -24,6 +24,10 @@
  *   node scripts/bridge-matrix.mjs --phase=devices   # 1.6.0: one identity on two devices
  *       add with a code, sync, connections, backups, lock-and-sync, remove, stand down, the phrase
  *       door. Two FRESH instances: VAULT_MATRIX_PORT (A) and VAULT_MATRIX_RESTORE_PORT (B).
+ *   node scripts/bridge-matrix.mjs --phase=webera    # 1.7.0: a migrated identity restored on a FRESH instance,
+ *       its web-era signatures and amendments counted from the 0.7 read alone (phrase file, see webEraLeg)
+ *   node scripts/bridge-matrix.mjs --phase=move-before|move-after|move-retired
+ *       1.7.0: the move through the app - driven by scripts/matrix-move.sh (1.6.1 build, then 1.7.0 twice)
  *   node scripts/bridge-matrix.mjs                   # all legs
  *
  * Env:
@@ -751,9 +755,9 @@ async function waitForConductor(want, { timeoutMs = 5 * 60 * 1000 } = {}) {
   return last;
 }
 
-async function passwordLeg() {
+async function passwordLeg(current = process.env.VAULT_MATRIX_PASSWORD) {
   console.log('\n── Password leg (change → lock → unlock with new → ready → change back)');
-  const CURRENT = process.env.VAULT_MATRIX_PASSWORD;
+  const CURRENT = current;
   if (!CURRENT) {
     record('password leg', true, 'skipped - set VAULT_MATRIX_PASSWORD to run it');
     return;
@@ -983,6 +987,34 @@ async function waitFor(port, predicate, secs) {
   return false;
 }
 
+/** The two network lines as /dev/status reports them: { 'holochain-0.6': state, 'holochain-0.7': state }. */
+async function linesOf(port) {
+  const d = await vaultFetch(port, '/dev/status').catch(() => null);
+  return Object.fromEntries((d?.data?.holochain_lines || []).map((l) => [l.generation, l.state]));
+}
+async function devOf(port) { return (await vaultFetch(port, '/dev/status').catch(() => null))?.data || {}; }
+/** Current rows and amendments the way the Overview counts them: a row named by
+ *  another row's `supersedes` is folded under it. Returns what did not fold too. */
+function foldCounts(signatures) {
+  const hashes = new Set(signatures.map((x) => x.action_hash));
+  const superseded = new Set(signatures.map((x) => x.supersedes).filter((h) => h && hashes.has(h)));
+  const dangling = signatures.filter((x) => x.supersedes && !hashes.has(x.supersedes)).map((x) => x.supersedes);
+  return { total: signatures.length, current: signatures.length - superseded.size, amendments: superseded.size, dangling };
+}
+/** 1.7.0: what a born identity's instance must say once its conductor is ready. */
+async function bornLineChecks(port) {
+  const cellSecs = await waitCellsReady(port, 120);
+  record('cells ready on the new network within two minutes', cellSecs >= 0, `${cellSecs} s`);
+  const dev = await devOf(port);
+  record('/dev/status.cells_ready (the badge\'s measure) is true once the cells answered', dev.cells_ready === true, JSON.stringify({ cells_ready: dev.cells_ready }));
+  const lines = await linesOf(port);
+  record('lines: 0.7 serving, 0.6 off for an identity born on 1.7.0', lines['holochain-0.7'] === 'serving' && lines['holochain-0.6'] === 'off', JSON.stringify(lines));
+  record('move marker: born here, 0.7 is the line, no 0.6 line needed', dev.move?.moved === true && dev.move?.marker?.born === true && dev.move?.marker?.line_06_needed === false && dev.move?.line === 'V07',
+    JSON.stringify({ moved: dev.move?.moved, born: dev.move?.marker?.born, line_06_needed: dev.move?.marker?.line_06_needed, line: dev.move?.line }));
+  const published = await (async () => { const deadline = Date.now() + 150_000; while (Date.now() < deadline) { const d = await devOf(port); if (d.enrollment_07 === 'published') return true; await new Promise((r) => setTimeout(r, 5000)); } return false; })();
+  record('enrollment key published on identity 1.5 within a devices round (pending note, then published)', published, `enrollment_07=${(await devOf(port)).enrollment_07}`);
+}
+
 async function createLeg() {
   console.log('\n── Create-identity leg');
   const port = Number(process.env.VAULT_MATRIX_PORT || 0);
@@ -1005,6 +1037,7 @@ async function createLeg() {
   const { agent_pub_key: agent, did, phrase } = created.data;
 
   record('conductor ready after create', await waitConductorReady(port, 120));
+  await bornLineChecks(port);
   const st = await vaultFetch(port, '/status');
   record('/status: unlocked, initialized, the new agent key + DID, email held for Flowsta pages',
     st.data?.unlocked === true && st.data?.initialized === true && st.data?.agent_pub_key === agent && st.data?.did === did && st.data?.web_email === email,
@@ -1040,6 +1073,9 @@ async function createLeg() {
   record('unlock moved the identity into its partition (layout: partitioned)', devAfter.data?.layout === 'partitioned',
     `${devAfter.data?.layout} ${(devAfter.data?.identity_root || '').split('/').slice(-2).join('/')}`);
 
+  // The password leg on an identity with only the 0.7 key store and db.key.
+  PORT = port;
+  await passwordLeg(password);
   if (!restorePort) { record('restore twin skipped - set VAULT_MATRIX_RESTORE_PORT to a second FRESH instance', true); return; }
   const fresh2 = await vaultFetch(restorePort, '/status');
   if (fresh2.data?.initialized !== false) { record('restore twin skipped - second instance already holds an identity', true); return; }
@@ -1374,28 +1410,60 @@ async function devicesLeg() {
   const stB = await op(b, { op: 'status' });
   record('B: same identity, its own conductor key, joined', stB.agent_pub_key === stA.agent_pub_key && stB.own_conductor_key === true && stB.joined_existing === true, JSON.stringify(stB));
   record('B: registered with the account (approved by A)', await until(async () => (await op(b, { op: 'standing' })).standing?.device === 'registered', 90));
+  // 1.7.0 lines on a pair. Both on 1.7.0 (born here): 0.7 only on both, A's
+  // enrollment key published. Mixed (VAULT_MATRIX_MIXED=1, A on 1.6.1): B
+  // runs both lines - it moved its own records to 0.7 and keeps 0.6 while
+  // its sibling is on it.
+  {
+    const mixed = process.env.VAULT_MATRIX_MIXED === '1';
+    const linesB = await linesOf(b);
+    const devB = await devOf(b);
+    if (mixed) {
+      // B joined on 0.7 (restored there); its first devices round sees a
+      // sibling on 0.6 (or nobody yet) and attaches the 0.6 line: ~a minute
+      // for the round, ~20 s for the 0.6 start, then the carry each round.
+      const both = await until(async () => (await linesOf(b))['holochain-0.6'] === 'serving' && (await linesOf(b))['holochain-0.7'] === 'serving', 300);
+      record('mixed: B (1.7.0) attaches the 0.6 line and serves BOTH beside a 1.6.1 sibling', both, JSON.stringify(await linesOf(b)));
+      const mB = (await devOf(b)).move || {};
+      record('mixed: B runs on 0.7 (restored there) and its marker says the 0.6 line is needed', mB.moved === true && mB.marker?.line_06_needed === true, JSON.stringify(mB.marker || null));
+      record("mixed: a carry pass ran on B (A's records reach 0.7 through B's 0.6 line)", await until(async () => ((await devOf(b)).move?.last_pass?.private_06 || 0) > 0, 240), JSON.stringify((await devOf(b)).move?.last_pass || null).slice(0, 200));
+      void linesB;
+    } else {
+      const linesA = await linesOf(a);
+      record('both on 1.7.0: 0.7 serving and 0.6 off on A and B', linesA['holochain-0.7'] === 'serving' && linesA['holochain-0.6'] === 'off' && linesB['holochain-0.7'] === 'serving' && linesB['holochain-0.6'] === 'off', JSON.stringify({ a: linesA, b: linesB }));
+      const devA = await devOf(a);
+      record('markers: A born here, B joined (restored) - neither needs a 0.6 line', devA.move?.marker?.born === true && devB.move?.marker?.born === false && devB.move?.marker?.restored === true && devA.move?.marker?.line_06_needed === false && devB.move?.marker?.line_06_needed === false, JSON.stringify({ a: devA.move?.marker, b: devB.move?.marker }));
+      record("A's enrollment key published on identity 1.5", await until(async () => (await devOf(a)).enrollment_07 === 'published', 150), `enrollment_07=${(await devOf(a)).enrollment_07}`);
+    }
+  }
   const installB = stB.install_id;
 
   // 3. Records, devices, connections, backups reach B.
   record("B: A's record arrives", await until(async () => ((await op(b, { op: 'notes' })).notes || []).some((n) => n.text === 'from A, before B'), 240));
   // Real records only: a joined device lists itself as "being set up" before its own record exists.
   const written = async (x) => ((await op(x, { op: 'list' })).devices || []).filter((d) => d.state !== 'this_device_setting_up').length;
-  record('both list two devices', await until(async () => (await written(a)) === 2 && (await written(b)) === 2, 180));
+  if (process.env.VAULT_MATRIX_MIXED === '1') {
+    record('mixed: B lists two devices (A, on 1.6.1, lists B only once it updates - records flow 0.6 → 0.7 only)', await until(async () => (await written(b)) === 2, 300), `A ${await written(a)}, B ${await written(b)}`);
+  } else {
+    record('both list two devices', await until(async () => (await written(a)) === 2 && (await written(b)) === 2, 180));
+  }
   record('B: lists itself without being asked to run a round', ((await op(b, { op: 'list' })).devices || []).some((d) => d.state === 'this_device'));
   // Signatures belong to the identity: made on either device, listed on both.
   record("B: lists the signature made on A before it joined", await until(async () => (await sigsOn(b)).some((x) => x.file_hash === hashSignedOnA), 300));
   const signedB = await signOn(b, hashSignedOnB);
   record('B: the added device signs a file', signedB.stage === 'done' && !!signedB.result?.action_hash, JSON.stringify(signedB).slice(0, 200));
   record('B: lists both signatures', await until(async () => { const l = await sigsOn(b); return l.some((x) => x.file_hash === hashSignedOnA) && l.some((x) => x.file_hash === hashSignedOnB); }, 120));
-  record('A: lists the signature made on B', await until(async () => (await sigsOn(a)).some((x) => x.file_hash === hashSignedOnB), 300));
+  if (process.env.VAULT_MATRIX_MIXED === '1') record("mixed: A (1.6.1) does not see B's 0.7 signature until it updates - by design", true);
+  else record('A: lists the signature made on B', await until(async () => (await sigsOn(a)).some((x) => x.file_hash === hashSignedOnB), 300));
   const countA = (await sigsOn(a)).length, countB = (await sigsOn(b)).length;
-  record("both list the identity's two signatures and nothing else", countA === 2 && countB === 2, `A ${countA}, B ${countB}`);
+  if (process.env.VAULT_MATRIX_MIXED === '1') record("mixed: B lists both signatures, A (1.6.1) its own only", countA === 1 && countB === 2, `A ${countA}, B ${countB}`);
+  else record("both list the identity's two signatures and nothing else", countA === 2 && countB === 2, `A ${countA}, B ${countB}`);
   await op(b, { op: 'round' });
   const connB = await op(b, { op: 'connections' });
   record('B: the picture written before devices were named arrives', await until(async () => { await op(b, { op: 'round' }); return (await op(b, { op: 'status' })).profile_picture === oldPicture; }, 120));
   record('B: the remembered site carried over; the app is NOT connected here', (connB.sites || []).includes('https://remembered.example') && !(connB.apps || []).includes('matrix_app'), JSON.stringify(connB));
   record('B: knows the app is used on A, so a link here says so', (connB.elsewhere || []).includes('matrix_app'), JSON.stringify(connB.elsewhere));
-  const heldB = await until(async () => { await op(b, { op: 'round' }); return ((await op(b, { op: 'backups', client_id: 'matrix_app' })).held || []).some((h) => h.from && h.opens_as === 'A recovery v1'); }, 120);
+  const heldB = await until(async () => { await op(b, { op: 'round' }); return ((await op(b, { op: 'backups', client_id: 'matrix_app' })).held || []).some((h) => h.from && h.opens_as === 'A recovery v1'); }, process.env.VAULT_MATRIX_MIXED === '1' ? 360 : 120);
   record("B: holds and opens a copy of A's app backup", heldB);
   // 3b. 1.6.1: an app secret is the SAME on both devices of the identity
   // (through the real route, from a linked origin), and a named device's
@@ -1417,7 +1485,7 @@ async function devicesLeg() {
   record("B: reads A's copy by naming the device", named.status === 200 && named.data?.from_device === installA && namedText === 'A recovery v1', `${named.status} ${JSON.stringify(named.data).slice(0, 160)}`);
   const listB = await vaultFetch(b, '/backup/list', { origin: APP_ORIGIN_MD });
   const heldA = (listB.data?.other_devices || []).find((d) => d.device === installA);
-  record("B: the list names A's device and its network generation", !!heldA && typeof heldA.name === 'string' && heldA.name.length > 0 && heldA.generation === 'holochain-0.6', JSON.stringify(heldA));
+  record("B: the list names A's device and its network generation", !!heldA && typeof heldA.name === 'string' && heldA.name.length > 0 && heldA.generation === (process.env.VAULT_MATRIX_MIXED === '1' ? 'holochain-0.6' : 'holochain-0.7'), JSON.stringify(heldA));
   const unknownDev = await vaultFetch(b, '/backup/retrieve', { method: 'POST', origin: APP_ORIGIN_MD, body: { client_id: 'matrix_app', label: 'recovery', across: 'devices', device: 'no-such-device' } });
   record('an unknown device is not found', unknownDev.status === 404 && unknownDev.data?.error === 'backup_not_found', `${unknownDev.status}`);
   const actB = (await vaultFetch(b, '/dev/status')).data?.activity || [];
@@ -1446,7 +1514,8 @@ async function devicesLeg() {
   const unlocked = await vaultFetch(a, '/dev/unlock', { method: 'POST' });
   record('A unlocks onto the running conductor', unlocked.status === 200 && (await op(a, { op: 'status' })).conductor?.status === 'ready', `${Date.now() - t0} ms`);
   record('A unlocked: the earlier web key is its own (none), not a leftover', (await op(a, { op: 'status' })).earlier_web_key == null);
-  record("A: B's record written while it was locked is there", await until(async () => ((await op(a, { op: 'notes' })).notes || []).some((n) => n.text === 'from B, while A was locked'), 60));
+  if (process.env.VAULT_MATRIX_MIXED === '1') record("mixed: A (1.6.1) does not see B's record written on 0.7 - by design", true);
+  else record("A: B's record written while it was locked is there", await until(async () => ((await op(a, { op: 'notes' })).notes || []).some((n) => n.text === 'from B, while A was locked'), 60));
 
   // 6. Remove. The removal holds even after the removed device's own round.
   const removed = await op(a, { op: 'remove', install_id: installB });
@@ -1468,7 +1537,7 @@ async function devicesLeg() {
   const door = await vaultFetch(b, '/dev/devices', { method: 'POST', body: { op: 'phrase-door', phrase, password: pwB } });
   record('B: the recovery phrase adds it back although the account has removed a device', door.status === 200 && door.data?.agent_pub_key === stA.agent_pub_key, JSON.stringify(door.data));
   record('B: registered with the account again', await until(async () => (await op(b, { op: 'standing' })).standing?.device === 'registered', 120));
-  record('B: its records arrive again', await until(async () => ((await op(b, { op: 'notes' })).notes || []).length >= 2, 300));
+  record('B: its records arrive again', await until(async () => ((await op(b, { op: 'notes' })).notes || []).length >= 2, process.env.VAULT_MATRIX_MIXED === '1' ? 720 : 300));
   record('A: lists B again as ONE device, not removed', await until(async () => { await op(a, { op: 'round' }); const rows = ((await op(a, { op: 'list' })).devices || []).filter((d) => d.install_id === installB); return rows.length === 1 && rows[0].state !== 'removed'; }, 300));
   record('A: is told a device was added elsewhere', await until(async () => { await op(a, { op: 'round' }); return ((await vaultFetch(a, '/dev/status')).data?.activity || []).includes('device_added_elsewhere'); }, 120));
 }
@@ -1504,6 +1573,143 @@ async function askForRateLimitExemption() {
   }
 }
 
+/** Web-era signatures on a 0.7-only session: a migrated identity (its phrase
+ *  in VAULT_MATRIX_WEBERA_PHRASE_FILE, default ~/.config/flowsta/staging-webera-phrase)
+ *  restored on a FRESH instance; the Overview's counts must come from the
+ *  0.7 read alone. VAULT_MATRIX_WEBERA_EXPECT="current,amendments" pins the counts. */
+async function webEraLeg() {
+  console.log('\n── Web-era leg (migrated identity restored on 1.7.0, counts from the 0.7 read)');
+  const port = Number(process.env.VAULT_MATRIX_PORT || 0);
+  if (!port) { record('web-era leg skipped - set VAULT_MATRIX_PORT to a FRESH test instance', true); return; }
+  const fs = await import('node:fs');
+  const file = process.env.VAULT_MATRIX_WEBERA_PHRASE_FILE || `${process.env.HOME}/.config/flowsta/staging-webera-phrase`;
+  let phrase = '';
+  try { phrase = fs.readFileSync(file, 'utf8').trim(); } catch { /* none */ }
+  if (phrase.split(/\s+/).length !== 24) { record('web-era leg skipped - no 24-word phrase in ' + file, true); return; }
+  const fresh = await vaultFetch(port, '/status');
+  if (fresh.data?.initialized !== false) { record('web-era leg skipped - instance already holds an identity', true); return; }
+  const password = `Matrix-webera-${randomHash().slice(0, 12)}!`;
+  const t0 = Date.now();
+  const restored = await vaultFetch(port, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, phrase, restore: true } });
+  record('restore from the phrase on a fresh instance', restored.status === 200 && restored.data?.restored === true, `${restored.status} ${restored.data?.error || ''} in ${Date.now() - t0} ms`);
+  if (restored.status !== 200) return;
+  record('conductor ready after restore', await waitConductorReady(port, 180));
+  const cellSecs = await waitCellsReady(port, 180);
+  record('cells ready', cellSecs >= 0, `${cellSecs} s`);
+  const lines = await linesOf(port);
+  record('lines: 0.7 serving, 0.6 off (a restored identity has nothing on 0.6)', lines['holochain-0.7'] === 'serving' && lines['holochain-0.6'] === 'off', JSON.stringify(lines));
+  const dev = await devOf(port);
+  record('move marker: restored on 0.7, not born', dev.move?.moved === true && dev.move?.marker?.restored === true && dev.move?.marker?.born === false, JSON.stringify(dev.move?.marker || null));
+  // The first network reads of a cold conductor land minutes in: wait for a
+  // non-empty list that holds still for 30 s.
+  let sigs = []; let stableSince = 0;
+  const deadline = Date.now() + 480_000;
+  while (Date.now() < deadline) {
+    const now = (await vaultFetch(port, '/signatures')).data?.signatures || [];
+    if (now.length && now.length === sigs.length) { if (!stableSince) stableSince = Date.now(); else if (Date.now() - stableSince > 30_000) { sigs = now; break; } }
+    else { stableSince = 0; }
+    sigs = now;
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  const counts = foldCounts(sigs);
+  record('web-era signatures read on the 0.7 line (the migrated identity has some)', sigs.length > 0 && sigs.every((x) => /0\.7/.test(x.signing_app_id || '')), `${sigs.length} rows, apps ${[...new Set(sigs.map((x) => x.signing_app_id))].join(',')}`);
+  record('every amendment folds onto a listed original (no supersedes names a hash that is not in the list)', counts.dangling.length === 0, JSON.stringify(counts));
+  const expect = (process.env.VAULT_MATRIX_WEBERA_EXPECT || '').split(',').map((n) => Number(n));
+  if (expect.length === 2 && expect.every((n) => Number.isFinite(n) && n >= 0) && process.env.VAULT_MATRIX_WEBERA_EXPECT) {
+    record(`Overview counts: ${expect[0]} signatures, ${expect[1]} amendments`, counts.current === expect[0] && counts.amendments === expect[1], JSON.stringify(counts));
+  } else {
+    record(`Overview counts noted (set VAULT_MATRIX_WEBERA_EXPECT="${counts.current},${counts.amendments}" to pin them)`, true, JSON.stringify(counts));
+  }
+}
+
+/** The move, through the app: `move-before` runs on a 1.6.1 (0.6-only) instance -
+ *  create, sign, amend - and writes VAULT_MATRIX_MOVE_STATE; `move-after` runs on
+ *  the SAME data folder opened by 1.7.0 - unlock, both lines, the move, the
+ *  carried records and the fold; `move-retired` on the next launch - 0.6 gone,
+ *  the list unchanged. scripts/matrix-move.sh drives the three launches. */
+async function moveLeg(stage) {
+  console.log(`\n── Move leg (${stage})`);
+  const port = Number(process.env.VAULT_MATRIX_PORT || 0);
+  if (!port) { record('move leg skipped - set VAULT_MATRIX_PORT', true); return; }
+  const fs = await import('node:fs');
+  const stateFile = process.env.VAULT_MATRIX_MOVE_STATE || '/tmp/vault-matrix-move-state.json';
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const sigsOn = async () => ((await vaultFetch(port, '/signatures')).data?.signatures) || [];
+  const signOn = async (body) => {
+    const sub = await vaultFetch(port, '/sign-document', { method: 'POST', body: { ...body, job: true } });
+    if (sub.status !== 200 || !sub.data?.job_id) return { stage: 'failed', error: `${sub.status} ${JSON.stringify(sub.data)}` };
+    let last = {};
+    const deadline = Date.now() + 300_000;
+    while (Date.now() < deadline) { last = (await vaultFetch(port, `/op-status/${sub.data.job_id}`)).data || {}; if (last.stage === 'done' || last.stage === 'failed') break; await sleep(1000); }
+    return last;
+  };
+  if (stage === 'move-before') {
+    const fresh = await vaultFetch(port, '/status');
+    if (fresh.data?.initialized !== false) { record('move-before skipped - instance already holds an identity', true); return; }
+    const password = `Matrix-move-${randomHash().slice(0, 12)}!`;
+    const created = await vaultFetch(port, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, email: `matrix-move-${Date.now()}@example.com`, display_name: 'Matrix Move' } });
+    record('1.6.1: identity created', created.status === 200 && !!created.data?.agent_pub_key, `${created.status} ${created.data?.error || ''}`);
+    if (created.status !== 200) return;
+    record('1.6.1: conductor ready', await waitConductorReady(port, 180));
+    record('1.6.1: cells ready', (await waitCellsReady(port, 180)) >= 0);
+    const d = await devOf(port);
+    record('1.6.1: no move marker, no lines field (a 1.6.1 build)', d.move === undefined && d.holochain_lines === undefined, JSON.stringify({ move: d.move, lines: d.holochain_lines }));
+    const hashA = randomHash();
+    const sign = await signOn(signBody(hashA));
+    record('1.6.1: sign publishes on 0.6', sign.stage === 'done' && !!sign.result?.action_hash, JSON.stringify(sign).slice(0, 160));
+    const aHash = sign.result?.action_hash;
+    const amend = await signOn(signBody(hashA, { supersedes: aHash, thumbnail: TINY_PNG_2, comment: 'amended before the move' }));
+    record('1.6.1: amend publishes on 0.6', amend.stage === 'done' && !!amend.result?.action_hash, JSON.stringify(amend).slice(0, 160));
+    const bHash = amend.result?.action_hash;
+    let sigs = []; for (let i = 0; i < 20 && sigs.length < 2; i++) { sigs = await sigsOn(); if (sigs.length < 2) await sleep(3000); }
+    const counts = foldCounts(sigs);
+    record('1.6.1: the list reads 1 signature + 1 amendment', counts.total === 2 && counts.current === 1 && counts.amendments === 1, JSON.stringify(counts));
+    fs.writeFileSync(stateFile, JSON.stringify({ password, agent: created.data.agent_pub_key, did: created.data.did, hashA, aHash, bHash }, null, 2));
+    record(`state written to ${stateFile}`, true);
+    return;
+  }
+  const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const st0 = await vaultFetch(port, '/status');
+  record(`${stage}: the identity is there and locked`, st0.data?.initialized === true && st0.data?.unlocked === false, JSON.stringify({ initialized: st0.data?.initialized, unlocked: st0.data?.unlocked }));
+  const un = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: saved.password } });
+  record(`${stage}: unlocks with the 1.6.1 password`, un.status === 200 && un.data?.success === true, `${un.status} ${un.data?.error || ''}`);
+  record(`${stage}: conductor ready`, await waitConductorReady(port, 240));
+  if (stage === 'move-after') {
+    const lines0 = await linesOf(port);
+    record('move-after: 0.6 is the line at first (serving), 0.7 coming up', lines0['holochain-0.6'] === 'serving' && ['starting', 'serving'].includes(lines0['holochain-0.7']), JSON.stringify(lines0));
+    // The move needs the 0.7 cells and the first network reads of a cold
+    // conductor: minutes. One pass per devices round.
+    const t0 = Date.now();
+    let dev = {};
+    const deadline = Date.now() + 720_000;
+    while (Date.now() < deadline) { dev = await devOf(port); if (dev.move?.moved === true) break; await sleep(5000); }
+    record('move-after: the identity MOVED to the 0.7 line', dev.move?.moved === true, `${Math.round((Date.now() - t0) / 1000)} s; last_pass=${JSON.stringify(dev.move?.last_pass || null).slice(0, 200)}`);
+    const m = dev.move?.marker || {};
+    record('move-after: marker counts the carried records (2 signatures, private records, not born, not restored)', m.signatures === 2 && m.private_records >= 1 && m.born === false && m.restored === false, JSON.stringify(m));
+    record('move-after: 0.7 serving now; 0.6 still attached while the move settles', (await linesOf(port))['holochain-0.7'] === 'serving', JSON.stringify(await linesOf(port)));
+    let sigs = []; for (let i = 0; i < 40; i++) { sigs = await sigsOn(); if (sigs.length === 2 && sigs.every((x) => x.original_action_hash)) break; await sleep(3000); }
+    const counts = foldCounts(sigs);
+    record('move-after: both records are the CARRIED copies (new hashes, each naming its original)', sigs.length === 2 && sigs.every((x) => x.original_action_hash && x.action_hash !== x.original_action_hash), JSON.stringify(sigs.map((x) => ({ h: (x.action_hash || '').slice(0, 10), orig: (x.original_action_hash || '').slice(0, 10), app: x.signing_app_id }))));
+    record('move-after: the originals they name are the 0.6 hashes', new Set(sigs.map((x) => x.original_action_hash)).size === 2 && sigs.some((x) => x.original_action_hash === saved.aHash) && sigs.some((x) => x.original_action_hash === saved.bHash), '');
+    record('move-after: the amendment folds onto the carried original (supersedes re-pointed) - 1 signature + 1 amendment', counts.current === 1 && counts.amendments === 1 && counts.dangling.length === 0, JSON.stringify(counts));
+    record('move-after: activity says the Vault synced to the new network', (dev.activity || []).includes('records_moved'), JSON.stringify(dev.activity || []));
+    fs.writeFileSync(stateFile, JSON.stringify({ ...saved, carried: sigs.map((x) => x.action_hash) }, null, 2));
+    return;
+  }
+  if (stage === 'move-retired') {
+    const lines = await linesOf(port);
+    const dev = await devOf(port);
+    record('move-retired: 0.6 not started (nothing of this identity on it), 0.7 serving', lines['holochain-0.6'] === 'off' && lines['holochain-0.7'] === 'serving', JSON.stringify(lines));
+    record('move-retired: marker says no 0.6 line needed', dev.move?.moved === true && dev.move?.marker?.line_06_needed === false, JSON.stringify(dev.move?.marker || null));
+    record('move-retired: cells ready on 0.7 alone', (await waitCellsReady(port, 180)) >= 0);
+    let sigs = []; for (let i = 0; i < 40; i++) { sigs = await sigsOn(); if (sigs.length === 2) break; await sleep(3000); }
+    const counts = foldCounts(sigs);
+    record('move-retired: the same two carried records, 1 signature + 1 amendment, from the 0.7 read alone', sigs.length === 2 && counts.current === 1 && counts.amendments === 1 && (saved.carried || []).every((h) => sigs.some((x) => x.action_hash === h)), JSON.stringify(counts));
+    return;
+  }
+  record(`unknown move stage ${stage}`, false);
+}
+
 (async () => {
   console.log(`Bridge matrix — phase: ${PHASE}, origin: ${ORIGIN}`);
   await askForRateLimitExemption();
@@ -1518,6 +1724,13 @@ async function askForRateLimitExemption() {
     await devicesLeg();
     const passedD = results.filter((r) => r.ok).length;
     console.log(`\nRESULT: ${passedD}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
+    process.exit(failures ? 1 : 0);
+  }
+  if (PHASE === 'webera' || PHASE.startsWith('move-')) {
+    if (PHASE === 'webera') await webEraLeg(); else await moveLeg(PHASE);
+    const passedW = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedW}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
     if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
     process.exit(failures ? 1 : 0);
   }

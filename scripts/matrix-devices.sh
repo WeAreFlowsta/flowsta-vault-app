@@ -15,12 +15,14 @@ rm -rf "$HOME/.local/share/flowsta-vault-md-c" "$HOME/.local/share/flowsta-vault
 echo "== instances $(date -u +%H:%M:%S)"
 answering() { for p in 27777 27778 27779; do curl -s -m 2 "http://127.0.0.1:$p/dev/status" | grep -q '"harness":true' && echo $p; done; }
 waitnew() { for i in $(seq 1 36); do for p in $(answering); do [ "$p" != "${1:-}" ] && { echo $p; return 0; }; done; sleep 5; done; return 1; }
-dbus-run-session -- scripts/run-test-instance.sh md-c > "$1/md-c.log" 2>&1 & PA=$!
+# LEGACY_A_BIN=<dir holding a 1.6.1 flowsta-vault + its sidecars> starts A on
+# that build (the mixed-version leg: a 1.6.1 sibling beside 1.7.0).
+VAULT_TEST_BIN="${LEGACY_A_BIN:+$LEGACY_A_BIN/flowsta-vault}" dbus-run-session -- scripts/run-test-instance.sh md-c > "$1/md-c.log" 2>&1 & PA=$!
 A=$(waitnew) || { echo "md-c never answered"; find "$HOME/.local/share/flowsta-vault-md-c" -name '*.log' -exec tail -20 {} +; kill $PA 2>/dev/null; exit 1; }
 dbus-run-session -- scripts/run-test-instance.sh md-d > "$1/md-d.log" 2>&1 & PB=$!
 B=$(waitnew "$A") || { echo "md-d never answered"; find "$HOME/.local/share/flowsta-vault-md-d" -name '*.log' -exec tail -20 {} +; kill $PA $PB 2>/dev/null; exit 1; }
 echo "== leg A=$A B=$B $(date -u +%H:%M:%S)"
-VAULT_MATRIX_PORT=$A VAULT_MATRIX_RESTORE_PORT=$B node scripts/bridge-matrix.mjs --phase=devices > "$1/matrix-devices.log" 2>&1
+VAULT_MATRIX_MIXED="${LEGACY_A_BIN:+1}" VAULT_MATRIX_PORT=$A VAULT_MATRIX_RESTORE_PORT=$B node scripts/bridge-matrix.mjs --phase=devices > "$1/matrix-devices.log" 2>&1
 rc=$?
 echo "== leg rc=$rc $(date -u +%H:%M:%S)"
 grep -E 'RESULT|✗' "$1/matrix-devices.log" | head -20

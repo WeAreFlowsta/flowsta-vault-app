@@ -34,4 +34,4 @@ FLOWSTA_BOOTSTRAP_URL=https://bootstrap-staging.flowsta.com \
 FLOWSTA_SIGNAL_URL=wss://bootstrap-staging.flowsta.com \
 FLOWSTA_BOOTSTRAP_URL_07=https://bootstrap-staging-7.flowsta.com \
 FLOWSTA_AUTH_MATERIAL=eyJjbGllbnRfaWQiOiJmbG93c3RhX2FwcF9iZGZmZDBjMTcwOTBiZDRkMzEyMWUwZjZkZGUzMmE0MDJjYWNmMTk3NmNiYjIzNDgzODA1MDAyZTJkNmE0Zjk0In0= \
-exec src-tauri/target/debug/flowsta-vault
+exec "${VAULT_TEST_BIN:-src-tauri/target/debug/flowsta-vault}"
