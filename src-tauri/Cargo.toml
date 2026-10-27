@@ -1,6 +1,6 @@
 [package]
 name = "flowsta-vault"
-version = "1.7.0-beta7"
+version = "1.7.0-beta8"
 description = "Flowsta Vault - The home of your Flowsta identity, powered by Holochain"
 authors = ["Flowsta"]
 license = ""

@@ -5,6 +5,16 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0-beta8] - 2026-10-27
+
+What the first beta7 run found.
+
+### Fixed
+- An identity that came from a web account showed 0 signatures once it
+  ran on the new network alone. Its web-era signatures had moved with it;
+  the Vault asked the new network only for its devices' signatures and
+  never for the web key's. It asks for both now.
+
 ## [1.7.0-beta7] - 2026-10-27
 
 What the beta6 gate found: three computers now run the new network alone.
