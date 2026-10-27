@@ -93,6 +93,13 @@ let idleInhibitor: ChildProcess | null = null;
 
 function screenLocked(): boolean {
   if (process.platform !== "linux") return false;
+  // Under a virtual display (xvfb-run, VAULT_E2E_VIRTUAL_DISPLAY=1) the app
+  // draws into that display whatever the session's lock state. 2026-10-27
+  // on the Linux dev box: WebKitGTK 2.46 segfaulted at one instruction in
+  // libwebkit2gtk in four of seven specs under Xvfb (the short specs passed);
+  // the real display is the reliable run. Kept for a try with software
+  // rendering (WEBKIT_DISABLE_COMPOSITING_MODE=1, LIBGL_ALWAYS_SOFTWARE=1).
+  if (process.env.VAULT_E2E_VIRTUAL_DISPLAY === "1") return false;
   try {
     const out = execFileSync("gdbus", ["call", "--session", "--dest", "org.gnome.ScreenSaver", "--object-path", "/org/gnome/ScreenSaver", "--method", "org.gnome.ScreenSaver.GetActive"], { encoding: "utf8", timeout: 5_000 });
     return out.includes("true");

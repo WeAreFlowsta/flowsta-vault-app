@@ -1596,16 +1596,49 @@ async function webEraLeg() {
   if (fresh.data?.initialized !== false) { record('web-era leg skipped - instance already holds an identity', true); return; }
   const password = `Matrix-webera-${randomHash().slice(0, 12)}!`;
   const t0 = Date.now();
-  const restored = await vaultFetch(port, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, phrase, restore: true } });
-  record('restore from the phrase on a fresh instance', restored.status === 200 && restored.data?.restored === true, `${restored.status} ${restored.data?.error || ''} in ${Date.now() - t0} ms`);
-  if (restored.status !== 200) return;
-  record('conductor ready after restore', await waitConductorReady(port, 180));
-  const cellSecs = await waitCellsReady(port, 180);
+  // Two doors. `migrate` (default): the phrase of a WEB account that was never
+  // in a Vault - the phrase-first upgrade (a legacy-shaped vault from the
+  // phrase, then /dev/run-upgrade), which brings the account over with its
+  // web key and owes the web-era carry. `restore`: the phrase of an identity
+  // that already lives in a Vault - the wizard's offline restore.
+  const mode = process.env.VAULT_MATRIX_WEBERA_MODE || 'migrate';
+  if (mode === 'migrate') {
+    const legacy = await vaultFetch(port, '/dev/setup-legacy-vault', { method: 'POST', body: { phrase, password } });
+    record('web account: a legacy-shaped vault from the phrase', legacy.status === 200, `${legacy.status} ${legacy.data?.error || ''} ${legacy.data?.description || ''}`);
+    if (legacy.status !== 200) return;
+    record('conductor ready on the legacy vault', await waitConductorReady(port, 180));
+    const t1 = Date.now();
+    const up = await vaultFetch(port, '/dev/run-upgrade', { method: 'POST', body: { phrase } });
+    if (up.status !== 200 && /already upgraded|device_hosted/i.test(up.data?.description || '')) {
+      // The account was brought over on an earlier run: it lives in a Vault
+      // now, so this is the restore of a moved web-era identity instead.
+      record('web account already brought over on an earlier run - restoring it instead', true, (up.data?.description || '').slice(0, 120));
+      await vaultFetch(port, '/dev/reset', { method: 'POST' });
+      const restored = await vaultFetch(port, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, phrase, restore: true } });
+      record('restore from the phrase on a fresh instance', restored.status === 200 && restored.data?.restored === true, `${restored.status} ${restored.data?.error || ''}`);
+      if (restored.status !== 200) return;
+    } else {
+      record('web account: the phrase-first upgrade brings it over', up.status === 200 && !!up.data?.agent_pub_key, `${up.status} ${up.data?.error || ''} ${(up.data?.description || '').slice(0, 160)} in ${Date.now() - t1} ms; records_migrated=${up.data?.records_migrated}`);
+      if (up.status !== 200) return;
+    }
+  } else {
+    const restored = await vaultFetch(port, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, phrase, restore: true } });
+    record('restore from the phrase on a fresh instance', restored.status === 200 && restored.data?.restored === true, `${restored.status} ${restored.data?.error || ''} in ${Date.now() - t0} ms`);
+    if (restored.status !== 200) return;
+  }
+  record('conductor ready', await waitConductorReady(port, 240));
+  const cellSecs = await waitCellsReady(port, 240);
   record('cells ready', cellSecs >= 0, `${cellSecs} s`);
-  const lines = await linesOf(port);
-  record('lines: 0.7 serving, 0.6 off (a restored identity has nothing on 0.6)', lines['holochain-0.7'] === 'serving' && lines['holochain-0.6'] === 'off', JSON.stringify(lines));
+  const dev0 = await devOf(port);
+  record('move marker present (0.7 is the line)', dev0.move?.moved === true && dev0.move?.line === 'V07', JSON.stringify(dev0.move?.marker || null));
+  // A migrated web account owes the web-era carry: the 0.6 line runs until
+  // its signatures are on 0.7 (the first network reads of a cold conductor
+  // land minutes in; one try per devices round).
+  const carried = await (async () => { const deadline = Date.now() + 720_000; while (Date.now() < deadline) { const d = await devOf(port); if (d.move?.marker?.web_era_carried === true) return true; await new Promise((r) => setTimeout(r, 10_000)); } return false; })();
   const dev = await devOf(port);
-  record('move marker: restored on 0.7, not born', dev.move?.moved === true && dev.move?.marker?.restored === true && dev.move?.marker?.born === false, JSON.stringify(dev.move?.marker || null));
+  record('web-era carry complete (marker: web_era_carried)', carried, JSON.stringify({ web_era_carried: dev.move?.marker?.web_era_carried, web_era_signatures: dev.move?.marker?.web_era_signatures, last_pass: dev.move?.last_pass && { web_era_06: dev.move.last_pass.web_era_06, web_era_carried: dev.move.last_pass.web_era_carried, error: dev.move.last_pass.error } }));
+  const lines = await linesOf(port);
+  record('lines: 0.7 serving', lines['holochain-0.7'] === 'serving', JSON.stringify(lines));
   // The first network reads of a cold conductor land minutes in: wait for a
   // non-empty list that holds still for 30 s.
   let sigs = []; let stableSince = 0;
