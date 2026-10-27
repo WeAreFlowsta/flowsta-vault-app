@@ -29,7 +29,7 @@ export function whereThingsAre(d: DeviceRow, now = Date.now()): string {
     case "not_seen_since": return `Your things are on ${d.name}, last seen ${when(d.at ?? 0)}. Open Flowsta Vault there (it can stay locked) and they arrive.`;
     case "setting_up": return `${d.name} is still being set up itself.`;
     default: return recent
-      ? `Waiting for ${d.name}, online a moment ago...`
+      ? `${d.name} is online. Your things are on their way...`
       : `Your things are on ${d.name}, last seen ${when(d.at ?? 0)}. Open Flowsta Vault there (it can stay locked) and they arrive.`;
   }
 }
@@ -104,6 +104,9 @@ export default component$(() => {
   // (a marker the round writes). The banner stays until then, including
   // while the cells are still starting.
   const settingUp = useSignal(false);
+  // Whether the round has answered once: the email callout below waits for
+  // that on a device that joined, so it does not flash before the answer.
+  const setupKnown = useSignal(false);
   // How far it has got: this device's records and the backups it fetches,
   // against what the other devices say they hold.
   const setupProgress = useSignal<DevicesProgress | null>(null);
@@ -118,6 +121,7 @@ export default component$(() => {
   const checkSettingUp = $(async () => {
     try {
       settingUp.value = await invoke<boolean>("joined_setup_pending");
+      setupKnown.value = true;
       if (settingUp.value) {
         setupProgress.value = await invoke<DevicesProgress>("devices_progress").catch(() => null);
         // Null until the cells answer; the card stays either way.
@@ -593,10 +597,12 @@ export default component$(() => {
 
   return (
     <div>
-      {/* A restored vault holds no email: Flowsta keeps only its hash, so the
-          person re-enters the address and the server confirms it. Until
-          then no app can be offered the email. */}
-      {identity.value && identity.value.hosting_model === "device-hosted" && identity.value.joined_existing && (!identity.value.web_email || settingUp.value) && (
+      {/* The card stays exactly as long as the round says this device is
+          being set up. It used to stay while the email was missing too,
+          waiting for the other device's profile record to bring it; an
+          identity without that record kept the card forever (Billz,
+          10-27). The email is asked for below instead, once setup is done. */}
+      {identity.value && identity.value.hosting_model === "device-hosted" && identity.value.joined_existing && settingUp.value && (
         <Callout intent="info" title={longSilence ? "No other device has answered yet" : "Your private data is on its way"} class="mb-6">
           {longSilence ? (
             <p data-testid="only-device-note">
@@ -648,7 +654,12 @@ export default component$(() => {
           })()}
         </Callout>
       )}
-      {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && !identity.value.joined_existing && (
+      {/* A restored vault holds no email: Flowsta keeps only its hash, so the
+          person re-enters the address and the server confirms it. Until
+          then no app can be offered the email. A device that joined waits
+          for setup first: the other devices' profile record usually brings
+          the email with it. */}
+      {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && (!identity.value.joined_existing || (setupKnown.value && !settingUp.value)) && (
         <Callout intent="info" title="Add the email you registered with" class="mb-6">
           <p class="mb-3">
             This Vault doesn't hold your email yet - Flowsta keeps only a fingerprint of it and can't send it back.
@@ -862,7 +873,7 @@ export default component$(() => {
               ? "Syncing - first load takes a few minutes"
               : sigCount === 0
                 ? recentlyRestored(activityLog.value)
-                  ? "Syncing from the network - your signatures return in a few minutes"
+                  ? "None found yet - the network is still answering after the restore"
                   : "Sign your first file"
                 : [
                     `${activeSigs} active`,

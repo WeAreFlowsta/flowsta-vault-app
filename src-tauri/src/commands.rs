@@ -2040,6 +2040,13 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                 Ok(false) => {}
                 Err(e) => log::info!("Profile picture not written: {}", e),
             }
+            // And its profile: the email, username and display name reach
+            // the other devices the same way.
+            match ensure_profile_record(devices_state).await {
+                Ok(true) => log::info!("This device's profile record was written"),
+                Ok(false) => {}
+                Err(e) => log::info!("Profile record not written: {}", e),
+            }
         }
         lap("picture");
         match apply_profile_from_other_devices(devices_state).await {
@@ -8481,9 +8488,18 @@ async fn mirror_email_into_sealed_profile(state: &Arc<AppState>, email: &str) ->
         .map(|d| d.as_micros() as i64)
         .unwrap_or(0)) as i64;
     let Some(record) = existing.iter().find(|r| r.entry_type == "user_profile") else {
-        // No profile record yet - the username/creation paths create one
-        // from the config, which already carries the new email.
-        return Ok(());
+        // No profile record yet: this device writes it, so the identity's
+        // other devices learn the email from the record (a device that
+        // joined receives it in its first round).
+        let (username, display_name) = {
+            let config = state.vault_config.lock().unwrap();
+            let cfg = config.as_ref();
+            (cfg.and_then(|c| c.web_username.clone()), cfg.and_then(|c| c.display_name.clone()))
+        };
+        let body = profile_record_body(Some(email), username.as_deref(), display_name.as_deref(), now_us).expect("the email alone is a profile");
+        return crate::sealed::sealed_store_inner(state, "user_profile".into(), body, Vec::new(), (now_us / 1000) as u64)
+            .await
+            .map(|_| ());
     };
     let mut body = record.body.clone();
     body["email"] = serde_json::json!(email);
@@ -8536,20 +8552,8 @@ async fn mirror_username_into_sealed_profile(
                 )
             };
             let now_ms = (now_us / 1000) as u64;
-            crate::sealed::sealed_store_inner(
-                state,
-                "user_profile".into(),
-                serde_json::json!({
-                    "email": email,
-                    "username": username,
-                    "display_name": display_name,
-                    "created_at": now_us,
-                    "updated_at": now_us,
-                }),
-                Vec::new(),
-                now_ms,
-            )
-            .await?;
+            let body = profile_record_body(Some(&email), Some(username), display_name.as_deref(), now_us).expect("the username alone is a profile");
+            crate::sealed::sealed_store_inner(state, "user_profile".into(), body, Vec::new(), now_ms).await?;
         }
     }
     Ok(())
@@ -8971,6 +8975,62 @@ pub(crate) async fn ensure_profile_picture_record(state: &Arc<AppState>) -> Resu
         .map(|_| true)
 }
 
+/// The identity's profile (email, username, display name) as a record, when
+/// this device holds any of them and no device has written one yet. Until
+/// now only a username claim or an email change wrote it, so an identity
+/// born in the Vault with its email had no profile record, and a device
+/// added to it never learned the email (Billz, 10-27). A device added to
+/// the identity does not write its own: the profile comes to it.
+pub(crate) async fn ensure_profile_record(state: &Arc<AppState>) -> Result<bool, String> {
+    let now_us = unix_now_us();
+    let body = {
+        let config = state.vault_config.lock().unwrap();
+        let cfg = config.as_ref().ok_or("vault_locked")?;
+        if cfg.joined_existing {
+            return Ok(false);
+        }
+        profile_record_body(cfg.web_email.as_deref(), cfg.web_username.as_deref(), cfg.display_name.as_deref(), now_us)
+    };
+    let Some(body) = body else {
+        return Ok(false);
+    };
+    let records = crate::sealed::sealed_list_inner(state).await?;
+    if records.iter().any(|r| r.entry_type == "user_profile") {
+        return Ok(false);
+    }
+    crate::sealed::sealed_store_inner(state, "user_profile".into(), body, Vec::new(), (now_us / 1000) as u64)
+        .await
+        .map(|_| true)
+}
+
+fn unix_now_us() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
+}
+
+/// The body of a new user_profile record from what the config holds, or
+/// None when it holds nothing worth a record. The shape the username claim
+/// has always written: `email` a string (empty when unknown), the others
+/// optional; readers skip empty values either way.
+pub(crate) fn profile_record_body(email: Option<&str>, username: Option<&str>, display_name: Option<&str>, now_us: i64) -> Option<serde_json::Value> {
+    fn some(s: Option<&str>) -> Option<&str> {
+        s.map(str::trim).filter(|s| !s.is_empty())
+    }
+    let (email, username, display_name) = (some(email), some(username), some(display_name));
+    if email.is_none() && username.is_none() && display_name.is_none() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "email": email.unwrap_or(""),
+        "username": username,
+        "display_name": display_name,
+        "created_at": now_us,
+        "updated_at": now_us,
+    }))
+}
+
 pub(crate) async fn apply_profile_from_other_devices(state: &Arc<AppState>) -> Result<bool, String> {
     let records = crate::sealed::sealed_list_inner(state).await?;
     let mine = crate::paths::install_id(&state.data_dir);
@@ -9333,5 +9393,33 @@ mod superseded_by_tests {
         assert_eq!(sigs[1]["supersedes"], "a7");
         assert_eq!(sigs[0]["superseded_by"], "b7");
         assert!(sigs[1].get("superseded_by").is_none());
+    }
+}
+
+#[cfg(test)]
+mod profile_record_tests {
+    use super::profile_record_body;
+
+    #[test]
+    fn an_identity_with_an_email_gets_a_profile_record_carrying_it() {
+        let body = profile_record_body(Some(" billz@example.com "), None, Some("Billz"), 7).unwrap();
+        assert_eq!(body["email"], "billz@example.com");
+        assert_eq!(body["username"], serde_json::Value::Null);
+        assert_eq!(body["display_name"], "Billz");
+        assert_eq!(body["created_at"], 7);
+        assert_eq!(body["updated_at"], 7);
+    }
+
+    #[test]
+    fn a_username_alone_is_a_profile_with_an_empty_email() {
+        let body = profile_record_body(None, Some("billz"), None, 7).unwrap();
+        assert_eq!(body["email"], "");
+        assert_eq!(body["username"], "billz");
+    }
+
+    #[test]
+    fn nothing_known_writes_no_record() {
+        assert!(profile_record_body(None, None, None, 7).is_none());
+        assert!(profile_record_body(Some(""), Some("  "), None, 7).is_none());
     }
 }

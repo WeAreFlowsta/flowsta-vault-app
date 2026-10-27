@@ -5,6 +5,30 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+What the beta12 restore of an identity born in the Vault found (Billz,
+restored on a second device).
+
+### Fixed
+- A device that joined an identity whose first device had never written a
+  profile record kept the "Your private data is on its way" card up for
+  good after setup had finished, its spinner turning and its "Waiting for
+  <device>, online a moment ago..." line frozen as if the other device were
+  offline. The card now leaves exactly when setup finishes, and the line
+  reads "<device> is online. Your things are on their way..." while it
+  shows.
+- The first device now writes the identity's profile record (email,
+  username, display name) when none exists, the way it already wrote the
+  picture, so a device added later learns the email from it. Until now only
+  a username claim or an email change wrote that record, and adding the
+  email on a device without one wrote nothing. A joined device that still
+  has no email once setup is done is asked for it, as a single-device
+  restore always was.
+- The Signatures card said "Syncing from the network" beside a 0 for half
+  an hour after a restore. It now says none have been found yet while the
+  network is still answering.
+
 ## [1.7.0-beta12] - 2026-10-27
 
 What the beta11 harness legs found.
