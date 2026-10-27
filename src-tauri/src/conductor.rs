@@ -161,11 +161,14 @@ impl ConductorHandle {
 ///   yet (or a pre-1.7.0 folder restored by hand) - yes, it is the primary;
 /// - born on 1.7.0 - never;
 /// - the signatures of the web key it came from are not carried yet - yes;
-/// - a device record it holds on 0.7 names a device still on 0.6 - yes;
+/// - a device record it holds on 0.7 names ANOTHER device still on 0.6 -
+///   yes (this device's own record, carried from 1.6.1 with the old
+///   generation and not rewritten yet when the Vault closed right after the
+///   move, says nothing about where this device is: it is this build);
 /// - otherwise no. A restored identity that has heard nothing yet decides
 ///   after its first round (`move_07::line_06_wanted_now`).
 /// Never from the network; the decision is written into the marker.
-pub fn line_06_wanted(data_dir: &Path, data_key: Option<&[u8; 32]>) -> bool {
+pub fn line_06_wanted(data_dir: &Path, data_key: Option<&[u8; 32]>, own_install_id: Option<&str>) -> bool {
     let Some(m) = crate::move_07::marker(data_dir) else { return true };
     if m.born {
         return false;
@@ -176,7 +179,7 @@ pub fn line_06_wanted(data_dir: &Path, data_key: Option<&[u8; 32]>) -> bool {
     let Some(key) = data_key else { return false };
     crate::sealed::held_devices_on_07(data_dir, key)
         .iter()
-        .any(|d| d.removed_at.is_none() && d.generation != Line::V07.generation())
+        .any(|d| d.removed_at.is_none() && d.generation != Line::V07.generation() && own_install_id.map(|me| d.install_id != me).unwrap_or(true))
 }
 
 /// Where the 0.7 line stands, for `/status` and the app. Set by the start
@@ -877,7 +880,8 @@ pub async fn start_holochain(
         // version, or born here): the 0.7 line is the primary one, Ready
         // when it is. The 0.6 line follows from a task only when something
         // on it is still wanted (`line_06_wanted`), never for a born identity.
-        let wanted_06 = line_06_wanted(&data_dir, data_key.as_ref());
+        let own_install_id = { let state = app_handle.state::<Arc<AppState>>(); crate::paths::install_id(&state.data_dir) };
+        let wanted_06 = line_06_wanted(&data_dir, data_key.as_ref(), own_install_id.as_deref());
         crate::move_07::record_line_06_decision(&data_dir, wanted_06);
         let handle = match start_holochain_07_only(&app_handle, &data_dir, &resource_dir, &passphrase, &conductor_seed, &conductor_tag).await {
             Ok(h) => h,

@@ -500,7 +500,7 @@ fn now_ms() -> Result<u64, String> {
 
 /// What to store. `id` / `updated_at` default to a fresh record's; an
 /// import passes the values the record already had.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct StoreSpec {
     pub entry_type: String,
     pub body: serde_json::Value,
@@ -576,12 +576,48 @@ pub(crate) static WRITE_WITHOUT_DEVICE: std::sync::atomic::AtomicBool = std::syn
 
 /// Seal one version and write it at the shared base of the identity's
 /// active line; `supersedes` retires that earlier version in the same call.
+///
+/// While a moved identity's 0.6 line runs beside its 0.7 primary (a sibling
+/// still on 1.6.1), the same version is written to the 0.6 cell too, so
+/// that sibling holds it: a record written only on 0.7 had no second holder
+/// until the household updated, and a reset of this device lost it (the
+/// beta9 mixed leg). The mirror is best effort and idempotent - the carry
+/// (0.6 → 0.7, by logical id and version time) sees it as present.
 pub(crate) async fn sealed_store_spec(
     state: &Arc<AppState>,
     spec: StoreSpec,
     supersedes: Option<holochain_types::prelude::ActionHash>,
 ) -> Result<String, String> {
-    sealed_store_spec_on(state, crate::hc::active_line(state), spec, supersedes).await
+    let active = crate::hc::active_line(state);
+    let mirror = (active == Line::V07 && crate::hc::line_ports(state, Line::V06).is_ok()).then(|| spec.clone());
+    let stored = sealed_store_spec_on(state, active, spec, supersedes).await?;
+    if let Some(spec) = mirror {
+        if let Err(e) = mirror_to_06(state, spec).await {
+            log::info!("[records] a version was not mirrored to the 0.6 line (carried later or by the other device's update): {}", e.chars().take(140).collect::<String>());
+        }
+    }
+    Ok(stored)
+}
+
+/// Write one version to the 0.6 cell as the device that wrote it on 0.7,
+/// superseding the version of that logical id the 0.6 cell holds when that
+/// one is older; nothing when the 0.6 cell already holds this version or a
+/// newer one (a sibling on 1.6.1 edited it since).
+async fn mirror_to_06(state: &Arc<AppState>, spec: StoreSpec) -> Result<(), String> {
+    use holochain_types::prelude::ActionHash;
+    let id = spec.id.clone().unwrap_or_else(|| derived_logical_id(&spec.entry_type, spec.created_at));
+    let version_time = spec.updated_at.unwrap_or(spec.created_at);
+    let held_06 = sealed_held_on(state, Line::V06).await?;
+    let supersedes = match held_06.get(&id) {
+        Some(held) if held.payload.version_time() >= version_time => return Ok(()),
+        Some(held) if held.action_hash.len() == 39 => Some(ActionHash::from_raw_39(held.action_hash.clone())),
+        _ => None,
+    };
+    let entry_type = spec.entry_type.clone();
+    let device = if WRITE_WITHOUT_DEVICE.load(std::sync::atomic::Ordering::SeqCst) { None } else { crate::paths::install_id(&state.data_dir) };
+    sealed_store_spec_as(state, Line::V06, spec, supersedes, device).await?;
+    log::info!("[records] {} mirrored to the 0.6 line for a device still on it", entry_type);
+    Ok(())
 }
 
 /// `sealed_store_spec` on a named line (the move writes to 0.7 while the

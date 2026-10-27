@@ -131,6 +131,11 @@ struct Arrived {
 }
 
 impl Lane {
+    /// The lines this lane was opened on.
+    pub fn lines(&self) -> Vec<Line> {
+        self.ends.iter().map(|e| e.line).collect()
+    }
+
     /// Open the lane: let sibling devices deliver pieces, and listen, on
     /// every line that runs.
     pub async fn open(state: &Arc<AppState>) -> Result<Arc<Lane>, String> {

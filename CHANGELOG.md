@@ -15,6 +15,17 @@ What the automated legs found on beta9.
   round attached the old network's line to look for older records, and
   that start made a fresh connection origin the running new-network
   conductor did not accept. The attached line keeps the origin in force.
+- A device on 1.7.0 with another device still on 1.6.1 was not listed by
+  that device, and the 1.6.1 device's app backups never reached it. Its
+  device record now goes to the old network's line every round while that
+  line runs, and the backup lane listens on a line that comes up later.
+- Closing the Vault within a minute of the move made the next start bring
+  the old network's line back for nothing: this device's own record,
+  carried with the old generation, was read as a device still on it.
+- A record written on 1.7.0 while another device was still on 1.6.1 had no
+  second copy anywhere until that device updated. While the old network's
+  line runs beside the new one, every private record and backup is written
+  to both, so the 1.6.1 device holds it too and a reset recovers it.
 
 ## [1.7.0-beta9] - 2026-10-27
 

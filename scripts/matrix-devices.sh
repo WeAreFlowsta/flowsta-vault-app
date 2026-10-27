@@ -26,6 +26,12 @@ VAULT_MATRIX_MIXED="${LEGACY_A_BIN:+1}" VAULT_MATRIX_PORT=$A VAULT_MATRIX_RESTOR
 rc=$?
 echo "== leg rc=$rc $(date -u +%H:%M:%S)"
 grep -E 'RESULT|✗' "$1/matrix-devices.log" | head -20
-killtests() { for pid in $(pgrep -x flowsta-vault); do case "$(readlink /proc/$pid/exe 2>/dev/null)" in *target/debug*) kill $pid 2>/dev/null;; esac; done; }
+# Test instances: the 1.7.0 build under target/debug and, on a mixed run, the
+# 1.6.1 build in LEGACY_A_BIN - plus the conductors and key stores they left.
+killtests() {
+  for pid in $(pgrep -x flowsta-vault); do case "$(readlink /proc/$pid/exe 2>/dev/null)" in *target/debug*|${LEGACY_A_BIN:+$LEGACY_A_BIN*}) kill $pid 2>/dev/null;; esac; done
+  sleep 2
+  for pid in $(pgrep -f "flowsta-vault-md-[cd]/"); do [ "$pid" != "$$" ] && kill -9 $pid 2>/dev/null; done
+}
 killtests; sleep 3; killtests
 exit $rc

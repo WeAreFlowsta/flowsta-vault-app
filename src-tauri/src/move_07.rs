@@ -997,11 +997,26 @@ mod tests {
         assert_eq!(crate::signing_07::linked_signatures(state, &[web_key.clone()]).await.unwrap().len(), 2, "carrying the web key's records again adds nothing");
         assert_eq!(crate::signing_07::own_signatures(state).await.unwrap().len(), 3, "carries are idempotent");
 
-        // ── After the flip: writes go to 0.7, 0.6 is untouched ──
+        // ── After the flip: writes go to 0.7 and, while the 0.6 line still
+        // runs (a sibling on 1.6.1), the same version is mirrored to 0.6 so
+        // that sibling holds it; the next pass finds it present, not new ──
         crate::sealed::sealed_store_inner(state, "login_activity".into(), serde_json::json!({ "after": true }), vec![], 5_000).await.unwrap();
         crate::sealed::forget_recent_versions();
         assert_eq!(crate::sealed::sealed_held_on(state, Line::V07).await.unwrap().len(), 44);
-        assert_eq!(latest_versions(crate::sealed::sealed_versions_on(state, Line::V06).await.unwrap()).0.len(), 43, "nothing new on 0.6");
+        let (winners_06_after, _) = latest_versions(crate::sealed::sealed_versions_on(state, Line::V06).await.unwrap());
+        assert_eq!(winners_06_after.len(), 44, "the write after the flip is mirrored to 0.6");
+        let mirrored = winners_06_after.iter().find(|v| v.payload.created_at == 5_000).expect("the mirrored version on 0.6");
+        assert_eq!(mirrored.payload.logical_id(), "login_activity:5000");
+        assert_eq!(mirrored.payload.version_time(), 5_000);
+        let after_mirror = run_pass(state, "after the mirror").await;
+        assert_eq!((after_mirror.private_written, after_mirror.private_present), (0, 44), "the mirrored version counts as present, nothing is carried back");
+        // An edit of the mirrored record supersedes the 0.6 copy too: still one winner per logical id.
+        let edited = crate::sealed::sealed_store_spec(state, StoreSpec { entry_type: "login_activity".into(), body: serde_json::json!({ "after": "edited" }), refs: vec![], created_at: 5_000, id: Some("login_activity:5000".into()), updated_at: Some(5_500), deleted: false }, None).await.unwrap();
+        let _ = edited;
+        crate::sealed::forget_recent_versions();
+        let (winners_06_edit, _) = latest_versions(crate::sealed::sealed_versions_on(state, Line::V06).await.unwrap());
+        assert_eq!(winners_06_edit.len(), 44, "the edit replaced the mirrored version on 0.6");
+        assert_eq!(winners_06_edit.iter().find(|v| v.payload.logical_id() == "login_activity:5000").unwrap().payload.version_time(), 5_500);
         let (admin_06, app_06) = crate::hc::line_ports(state, Line::V06).unwrap();
         let s4 = crate::commands::commit_signature_to_dht(state, admin_06, app_06, &[4u8; 32], 40_000, Some("authorship"), None, None, None, None, Some("after the move"), None)
             .await
@@ -1131,7 +1146,7 @@ mod tests {
 
         // No 0.6 line, by the identity's own marker; writes go to 0.7 from the first.
         for d in [&a, &b] {
-            assert!(!crate::conductor::line_06_wanted(&d.state.identity_root(), Some(&[36u8; 32])));
+            assert!(!crate::conductor::line_06_wanted(&d.state.identity_root(), Some(&[36u8; 32]), None));
             assert_eq!(crate::hc::active_line(&d.state), Line::V07);
             assert!(crate::hc::line_ports(&d.state, Line::V06).is_err());
             let out = run_pass(&d.state, "born").await;
@@ -1215,7 +1230,7 @@ mod tests {
         *restored.vault_config.lock().unwrap() = Some(config_a.clone());
         *restored.test_conductor_ports_07.lock().unwrap() = *a.state.test_conductor_ports_07.lock().unwrap();
         assert_eq!(crate::hc::active_line(&restored), Line::V07);
-        assert!(!crate::conductor::line_06_wanted(&restored.identity_root(), Some(&[36u8; 32])), "nothing owed, nothing held: 0.7 first");
+        assert!(!crate::conductor::line_06_wanted(&restored.identity_root(), Some(&[36u8; 32]), None), "nothing owed, nothing held: 0.7 first");
         crate::sealed::forget_recent_versions();
         assert_eq!(line_06_wanted_now(&restored).await, Some(false), "every other device it sees is on 0.7");
         // A record of a device still on 1.6.1 (as the catch-up would carry it) changes the answer.
@@ -1278,18 +1293,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let key = [40u8; 32];
         // No marker: an identity from before 1.7.0 that has not moved - 0.6 is its primary.
-        assert!(crate::conductor::line_06_wanted(&dir, Some(&key)));
+        assert!(crate::conductor::line_06_wanted(&dir, Some(&key), None));
         // Born: never.
         mark_born(&dir).unwrap();
         assert!(born_on_07(&dir) && moved(&dir));
-        assert!(!crate::conductor::line_06_wanted(&dir, Some(&key)));
+        assert!(!crate::conductor::line_06_wanted(&dir, Some(&key), None));
         // Restored from a web account: the web-era carry is owed → wanted.
         mark_restored(&dir, true).unwrap();
         assert!(marker(&dir).unwrap().restored && !marker(&dir).unwrap().web_era_carried);
-        assert!(crate::conductor::line_06_wanted(&dir, Some(&key)));
+        assert!(crate::conductor::line_06_wanted(&dir, Some(&key), None));
         // Restored, nothing owed, nothing held yet: 0.7 first; the first round decides.
         mark_restored(&dir, false).unwrap();
-        assert!(!crate::conductor::line_06_wanted(&dir, Some(&key)));
+        assert!(!crate::conductor::line_06_wanted(&dir, Some(&key), None));
         record_line_06_decision(&dir, false);
         assert_eq!(marker(&dir).unwrap().line_06_needed, Some(false));
         let _ = std::fs::remove_dir_all(&dir);

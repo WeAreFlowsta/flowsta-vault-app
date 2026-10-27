@@ -447,13 +447,23 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// This device's end of the lane, opened when needed and again when the
-/// conductor it was opened on has gone.
+/// This device's end of the lane, opened when needed, again when the
+/// conductor it was opened on has gone, and again when the set of running
+/// lines changed: a 0.6 line attached a minute after the start (a sibling
+/// on 1.6.1) must be listened on too, or that sibling's pieces and
+/// announcements never arrive here (the beta9 mixed leg).
 pub(crate) async fn lane(state: &Arc<crate::commands::AppState>) -> Result<Arc<crate::backup_lane::Lane>, String> {
     let mut slot = state.backup_lane.lock().await;
+    let running: Vec<crate::hc::Line> = [crate::hc::Line::V06, crate::hc::Line::V07]
+        .into_iter()
+        .filter(|l| crate::hc::line_ports(state, *l).is_ok())
+        .collect();
     if let Some(lane) = slot.as_ref() {
-        if lane.alive().await {
+        if lane.lines() == running && lane.alive().await {
             return Ok(lane.clone());
+        }
+        if lane.lines() != running {
+            log::info!("[backups] the lane reopens: the lines changed ({:?} -> {:?})", lane.lines(), running);
         }
     }
     let lane = crate::backup_lane::Lane::open(state).await?;

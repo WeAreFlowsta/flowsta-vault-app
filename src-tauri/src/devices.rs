@@ -740,8 +740,11 @@ pub async fn publish_own(state: &Arc<AppState>) -> Result<bool, String> {
     let written = publish_own_on(state, active).await?;
     // While a moved identity's 0.6 line runs, its device record goes there
     // too: a device still on 1.6.1 then lists this one as needing the
-    // update to sync, instead of a record that goes stale.
-    if written && active == crate::hc::Line::V07 && crate::hc::line_ports(state, crate::hc::Line::V06).is_ok() {
+    // update to sync, instead of a record that goes stale. Checked against
+    // the 0.6 cell on its own, every round: a 0.6 line attached after this
+    // device wrote its 0.7 record (a sibling on 1.6.1 found a minute in)
+    // holds no record of it yet (the beta9 mixed leg).
+    if active == crate::hc::Line::V07 && crate::hc::line_ports(state, crate::hc::Line::V06).is_ok() {
         if let Err(e) = publish_own_on(state, crate::hc::Line::V06).await {
             log::info!("[devices] this device's record was not written on the 0.6 line too: {}", e.chars().take(120).collect::<String>());
         }

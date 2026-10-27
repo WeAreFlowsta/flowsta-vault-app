@@ -1443,7 +1443,10 @@ async function devicesLeg() {
   // Real records only: a joined device lists itself as "being set up" before its own record exists.
   const written = async (x) => ((await op(x, { op: 'list' })).devices || []).filter((d) => d.state !== 'this_device_setting_up').length;
   if (process.env.VAULT_MATRIX_MIXED === '1') {
-    record('mixed: B lists two devices (A, on 1.6.1, lists B only once it updates - records flow 0.6 → 0.7 only)', await until(async () => (await written(b)) === 2, 300), `A ${await written(a)}, B ${await written(b)}`);
+    // B's device record goes to the 0.6 line too while that line runs, so A
+    // (1.6.1) lists B as a device needing the update; private records and
+    // signatures flow 0.6 → 0.7 only.
+    record("mixed: both list two devices (B's record reaches A through the 0.6 line)", await until(async () => (await written(a)) === 2 && (await written(b)) === 2, 360), `A ${await written(a)}, B ${await written(b)}`);
   } else {
     record('both list two devices', await until(async () => (await written(a)) === 2 && (await written(b)) === 2, 180));
   }
@@ -1514,8 +1517,9 @@ async function devicesLeg() {
   const unlocked = await vaultFetch(a, '/dev/unlock', { method: 'POST' });
   record('A unlocks onto the running conductor', unlocked.status === 200 && (await op(a, { op: 'status' })).conductor?.status === 'ready', `${Date.now() - t0} ms`);
   record('A unlocked: the earlier web key is its own (none), not a leftover', (await op(a, { op: 'status' })).earlier_web_key == null);
-  if (process.env.VAULT_MATRIX_MIXED === '1') record("mixed: A (1.6.1) does not see B's record written on 0.7 - by design", true);
-  else record("A: B's record written while it was locked is there", await until(async () => ((await op(a, { op: 'notes' })).notes || []).some((n) => n.text === 'from B, while A was locked'), 60));
+  // B's private records are mirrored to the 0.6 line while a sibling is on
+  // it, so A (1.6.1) holds them too (a reset of B then recovers them).
+  record("A: B's record written while it was locked is there", await until(async () => ((await op(a, { op: 'notes' })).notes || []).some((n) => n.text === 'from B, while A was locked'), process.env.VAULT_MATRIX_MIXED === '1' ? 240 : 60));
 
   // 6. Remove. The removal holds even after the removed device's own round.
   const removed = await op(a, { op: 'remove', install_id: installB });
@@ -1537,6 +1541,8 @@ async function devicesLeg() {
   const door = await vaultFetch(b, '/dev/devices', { method: 'POST', body: { op: 'phrase-door', phrase, password: pwB } });
   record('B: the recovery phrase adds it back although the account has removed a device', door.status === 200 && door.data?.agent_pub_key === stA.agent_pub_key, JSON.stringify(door.data));
   record('B: registered with the account again', await until(async () => (await op(b, { op: 'standing' })).standing?.device === 'registered', 120));
+  // On a mixed pair both notes come back through the 0.6 line: A's own, and
+  // B's earlier note that B mirrored to 0.6 before the reset (A held it).
   record('B: its records arrive again', await until(async () => ((await op(b, { op: 'notes' })).notes || []).length >= 2, process.env.VAULT_MATRIX_MIXED === '1' ? 720 : 300));
   record('A: lists B again as ONE device, not removed', await until(async () => { await op(a, { op: 'round' }); const rows = ((await op(a, { op: 'list' })).devices || []).filter((d) => d.install_id === installB); return rows.length === 1 && rows[0].state !== 'removed'; }, 300));
   record('A: is told a device was added elsewhere', await until(async () => { await op(a, { op: 'round' }); return ((await vaultFetch(a, '/dev/status')).data?.activity || []).includes('device_added_elsewhere'); }, 120));
