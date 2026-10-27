@@ -5,7 +5,7 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.0-beta13] - 2026-10-28
 
 What the beta12 restore of an identity born in the Vault found (Billz,
 restored on a second device).
