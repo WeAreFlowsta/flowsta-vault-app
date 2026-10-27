@@ -1470,6 +1470,10 @@ async function devicesLeg() {
   const signedB = await signOn(b, hashSignedOnB);
   record('B: the added device signs a file', signedB.stage === 'done' && !!signedB.result?.action_hash, JSON.stringify(signedB).slice(0, 200));
   record('B: lists both signatures', await until(async () => { const l = await sigsOn(b); return l.some((x) => x.file_hash === hashSignedOnA) && l.some((x) => x.file_hash === hashSignedOnB); }, 120));
+  // One row per original on the list apps read: a carried record appears
+  // once however many devices carried it (Team Flowsta, beta13: three).
+  const oneRowPerOriginal = (l) => { const seen = new Set(); return l.every((x) => !x.original_action_hash || (!seen.has(x.original_action_hash) && seen.add(x.original_action_hash))); };
+  record('B: no two rows name the same original', oneRowPerOriginal(await sigsOn(b)), JSON.stringify((await sigsOn(b)).map((x) => [x.action_hash?.slice(0, 8), x.original_action_hash?.slice(0, 8) || null])));
   if (process.env.VAULT_MATRIX_MIXED === '1') record("mixed: A (1.6.1) does not see B's 0.7 signature until it updates - by design", true);
   else record('A: lists the signature made on B', await until(async () => (await sigsOn(a)).some((x) => x.file_hash === hashSignedOnB), 300));
   const countA = (await sigsOn(a)).length, countB = (await sigsOn(b)).length;
@@ -1563,6 +1567,7 @@ async function devicesLeg() {
   record('B: restored from the phrase, it stops reading as being set up once its round has everything', (await setupOf(b)).joined === true && await until(async () => (await setupOf(b)).pending === false, process.env.VAULT_MATRIX_MIXED === '1' ? 720 : 420), JSON.stringify(await setupOf(b)));
   record('A: lists B again as ONE device, not removed', await until(async () => { await op(a, { op: 'round' }); const rows = ((await op(a, { op: 'list' })).devices || []).filter((d) => d.install_id === installB); return rows.length === 1 && rows[0].state !== 'removed'; }, 300));
   record('A: is told a device was added elsewhere', await until(async () => { await op(a, { op: 'round' }); return ((await vaultFetch(a, '/dev/status')).data?.activity || []).includes('device_added_elsewhere'); }, 120));
+  record('B: after the phrase re-add, still no two rows name the same original', await until(async () => (await sigsOn(b)).length > 0 && oneRowPerOriginal(await sigsOn(b)), 120), JSON.stringify((await sigsOn(b)).map((x) => [x.action_hash?.slice(0, 8), x.original_action_hash?.slice(0, 8) || null])));
 }
 
 // ───────────────────────── main ─────────────────────────

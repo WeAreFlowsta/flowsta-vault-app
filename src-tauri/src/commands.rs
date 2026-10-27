@@ -6800,7 +6800,7 @@ pub(crate) async fn open_signing_conductor(
 /// records the forward `supersedes` link; the frontend needs the reverse
 /// so amended records drop out of the active list. Scoped within whatever
 /// batch is passed in.
-fn apply_superseded_by(signatures: &mut [serde_json::Value]) {
+pub(crate) fn apply_superseded_by(signatures: &mut [serde_json::Value]) {
     // A record carried from the old line keeps the `supersedes` it was
     // signed with, which names the OLD hash of the record it amended; that
     // record's carried copy is the row here, under its new hash. Re-point

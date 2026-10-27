@@ -4447,6 +4447,10 @@ async fn signatures_handler(
             .map(|h| !own_hashes.contains(h))
             .unwrap_or(true)
     }));
+    // One row per original across the two lists (every device carried the
+    // same records), and the amendment chain read over the whole.
+    let mut signatures = crate::signing_07::one_copy_per_original(signatures);
+    crate::commands::apply_superseded_by(&mut signatures);
 
     Ok(axum::response::IntoResponse::into_response(Json(
         serde_json::json!({ "source": "vault", "signatures": signatures }),
