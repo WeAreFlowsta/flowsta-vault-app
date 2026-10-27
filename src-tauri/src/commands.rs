@@ -6767,6 +6767,22 @@ pub(crate) async fn open_signing_conductor(
 /// so amended records drop out of the active list. Scoped within whatever
 /// batch is passed in.
 fn apply_superseded_by(signatures: &mut [serde_json::Value]) {
+    // A record carried from the old line keeps the `supersedes` it was
+    // signed with, which names the OLD hash of the record it amended; that
+    // record's carried copy is the row here, under its new hash. Re-point
+    // first, or an amendment and its original both show as current (seen
+    // on beta8 for a migrated identity's web-era pair).
+    let carried: std::collections::HashMap<String, String> = signatures.iter()
+        .filter_map(|s| Some((s.get("original_action_hash")?.as_str()?.to_string(), s.get("action_hash")?.as_str()?.to_string())))
+        .collect();
+    if !carried.is_empty() {
+        for sig in signatures.iter_mut() {
+            let Some(sup) = sig.get("supersedes").and_then(|v| v.as_str()).map(String::from) else { continue };
+            if let Some(new_hash) = carried.get(&sup) {
+                sig["supersedes"] = serde_json::Value::String(new_hash.clone());
+            }
+        }
+    }
     let map: std::collections::HashMap<String, String> = signatures.iter()
         .filter_map(|s| {
             let action_hash = s.get("action_hash")?.as_str()?.to_string();
@@ -9256,5 +9272,37 @@ mod backups_retry_tests {
         assert!(backups_retry_due(), "progress: each minute again");
         note_backups_waiting(0, 2);
         assert!(!backups_retry_due(), "all here");
+    }
+}
+
+#[cfg(test)]
+mod superseded_by_tests {
+    use super::apply_superseded_by;
+
+    fn sig(hash: &str, supersedes: Option<&str>, original: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::json!({ "action_hash": hash, "supersedes": supersedes });
+        if let Some(o) = original {
+            v["original_action_hash"] = serde_json::json!(o);
+        }
+        v
+    }
+
+    #[test]
+    fn an_amendment_folds_its_original_on_one_line() {
+        let mut sigs = vec![sig("aa", None, None), sig("bb", Some("aa"), None)];
+        apply_superseded_by(&mut sigs);
+        assert_eq!(sigs[0]["superseded_by"], "bb");
+        assert!(sigs[1].get("superseded_by").is_none());
+    }
+
+    #[test]
+    fn a_carried_amendment_folds_its_carried_original() {
+        // Both carried from the old line: the amendment's supersedes still
+        // names the original's OLD hash.
+        let mut sigs = vec![sig("a7", None, Some("aa")), sig("b7", Some("aa"), Some("bb"))];
+        apply_superseded_by(&mut sigs);
+        assert_eq!(sigs[1]["supersedes"], "a7");
+        assert_eq!(sigs[0]["superseded_by"], "b7");
+        assert!(sigs[1].get("superseded_by").is_none());
     }
 }
