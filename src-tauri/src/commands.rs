@@ -6656,6 +6656,9 @@ pub(crate) fn live_passphrase(state: &AppState) -> Option<String> {
 
 pub(crate) fn persist_web_agent_pub_key(state: &Arc<AppState>, key_b64: &str) {
     *state.linked_web_agent_key.lock().unwrap() = Some(key_b64.to_string());
+    // A marker written before this key was known says nothing is owed from
+    // the web era; the key's signatures on 0.6 are carried from here.
+    crate::move_07::owe_web_era_carry(&state.identity_root());
 
     let vault_path = state.vault_path.lock().unwrap().clone();
     let mut config = state.vault_config.lock().unwrap();

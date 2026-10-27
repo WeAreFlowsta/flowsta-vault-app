@@ -128,6 +128,28 @@ pub fn mark_restored(root: &Path, web_key_present: bool) -> Result<(), String> {
     crate::vault::write_atomic(&crate::paths::moved_07_path(root), &bytes).map_err(|e| e.to_string())
 }
 
+/// The identity's web key became known after its marker was written (an
+/// account brought over on this version through an existing vault, or a
+/// restored identity whose web key the auto-link found later): the web-era
+/// carry is owed now. Nothing when the marker already carried signatures,
+/// is born, or is absent. Returns whether the marker changed.
+pub fn owe_web_era_carry(root: &Path) -> bool {
+    let Some(m) = marker(root) else { return false };
+    if m.born || !m.web_era_carried || m.web_era_signatures > 0 {
+        return false;
+    }
+    match update_marker(root, |m| m.web_era_carried = false) {
+        Ok(()) => {
+            log::info!("[move] the identity's web key is known now - its web-era signatures will be carried from 0.6");
+            true
+        }
+        Err(e) => {
+            log::warn!("[move] the web-era carry was not recorded as owed: {}", e);
+            false
+        }
+    }
+}
+
 /// What a start decided about the 0.6 line, kept in the marker.
 pub fn record_line_06_decision(root: &Path, wanted: bool) {
     if let Err(e) = update_marker(root, |m| m.line_06_needed = Some(wanted)) {
@@ -1284,6 +1306,23 @@ mod tests {
         // A pre-1.7.0 marker shape (no `born`) reads as not born.
         std::fs::write(crate::paths::moved_07_path(&dir), br#"{"v":1,"moved_at_ms":1,"vault_version":"1.7.0","private_records":0,"signatures":0,"revocations":0,"thumbnails":0}"#).unwrap();
         assert!(!born_on_07(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_web_key_learned_after_the_marker_owes_the_web_era_carry() {
+        let dir = std::env::temp_dir().join(format!("fv-move-owe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!owe_web_era_carry(&dir), "no marker: nothing to change");
+        mark_born(&dir).unwrap();
+        assert!(!owe_web_era_carry(&dir), "born: never");
+        mark_restored(&dir, false).unwrap();
+        assert!(marker(&dir).unwrap().web_era_carried);
+        assert!(owe_web_era_carry(&dir), "restored without a web key, then the key is known: owed");
+        assert!(!marker(&dir).unwrap().web_era_carried);
+        assert!(!owe_web_era_carry(&dir), "already owed: no change");
+        update_marker(&dir, |m| { m.web_era_carried = true; m.web_era_signatures = 3; }).unwrap();
+        assert!(!owe_web_era_carry(&dir), "already carried signatures: left alone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

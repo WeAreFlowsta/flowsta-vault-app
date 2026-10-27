@@ -26,6 +26,9 @@ What the automated legs found on beta9.
   second copy anywhere until that device updated. While the old network's
   line runs beside the new one, every private record and backup is written
   to both, so the 1.6.1 device holds it too and a reset recovers it.
+- An identity whose web key became known only after its first start on
+  1.7.0 never carried that key's signatures from the old network. The
+  moment the key is known, the carry is owed and runs on the next round.
 
 ## [1.7.0-beta9] - 2026-10-27
 

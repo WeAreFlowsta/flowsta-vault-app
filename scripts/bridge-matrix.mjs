@@ -1651,7 +1651,10 @@ async function webEraLeg() {
     await new Promise((r) => setTimeout(r, 5000));
   }
   const counts = foldCounts(sigs);
-  record('web-era signatures read on the 0.7 line (the migrated identity has some)', sigs.length > 0 && sigs.every((x) => /0\.7/.test(x.signing_app_id || '')), `${sigs.length} rows, apps ${[...new Set(sigs.map((x) => x.signing_app_id))].join(',')}`);
+  // The carry pass says how many web-era records the 0.6 line held; the 0.7
+  // read must list that many (an account with none reads none).
+  const pass = (await devOf(port)).move?.last_pass || {};
+  record('the web-era carry pass ran and the 0.7 read lists what it carried', typeof pass.web_era_06 === 'number' && pass.web_era_complete === true && sigs.length === pass.web_era_06 && sigs.every((x) => /0\.7/.test(x.signing_app_id || '')), `${sigs.length} rows on 0.7; pass web_era_06=${pass.web_era_06} carried=${pass.web_era_carried} complete=${pass.web_era_complete}`);
   record('every amendment folds onto a listed original (no supersedes names a hash that is not in the list)', counts.dangling.length === 0, JSON.stringify(counts));
   const expect = (process.env.VAULT_MATRIX_WEBERA_EXPECT || '').split(',').map((n) => Number(n));
   if (expect.length === 2 && expect.every((n) => Number.isFinite(n) && n >= 0) && process.env.VAULT_MATRIX_WEBERA_EXPECT) {
