@@ -46,15 +46,17 @@ pub(crate) fn removal_statement(identity_public: &[u8; 32], device_key_32: &[u8;
 /// Publish the identity's enrollment key on identity 1.5, once per device
 /// (a marker beside the identity's files; the first publish also looks on
 /// the network so a second device of the identity does not add a second
-/// first key). The 0.7 line must be up; otherwise nothing happens and the
-/// next registration tries again.
-pub(crate) async fn publish_enrollment_key(state: &Arc<AppState>, identity_seed: &[u8; 32], enrollment_seed: &[u8; 32], created_at_ms: i64) -> Result<bool, String> {
+/// first key). Only the key's public half is needed: the statement is
+/// signed by the identity key. The 0.7 line must be up; otherwise the
+/// registration keeps a pending note and the devices round tries again
+/// (`device_registry::publish_pending_enrollment`).
+pub(crate) async fn publish_enrollment_key(state: &Arc<AppState>, identity_seed: &[u8; 32], enrollment_public: &[u8; 32], created_at_ms: i64) -> Result<bool, String> {
     let marker = state.identity_root().join("enrollment-published-07");
     if marker.exists() {
         return Ok(false);
     }
     let identity = identity_agent(identity_seed);
-    let enrollment_public = public_key_of_seed(enrollment_seed);
+    let enrollment_public = *enrollment_public;
     let (client, role) = identity_client(state).await?;
     // Already there (this identity's other device published it)?
     #[derive(serde::Deserialize)]

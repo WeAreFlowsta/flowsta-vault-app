@@ -5,6 +5,24 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0-beta9] - 2026-10-27
+
+What the beta8 runs found.
+
+### Fixed
+- An amendment that moved to the new network showed as its own signature
+  beside the one it amended, and the Overview counted both. The moved
+  amendment still named the old copy of its original; the fold follows the
+  move now, so Sign It shows the amendment with its original folded under
+  it and the Overview counts one signature and one amendment.
+- A new identity's enrollment key was not published on the new network.
+  The identity registered with its account a moment before its network
+  came up, the publish failed once and was not tried again. It is kept
+  and published on the next devices round.
+- A new identity on one device asked the network for its own signatures a
+  second time, as if it were another device's, on every refresh. It asks
+  only for its other devices and its web key now.
+
 ## [1.7.0-beta8] - 2026-10-27
 
 What the first beta7 run found.

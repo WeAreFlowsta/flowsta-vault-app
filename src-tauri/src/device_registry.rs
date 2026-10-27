@@ -421,10 +421,18 @@ pub async fn register_this_device(state: &Arc<AppState>, api_url: &str) -> Resul
     match sent {
         Ok(known) => {
             // The same statement on identity 1.5, where readers need no API.
+            // A new identity registers before its 0.7 line is up (beta8, a
+            // Mac): the public half and the time are kept beside the
+            // identity's files and the devices round publishes them.
             if let Some(seed) = enrollment_seed.as_ref() {
-                match crate::identity_07::publish_enrollment_key(state, &keys.identity_seed, seed, now_ms() as i64).await {
+                let enrollment_public = public_key_of_seed(seed);
+                let created_at_ms = now_ms() as i64;
+                match crate::identity_07::publish_enrollment_key(state, &keys.identity_seed, &enrollment_public, created_at_ms).await {
                     Ok(_) => {}
-                    Err(e) => log::info!("[identity 1.5] enrollment key not published yet: {}", e.chars().take(140).collect::<String>()),
+                    Err(e) => {
+                        log::info!("[identity 1.5] enrollment key not published yet: {} - the devices round tries again", e.chars().take(140).collect::<String>());
+                        hold_pending_enrollment(state, &enrollment_public, created_at_ms);
+                    }
                 }
             }
             forget_enrollment_seed();
@@ -438,6 +446,57 @@ pub async fn register_this_device(state: &Arc<AppState>, api_url: &str) -> Resul
             }
             Err(e)
         }
+    }
+}
+
+/// The enrollment key's public half and the time of its statement, kept
+/// beside the identity's files while the identity 1.5 publish waits for the
+/// 0.7 line. Nothing secret: the statement is signed by the identity key,
+/// which the unlocked vault holds. Removed once published.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingEnrollment {
+    enrollment_public: String,
+    created_at_ms: i64,
+}
+
+fn pending_enrollment_path(state: &AppState) -> std::path::PathBuf {
+    state.identity_root().join("enrollment-pending-07")
+}
+
+pub(crate) fn hold_pending_enrollment(state: &AppState, enrollment_public: &[u8; 32], created_at_ms: i64) {
+    let note = PendingEnrollment { enrollment_public: base64_standard_encode(enrollment_public), created_at_ms };
+    if let Ok(json) = serde_json::to_vec(&note) {
+        if let Err(e) = std::fs::write(pending_enrollment_path(state), json) {
+            log::warn!("[identity 1.5] pending enrollment note not kept: {}", e);
+        }
+    }
+}
+
+/// Publish the enrollment key a registration could not (the 0.7 line was
+/// not up): once per devices round until it is on identity 1.5.
+pub(crate) async fn publish_pending_enrollment(state: &Arc<AppState>) {
+    let Some(keys) = keys(state) else { return };
+    publish_pending_enrollment_with(state, &keys.identity_seed).await;
+}
+
+pub(crate) async fn publish_pending_enrollment_with(state: &Arc<AppState>, identity_seed: &[u8; 32]) {
+    let path = pending_enrollment_path(state);
+    let Ok(bytes) = std::fs::read(&path) else { return };
+    let Ok(note) = serde_json::from_slice::<PendingEnrollment>(&bytes) else {
+        log::warn!("[identity 1.5] pending enrollment note unreadable - dropped");
+        let _ = std::fs::remove_file(&path);
+        return;
+    };
+    let Ok(public) = crate::commands::base64_standard_decode(&note.enrollment_public).and_then(|v| <[u8; 32]>::try_from(v).map_err(|_| ())) else {
+        log::warn!("[identity 1.5] pending enrollment note unreadable - dropped");
+        let _ = std::fs::remove_file(&path);
+        return;
+    };
+    match crate::identity_07::publish_enrollment_key(state, identity_seed, &public, note.created_at_ms).await {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&path);
+        }
+        Err(e) => log::info!("[identity 1.5] enrollment key not published yet: {}", e.chars().take(140).collect::<String>()),
     }
 }
 
@@ -581,6 +640,27 @@ mod tests {
             ["capabilities", "device_key", "device_signature", "enrollment_signature", "identity_key", "identity_signature", "install_id", "timestamp"]
         );
         assert!(verifies(&ENROLLMENT, &message, with_phrase["enrollment_signature"].as_str().unwrap()));
+    }
+
+    /// The identity 1.5 publish a registration could not make (the 0.7 line
+    /// was not up) is kept as a note - public key and time only - that the
+    /// devices round publishes; it stays until a publish succeeds.
+    #[tokio::test]
+    async fn a_pending_enrollment_note_waits_for_the_0_7_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf()));
+        std::fs::create_dir_all(state.identity_root()).unwrap();
+        let public = public_key_of_seed(&ENROLLMENT);
+        hold_pending_enrollment(&state, &public, 1_790_000_000_000);
+        let note: PendingEnrollment = serde_json::from_slice(&std::fs::read(pending_enrollment_path(&state)).unwrap()).unwrap();
+        assert_eq!(note.enrollment_public, base64_standard_encode(&public));
+        assert_eq!(note.created_at_ms, 1_790_000_000_000);
+        // No 0.7 line: the note stays for the next round.
+        publish_pending_enrollment_with(&state, &IDENTITY).await;
+        assert!(pending_enrollment_path(&state).exists());
+        // A locked vault (no keys) leaves it alone too.
+        publish_pending_enrollment(&state).await;
+        assert!(pending_enrollment_path(&state).exists());
     }
 
     #[test]

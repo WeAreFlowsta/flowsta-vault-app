@@ -1189,9 +1189,15 @@ mod tests {
         assert_eq!(own[0]["signing_app_id"], "flowsta_signing_v1_5@holochain-0.7");
 
         // ── The identity's device statements on identity 1.5 ──
-        let enrollment_seed = crate::key_derivation::new_conductor_seed();
-        assert!(crate::identity_07::publish_enrollment_key(&a.state, &[29u8; 32], &enrollment_seed, 1_790_000_000_000).await.expect("enrollment key published"));
-        assert!(!crate::identity_07::publish_enrollment_key(&a.state, &[29u8; 32], &enrollment_seed, 1_790_000_000_000).await.unwrap(), "published once");
+        let enrollment_public = crate::key_derivation::public_key_of_seed(&crate::key_derivation::new_conductor_seed());
+        // A registration that ran before the 0.7 line was up left a pending
+        // note; the devices round publishes it (beta8, a born identity).
+        crate::device_registry::hold_pending_enrollment(&a.state, &enrollment_public, 1_790_000_000_000);
+        assert!(a.state.identity_root().join("enrollment-pending-07").exists());
+        crate::device_registry::publish_pending_enrollment_with(&a.state, &[29u8; 32]).await;
+        assert!(a.state.identity_root().join("enrollment-published-07").exists(), "pending enrollment key published");
+        assert!(!a.state.identity_root().join("enrollment-pending-07").exists(), "pending note removed once published");
+        assert!(!crate::identity_07::publish_enrollment_key(&a.state, &[29u8; 32], &enrollment_public, 1_790_000_000_000).await.unwrap(), "published once");
         let key_b = crate::key_derivation::public_key_of_seed(&seed_b);
         // A network read on identity 1.5; a cold conductor answers late, the
         // device's round asks again each minute.

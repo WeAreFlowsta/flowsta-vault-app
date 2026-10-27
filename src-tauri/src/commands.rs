@@ -1894,6 +1894,9 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                     // What the 0.6 cells hold and the 0.7 cells do not,
                     // carried over (the move, and the catch-up after it).
                     crate::move_07::schedule_pass(devices_state.clone(), "devices round");
+                    // The enrollment key a registration could not publish
+                    // on identity 1.5 (the 0.7 line was not up yet).
+                    crate::device_registry::publish_pending_enrollment(&devices_state).await;
                     pass += 1;
                     DEVICES_ROUND_EVERY
                 }
@@ -6604,6 +6607,25 @@ async fn identity_device_keys(state: &Arc<AppState>) -> Vec<holochain_types::pre
         .collect()
 }
 
+/// The conductor key this device signs with, in the form the network uses.
+fn own_conductor_key(state: &AppState) -> Option<holochain_types::prelude::AgentPubKey> {
+    let seed = state.vault_config.lock().unwrap().as_ref()?.conductor_seed_bytes()?;
+    Some(holochain_types::prelude::AgentPubKey::from_raw_32(crate::key_derivation::public_key_of_seed(&seed).to_vec()))
+}
+
+/// The other devices' conductor keys: `identity_device_keys` without this
+/// device's own. What this device signed is its own list; asking the
+/// network for it as a linked agent's cost a cold read for nothing and
+/// made a one-device identity look linked (beta8, a born identity).
+async fn other_device_keys(state: &Arc<AppState>) -> Vec<holochain_types::prelude::AgentPubKey> {
+    let own = own_conductor_key(state);
+    identity_device_keys(state)
+        .await
+        .into_iter()
+        .filter(|k| own.as_ref().map(|o| o.get_raw_32() != k.get_raw_32()).unwrap_or(true))
+        .collect()
+}
+
 /// The identity's agent key in the form the network uses, from the unlocked
 /// config. `None` while locked or when the config carries no raw key.
 pub(crate) fn identity_agent_key(state: &AppState) -> Option<holochain_types::prelude::AgentPubKey> {
@@ -6936,7 +6958,7 @@ pub(crate) async fn get_my_linked_signatures_inner(
     // 0.7 line answers for it (beta6 asked only the device keys and showed
     // a migrated identity's web-era signatures as none).
     if crate::hc::line_ports(state, crate::hc::Line::V06).is_err() {
-        let mut keys = identity_device_keys(state).await;
+        let mut keys = other_device_keys(state).await;
         if let Some(cached) = state.linked_web_agent_key.lock().unwrap().clone() {
             match base64_standard_decode(&cached) {
                 Ok(raw) if raw.len() == 39 => {
@@ -6949,11 +6971,13 @@ pub(crate) async fn get_my_linked_signatures_inner(
             }
         }
         if keys.is_empty() {
+            log::info!("[get_my_linked_signatures] one device, no web key - no linked agents by construction (0.7)");
             return Ok(LinkedSignaturesResult { signatures: Vec::new(), has_linked_agents: false });
         }
         log::info!("[get_my_linked_signatures] querying {} linked agent(s) on the 0.7 line", keys.len());
         let mut signatures = crate::signing_07::linked_signatures(state, &keys).await?;
         apply_superseded_by(&mut signatures);
+        log::info!("[get_my_linked_signatures] {} sig(s) on the 0.7 line", signatures.len());
         return Ok(LinkedSignaturesResult { signatures, has_linked_agents: true });
     }
     let (admin_ws, app_port, apps, signing_apps) = open_signing_conductor(state).await?;
@@ -7126,7 +7150,7 @@ async fn get_my_signatures_inner(
     // records from the 0.7 cell, best effort as below.
     if crate::hc::line_ports(state, crate::hc::Line::V06).is_err() {
         let mut signatures = crate::signing_07::own_signatures(state).await?;
-        let keys = identity_device_keys(state).await;
+        let keys = other_device_keys(state).await;
         if !keys.is_empty() {
             match crate::signing_07::linked_signatures(state, &keys).await {
                 Ok(linked) => {
