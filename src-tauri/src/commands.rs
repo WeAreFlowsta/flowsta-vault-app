@@ -2160,9 +2160,11 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
         let marker = crate::paths::setup_done_path(&devices_state.identity_root());
         if joined && !marker.exists() {
             // The other devices' profile (picture included) must have landed
-            // too - gossip can deliver it a pass or two after the rest. If no
-            // such record ever comes (an identity without one), ten minutes
-            // after the first otherwise-complete round is enough waiting.
+            // too - gossip can deliver it a pass or two after the rest. A
+            // sibling that said what it holds counts its profile record in,
+            // so matched counts settle it at once; where no sibling has said,
+            // ten minutes after the first otherwise-complete round is enough
+            // waiting (an identity without a profile record).
             let pending = marker.with_extension("pending");
             let waited_long_enough = std::fs::metadata(&pending)
                 .and_then(|m| m.modified())
@@ -2172,7 +2174,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                 .unwrap_or(false);
             if crate::devices::still_receiving_records(devices_state).await {
                 // Records are still arriving; the backups they list with them.
-            } else if profile_seen || waited_long_enough {
+            } else if profile_seen || waited_long_enough || crate::devices::siblings_matched(devices_state).await {
                 let _ = std::fs::write(&marker, b"");
                 let _ = std::fs::remove_file(&pending);
                 log::info!("This device has everything from the other devices");

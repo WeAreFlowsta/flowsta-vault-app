@@ -5,6 +5,20 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A device that joined an identity kept its "Your private data is on its
+  way" card up for ten minutes after both bars were full, when the identity
+  has no profile record to wait for. The other device's record says how
+  many records it holds, its profile record included, so matched counts
+  end the wait on the next round.
+- A phrase restore showed an unstyled line calling the device the
+  identity's only one, in the seconds before the new network's cell had
+  heard from anyone. The line is gone. The card keeps waiting, and after
+  ten quiet minutes says that no other device has answered yet, with the
+  import door, without claiming to know there is none.
+
 ## [1.7.0-beta10] - 2026-10-27
 
 What the automated legs found on beta9.

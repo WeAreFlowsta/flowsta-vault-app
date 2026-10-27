@@ -589,6 +589,22 @@ pub async fn still_receiving_records(state: &Arc<AppState>) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a settled sibling has said what it holds and this device holds
+/// at least that many records. A sibling's count includes its profile
+/// record if it has one, so matched counts mean nothing is left to wait
+/// for: an identity without a profile record no longer keeps its "on its
+/// way" card up for ten minutes after the bars are full (10-27, Linux).
+pub async fn siblings_matched(state: &Arc<AppState>) -> bool {
+    let mine = own_holds(state).await.records;
+    siblings_matched_in(SIBLING_HOLDS.lock().unwrap().as_ref(), mine)
+}
+
+pub fn siblings_matched_in(siblings: Option<&std::collections::HashMap<String, (Holds, u64)>>, mine: u64) -> bool {
+    let Some(siblings) = siblings else { return false };
+    let settled: Vec<&Holds> = siblings.values().map(|(h, _)| h).filter(|h| !h.setting_up).collect();
+    !settled.is_empty() && settled.iter().all(|h| h.records <= mine)
+}
+
 #[derive(Serialize)]
 pub struct SiblingProgress {
     pub install_id: String,
@@ -799,6 +815,10 @@ pub struct SiblingSync {
     pub other_devices: Vec<String>,
     /// Records written by another device have arrived (anything, not only device records).
     pub records_arrived: bool,
+    /// How long this session has been asking the network (seconds), None
+    /// before the first ask. The Overview changes its card after a long
+    /// silence; a cold cell's empty first answer is not "no other device".
+    pub asked_for_secs: Option<u64>,
 }
 
 pub fn sibling_sync_in(records: &[SealedListItem], me: &str, joined: bool) -> SiblingSync {
@@ -808,7 +828,7 @@ pub fn sibling_sync_in(records: &[SealedListItem], me: &str, joined: bool) -> Si
         .map(|d| d.name)
         .collect();
     let records_arrived = records.iter().any(|r| r.device.as_deref().map(|d| d != me).unwrap_or(false));
-    SiblingSync { joined, other_devices, records_arrived }
+    SiblingSync { joined, other_devices, records_arrived, asked_for_secs: None }
 }
 
 /// For the first minutes after a device joins: what has arrived.
@@ -817,7 +837,9 @@ pub async fn sibling_sync(state: tauri::State<'_, Arc<AppState>>) -> Result<Sibl
     let joined = state.vault_config.lock().unwrap().as_ref().map(|c| c.joined_existing).unwrap_or(false);
     let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
     let records = crate::sealed::sealed_list_inner(&state).await?;
-    Ok(sibling_sync_in(&records, &me, joined))
+    let mut sync = sibling_sync_in(&records, &me, joined);
+    sync.asked_for_secs = session_age().map(|d| d.as_secs());
+    Ok(sync)
 }
 
 /// One row of Settings → Devices.
@@ -1199,12 +1221,30 @@ mod tests {
         };
         let mine = item(DEVICE_ENTRY_TYPE, serde_json::to_value(device("me")).unwrap(), Some("me"));
         let early = sibling_sync_in(&[mine.clone()], "me", true);
-        assert_eq!(early, SiblingSync { joined: true, other_devices: vec![], records_arrived: false });
+        assert_eq!(early, SiblingSync { joined: true, other_devices: vec![], records_arrived: false, asked_for_secs: None });
         let mut other = device("other");
         other.name = "MacBook".into();
         let later = sibling_sync_in(&[mine, item(DEVICE_ENTRY_TYPE, serde_json::to_value(&other).unwrap(), Some("other")), item("user_profile", serde_json::json!({}), Some("other"))], "me", true);
         assert_eq!(later.other_devices, vec!["MacBook".to_string()]);
         assert!(later.records_arrived);
+    }
+
+    #[test]
+    fn setup_is_done_once_a_settled_sibling_holds_no_more_than_this_device() {
+        let holds = |records: u64, setting_up: bool| Holds { records, backups_wanted: 0, backups_pending: 0, setting_up };
+        let map = |entries: Vec<(&str, Holds)>| entries.into_iter().map(|(id, h)| (id.to_string(), (h, 0u64))).collect::<std::collections::HashMap<_, _>>();
+        // Nobody has said what it holds: the ten-minute wait stays.
+        assert!(!siblings_matched_in(None, 8));
+        assert!(!siblings_matched_in(Some(&map(vec![])), 8));
+        // The sibling holds more: still receiving.
+        assert!(!siblings_matched_in(Some(&map(vec![("mac", holds(9, false))])), 8));
+        // Matched: nothing left to wait for, profile record or not.
+        assert!(siblings_matched_in(Some(&map(vec![("mac", holds(8, false))])), 8));
+        assert!(siblings_matched_in(Some(&map(vec![("mac", holds(7, false))])), 8));
+        // A sibling still being set up itself does not settle the question.
+        assert!(!siblings_matched_in(Some(&map(vec![("mac", holds(8, true))])), 8));
+        // Two siblings: every settled one must be matched.
+        assert!(!siblings_matched_in(Some(&map(vec![("mac", holds(8, false)), ("win", holds(12, false))])), 8));
     }
 
     #[test]
