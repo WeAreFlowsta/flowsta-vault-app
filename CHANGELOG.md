@@ -5,6 +5,18 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+What the beta14 harness legs found.
+
+### Fixed
+- A device restored from its phrase could wait five minutes before
+  anything arrived: its first ask of the network for the other devices'
+  records hung for the client's whole request timeout on the cold cell, and
+  the hand-off that tells it where its other devices are waited behind
+  that ask. The ask now gives up after a minute and the round moves on; it
+  asks again on the next round, when the cell is warmer.
+
 ## [1.7.0-beta14] - 2026-10-28
 
 What Eric's beta13 hand pass found.

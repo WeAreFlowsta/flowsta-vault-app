@@ -1131,6 +1131,9 @@ static NETWORK_DEVICE_VERSIONS: std::sync::Mutex<Option<(std::path::PathBuf, Vec
 /// what has been sent to it since; an older record - a sibling that has not
 /// written its own since - would otherwise arrive only with the background
 /// sync. Returns how many versions were read.
+/// How long one ask of the network for the device records may take.
+const ASK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub(crate) async fn fetch_device_records(state: &Arc<AppState>) -> Result<usize, String> {
     let line = crate::hc::active_line(state);
     let data_key = vault_data_key(state)?;
@@ -1138,7 +1141,16 @@ pub(crate) async fn fetch_device_records(state: &Arc<AppState>) -> Result<usize,
     let root = state.identity_root();
     let input = rmp_serde::to_vec_named(&ListAtWire { base, tag_prefix: device_records_tag(&data_key), network: true })
         .map_err(|e| e.to_string())?;
-    let result = sealed_zome_call(state, line, "get_all_sealed_at", input).await?;
+    // A network read on a cold cell can hang for the client's whole
+    // request timeout (304 s on a phrase re-add, 10-27), and this ask is
+    // the first step of the round: everything after it, the rendezvous
+    // hand-off included, waited behind it. A short budget; the round runs
+    // again in a minute and the cell is warmer then.
+    let call = sealed_zome_call(state, line, "get_all_sealed_at", input);
+    let result = match tokio::time::timeout(ASK_WAIT, call).await {
+        Ok(r) => r?,
+        Err(_) => return Err(format!("get_all_sealed_at timed out after {} s", ASK_WAIT.as_secs())),
+    };
     let records = decode_listed(line, &result)?;
     let versions: Vec<StoredVersion> = decode_versions(&records, &data_key)
         .into_iter()
