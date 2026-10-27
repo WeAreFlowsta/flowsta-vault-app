@@ -564,12 +564,28 @@ pub fn note_holds(install_id: &str, holds: Holds) {
 }
 
 pub async fn own_holds(state: &Arc<AppState>) -> Holds {
-    let records = crate::sealed::sealed_versions(state)
-        .await
-        .map(|v| v.iter().filter(|x| x.payload.entry_type != DEVICE_ENTRY_TYPE && x.payload.entry_type != REMOVAL_ENTRY_TYPE).count() as u64)
-        .unwrap_or(0);
+    let count = |v: &[crate::sealed::StoredVersion]| v.iter().filter(|x| x.payload.entry_type != DEVICE_ENTRY_TYPE && x.payload.entry_type != REMOVAL_ENTRY_TYPE).count() as u64;
+    let active = crate::sealed::sealed_versions(state).await.map(|v| count(&v)).unwrap_or(0);
+    // A sibling still on 0.6 counts what it holds there, superseded versions
+    // included, and this device's attached 0.6 cell holds that same set
+    // (dual write and gossip), while its 0.7 view is reduced to the newest
+    // version of each record. Count what this device holds on both lines,
+    // or a device beside a 1.6.1 sibling reads as behind for good and its
+    // "on its way" card never leaves (mixed leg, 10-27).
+    let attached_06 = if crate::hc::active_line(state) == crate::hc::Line::V07 {
+        crate::sealed::sealed_versions_on(state, crate::hc::Line::V06).await.ok().map(|v| count(&v))
+    } else {
+        None
+    };
+    let records = records_held(active, attached_06);
     let (backups_wanted, backups_pending) = crate::backup_sync::copies_progress(&state.identity_root());
     Holds { records, backups_wanted, backups_pending, setting_up: setting_up_here(state) }
+}
+
+/// What this device holds, counted the way a sibling counts: the larger of
+/// its active line's view and its attached 0.6 line's, when it has one.
+pub fn records_held(active: u64, attached_06: Option<u64>) -> u64 {
+    attached_06.map_or(active, |on_06| active.max(on_06))
 }
 
 /// Whether this device still has records to receive: the private network
@@ -1227,6 +1243,15 @@ mod tests {
         let later = sibling_sync_in(&[mine, item(DEVICE_ENTRY_TYPE, serde_json::to_value(&other).unwrap(), Some("other")), item("user_profile", serde_json::json!({}), Some("other"))], "me", true);
         assert_eq!(later.other_devices, vec!["MacBook".to_string()]);
         assert!(later.records_arrived);
+    }
+
+    #[test]
+    fn a_device_counts_what_its_attached_06_line_holds_too() {
+        // 0.7 view reduced to 16; the 0.6 cell beside a 1.6.1 sibling holds the
+        // sibling's 18 versions: the device holds 18, not "two behind" forever.
+        assert_eq!(super::records_held(16, Some(18)), 18);
+        assert_eq!(super::records_held(16, Some(9)), 16, "the 0.6 cell can lag the 0.7 one");
+        assert_eq!(super::records_held(16, None), 16, "no 0.6 line: the active view");
     }
 
     #[test]

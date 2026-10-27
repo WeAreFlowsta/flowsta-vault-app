@@ -1381,11 +1381,14 @@ async function devicesLeg() {
   await vaultFetch(a, '/dev/remember-origin', { method: 'POST', body: { origin: 'https://remembered.example' } });
   await op(a, { op: 'backup', client_id: 'matrix_app', label: 'recovery', text: 'A recovery v1' });
   const oldPicture = 'data:image/svg+xml;base64,PHN2Zy8+';
-  record('A: holds a picture record written before devices were named', !!(await op(a, { op: 'old-picture', picture: oldPicture })).action_hash);
   const signedA = await signOn(a, hashSignedOnA);
   record('A: signs a file', signedA.stage === 'done' && !!signedA.result?.action_hash, JSON.stringify(signedA).slice(0, 200));
   record('A: lists its signature', await until(async () => (await sigsOn(a)).some((x) => x.file_hash === hashSignedOnA), 60));
   record('A: a round says what it holds', (await op(a, { op: 'round' })).round === 'done');
+  // After A's first round: a 1.6.1 A writes its own identicon in that round
+  // when its list has not seen this record yet, and the newer version wins
+  // (mixed leg, 10-27). Written now, this is the newest and has no device.
+  record('A: holds a picture record written before devices were named', !!(await op(a, { op: 'old-picture', picture: oldPicture })).action_hash);
 
   // 2. B joins with a code. A cancelled code is refused at once.
   const cancelled = (await op(b, { op: 'pair-begin', password: pwB })).code;
@@ -1408,7 +1411,8 @@ async function devicesLeg() {
   // the identity; the first device never is.
   const setupOf = async (port) => (await vaultFetch(port, '/dev/status')).data?.setup || {};
   record('B: reads as being set up from the moment it joins (the card shows)', (await setupOf(b)).pending === true, JSON.stringify(await setupOf(b)));
-  record('A: the first device never reads as being set up (no card)', (await setupOf(a)).pending === false && (await setupOf(a)).joined === false, JSON.stringify(await setupOf(a)));
+  // A 1.6.1 first device has no `setup` field: never true is the rule.
+  record('A: the first device never reads as being set up (no card)', (await setupOf(a)).pending !== true && (await setupOf(a)).joined !== true, JSON.stringify(await setupOf(a)));
   record('B: its conductor comes up once, under competing starts', await until(async () => (await op(b, { op: 'status' })).conductor?.status === 'ready', 180));
   await sleep(5000);
   hammering = false;

@@ -31,6 +31,12 @@ restored on a second device).
 - The per-device lines on that card read every other device as heard a
   moment ago, however long ago it was last seen: the list index was being
   passed where the current time belonged.
+- Beside a device still on 1.6.1, a device on 1.7.0 could read as still
+  receiving records for good, so its "on its way" card never left: it
+  counted its records on the new line, where each record is one version,
+  while the 1.6.1 device counts every version it holds on the old line.
+  The device now counts what it holds on its attached 0.6 line too. Found
+  by the new harness assertion on the phrase-restore path.
 
 ### Tests
 - The rules for the setup card and the email callout live in one tested
