@@ -6913,13 +6913,29 @@ pub async fn get_my_linked_signatures(
 pub(crate) async fn get_my_linked_signatures_inner(
     state: &Arc<AppState>,
 ) -> Result<LinkedSignaturesResult, String> {
-    // No 0.6 line (an identity born on 1.7.0): no web account was ever
-    // linked; the other devices' keys are the only linked agents.
+    // No 0.6 line: an identity born on 1.7.0, or a moved one whose 0.6 line
+    // has retired. The linked agents are the other devices' keys and, for
+    // an identity that came from a web account, its web key: the move
+    // carried that key's signatures to 0.7 under the same signer, so the
+    // 0.7 line answers for it (beta6 asked only the device keys and showed
+    // a migrated identity's web-era signatures as none).
     if crate::hc::line_ports(state, crate::hc::Line::V06).is_err() {
-        let keys = identity_device_keys(state).await;
+        let mut keys = identity_device_keys(state).await;
+        if let Some(cached) = state.linked_web_agent_key.lock().unwrap().clone() {
+            match base64_standard_decode(&cached) {
+                Ok(raw) if raw.len() == 39 => {
+                    let web = holochain_types::prelude::AgentPubKey::from_raw_39(raw);
+                    if !keys.contains(&web) {
+                        keys.push(web);
+                    }
+                }
+                _ => log::warn!("[get_my_linked_signatures] cached web agent key not decodable - web-era signatures not asked"),
+            }
+        }
         if keys.is_empty() {
             return Ok(LinkedSignaturesResult { signatures: Vec::new(), has_linked_agents: false });
         }
+        log::info!("[get_my_linked_signatures] querying {} linked agent(s) on the 0.7 line", keys.len());
         let mut signatures = crate::signing_07::linked_signatures(state, &keys).await?;
         apply_superseded_by(&mut signatures);
         return Ok(LinkedSignaturesResult { signatures, has_linked_agents: true });
