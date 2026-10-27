@@ -5,6 +5,19 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+What Eric's beta13 hand pass found.
+
+### Fixed
+- An identity on several devices listed each of its web-era signatures
+  once per device, and the Overview counted them all: every device carries
+  the same records to the new line itself, so a three-device identity held
+  three witnessed copies of each original. One row per original now, on
+  the Vault's list and on the page's combination of own and linked rows,
+  with an amendment pointed at the copy that stays; a list cached before
+  this fix collapses the same way on the next unlock.
+
 ## [1.7.0-beta13] - 2026-10-28
 
 What the beta12 restore of an identity born in the Vault found (Billz,

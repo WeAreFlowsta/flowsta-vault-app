@@ -55,6 +55,43 @@ export function dropCarriedOriginals<T extends { action_hash?: string; original_
   return sigs.filter((s) => !s.action_hash || !originals.has(s.action_hash));
 }
 
+/**
+ * One row per original across everything the page holds. Every device of
+ * an identity carries the same record itself (the DNA's idempotency is per
+ * witness), so a three-device identity's own list and its linked-agent
+ * list together held three copies of each web-era signature, and the
+ * Overview counted them all (Team Flowsta, beta13, 2026-10-28). The Vault
+ * collapses each list it returns; this collapses across the two, and
+ * across a cache written before the fix. The first copy seen stays; a
+ * `supersedes` naming a dropped copy is re-pointed at the kept one, and
+ * `superseded_by` is recomputed over the result so an amendment and its
+ * original never both read as current.
+ */
+export function oneCopyPerOriginal<T extends { action_hash?: string | null; original_action_hash?: string | null; supersedes?: string | null; superseded_by?: string | null }>(sigs: T[]): T[] {
+  const keptFor = new Map<string, string>();
+  const droppedToKept = new Map<string, string>();
+  const out: T[] = [];
+  for (const s of sigs) {
+    const original = s.original_action_hash;
+    const hash = s.action_hash;
+    if (original && hash) {
+      const kept = keptFor.get(original);
+      if (kept) { droppedToKept.set(hash, kept); continue; }
+      keptFor.set(original, hash);
+    }
+    out.push(s);
+  }
+  if (droppedToKept.size === 0) return sigs;
+  const repointed = out.map((s) => (s.supersedes && droppedToKept.has(s.supersedes) ? { ...s, supersedes: droppedToKept.get(s.supersedes)! } : s));
+  const supersededBy = new Map<string, string>();
+  for (const s of repointed) if (s.supersedes && s.action_hash) supersededBy.set(s.supersedes, s.action_hash);
+  return repointed.map((s) => {
+    const by = s.action_hash ? supersededBy.get(s.action_hash) : undefined;
+    if (by === s.superseded_by || (!by && !s.superseded_by)) return s;
+    return { ...s, superseded_by: by ?? null };
+  });
+}
+
 export function persistSignaturesCache(sigs: unknown[]): void {
   if (!activeAgent) return; // no identity registered - don't cache
   try {

@@ -310,17 +310,7 @@ pub(crate) async fn linked_signatures(state: &Arc<AppState>, linked_keys: &[Agen
 /// a `supersedes` that names a carried original is re-pointed at the
 /// carried copy so the chain reads whole.
 pub(crate) fn merge_own(mut from_06: Vec<serde_json::Value>, from_07: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
-    // Two devices of one identity may each have carried the same record
-    // (the DNA's idempotency is per witness): one copy per original stays,
-    // the first seen.
-    let mut originals_seen = std::collections::HashSet::new();
-    let from_07: Vec<serde_json::Value> = from_07
-        .into_iter()
-        .filter(|s| match s.get("original_action_hash").and_then(|v| v.as_str()) {
-            Some(o) => originals_seen.insert(o.to_string()),
-            None => true,
-        })
-        .collect();
+    let from_07 = one_copy_per_original(from_07);
     let carried: std::collections::HashMap<String, String> = from_07
         .iter()
         .filter_map(|s| Some((s.get("original_action_hash")?.as_str()?.to_string(), s.get("action_hash")?.as_str()?.to_string())))
@@ -335,6 +325,44 @@ pub(crate) fn merge_own(mut from_06: Vec<serde_json::Value>, from_07: Vec<serde_
         }
     }
     all
+}
+
+/// One row per original: every device of an identity carries the same
+/// record itself (a cold cell reads only its own carried copies, so the
+/// DNA's idempotency is per witness), and a three-device identity listed
+/// each web-era signature three times with the Overview counting them all
+/// (Team Flowsta, beta13, 10-28). The first copy seen stays; a `supersedes`
+/// that names a dropped copy is re-pointed at the kept one so the chain
+/// still reads whole. Rows without an original (native) pass through.
+pub(crate) fn one_copy_per_original(sigs: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut kept_for: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut dropped_to_kept: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(sigs.len());
+    for s in sigs {
+        let original = s.get("original_action_hash").and_then(|v| v.as_str()).map(String::from);
+        let hash = s.get("action_hash").and_then(|v| v.as_str()).map(String::from);
+        match (original, hash) {
+            (Some(o), Some(h)) => match kept_for.get(&o) {
+                Some(kept) => {
+                    dropped_to_kept.insert(h, kept.clone());
+                }
+                None => {
+                    kept_for.insert(o, h);
+                    out.push(s);
+                }
+            },
+            _ => out.push(s),
+        }
+    }
+    if !dropped_to_kept.is_empty() {
+        for s in out.iter_mut() {
+            let Some(sup) = s.get("supersedes").and_then(|v| v.as_str()).map(String::from) else { continue };
+            if let Some(kept) = dropped_to_kept.get(&sup) {
+                s["supersedes"] = serde_json::json!(kept);
+            }
+        }
+    }
+    out
 }
 
 // ── The carries (the move) ──────────────────────────────────────────────
@@ -524,6 +552,30 @@ mod tests {
             v["original_action_hash"] = serde_json::json!(o);
         }
         v
+    }
+
+    #[test]
+    fn carried_copies_from_several_devices_collapse_to_one_row_per_original() {
+        // Team Flowsta, three devices: the original carried three times, its
+        // amendment three times, each amendment copy naming one of the
+        // original's copies.
+        let c = |hash: &str, original: &str, supersedes: Option<&str>| {
+            serde_json::json!({ "action_hash": hash, "original_action_hash": original, "supersedes": supersedes })
+        };
+        let rows = vec![
+            c("o1", "orig", None),
+            c("a1", "amend", Some("o2")),
+            c("o2", "orig", None),
+            c("a2", "amend", Some("o2")),
+            c("o3", "orig", None),
+            c("a3", "amend", Some("o3")),
+            serde_json::json!({ "action_hash": "native", "supersedes": null }),
+        ];
+        let out = one_copy_per_original(rows);
+        let hashes: Vec<&str> = out.iter().map(|s| s["action_hash"].as_str().unwrap()).collect();
+        assert_eq!(hashes, vec!["o1", "a1", "native"], "the first copy of each original stays, in order");
+        assert_eq!(out[1]["supersedes"], "o1", "the amendment now names the kept copy of the original");
+        assert!(out[2]["supersedes"].is_null());
     }
 
     #[test]
