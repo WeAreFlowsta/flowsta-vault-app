@@ -4501,9 +4501,18 @@ async fn dev_status_handler(
             "none"
         }
     };
+    // Whether this device is still being set up as one of the identity's
+    // devices (the Overview's card follows exactly this): joined, and the
+    // round has not yet written its setup-done marker.
+    let setup = {
+        let joined = state.app_state.vault_config.lock().unwrap().as_ref().map(|c| c.joined_existing).unwrap_or(false);
+        let pending = joined && !crate::paths::setup_done_path(&state.app_state.identity_root()).exists();
+        serde_json::json!({ "joined": joined, "pending": pending })
+    };
     Ok(axum::response::IntoResponse::into_response(Json(
         serde_json::json!({
             "harness": true, "conductor": conductor, "cells_ready": cells_ready, "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity, "activity_last": activity_last,
+            "setup": setup,
             // Phase 2 partitioning: where this identity's files live.
             "layout": if state.app_state.identity_root() == state.app_state.data_dir { "legacy" } else { "partitioned" },
             "identity_root": state.app_state.identity_root().display().to_string(),

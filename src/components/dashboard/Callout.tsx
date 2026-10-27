@@ -37,6 +37,8 @@ interface CalloutProps {
   dismissible?: boolean;
   onDismiss$?: QRL<() => void>;
   class?: string;
+  /** For the UI tests: lands on the root as data-testid. */
+  testId?: string;
 }
 
 type BtnVariant = "primary" | "info" | "success" | "warning" | "danger";
@@ -110,12 +112,14 @@ export default component$<CalloutProps>((props) => {
     dismissible,
     onDismiss$,
     class: className = "",
+    testId,
   } = props;
   const c = INTENT[intent];
 
   return (
     <div
       class={`rounded-lg border border-l-4 p-4 ${c.wrap} ${c.bar} ${banner ? "mb-6" : ""} ${className}`}
+      data-testid={testId}
     >
       <div class="flex items-start gap-3">
         <svg

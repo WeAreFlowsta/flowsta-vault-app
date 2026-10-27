@@ -28,6 +28,18 @@ restored on a second device).
 - The Signatures card said "Syncing from the network" beside a 0 for half
   an hour after a restore. It now says none have been found yet while the
   network is still answering.
+- The per-device lines on that card read every other device as heard a
+  moment ago, however long ago it was last seen: the list index was being
+  passed where the current time belonged.
+
+### Tests
+- The rules for the setup card and the email callout live in one tested
+  module (`npm run test:unit`); the devices harness leg asserts the joining
+  device reads as being set up from the moment it joins and stops once its
+  round has everything, on the code path and on the phrase-restore path;
+  a UI spec watches the joining device's own window: the card from the
+  first moment, honest lines while it waits, gone when the device has
+  everything, no question about the email.
 
 ## [1.7.0-beta12] - 2026-10-27
 

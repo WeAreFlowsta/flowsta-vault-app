@@ -1,7 +1,9 @@
 // One person's first hour, through the real window: a fresh Vault, a new
 // identity made in the wizard, then every page looked at for things that
 // are stuck, asked twice, or worded wrongly. A picture is kept of each step.
-import { byId, click, copyProblems, fill, PASSWORD, shot, stillBusy, visibleText } from "../_helpers";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { byId, click, copyProblems, fill, PASSWORD, PHRASE_FILE, shot, stillBusy, visibleText } from "../_helpers";
 
 const email = `ui-journey-${Date.now()}@example.com`;
 const password = PASSWORD;
@@ -34,7 +36,11 @@ describe("a new identity", () => {
     expect(words.length).toBe(24);
     expect(words.every((w) => /^[a-z]+$/.test(w))).toBe(true);
     await note("phrase");
-    // No picture here: the phrase is a secret even for a test identity.
+    // No picture here: the phrase is a secret even for a test identity. It
+    // is kept in the scratch profile (wiped per run) for 08, which restores
+    // this identity on a second device from it.
+    mkdirSync(dirname(PHRASE_FILE), { recursive: true });
+    writeFileSync(PHRASE_FILE, words.join(" "), { mode: 0o600 });
   });
 
   it("checks the phrase was written down, then creates the identity", async () => {

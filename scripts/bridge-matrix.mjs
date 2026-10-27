@@ -1402,6 +1402,13 @@ async function devicesLeg() {
   const hammer = (async () => { while (hammering) { await op(b, { op: 'watchdog' }).catch(() => {}); await sleep(150); } })();
   record('A: approves', (await op(a, { op: 'pair-approve' })).approved === true);
   record('B: holds the identity', await until(async () => (await op(b, { op: 'status' })).unlocked === true, 60));
+  // The Overview's "Your private data is on its way" card follows this
+  // flag alone (10-27: it stayed for good when it also waited on the
+  // email). The joining device is being set up from the moment it holds
+  // the identity; the first device never is.
+  const setupOf = async (port) => (await vaultFetch(port, '/dev/status')).data?.setup || {};
+  record('B: reads as being set up from the moment it joins (the card shows)', (await setupOf(b)).pending === true, JSON.stringify(await setupOf(b)));
+  record('A: the first device never reads as being set up (no card)', (await setupOf(a)).pending === false && (await setupOf(a)).joined === false, JSON.stringify(await setupOf(a)));
   record('B: its conductor comes up once, under competing starts', await until(async () => (await op(b, { op: 'status' })).conductor?.status === 'ready', 180));
   await sleep(5000);
   hammering = false;
@@ -1450,6 +1457,9 @@ async function devicesLeg() {
   } else {
     record('both list two devices', await until(async () => (await written(a)) === 2 && (await written(b)) === 2, 180));
   }
+  // Its round says it has everything (records matched, or the profile seen,
+  // or - with no sibling heard - ten minutes): the card leaves.
+  record('B: stops reading as being set up once its round has everything (the card leaves)', await until(async () => (await setupOf(b)).pending === false, process.env.VAULT_MATRIX_MIXED === '1' ? 600 : 300), JSON.stringify(await setupOf(b)));
   record('B: lists itself without being asked to run a round', ((await op(b, { op: 'list' })).devices || []).some((d) => d.state === 'this_device'));
   // Signatures belong to the identity: made on either device, listed on both.
   record("B: lists the signature made on A before it joined", await until(async () => (await sigsOn(b)).some((x) => x.file_hash === hashSignedOnA), 300));
@@ -1544,6 +1554,9 @@ async function devicesLeg() {
   // On a mixed pair both notes come back through the 0.6 line: A's own, and
   // B's earlier note that B mirrored to 0.6 before the reset (A held it).
   record('B: its records arrive again', await until(async () => ((await op(b, { op: 'notes' })).notes || []).length >= 2, process.env.VAULT_MATRIX_MIXED === '1' ? 720 : 300));
+  // Restored from the phrase (the 10-27 Billz path): being set up at
+  // first, done once its round has everything, so that card leaves too.
+  record('B: restored from the phrase, it stops reading as being set up once its round has everything', (await setupOf(b)).joined === true && await until(async () => (await setupOf(b)).pending === false, process.env.VAULT_MATRIX_MIXED === '1' ? 720 : 420), JSON.stringify(await setupOf(b)));
   record('A: lists B again as ONE device, not removed', await until(async () => { await op(a, { op: 'round' }); const rows = ((await op(a, { op: 'list' })).devices || []).filter((d) => d.install_id === installB); return rows.length === 1 && rows[0].state !== 'removed'; }, 300));
   record('A: is told a device was added elsewhere', await until(async () => { await op(a, { op: 'round' }); return ((await vaultFetch(a, '/dev/status')).data?.activity || []).includes('device_added_elsewhere'); }, 120));
 }

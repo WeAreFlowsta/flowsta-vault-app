@@ -15,24 +15,9 @@ import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATC
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 import { ActivityRow } from "~/components/vault/ActivityRow";
 import { sizeText, type DevicesProgress, type DeviceRow } from "~/components/vault/DevicesTab";
+import { asksForEmail, setupCard, whereThingsAre, type SiblingSync } from "~/lib/overview-cards";
 import { buildFeed, timeAgo, recentlyRestored, type ActivityLogEntry } from "~/lib/activity";
 
-/** One line per other device while nothing has arrived from it: where the
- *  things are and what would make them come (the 10-23 spec). The other
- *  device's own choice to stop syncing while locked is not in its record
- *  yet, so that case reads as "last seen". */
-export function whereThingsAre(d: DeviceRow, now = Date.now()): string {
-  const when = (ms: number) => new Date(ms).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-  const recent = (d.at ?? 0) > now - 10 * 60 * 1000;
-  switch (d.state) {
-    case "needs_update": return `${d.name} needs the Vault update to sync.`;
-    case "not_seen_since": return `Your things are on ${d.name}, last seen ${when(d.at ?? 0)}. Open Flowsta Vault there (it can stay locked) and they arrive.`;
-    case "setting_up": return `${d.name} is still being set up itself.`;
-    default: return recent
-      ? `${d.name} is online. Your things are on their way...`
-      : `Your things are on ${d.name}, last seen ${when(d.at ?? 0)}. Open Flowsta Vault there (it can stay locked) and they arrive.`;
-  }
-}
 
 declare const __API_URL__: string;
 declare const __WEB_URL__: string;
@@ -116,7 +101,7 @@ export default component$(() => {
   // restored on its only device said "on its way" for ten minutes with
   // nothing coming (Eric, staging, 2026-10-23); after ten quiet minutes
   // the card now says no device has answered.
-  const siblingSync = useSignal<{ joined: boolean; other_devices: string[]; records_arrived: boolean; asked_for_secs: number | null } | null>(null);
+  const siblingSync = useSignal<SiblingSync | null>(null);
   const otherDevices = useSignal<DeviceRow[]>([]);
   const checkSettingUp = $(async () => {
     try {
@@ -125,7 +110,7 @@ export default component$(() => {
       if (settingUp.value) {
         setupProgress.value = await invoke<DevicesProgress>("devices_progress").catch(() => null);
         // Null until the cells answer; the card stays either way.
-        siblingSync.value = await invoke<{ joined: boolean; other_devices: string[]; records_arrived: boolean; asked_for_secs: number | null }>("sibling_sync").catch(() => null);
+        siblingSync.value = await invoke<SiblingSync>("sibling_sync").catch(() => null);
         otherDevices.value = (await invoke<DeviceRow[]>("devices_list").catch(() => [] as DeviceRow[]))
           .filter((d) => d.state !== "this_device" && d.state !== "this_device_setting_up" && d.state !== "removed");
       }
@@ -592,8 +577,17 @@ export default component$(() => {
   // says so instead of "on its way". It never says "only device" as a fact,
   // because a quiet network cannot tell the Vault that; a cold cell's empty
   // first answer used to be read that way (10-27, Linux restore).
-  const ss = siblingSync.value;
-  const longSilence = !!ss && ss.other_devices.length === 0 && !ss.records_arrived && (ss.asked_for_secs ?? 0) >= 600;
+  // The card and the email callout follow rules kept (and tested) in
+  // ~/lib/overview-cards.
+  const setupView = {
+    joined: !!identity.value?.joined_existing,
+    settingUp: settingUp.value,
+    setupKnown: setupKnown.value,
+    webEmail: identity.value?.web_email ?? null,
+    sync: siblingSync.value,
+  };
+  const card = identity.value?.hosting_model === "device-hosted" ? setupCard(setupView) : null;
+  const longSilence = card === "silence";
 
   return (
     <div>
@@ -602,8 +596,8 @@ export default component$(() => {
           waiting for the other device's profile record to bring it; an
           identity without that record kept the card forever (Billz,
           10-27). The email is asked for below instead, once setup is done. */}
-      {identity.value && identity.value.hosting_model === "device-hosted" && identity.value.joined_existing && settingUp.value && (
-        <Callout intent="info" title={longSilence ? "No other device has answered yet" : "Your private data is on its way"} class="mb-6">
+      {identity.value && card && (
+        <Callout intent="info" title={longSilence ? "No other device has answered yet" : "Your private data is on its way"} class="mb-6" testId="setup-card">
           {longSilence ? (
             <p data-testid="only-device-note">
               If this identity is on another device, open Flowsta Vault there (it can stay locked) and your things arrive.
@@ -632,7 +626,10 @@ export default component$(() => {
             if (rows.length === 0) {
               // Nothing has arrived yet: name the device the things are on and
               // what it is doing, so "waiting" reads as something to act on.
-              const lines = otherDevices.value.map(whereThingsAre);
+              // Not `.map(whereThingsAre)`: map passes the index as the
+              // second argument, which was read as "now" - every device
+              // then counted as heard a moment ago (found 10-27).
+              const lines = otherDevices.value.map((d) => whereThingsAre(d));
               if (lines.length === 0) return <p class="mt-2 text-xs text-gray-400" data-testid="setup-progress">Waiting to hear from your other devices...</p>;
               return <div class="mt-2 space-y-1 text-xs text-gray-400" data-testid="setup-progress">{lines.map((l) => <p key={l}>{l}</p>)}</div>;
             }
@@ -659,8 +656,8 @@ export default component$(() => {
           then no app can be offered the email. A device that joined waits
           for setup first: the other devices' profile record usually brings
           the email with it. */}
-      {identity.value && identity.value.hosting_model === "device-hosted" && !identity.value.web_email && (!identity.value.joined_existing || (setupKnown.value && !settingUp.value)) && (
-        <Callout intent="info" title="Add the email you registered with" class="mb-6">
+      {identity.value && identity.value.hosting_model === "device-hosted" && asksForEmail(setupView) && (
+        <Callout intent="info" title="Add the email you registered with" class="mb-6" testId="email-callout">
           <p class="mb-3">
             This Vault doesn't hold your email yet - Flowsta keeps only a fingerprint of it and can't send it back.
             Enter the address you registered this identity with and apps you allow can ask for it. A wrong address is

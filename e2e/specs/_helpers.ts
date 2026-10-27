@@ -2,6 +2,7 @@
 import { resolve } from "node:path";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { remote } from "webdriverio";
 import { SHOTS } from "../wdio.conf";
 
 let step = 0;
@@ -47,10 +48,13 @@ const BANNED: [RegExp, string][] = [
   [/undefined|NaN|\[object Object\]/, "shows a programming leftover"],
 ];
 
+/** The wording problems in a screen's text, each with where it was seen. */
+export function copyProblemsIn(text: string, where: string): string[] {
+  return BANNED.filter(([re]) => re.test(text)).map(([re, what]) => `${where}: ${what}: "${(text.match(re) || [""])[0]}"`);
+}
 /** The wording problems on the screen as it is now, each with where it was seen. */
 export async function copyProblems(where: string): Promise<string[]> {
-  const text = await visibleText();
-  return BANNED.filter(([re]) => re.test(text)).map(([re, what]) => `${where}: ${what}: "${(text.match(re) || [""])[0]}"`);
+  return copyProblemsIn(await visibleText(), where);
 }
 
 /** Anything still spinning or still saying it is loading. */
@@ -67,6 +71,10 @@ export const stillBusy = () =>
 /** The test identity's Vault password (the same in every spec of a run). */
 export const PASSWORD = "Ui-journey-password-1!";
 const ORIGIN = "https://ourtest.flowsta.com";
+export const API = "https://auth-api-staging.flowsta.com";
+/** Where 01 keeps the identity's phrase for the specs that restore it (the
+ *  scratch profile, wiped per run). */
+export const PHRASE_FILE = resolve(import.meta.dirname ?? ".", "..", "profile", "phrase.txt");
 /** The window's Vault answers on the first port; a second device on the next. */
 /** A conductor that already holds data rebuilds its DHT model at every start,
  *  one hash sector at a time over the whole database - minutes on staging,
@@ -129,6 +137,32 @@ export async function startSecondDevice(dataDir: string) {
     await new Promise((r) => setTimeout(r, 2000));
   }
   throw new Error("the second device never answered on its port");
+}
+/** The e2e build of device B serves WebDriver on this port (startSecondDevice sets it). */
+export const WEBDRIVER_PORT_B = 4470;
+/** Device B's own window, driven like the first one. */
+export async function secondWindow(): Promise<WebdriverIO.Browser> {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${WEBDRIVER_PORT_B}/status`, { signal: AbortSignal.timeout(3_000) });
+      if (r.ok && (await r.json())?.value?.ready === true) break;
+    } catch { /* not up yet */ }
+    await new Promise((r) => setTimeout(r, 2_000));
+  }
+  return remote({ hostname: "127.0.0.1", port: WEBDRIVER_PORT_B, path: "/", capabilities: { browserName: "tauri" } as WebdriverIO.Capabilities, logLevel: "warn", waitforTimeout: 30_000 });
+}
+/** Bring device B's window to the front: a webview draws, and runs its
+ *  visible tasks, only while its window is active (see wdio.conf). */
+export function activateSecondWindow() {
+  if (process.platform !== "linux" || !process.env.DISPLAY) return;
+  try {
+    const out = execFileSync("ss", ["-ltnpH", "sport", "=", `:${PORT_B}`], { encoding: "utf8" });
+    const pid = out.match(/pid=(\d+)/)?.[1];
+    if (!pid) return;
+    const ids = execFileSync("xdotool", ["search", "--onlyvisible", "--pid", pid], { encoding: "utf8", timeout: 5_000 }).trim().split("\n").filter(Boolean);
+    if (ids.length) execFileSync("xdotool", ["windowactivate", "--sync", ids[ids.length - 1]], { timeout: 10_000, stdio: "ignore" });
+  } catch { /* not mapped yet */ }
 }
 /** Stop device B: every copy of the test build that listens on B's port. */
 export function stopSecondDevice() {
