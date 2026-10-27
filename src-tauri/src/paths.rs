@@ -274,14 +274,30 @@ pub fn device_name_path(device_root: &Path) -> PathBuf { device_root.join("devic
 /// at bind so a second launch of the same install finds the first.
 pub fn ipc_port_path(device_root: &Path) -> PathBuf { device_root.join("ipc-port") }
 
+/// One minting at a time. On a fresh install the first callers arrive
+/// together (the registration, the devices round, the backup lane) and
+/// `write_atomic` shares one temp name per path, so two mints raced: one
+/// rename failed ("no install id", the device registered a minute late)
+/// and the winner could return an id other than the one on disk (10-27,
+/// harness instance A). The read outside the lock keeps the steady state
+/// lock-free.
+static INSTALL_ID_MINT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn install_id_on_disk(path: &Path) -> Option<String> {
+    let existing = std::fs::read_to_string(path).ok()?;
+    let id = existing.trim();
+    (id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())).then(|| id.to_string())
+}
+
 /// This install's id (32 hex characters), created on first use.
 pub fn install_id(device_root: &Path) -> Option<String> {
     let path = install_id_path(device_root);
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        let id = existing.trim();
-        if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Some(id.to_string());
-        }
+    if let Some(id) = install_id_on_disk(&path) {
+        return Some(id);
+    }
+    let _mint = INSTALL_ID_MINT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(id) = install_id_on_disk(&path) {
+        return Some(id);
     }
     use rand::RngCore;
     let mut bytes = [0u8; 16];
@@ -308,6 +324,21 @@ mod tests {
         let replaced = super::install_id(&dir).expect("an id");
         assert_ne!(replaced, "not an id");
         assert_eq!(replaced.len(), 32);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn callers_arriving_together_on_a_fresh_install_all_get_the_one_id() {
+        let dir = std::env::temp_dir().join(format!("fv-install-id-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ids: Vec<Option<String>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..16).map(|_| s.spawn(|| super::install_id(&dir))).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let on_disk = std::fs::read_to_string(super::install_id_path(&dir)).unwrap();
+        for id in &ids {
+            assert_eq!(id.as_deref(), Some(on_disk.trim()), "every caller returns the id on disk");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

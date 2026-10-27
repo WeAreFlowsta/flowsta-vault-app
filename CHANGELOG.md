@@ -5,6 +5,15 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- On a fresh install the device's id could be minted twice at once (the
+  registration, the devices round and the backup lane all ask for it in
+  the same second), so one of them saw no id and the device registered
+  with the account a minute late, and the id a caller got could differ
+  from the one kept on disk. One minting at a time now.
+
 ## [1.7.0-beta11] - 2026-10-27
 
 The two Overview findings from the beta10 phrase-restore leg.
