@@ -1516,6 +1516,20 @@ async function devicesLeg() {
   record("B: the list names A's device and its network generation", !!heldA && typeof heldA.name === 'string' && heldA.name.length > 0 && heldA.generation === (process.env.VAULT_MATRIX_MIXED === '1' ? 'holochain-0.6' : 'holochain-0.7'), JSON.stringify(heldA));
   const unknownDev = await vaultFetch(b, '/backup/retrieve', { method: 'POST', origin: APP_ORIGIN_MD, body: { client_id: 'matrix_app', label: 'recovery', across: 'devices', device: 'no-such-device' } });
   record('an unknown device is not found', unknownDev.status === 404 && unknownDev.data?.error === 'backup_not_found', `${unknownDev.status}`);
+  // A removal reaches the other device too: a delete wakes the devices loop
+  // the way a save does (10-29; before, it waited for the next pass). From a
+  // 1.6.1 A (mixed) it crosses through B's 0.6 line and its carry, so slower.
+  {
+    const label = 'to-delete';
+    const copyOnB = async () => (await vaultFetch(b, '/backup/retrieve', { method: 'POST', origin: APP_ORIGIN_MD, body: { client_id: 'matrix_app', label, across: 'devices', device: installA } })).status === 200;
+    await op(a, { op: 'backup', client_id: 'matrix_app', label, text: 'A, about to be deleted' });
+    record("B: gets A's new backup", await until(copyOnB, 300));
+    const del = await op(a, { op: 'backup-delete', client_id: 'matrix_app', label });
+    const t0 = Date.now();
+    const gone = await until(async () => !(await copyOnB()), 300);
+    record('B: drops its copy once A deletes the backup', del.deleted === true && gone, `${del.deleted === true ? 'deleted' : JSON.stringify(del)}; ${Math.round((Date.now() - t0) / 1000)} s`);
+    console.log(`   a removal on A reached B in ${Math.round((Date.now() - t0) / 1000)} s`);
+  }
   const actB = (await vaultFetch(b, '/dev/status')).data?.activity || [];
   record('B: is not told that the devices already there were "added"', !actB.includes('device_added_elsewhere'), JSON.stringify(actB));
   const actA = (await vaultFetch(a, '/dev/status')).data?.activity || [];
