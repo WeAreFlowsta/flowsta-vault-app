@@ -2,7 +2,7 @@
 # The devices matrix leg end to end: build the test binary (skip with
 # SKIP_BUILD=1), start two FRESH test instances (md-c / md-d) under a session
 # bus, run `bridge-matrix.mjs --phase=devices` against them, stop them.
-# Usage: scripts/matrix-devices.sh [log dir]
+# Usage: scripts/matrix-devices.sh [log dir]   (MATRIX_PHASE=bulk runs the bulk leg on the same pair)
 # Needs the installed Vault CLOSED: a test instance exits at once otherwise
 # (the single-instance plugin hands off to it, exit 0, empty data dir).
 # The first instance takes 27777 then, the second 27778.
@@ -22,7 +22,7 @@ A=$(waitnew) || { echo "md-c never answered"; find "$HOME/.local/share/flowsta-v
 dbus-run-session -- scripts/run-test-instance.sh md-d > "$1/md-d.log" 2>&1 & PB=$!
 B=$(waitnew "$A") || { echo "md-d never answered"; find "$HOME/.local/share/flowsta-vault-md-d" -name '*.log' -exec tail -20 {} +; kill $PA $PB 2>/dev/null; exit 1; }
 echo "== leg A=$A B=$B $(date -u +%H:%M:%S)"
-VAULT_MATRIX_MIXED="${LEGACY_A_BIN:+1}" VAULT_MATRIX_PORT=$A VAULT_MATRIX_RESTORE_PORT=$B node scripts/bridge-matrix.mjs --phase=devices > "$1/matrix-devices.log" 2>&1
+VAULT_MATRIX_MIXED="${LEGACY_A_BIN:+1}" VAULT_MATRIX_PORT=$A VAULT_MATRIX_RESTORE_PORT=$B node scripts/bridge-matrix.mjs --phase="${MATRIX_PHASE:-devices}" > "$1/matrix-devices.log" 2>&1
 rc=$?
 echo "== leg rc=$rc $(date -u +%H:%M:%S)"
 grep -E 'RESULT|✗' "$1/matrix-devices.log" | head -20

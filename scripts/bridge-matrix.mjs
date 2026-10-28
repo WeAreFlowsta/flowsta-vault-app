@@ -24,6 +24,12 @@
  *   node scripts/bridge-matrix.mjs --phase=devices   # 1.6.0: one identity on two devices
  *       add with a code, sync, connections, backups, lock-and-sync, remove, stand down, the phrase
  *       door. Two FRESH instances: VAULT_MATRIX_PORT (A) and VAULT_MATRIX_RESTORE_PORT (B).
+ *   node scripts/bridge-matrix.mjs --phase=bulk      # 1.7.0: an identity past one gossip batch - A holds
+ *       VAULT_MATRIX_BULK_RECORDS (2500) records before B joins; B must hold them all within
+ *       VAULT_MATRIX_BULK_WAIT_MIN (45) minutes. Same two FRESH instances as --phase=devices.
+ *   node scripts/bridge-matrix.mjs --phase=bulk-move-before|bulk-move-after|bulk-move-retired
+ *       1.7.0: two 1.6.1 devices of an N-record identity both move at once - driven by
+ *       scripts/matrix-bulk-move.sh
  *   node scripts/bridge-matrix.mjs --phase=webera    # 1.7.0: a migrated identity restored on a FRESH instance,
  *       its web-era signatures and amendments counted from the 0.7 read alone (phrase file, see webEraLeg)
  *   node scripts/bridge-matrix.mjs --phase=move-before|move-after|move-retired
@@ -46,6 +52,7 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 
 const ORIGIN = process.env.VAULT_MATRIX_ORIGIN || 'https://ourtest.flowsta.com';
 const EVIL_ORIGIN = 'https://example.com';
@@ -1576,6 +1583,255 @@ async function devicesLeg() {
  * limits for two hours, so the legs can run back to back. The key comes
  * from VAULT_MATRIX_TEST_KEY or ~/.config/flowsta/staging-test-key; with
  * neither, the limits apply as they do to anyone. Never sent to production. */
+// The 0.7 conductor's own log files under an instance's identity (current
+// and the one rotated before it), for counting what the conductor said.
+const REFUSED = 'too many SQL variables';
+async function conductorLogs07(port) {
+  const root = (await devOf(port)).identity_root || '';
+  const dirs = [`${root}/conductor-07`];
+  try { for (const id of fs.readdirSync(`${root}/identities`)) dirs.push(`${root}/identities/${id}/conductor-07`); } catch { /* partitioned root */ }
+  const files = [];
+  for (const d of dirs) for (const f of ['holochain-stderr.log', 'holochain-stderr.previous.log']) if (fs.existsSync(`${d}/${f}`)) files.push(`${d}/${f}`);
+  return files;
+}
+function countInLogs(files, needle) {
+  if (!files.length) return -1;
+  return files.reduce((n, f) => { try { return n + fs.readFileSync(f, 'utf8').split(needle).length - 1; } catch { return n; } }, 0);
+}
+
+// The bulk leg (10-28, Eric's Mac short of ten backups): a Holochain 0.7.1
+// conductor checks which offered ops it already holds in ONE query that
+// binds every op id three times, so a gossip batch of more than ~10.9k ids
+// passes SQLite's bound-variable limit and the receiving conductor drops the
+// exchange ("too many SQL variables"). Each record is ~6 ops, so 2,500
+// records written before a second device joins is past it. The two devices
+// then never finish a sync, their storage arcs on the private network stay
+// empty and publish has no target either: nothing written on one device
+// reaches the other. B must hold every record, neither conductor may drop a
+// batch, and a record written after the backlog must arrive too.
+async function bulkLeg() {
+  console.log('\n── Bulk leg (an identity past one gossip batch)');
+  const a = Number(process.env.VAULT_MATRIX_PORT || 0);
+  const b = Number(process.env.VAULT_MATRIX_RESTORE_PORT || 0);
+  if (!a || !b) { record('bulk leg skipped - set VAULT_MATRIX_PORT and VAULT_MATRIX_RESTORE_PORT to two FRESH test instances', true); return; }
+  const N = Number(process.env.VAULT_MATRIX_BULK_RECORDS || 2500);
+  const waitMin = Number(process.env.VAULT_MATRIX_BULK_WAIT_MIN || 45);
+  const op = async (port, body) => (await vaultFetch(port, '/dev/devices', { method: 'POST', body })).data || {};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const until = async (fn, secs) => {
+    const deadline = Date.now() + secs * 1000;
+    while (Date.now() < deadline) { if (await fn().catch(() => false)) return true; await sleep(2000); }
+    return false;
+  };
+  const notesOn = async (port) => (await vaultFetch(port, '/dev/sealed')).data?.counts_by_entry_type?.harness_note || 0;
+  const setupOf = async (port) => (await vaultFetch(port, '/dev/status')).data?.setup || {};
+  const pwA = `Matrix-bulk-a-${randomHash().slice(0, 10)}!`;
+  const pwB = `Matrix-bulk-b-${randomHash().slice(0, 10)}!`;
+
+  for (const port of [a, b]) {
+    const st = await vaultFetch(port, '/status');
+    if (st.data?.initialized !== false) { record(`bulk leg skipped - the instance on ${port} already holds an identity`, true); return; }
+  }
+
+  // 1. A creates the identity and writes the backlog.
+  const created = await vaultFetch(a, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password: pwA, email: `matrix-bulk-${Date.now()}@example.com`, display_name: 'Matrix Bulk' } });
+  record('A: identity created', created.status === 200 && !!created.data?.phrase, `${created.status} ${created.data?.description || ''}`);
+  if (created.status !== 200) return;
+  record('A: its records answer', await until(async () => Array.isArray((await op(a, { op: 'list' })).devices), 240));
+  // ~7 writes a second: in requests of 250, each well inside fetch's 300 s.
+  const writeStarted = Date.now();
+  let written = 0;
+  let writeFailed = null;
+  while (written < N && !writeFailed) {
+    const part = await op(a, { op: 'write-many', count: Math.min(250, N - written), text: `bulk ${written}` });
+    written += part.written || 0;
+    writeFailed = part.failed || (part.written ? null : 'nothing written');
+  }
+  record(`A: writes ${N} records`, written === N, `${written} in ${((Date.now() - writeStarted) / 60000).toFixed(1)} min${writeFailed ? `; ${writeFailed}` : ''}`);
+  record(`A: lists all ${N}`, await until(async () => (await notesOn(a)) >= N, 300), `${await notesOn(a)}`);
+
+  // 2. B joins with a code.
+  const code = (await op(b, { op: 'pair-begin', password: pwB })).code;
+  const claim = await op(a, { op: 'pair-claim', code });
+  record('A: the code names the new device', !!claim.intro?.install_id, JSON.stringify(claim).slice(0, 200));
+  record('A: approves', (await op(a, { op: 'pair-approve' })).approved === true);
+  record('B: holds the identity', await until(async () => (await op(b, { op: 'status' })).unlocked === true, 60));
+  record('B: its conductor comes up', await until(async () => (await op(b, { op: 'status' })).conductor?.status === 'ready', 180));
+  const logA = await conductorLogs07(a);
+  const logB = await conductorLogs07(b);
+
+  // 3. The backlog reaches B.
+  const started = Date.now();
+  let held = 0;
+  let printed = 0;
+  while (Date.now() - started < waitMin * 60000) {
+    held = await notesOn(b).catch(() => held);
+    if (held >= N) break;
+    if (Date.now() - printed > 60000) {
+      console.log(`   ${((Date.now() - started) / 60000).toFixed(0)} min: B holds ${held}/${N}; batches dropped A ${countInLogs(logA, REFUSED)}, B ${countInLogs(logB, REFUSED)}`);
+      printed = Date.now();
+    }
+    await sleep(10000);
+  }
+  const mins = ((Date.now() - started) / 60000).toFixed(1);
+  console.log(`   catch-up: ${held}/${N} in ${mins} min`);
+  record(`B: holds all ${N} of A's records`, held >= N, `${held}/${N} after ${mins} min`);
+  record(`neither conductor dropped a gossip batch ("${REFUSED}")`, countInLogs(logA, REFUSED) === 0 && countInLogs(logB, REFUSED) === 0, `A ${countInLogs(logA, REFUSED)}, B ${countInLogs(logB, REFUSED)}`);
+
+  // 4. After the backlog: a new record arrives, and B stops being set up.
+  await op(a, { op: 'write', text: 'from A, after the backlog' });
+  record('B: a record A writes after the backlog arrives', await until(async () => ((await op(b, { op: 'notes' })).notes || []).some((n) => n.text === 'from A, after the backlog'), 600));
+  record('B: stops reading as being set up (the card leaves)', await until(async () => (await setupOf(b)).pending === false, 600), JSON.stringify(await setupOf(b)));
+}
+
+// The bulk MOVE leg (10-28): Eric's case exactly. Two devices on 1.6.1 share
+// an identity of N records on 0.6 (no such limit there); both update to
+// 1.7.0 at once, so each carries all N to the new 0.7 private network
+// itself, in one burst (~6 ops a record, new hashes per device). Each then
+// lacks thousands of ops the other holds, in both directions - the shape
+// that never recovered on Eric's two devices (one direction alone does, the
+// bulk leg). After both moved, a record written on either device must reach
+// the other, and neither 0.7 conductor may drop a gossip batch.
+// Driven by scripts/matrix-bulk-move.sh (1.6.1 build for -before, 1.7.0 after).
+async function bulkMoveLeg(stage) {
+  console.log(`\n── Bulk move leg (${stage})`);
+  const a = Number(process.env.VAULT_MATRIX_PORT || 0);
+  const b = Number(process.env.VAULT_MATRIX_RESTORE_PORT || 0);
+  if (!a || !b) { record('bulk move leg skipped - set VAULT_MATRIX_PORT and VAULT_MATRIX_RESTORE_PORT', true); return; }
+  const N = Number(process.env.VAULT_MATRIX_BULK_RECORDS || 2500);
+  const waitMin = Number(process.env.VAULT_MATRIX_BULK_WAIT_MIN || 45);
+  const stateFile = process.env.VAULT_MATRIX_MOVE_STATE || '/tmp/vault-matrix-bulk-move-state.json';
+  const op = async (port, body) => (await vaultFetch(port, '/dev/devices', { method: 'POST', body })).data || {};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const until = async (fn, secs) => {
+    const deadline = Date.now() + secs * 1000;
+    while (Date.now() < deadline) { if (await fn().catch(() => false)) return true; await sleep(5000); }
+    return false;
+  };
+  const notes = async (port) => ((await op(port, { op: 'notes' })).notes || []);
+  const has = async (port, text) => (await notes(port)).some((n) => n.text === text);
+
+  if (stage === 'bulk-move-before') {
+    for (const port of [a, b]) {
+      const st = await vaultFetch(port, '/status');
+      if (st.data?.initialized !== false) { record(`bulk move leg skipped - the instance on ${port} already holds an identity`, true); return; }
+    }
+    const pwA = `Matrix-bmove-a-${randomHash().slice(0, 10)}!`;
+    const pwB = `Matrix-bmove-b-${randomHash().slice(0, 10)}!`;
+    // Staging answered one registration with a 500 that a retry a minute
+    // later did not repeat (10-28): one retry, said in the log. Registration
+    // is not what this leg tests.
+    const setup = () => vaultFetch(a, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password: pwA, email: `matrix-bmove-${Date.now()}@example.com`, display_name: 'Matrix Bulk Move' } });
+    let created = await setup();
+    if (created.status === 500) { console.log(`   setup-identity answered 500 (${created.data?.description || ''}); one retry in 20 s`); await sleep(20000); created = await setup(); }
+    record('1.6.1 A: identity created', created.status === 200, `${created.status} ${created.data?.description || ''}`);
+    if (created.status !== 200) return;
+    record('1.6.1 A: its records answer', await until(async () => Array.isArray((await op(a, { op: 'list' })).devices), 240));
+    // 1.6.1 has no write-many: one write per request.
+    const t0 = Date.now();
+    let written = 0;
+    for (let i = 0; i < N; i++) {
+      const w = await op(a, { op: 'write', text: `bulk ${i}` });
+      if (!w.action_hash) break;
+      written++;
+      if (written % 500 === 0) console.log(`   A wrote ${written}/${N} (${((Date.now() - t0) / 60000).toFixed(1)} min)`);
+    }
+    record(`1.6.1 A: writes ${N} records on 0.6`, written === N, `${written} in ${((Date.now() - t0) / 60000).toFixed(1)} min`);
+    const code = (await op(b, { op: 'pair-begin', password: pwB })).code;
+    const claim = await op(a, { op: 'pair-claim', code });
+    record('1.6.1 A: the code names the new device', !!claim.intro?.install_id, JSON.stringify(claim).slice(0, 160));
+    record('1.6.1 A: approves', (await op(a, { op: 'pair-approve' })).approved === true);
+    record('1.6.1 B: holds the identity', await until(async () => (await op(b, { op: 'status' })).unlocked === true, 90));
+    const t1 = Date.now();
+    record(`1.6.1 B: holds all ${N} records on 0.6`, await until(async () => (await notes(b)).length >= N, 1200), `${(await notes(b)).length} after ${((Date.now() - t1) / 60000).toFixed(1)} min`);
+    record('1.6.1: both list two devices', await until(async () => ((await op(a, { op: 'list' })).devices || []).length >= 2 && ((await op(b, { op: 'list' })).devices || []).length >= 2, 300));
+    fs.writeFileSync(stateFile, JSON.stringify({ pwA, pwB }, null, 2));
+    record(`state written to ${stateFile}`, true);
+    return;
+  }
+
+  // bulk-move-after: both on 1.7.0, opened at the same time.
+  const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  // One after the other: two test instances on one box pick conductor
+  // ports from the same list, and two unlocks in the same second chose the
+  // same port (10-28; one Vault per machine never does). Each device moves
+  // on its own unlock, so both still carry their own copies.
+  const ua = await vaultFetch(a, '/dev/unlock-with-password', { method: 'POST', body: { password: saved.pwA } });
+  const readyA = await waitConductorReady(a, 240);
+  const ub = await vaultFetch(b, '/dev/unlock-with-password', { method: 'POST', body: { password: saved.pwB } });
+  const readyB = await waitConductorReady(b, 240);
+  record('1.7.0: both unlock with their 1.6.1 passwords', ua.status === 200 && ub.status === 200, `${ua.status} ${ub.status}`);
+  record('1.7.0: both conductors ready', readyA && readyB, `A ${readyA}, B ${readyB}`);
+  const t0 = Date.now();
+  const moved = await until(async () => (await devOf(a)).move?.moved === true && (await devOf(b)).move?.moved === true, stage === 'bulk-move-after' ? 900 : 120);
+  const passOf = async (port) => JSON.stringify((await devOf(port)).move?.last_pass || null).slice(0, 160);
+  record(stage === 'bulk-move-after' ? '1.7.0: BOTH devices moved, each carrying the records itself' : '1.7.0: both still moved after the restart', moved, `${((Date.now() - t0) / 60000).toFixed(1)} min; A ${await passOf(a)}; B ${await passOf(b)}`);
+  const logA = await conductorLogs07(a);
+  const logB = await conductorLogs07(b);
+  if (stage === 'bulk-move-retired') {
+    // The household settled: both devices' records say 0.7, so neither
+    // starts the 0.6 line - nothing written now can cross on 0.6 (in the
+    // -after stage a write is mirrored to 0.6 and the other device's
+    // catch-up carries it, which hides the 0.7 network; Eric's devices had
+    // retired 0.6 when their records stopped crossing).
+    const linesA = await linesOf(a);
+    const linesB = await linesOf(b);
+    // At least one side must have 0.6 off for the crossings to prove the 0.7
+    // network: a record reaches a device with no 0.6 line only on 0.7, and a
+    // device with no 0.6 line writes to 0.7 only. (On 10-28 A re-attached 0.6
+    // at this start while B did not; both crossings still went on 0.7.)
+    console.log(`   lines: A ${JSON.stringify(linesA)}, B ${JSON.stringify(linesB)}`);
+    const off = linesA['holochain-0.6'] === 'off' || linesB['holochain-0.6'] === 'off';
+    record('settled: 0.6 off on at least one device, 0.7 serving on both', off && linesA['holochain-0.7'] === 'serving' && linesB['holochain-0.7'] === 'serving', JSON.stringify({ a: linesA, b: linesB }));
+    if (linesA['holochain-0.6'] !== 'off' && linesB['holochain-0.6'] !== 'off') console.log('   both devices run 0.6: the crossings below do not prove the 0.7 network');
+  }
+  // Written after both moved: in the -retired stage they can only travel on the 0.7 network.
+  const tag = stage === 'bulk-move-retired' ? 'after the 0.6 line retired' : 'after the move';
+  // Checked and retried: right after a restart a write can be refused while
+  // the cells come up, and an unchecked refusal reads as "never arrived"
+  // (the 10-28 green run: neither stage-three write existed on its own device).
+  const writeOn = async (port, text) => {
+    let last = {};
+    const deadline = Date.now() + 180_000;
+    while (Date.now() < deadline) {
+      last = await vaultFetch(port, '/dev/devices', { method: 'POST', body: { op: 'write', text } });
+      if (last.data?.action_hash) return last.data.action_hash;
+      await sleep(5000);
+    }
+    return `refused: ${last.status} ${JSON.stringify(last.data).slice(0, 160)}`;
+  };
+  const wroteA = await writeOn(a, `from A, ${tag}`);
+  const wroteB = await writeOn(b, `from B, ${tag}`);
+  record(`A: writes a record ${tag}`, !String(wroteA).startsWith('refused'), String(wroteA).slice(0, 80));
+  record(`B: writes a record ${tag}`, !String(wroteB).startsWith('refused'), String(wroteB).slice(0, 80));
+  record(`A: holds its own record ${tag}`, await until(async () => has(a, `from A, ${tag}`), 60));
+  record(`B: holds its own record ${tag}`, await until(async () => has(b, `from B, ${tag}`), 60));
+  const t1 = Date.now();
+  let aToB = false;
+  let bToA = false;
+  let printed = 0;
+  while (Date.now() - t1 < waitMin * 60000 && !(aToB && bToA)) {
+    aToB = aToB || (await has(b, `from A, ${tag}`).catch(() => false));
+    bToA = bToA || (await has(a, `from B, ${tag}`).catch(() => false));
+    if (Date.now() - printed > 60000) {
+      console.log(`   ${((Date.now() - t1) / 60000).toFixed(0)} min: A->B ${aToB}, B->A ${bToA}; batches dropped A ${countInLogs(logA, REFUSED)}, B ${countInLogs(logB, REFUSED)}; no peer for a publish A ${countInLogs(logA, 'NoPeersForLocation')}, B ${countInLogs(logB, 'NoPeersForLocation')}`);
+      printed = Date.now();
+    }
+    if (!(aToB && bToA)) await sleep(15000);
+  }
+  const mins = ((Date.now() - t1) / 60000).toFixed(1);
+  console.log(`   ${tag}: A->B ${aToB}, B->A ${bToA} in ${mins} min`);
+  record(`B: a record A writes ${tag} arrives`, aToB, `${mins} min`);
+  record(`A: a record B writes ${tag} arrives`, bToA, `${mins} min`);
+  if (stage === 'bulk-move-after') {
+    // Said, not asserted: the restart that follows is what retires 0.6 (the
+    // -retired stage checks the lines); the markers still said true here on
+    // the 10-28 runs.
+    console.log(`   markers line_06_needed: A ${(await devOf(a)).move?.marker?.line_06_needed}, B ${(await devOf(b)).move?.marker?.line_06_needed}`);
+  }
+  record(`neither 0.7 conductor dropped a gossip batch ("${REFUSED}")`, countInLogs(logA, REFUSED) === 0 && countInLogs(logB, REFUSED) === 0, `A ${countInLogs(logA, REFUSED)}, B ${countInLogs(logB, REFUSED)}`);
+}
+
 async function askForRateLimitExemption() {
   if (!/staging/.test(API)) return;
   let key = process.env.VAULT_MATRIX_TEST_KEY || '';
@@ -1781,6 +2037,20 @@ async function moveLeg(stage) {
     await switcherLeg();
     const passedS = results.filter((r) => r.ok).length;
     console.log(`\nRESULT: ${passedS}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
+    process.exit(failures ? 1 : 0);
+  }
+  if (PHASE.startsWith('bulk-move-')) {
+    await bulkMoveLeg(PHASE);
+    const passedM = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedM}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
+    process.exit(failures ? 1 : 0);
+  }
+  if (PHASE === 'bulk') {
+    await bulkLeg();
+    const passedB = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedB}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
     if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
     process.exit(failures ? 1 : 0);
   }

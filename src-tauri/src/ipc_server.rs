@@ -4821,6 +4821,35 @@ async fn dev_devices_handler(
         )
         .await
         .map(|hash| serde_json::json!({ "action_hash": hash })),
+        // Many records in one go, one write after another: an identity
+        // large enough that one gossip exchange of all of it passes what a
+        // 0.7.1 conductor can check at once (the bulk leg, 10-28).
+        "write-many" => {
+            let count = body.get("count").and_then(|v| v.as_u64()).unwrap_or(0).min(20_000);
+            let prefix = text("text");
+            let base = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+            let started = std::time::Instant::now();
+            let mut written = 0u64;
+            let mut failed: Option<String> = None;
+            for i in 0..count {
+                match crate::sealed::sealed_store_inner(
+                    app,
+                    "harness_note".into(),
+                    serde_json::json!({ "text": format!("{} {}", prefix, i) }),
+                    Vec::new(),
+                    base + i,
+                )
+                .await
+                {
+                    Ok(_) => written += 1,
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
+                }
+            }
+            Ok(serde_json::json!({ "written": written, "secs": started.elapsed().as_secs(), "failed": failed }))
+        }
         "notes" => crate::sealed::sealed_list_inner(app).await.map(|records| {
             let notes: Vec<serde_json::Value> = records
                 .iter()
