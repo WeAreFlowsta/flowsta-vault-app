@@ -5,6 +5,23 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0-beta17] - 2026-10-29
+
+What Eric's beta16 hand pass found.
+
+### Fixed
+- The Overview's Backups card showed a smaller number for a moment each
+  time the page opened, then the full one: the backups made on this device
+  and the copies kept of the other devices' load separately, and the card
+  showed the first part on its own. It now waits for both.
+- A backup an app deleted was removed from the other devices only on the
+  next sync pass, up to a minute later. A deletion now reaches them as
+  quickly as a new backup does.
+
+### Tests
+- The devices legs check that a backup deleted on one device is dropped on
+  the other.
+
 ## [1.7.0-beta16] - 2026-10-28
 
 What Eric's beta15 hand pass found (the Mac ten backups short of Linux
