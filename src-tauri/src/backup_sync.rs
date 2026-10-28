@@ -473,9 +473,10 @@ pub(crate) async fn lane(state: &Arc<crate::commands::AppState>) -> Result<Arc<c
 
 /// One pass: write the records for this device's backups that changed,
 /// drop copies their device no longer holds, fetch copies that are missing.
-/// An app saved a backup: the devices loop wakes, waits for the burst to
-/// end, and says so to the other devices (10-20: a picture change took up
-/// to ten minutes to reach the other device, on the five-minute rounds).
+/// An app saved or deleted a backup: the devices loop wakes, waits for the
+/// burst to end, and says so to the other devices (10-20: a picture change
+/// took up to ten minutes to reach the other device, on the five-minute
+/// rounds; 10-29: a removal waited for the next pass the same way).
 pub static SAVED: std::sync::LazyLock<tokio::sync::Notify> = std::sync::LazyLock::new(tokio::sync::Notify::new);
 
 pub fn note_saved() {

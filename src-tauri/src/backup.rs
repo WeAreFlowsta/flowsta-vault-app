@@ -781,6 +781,12 @@ pub fn delete_app_backups(data_dir: &Path, client_id: &str) -> Result<usize, Str
     let _ = std::fs::remove_dir(&app_dir);
 
     log::info!("Deleted {} backups for {}", deleted, client_id);
+    if deleted > 0 {
+        // A removal reaches the other devices the way a save does: the
+        // devices loop wakes and says so, instead of waiting for its next
+        // pass (up to a minute).
+        crate::backup_sync::note_saved();
+    }
     Ok(deleted)
 }
 
@@ -792,6 +798,8 @@ pub fn delete_backup(data_dir: &Path, client_id: &str, label: Option<&str>) -> R
         return Err(format!("No backup found for label '{}'", label_str));
     }
     std::fs::remove_file(&path).map_err(|e| format!("Failed to delete backup: {}", e))?;
+    // Said to the other devices at once, as a save is (see `delete_app_backups`).
+    crate::backup_sync::note_saved();
 
     // Remove the app dir if now empty
     let app_dir = app_backup_dir(data_dir, client_id);

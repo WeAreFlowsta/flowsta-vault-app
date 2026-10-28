@@ -1,7 +1,7 @@
 // node --import tsx --test src/lib/*.test.ts  (npm run test:unit)
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { asksForEmail, longSilence, setupCard, whereThingsAre, type SetupView, type SiblingSync } from "./overview-cards";
+import { asksForEmail, backupsTotal, longSilence, setupCard, whereThingsAre, type SetupView, type SiblingSync } from "./overview-cards";
 import type { DeviceRow } from "~/components/vault/DevicesTab";
 
 const quiet: SiblingSync = { joined: true, other_devices: [], records_arrived: false, asked_for_secs: 0 };
@@ -71,5 +71,18 @@ describe("where the things are", () => {
     assert.match(whereThingsAre(row({ state: "needs_update" }), now), /needs the Vault update/);
     assert.match(whereThingsAre(row({ state: "setting_up" }), now), /still being set up itself/);
     assert.match(whereThingsAre(row({ state: "not_seen_since", at: now - 60_000 }), now), /last seen/);
+  });
+});
+
+describe("the Backups card's number", () => {
+  it("waits for both parts, so a partial sum never shows", () => {
+    assert.equal(backupsTotal(null, null), null, "nothing loaded yet");
+    assert.equal(backupsTotal(1815, null), null, "the copies kept from the other device are not in yet");
+    assert.equal(backupsTotal(null, 8), null, "this device's own backups are not in yet");
+  });
+  it("adds the two once both are known", () => {
+    assert.equal(backupsTotal(1815, 8), 1823);
+    assert.equal(backupsTotal(8, 1815), 1823);
+    assert.equal(backupsTotal(0, 0), 0, "a device with none says so, as a number");
   });
 });

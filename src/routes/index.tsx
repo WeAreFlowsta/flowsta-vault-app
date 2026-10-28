@@ -15,7 +15,7 @@ import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATC
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 import { ActivityRow } from "~/components/vault/ActivityRow";
 import { sizeText, type DevicesProgress, type DeviceRow } from "~/components/vault/DevicesTab";
-import { asksForEmail, setupCard, whereThingsAre, type SiblingSync } from "~/lib/overview-cards";
+import { asksForEmail, backupsTotal, setupCard, whereThingsAre, type SiblingSync } from "~/lib/overview-cards";
 import { buildFeed, timeAgo, recentlyRestored, type ActivityLogEntry } from "~/lib/activity";
 
 
@@ -122,12 +122,16 @@ export default component$(() => {
   // devices - the Backups card counts them too, so a second device never
   // says "No backups yet" while it holds them.
   const keptFromDevices = useSignal<{ name: string; backups: number }[]>([]);
+  // Set once the copies have been counted (or could not be): the card shows
+  // no number before then (`backupsTotal`).
+  const keptLoaded = useSignal(false);
   const loadKept = $(async () => {
     try {
       const kept = await invoke<{ install_id: string; backups: number; bytes: number }[]>("backups_kept_from_devices");
       const devices = kept.length ? await invoke<{ install_id: string; name: string }[]>("devices_list").catch(() => []) : [];
       keptFromDevices.value = kept.map((k) => ({ name: devices.find((d) => d.install_id === k.install_id)?.name || "another device", backups: k.backups }));
     } catch { /* locked */ }
+    keptLoaded.value = true;
   });
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async ({ cleanup }) => {
@@ -918,11 +922,19 @@ export default component$(() => {
             const made = stats?.total_backups ?? 0;
             const kept = keptFromDevices.value.reduce((n, k) => n + k.backups, 0);
             const from = keptFromDevices.value.length === 1 ? keptFromDevices.value[0].name : `${keptFromDevices.value.length} other devices`;
+            const total = backupsTotal(stats ? stats.total_backups : null, keptLoaded.value ? kept : null);
+            if (total === null) {
+              return (
+                <p data-testid="backups-count" data-loaded="0" class="text-3xl font-bold text-white">
+                  <span class="inline-block h-7 w-10 animate-pulse rounded bg-gray-700 align-middle" />
+                </p>
+              );
+            }
             return (
               <>
-                <p class="text-3xl font-bold text-white">{(made + kept).toLocaleString()}</p>
+                <p data-testid="backups-count" data-loaded="1" class="text-3xl font-bold text-white">{total.toLocaleString()}</p>
                 <p class="mt-1 text-xs text-gray-500">
-                  {made + kept > 0 && stats
+                  {total > 0 && stats
                     ? `${formatBytes(stats.total_size)} across ${stats.app_count} app${stats.app_count !== 1 ? "s" : ""}`
                     : "No backups yet"}
                 </p>
