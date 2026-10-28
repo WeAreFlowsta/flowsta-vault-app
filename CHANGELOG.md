@@ -5,6 +5,31 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+What Eric's beta15 hand pass found (the Mac ten backups short of Linux
+for days, on an identity of about 2,300 records).
+
+### Fixed
+- Two devices of a large identity could stop syncing for good after the
+  move to the new network: records written on one never reached the
+  other. Holochain 0.7.1 checks which of the offered data it already holds
+  in one database query that names every item three times, and the
+  database refuses a query naming more than about 11,000 items, so a
+  device dropped every exchange that offered more. Each device's move
+  writes thousands of records at once, so every exchange between the two
+  was that large, and while they never finished one, neither would accept
+  the other's direct deliveries either. The Vault now tells its conductor
+  to take at most 1 MiB of data per exchange, a few thousand items; a
+  larger backlog arrives over several exchanges. Both devices need this
+  version.
+
+### Tests
+- A two-device move leg: two 1.6.1 devices of a 2,500-record identity
+  update together, move, and restart with the old network retired; a
+  record written on each must reach the other, and neither conductor may
+  drop an exchange.
+
 ## [1.7.0-beta15] - 2026-10-28
 
 What the beta14 harness legs found.

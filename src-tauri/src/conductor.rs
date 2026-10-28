@@ -545,6 +545,18 @@ network:
     Ok(config_path)
 }
 
+/// How many bytes of ops one gossip exchange may offer the 0.7 conductor
+/// (kitsune2's default is 100 MB). Holochain 0.7.1 checks which offered ops
+/// it already holds in one database query that binds every op id three
+/// times, and SQLite refuses a query past 32,766 bound values: an exchange
+/// offering more than ~10.9k ids is dropped, and two devices of a large
+/// identity never finish a sync (2026-10-28: the move wrote ~14k ops on each
+/// device; the Mac was ten backups short for days). Each conductor's own
+/// figure bounds every batch offered to it, and the smallest ops are a few
+/// hundred bytes, so 1 MiB keeps a batch to a few thousand ids; a larger
+/// backlog arrives over several rounds.
+pub const GOSSIP_OP_BYTES_07: u32 = 1024 * 1024;
+
 /// Generate conductor-config.yaml for the Holochain 0.7.1 conductor.
 ///
 /// The 0.7 shape: no `signal_url` (an unknown field fails the parse),
@@ -585,6 +597,10 @@ network:
   bootstrap_url: {bootstrap_url}
   relay_url: {relay_url}
 {auth_lines}  request_timeout_s: 240
+  advanced:
+    k2Gossip:
+      maxGossipOpBytes: {gossip_bytes}
+      maxRequestGossipOpBytes: {gossip_bytes}
 db_sync_level: Normal
 "#,
         data_root = data_root,
@@ -594,6 +610,7 @@ db_sync_level: Normal
         bootstrap_url = bootstrap_url,
         relay_url = relay_url,
         auth_lines = auth_lines,
+        gossip_bytes = GOSSIP_OP_BYTES_07,
     );
     let config_path = conductor_dir.join("conductor-config.yaml");
     write_private(&config_path, &config)
@@ -1698,6 +1715,12 @@ mod bootstrap_target_tests {
         assert!(cfg.contains("  request_timeout_s: 240"), "request_timeout_s belongs under network in 0.7");
         assert!(cfg.contains("db_sync_level: Normal"));
         assert!(!cfg.contains("db_sync_strategy"));
+        // The gossip cap sits under network.advanced.k2Gossip (kitsune2's
+        // module config, camelCase keys), one level below request_timeout_s.
+        assert!(
+            cfg.contains("  request_timeout_s: 240\n  advanced:\n    k2Gossip:\n      maxGossipOpBytes: 1048576\n      maxRequestGossipOpBytes: 1048576\ndb_sync_level: Normal"),
+            "the gossip cap belongs under network.advanced.k2Gossip: {cfg}"
+        );
         assert!(cfg.contains("base64_auth_material_relay: \"eyJmb28iOiJiYXIifQ==\""));
         assert!(cfg.contains("port: 4458"));
         let _ = std::fs::remove_dir_all(&dir);
