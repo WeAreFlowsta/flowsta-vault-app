@@ -5,6 +5,75 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-10-29
+
+### Highlights
+- **Your Vault now runs on Holochain 0.7.1.** Holochain is the technology
+  that keeps your identity and data on your own devices instead of on a
+  company's servers. The first time you unlock after updating, your Vault
+  copies your data to the new version by itself. Nothing is deleted, and
+  there is nothing for you to do.
+- **Update your devices whenever suits you.** If you use your Vault on more
+  than one computer, they don't need to update on the same day. A computer
+  still on the previous version keeps working and stays in step with the
+  updated ones.
+- **Anything new starts on the new version.** An identity you create,
+  restore from your recovery phrase, or add to another computer after
+  updating uses the new version from the start.
+- **Your devices can check they still belong to you, without asking us.**
+  Each of your computers can confirm on its own that it is still one of
+  yours, and a computer you remove from your identity stops acting for it
+  as soon as it finds out.
+- **Security updates.** Your Vault's privacy protections go further still.
+  Websites you haven't signed in to now see only that a Vault is installed,
+  not which identity it holds. A private lookup code no longer travels in
+  web addresses, where it could end up in logs. And the parts of the Vault
+  that check websites' security certificates are on their latest patched
+  versions.
+
+### Added
+- Rename this device in Settings → Devices; your other devices and the
+  apps that list them see the new name within a minute.
+- Settings → Devices shows the move while it runs ("Moving your records
+  … N of M"), and Activity says once per device when your Vault synced
+  to the new network.
+- Flowsta's dashboard can set your picture back to the Vault's own default
+  face on every device.
+- The Vault can sign Flowsta's server manifests for a linked release tool,
+  showing exactly what it signs and only on your approval.
+
+### Changed
+- The Vault is ready as soon as its first Holochain network is, and the
+  second follows in the background; apps no longer wait for both.
+- "Your private data is on its way" shows only while there is another
+  device to wait for, names it, and leaves as soon as setup has finished.
+  A device added to an identity now learns its email from the first
+  device.
+
+### Fixed
+- Two devices of a large identity kept in step: the Vault now limits how
+  much one sync exchange carries, after Holochain 0.7.1 dropped larger
+  exchanges and such devices stopped syncing.
+- A device restored from its phrase gets its things within a minute or
+  two, not after five.
+- Signatures and their amendments are listed once each on every device,
+  and the Overview counts them once.
+- The Backups card no longer shows a smaller number for a moment when the
+  Overview opens, and a backup an app deletes leaves your other devices as
+  quickly as a new one arrives.
+- Opening a second copy of the Vault brings the running one to the front
+  instead of starting beside it (on Windows, copies could stack up).
+- Fetching app backups from another device no longer waits minutes for a
+  device that is closed or asleep.
+- Signing in with a computer clock that is off now retries once with the
+  server's time.
+- On macOS, two key stores under one identity no longer collide on a fresh
+  install.
+- A device's id is created once on a fresh install, so it registers with
+  your account straight away.
+- Removing an identity leaves one the next launch can find, instead of
+  showing the setup wizard.
+
 ## [1.7.0-beta17] - 2026-10-29
 
 What Eric's beta16 hand pass found.
