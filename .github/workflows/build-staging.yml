@@ -81,12 +81,18 @@ jobs:
           HC_RELEASE: holochain-0.6.1
         run: |
           mkdir -p src-tauri/binaries
+          pinned() { awk -v k="$1" '$1 !~ /^#/ && $2 == k { print $1 }' .github/holochain-sidecars.sha256; }
+          sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+          check() { # file, release/asset
+            w=$(pinned "$2"); g=$(sha "$1")
+            [ -n "$w" ] && [ "$g" = "$w" ] || { echo "$2: SHA-256 $g does not match the pinned ${w:-(none)}"; exit 1; }
+          }
           base="https://github.com/holochain/holochain/releases/download/${HC_RELEASE}"
           for bin in holochain lair-keystore; do
             dest="src-tauri/binaries/vault-${bin}-${{ matrix.target }}"
             curl -fsSL "${base}/${bin}-${{ matrix.target }}" -o "$dest"
             chmod +x "$dest"
-            test "$(wc -c < "$dest")" -gt 1000000 || { echo "$bin download too small"; exit 1; }
+            check "$dest" "${HC_RELEASE}/${bin}-${{ matrix.target }}"
           done
 
       # The Holochain 0.7.1 line beside 0.6.1 (the 1.7.0 transition: a 0.7
@@ -97,12 +103,18 @@ jobs:
         env:
           HC_RELEASE_07: holochain-0.7.1
         run: |
+          pinned() { awk -v k="$1" '$1 !~ /^#/ && $2 == k { print $1 }' .github/holochain-sidecars.sha256; }
+          sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+          check() { # file, release/asset
+            w=$(pinned "$2"); g=$(sha "$1")
+            [ -n "$w" ] && [ "$g" = "$w" ] || { echo "$2: SHA-256 $g does not match the pinned ${w:-(none)}"; exit 1; }
+          }
           base="https://github.com/holochain/holochain/releases/download/${HC_RELEASE_07}"
           for bin in holochain lair-keystore; do
             dest="src-tauri/binaries/vault-${bin}-07-${{ matrix.target }}"
             curl -fsSL "${base}/${bin}-${{ matrix.target }}" -o "$dest"
             chmod +x "$dest"
-            test "$(wc -c < "$dest")" -gt 1000000 || { echo "$bin (0.7.1) download too small"; exit 1; }
+            check "$dest" "${HC_RELEASE_07}/${bin}-${{ matrix.target }}"
           done
 
       - name: Fetch Holochain 0.6.1 binaries (Windows)
@@ -112,12 +124,18 @@ jobs:
           HC_RELEASE: holochain-0.6.1
         run: |
           New-Item -ItemType Directory -Force -Path src-tauri/binaries
+          function Assert-Pinned($file, $key) {
+            $want = Get-Content .github/holochain-sidecars.sha256 | Where-Object { $_ -notmatch '^\s*#' } |
+              ForEach-Object { $p = $_ -split '\s+'; if ($p[1] -eq $key) { $p[0] } } | Select-Object -First 1
+            $got = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            if (-not $want -or $got -ne $want) { throw "${key}: SHA-256 $got does not match the pinned $want" }
+          }
           $base = "https://github.com/holochain/holochain/releases/download/$env:HC_RELEASE"
           $t = "${{ matrix.target }}"
           foreach ($bin in "holochain","lair-keystore") {
             $dest = "src-tauri/binaries/vault-$bin-$t.exe"
             Invoke-WebRequest "$base/$bin-$t.exe" -OutFile $dest
-            if ((Get-Item $dest).Length -lt 1000000) { throw "$bin download too small" }
+            Assert-Pinned $dest "$env:HC_RELEASE/$bin-$t.exe"
           }
 
       - name: Fetch Holochain 0.7.1 binaries (Windows)
@@ -126,12 +144,18 @@ jobs:
         env:
           HC_RELEASE_07: holochain-0.7.1
         run: |
+          function Assert-Pinned($file, $key) {
+            $want = Get-Content .github/holochain-sidecars.sha256 | Where-Object { $_ -notmatch '^\s*#' } |
+              ForEach-Object { $p = $_ -split '\s+'; if ($p[1] -eq $key) { $p[0] } } | Select-Object -First 1
+            $got = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            if (-not $want -or $got -ne $want) { throw "${key}: SHA-256 $got does not match the pinned $want" }
+          }
           $base = "https://github.com/holochain/holochain/releases/download/$env:HC_RELEASE_07"
           $t = "${{ matrix.target }}"
           foreach ($bin in "holochain","lair-keystore") {
             $dest = "src-tauri/binaries/vault-$bin-07-$t.exe"
             Invoke-WebRequest "$base/$bin-$t.exe" -OutFile $dest
-            if ((Get-Item $dest).Length -lt 1000000) { throw "$bin (0.7.1) download too small" }
+            Assert-Pinned $dest "$env:HC_RELEASE_07/$bin-$t.exe"
           }
 
       - name: Install frontend dependencies
