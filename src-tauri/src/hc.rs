@@ -14,39 +14,20 @@
 use crate::commands::AppState;
 use std::sync::Arc;
 
-/// Which Holochain line a conductor speaks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum Line {
-    /// Holochain 0.6.1: private v2.0, identity 1.4, signing 1.4.
-    V06,
-    /// Holochain 0.7.1: private v2.1, identity 1.5, signing 1.5.
-    V07,
+pub use flowsta_hc_lines::{Line, RecordView};
+
+/// The suffix on this line's per-identity files (`sealed-records.bin` for
+/// 0.6, `sealed-records-07.bin` for 0.7): a Vault naming, not the library's.
+pub trait LineFiles {
+    fn file_suffix(self) -> &'static str;
 }
 
-impl Line {
-    /// The generation name device records carry (`DeviceRecord.generation`).
-    pub fn generation(self) -> &'static str {
-        match self {
-            Line::V06 => "holochain-0.6",
-            Line::V07 => "holochain-0.7",
-        }
-    }
-    /// The suffix on this line's per-identity files (`sealed-records.bin`
-    /// for 0.6, `sealed-records-07.bin` for 0.7).
-    pub fn file_suffix(self) -> &'static str {
+impl LineFiles for Line {
+    fn file_suffix(self) -> &'static str {
         match self {
             Line::V06 => "",
             Line::V07 => "-07",
         }
-    }
-}
-
-impl std::fmt::Display for Line {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Line::V06 => "0.6",
-            Line::V07 => "0.7",
-        })
     }
 }
 
@@ -127,118 +108,27 @@ impl AppClient {
     }
 }
 
-/// What the Vault needs from a record, whichever line produced it. Kept on
-/// disk as the held-records file (serde), so the shape is a format.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RecordView {
-    /// The action hash, 39 raw bytes.
-    #[serde(with = "serde_bytes")]
-    pub action_hash: Vec<u8>,
-    /// The author's agent key, 39 raw bytes.
-    #[serde(with = "serde_bytes")]
-    pub author: Vec<u8>,
-    /// Action timestamp, microseconds since the epoch.
-    pub timestamp_us: i64,
-    /// The app entry's msgpack bytes, when the record carries an entry.
-    #[serde(default, with = "serde_bytes_opt")]
-    pub entry: Option<Vec<u8>>,
-    /// The signed action as that line encodes it (msgpack): the proof a
-    /// carried record travels with.
-    #[serde(with = "serde_bytes")]
-    pub signed_action: Vec<u8>,
-    pub line: Line,
-}
-
-/// `serde_bytes` for an `Option<Vec<u8>>`.
-mod serde_bytes_opt {
-    pub fn serialize<S: serde::Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
-        match v {
-            Some(b) => s.serialize_some(&serde_bytes::Bytes::new(b)),
-            None => s.serialize_none(),
-        }
-    }
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
-        let v: Option<serde_bytes::ByteBuf> = serde::Deserialize::deserialize(d)?;
-        Ok(v.map(|b| b.into_vec()))
-    }
-}
-
-impl RecordView {
-    /// Decode the entry as one of our own entry structs.
-    pub fn entry_as<T: serde::de::DeserializeOwned>(&self) -> Result<T, String> {
-        let bytes = self.entry.as_ref().ok_or("Record has no entry")?;
-        rmp_serde::from_slice(bytes).map_err(|e| format!("Failed to decode entry: {}", e))
-    }
-}
-
 /// Decode a zome output of `Vec<Record>` from the given line.
 pub fn records(line: Line, bytes: &[u8]) -> Result<Vec<RecordView>, String> {
-    match line {
-        Line::V06 => {
-            let recs: Vec<holochain_types::prelude::Record> =
-                rmp_serde::from_slice(bytes).map_err(|e| format!("Failed to decode records (0.6): {}", e))?;
-            Ok(recs.iter().map(view_06).collect())
-        }
-        Line::V07 => {
-            let recs: Vec<holochain_types_07::prelude::Record> =
-                rmp_serde::from_slice(bytes).map_err(|e| format!("Failed to decode records (0.7): {}", e))?;
-            Ok(recs.iter().map(view_07).collect())
-        }
-    }
+    Ok(flowsta_hc_lines::records(line, bytes)?)
 }
 
 /// Decode a zome output of `Option<Record>` from the given line.
 pub fn record_opt(line: Line, bytes: &[u8]) -> Result<Option<RecordView>, String> {
-    match line {
-        Line::V06 => {
-            let rec: Option<holochain_types::prelude::Record> =
-                rmp_serde::from_slice(bytes).map_err(|e| format!("Failed to decode record (0.6): {}", e))?;
-            Ok(rec.as_ref().map(view_06))
-        }
-        Line::V07 => {
-            let rec: Option<holochain_types_07::prelude::Record> =
-                rmp_serde::from_slice(bytes).map_err(|e| format!("Failed to decode record (0.7): {}", e))?;
-            Ok(rec.as_ref().map(view_07))
-        }
-    }
+    Ok(flowsta_hc_lines::record_opt(line, bytes)?)
 }
 
 /// Decode a zome output of one `Record` from the given line.
 pub fn record(line: Line, bytes: &[u8]) -> Result<RecordView, String> {
-    match line {
-        Line::V06 => {
-            let rec: holochain_types::prelude::Record =
-                rmp_serde::from_slice(bytes).map_err(|e| format!("Failed to decode record (0.6): {}", e))?;
-            Ok(view_06(&rec))
-        }
-        Line::V07 => {
-            let rec: holochain_types_07::prelude::Record =
-                rmp_serde::from_slice(bytes).map_err(|e| format!("Failed to decode record (0.7): {}", e))?;
-            Ok(view_07(&rec))
-        }
-    }
+    Ok(flowsta_hc_lines::record(line, bytes)?)
 }
 
-pub fn view_06(r: &holochain_types::prelude::Record) -> RecordView {
-    RecordView {
-        action_hash: r.action_address().get_raw_39().to_vec(),
-        author: r.action().author().get_raw_39().to_vec(),
-        timestamp_us: r.action().timestamp().as_micros(),
-        entry: r.entry().as_option().and_then(|e| e.as_app_entry()).map(|a| a.as_ref().bytes().to_vec()),
-        signed_action: rmp_serde::to_vec_named(r.signed_action()).unwrap_or_default(),
-        line: Line::V06,
-    }
+pub fn view_06(r: &holochain_types::prelude::Record) -> Result<RecordView, String> {
+    Ok(flowsta_hc_lines::view_06(r)?)
 }
 
-pub fn view_07(r: &holochain_types_07::prelude::Record) -> RecordView {
-    RecordView {
-        action_hash: r.action_address().get_raw_39().to_vec(),
-        author: r.action().author().get_raw_39().to_vec(),
-        timestamp_us: r.action().timestamp().as_micros(),
-        entry: r.entry().as_option().and_then(|e| e.as_app_entry()).map(|a| a.as_ref().bytes().to_vec()),
-        signed_action: rmp_serde::to_vec_named(r.signed_action()).unwrap_or_default(),
-        line: Line::V07,
-    }
+pub fn view_07(r: &holochain_types_07::prelude::Record) -> Result<RecordView, String> {
+    Ok(flowsta_hc_lines::view_07(r)?)
 }
 
 /// Connect to one installed app on the 0.7 line and return the app
@@ -304,32 +194,6 @@ pub fn long_request_ws_config_07() -> Arc<holochain_client_07::WebsocketConfig> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hashes_are_the_same_bytes_on_both_lines() {
-        let h = holochain_types::prelude::ActionHash::from_raw_32(vec![7u8; 32]);
-        let h7 = holochain_types_07::prelude::ActionHash::from_raw_39(h.get_raw_39().to_vec());
-        assert_eq!(h.to_string(), h7.to_string());
-        // The msgpack of a hash is the same on both lines, so a wire struct
-        // typed with the 0.6 hash serves the 0.7 cell too.
-        assert_eq!(rmp_serde::to_vec_named(&h).unwrap(), rmp_serde::to_vec_named(&h7).unwrap());
-        let k = holochain_types::prelude::AgentPubKey::from_raw_32(vec![9u8; 32]);
-        let k7 = holochain_types_07::prelude::AgentPubKey::from_raw_39(k.get_raw_39().to_vec());
-        assert_eq!(rmp_serde::to_vec_named(&k).unwrap(), rmp_serde::to_vec_named(&k7).unwrap());
-    }
-
-    #[test]
-    fn our_structs_encode_identically_for_both_lines() {
-        #[derive(serde::Serialize, Debug)]
-        struct In {
-            title: String,
-            n: u32,
-        }
-        let a = holochain_types::prelude::ExternIO::encode(&In { title: "x".into(), n: 2 }).unwrap().into_vec();
-        let b = holochain_types_07::prelude::ExternIO::encode(&In { title: "x".into(), n: 2 }).unwrap().into_vec();
-        assert_eq!(a, b);
-        assert_eq!(a, rmp_serde::to_vec_named(&In { title: "x".into(), n: 2 }).unwrap());
-    }
 
     #[test]
     fn a_line_names_its_generation_and_files() {

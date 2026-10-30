@@ -90,6 +90,8 @@ lair_keystore_api_07 = { package = "lair_keystore_api", version = "=0.7.1" }
 # holochain_types 0.6.1 uses).
 mr_bundle = "=0.6.1"
 mr_bundle_07 = { package = "mr_bundle", version = "=0.7.1" }
+# The two-line machinery, extracted into a library other apps share.
+flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "2d892851741b376c7aa4278d681d298278afd420" }
 
 # Save dialog
 tauri-plugin-dialog = "2"

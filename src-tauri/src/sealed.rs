@@ -122,32 +122,28 @@ pub struct StoredVersion {
     pub payload: SealedPayload,
 }
 
-/// Reduce every stored version to the newest per logical id. Returns the
-/// winners (deletions included) and the versions they supersede. The order
-/// between two versions is the same on every device: newer time first, then
-/// a deletion over a live version, then the larger action hash.
-pub fn latest_versions(versions: Vec<StoredVersion>) -> (Vec<StoredVersion>, Vec<StoredVersion>) {
-    use std::collections::HashMap;
-    let mut winners: HashMap<String, StoredVersion> = HashMap::new();
-    let mut superseded = Vec::new();
-    for version in versions {
-        let id = version.payload.logical_id();
-        match winners.get(&id) {
-            None => {
-                winners.insert(id, version);
-            }
-            Some(current) => {
-                let rank = |v: &StoredVersion| (v.payload.version_time(), v.payload.deleted, v.action_hash.clone());
-                if rank(&version) > rank(current) {
-                    let old = winners.insert(id, version).expect("present");
-                    superseded.push(old);
-                } else if version.action_hash != current.action_hash {
-                    superseded.push(version);
-                }
-            }
-        }
+impl flowsta_hc_lines::Versioned for StoredVersion {
+    fn logical_id(&self) -> String {
+        self.payload.logical_id()
     }
-    (winners.into_values().collect(), superseded)
+    fn version_time(&self) -> u64 {
+        self.payload.version_time()
+    }
+    fn created_at(&self) -> u64 {
+        self.payload.created_at
+    }
+    fn deleted(&self) -> bool {
+        self.payload.deleted
+    }
+    fn action_hash(&self) -> &[u8] {
+        &self.action_hash
+    }
+}
+
+/// Reduce every stored version to the newest per logical id (winners, and
+/// the versions they supersede). The rule lives in `flowsta-hc-lines`.
+pub fn latest_versions(versions: Vec<StoredVersion>) -> (Vec<StoredVersion>, Vec<StoredVersion>) {
+    flowsta_hc_lines::latest_versions(versions)
 }
 
 /// Encrypt a payload with the per-user data key. Returns (cipher, nonce);
@@ -414,11 +410,15 @@ fn decode_listed(line: Line, bytes: &[u8]) -> Result<Vec<RecordView>, String> {
     }
     match line {
         Line::V06 => rmp_serde::from_slice::<Vec<Listed06>>(bytes)
-            .map(|l| l.iter().map(|x| crate::hc::view_06(&x.record)).collect())
-            .map_err(|e| format!("Records decode failed: {}", e)),
+            .map_err(|e| format!("Records decode failed: {}", e))?
+            .iter()
+            .map(|x| crate::hc::view_06(&x.record))
+            .collect(),
         Line::V07 => rmp_serde::from_slice::<Vec<Listed07>>(bytes)
-            .map(|l| l.iter().map(|x| crate::hc::view_07(&x.record)).collect())
-            .map_err(|e| format!("Records decode failed: {}", e)),
+            .map_err(|e| format!("Records decode failed: {}", e))?
+            .iter()
+            .map(|x| crate::hc::view_07(&x.record))
+            .collect(),
     }
 }
 
@@ -457,11 +457,21 @@ fn decode_listed_refs(
     match line {
         Line::V06 => {
             let l: Refs06 = rmp_serde::from_slice(bytes).map_err(|e| format!("Records decode failed: {}", e))?;
-            Ok((l.refs.into_iter().map(|r| (r.target, r.record.as_ref().map(crate::hc::view_06), r.left)).collect(), l.more))
+            let refs = l
+                .refs
+                .into_iter()
+                .map(|r| Ok((r.target, r.record.as_ref().map(crate::hc::view_06).transpose()?, r.left)))
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok((refs, l.more))
         }
         Line::V07 => {
             let l: Refs07 = rmp_serde::from_slice(bytes).map_err(|e| format!("Records decode failed: {}", e))?;
-            Ok((l.refs.into_iter().map(|r| (r.target, r.record.as_ref().map(crate::hc::view_07), r.left)).collect(), l.more))
+            let refs = l
+                .refs
+                .into_iter()
+                .map(|r| Ok((r.target, r.record.as_ref().map(crate::hc::view_07).transpose()?, r.left)))
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok((refs, l.more))
         }
     }
 }
@@ -901,6 +911,7 @@ static RECORDS_FROM_CELL: std::sync::atomic::AtomicUsize = std::sync::atomic::At
 const GETS_PER_CALL: u32 = 100;
 
 pub(crate) fn held_records_path(root: &std::path::Path, line: Line) -> std::path::PathBuf {
+    use crate::hc::LineFiles;
     root.join(format!("sealed-records{}.bin", line.file_suffix()))
 }
 
@@ -942,7 +953,9 @@ fn load_held_file(path: &std::path::Path, data_key: &[u8; 32]) -> Vec<RecordView
     match rmp_serde::from_slice::<Vec<holochain_types::prelude::Record>>(&plain) {
         Ok(records) => {
             log::info!("[records] kept records in the pre-1.7.0 shape: {} read", records.len());
-            records.iter().map(crate::hc::view_06).collect()
+            // A record whose action does not encode is left out and read
+            // again from the cell, never kept with an empty signature.
+            records.iter().filter_map(|r| crate::hc::view_06(r).ok()).collect()
         }
         Err(_) => Vec::new(),
     }

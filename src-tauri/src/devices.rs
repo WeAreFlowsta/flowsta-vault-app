@@ -585,7 +585,7 @@ pub async fn own_holds(state: &Arc<AppState>) -> Holds {
 /// What this device holds, counted the way a sibling counts: the larger of
 /// its active line's view and its attached 0.6 line's, when it has one.
 pub fn records_held(active: u64, attached_06: Option<u64>) -> u64 {
-    attached_06.map_or(active, |on_06| active.max(on_06))
+    flowsta_hc_lines::records_held(active, attached_06)
 }
 
 /// Whether this device still has records to receive: the private network

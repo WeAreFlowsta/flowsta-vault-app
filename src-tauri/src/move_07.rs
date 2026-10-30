@@ -466,12 +466,7 @@ pub(crate) fn missing_on_07<'a>(
     winners_06: &'a [StoredVersion],
     held_07: &std::collections::HashMap<String, StoredVersion>,
 ) -> Vec<(&'a StoredVersion, Option<Vec<u8>>)> {
-    let mut list: Vec<&StoredVersion> = winners_06
-        .iter()
-        .filter(|v| held_07.get(&v.payload.logical_id()).map(|c| c.payload.version_time() < v.payload.version_time()).unwrap_or(true))
-        .collect();
-    list.sort_by(|a, b| a.payload.created_at.cmp(&b.payload.created_at).then_with(|| a.action_hash.cmp(&b.action_hash)));
-    list.into_iter().map(|v| (v, held_07.get(&v.payload.logical_id()).map(|c| c.action_hash.clone()))).collect()
+    flowsta_hc_lines::missing_on(winners_06, held_07)
 }
 
 async fn private_pass(state: &Arc<AppState>, out: &mut PassOutcome) -> Result<(), String> {
