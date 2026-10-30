@@ -3431,113 +3431,27 @@ pub async fn check_api_connectivity(api_url: String) -> bool {
         .unwrap_or(false)
 }
 
-/// Re-wrap the conductor's SQLCipher key file (`databases/db.key`) under a
-/// new passphrase. The inner 32-byte database key is unchanged - only the
-/// passphrase wrapping rotates - so the databases themselves stay readable.
+/// Re-wrap a conductor's SQLCipher key file (`databases/db.key`) under a
+/// new passphrase, with that line's own code (flowsta-hc-lines
+/// `keystore::rekey_db_key`). The inner database key and its salt are kept,
+/// so the databases stay readable.
 ///
-/// File format (holochain_sqlite 0.6.1 `DbKey`):
-/// `base64url_no_pad( nonce[24] ‖ secretbox(key[32])[48] ‖ argon2_salt[16] )`
-/// where the secretbox secret = argon2id(passphrase, salt, MODERATE/MODERATE).
-///
-/// Repair-idempotent: if the file no longer opens with the current password
-/// but already opens with the new one (a previous change was interrupted
-/// between file writes), it is left as-is and Ok is returned.
+/// Repair-idempotent: a file that already opens with the new password (a
+/// previous change was interrupted between file writes) is left as it is.
 fn rekey_conductor_db_key(
     db_key_path: &std::path::Path,
+    line: crate::hc::Line,
     current_password: &str,
     new_password: &str,
 ) -> Result<(), String> {
-    use base64::Engine as _;
-    use lair_keystore_api::dependencies::sodoken;
-
-    const NONCE: usize = sodoken::secretbox::XSALSA_NONCEBYTES;
-    const MAC: usize = sodoken::secretbox::XSALSA_MACBYTES;
-    const SALT: usize = sodoken::argon2::ARGON2_ID_SALTBYTES;
-
-    let b64 = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-    let locked = std::fs::read_to_string(db_key_path)
-        .map_err(|e| format!("Failed to read db.key: {}", e))?;
-    let buf = b64
-        .decode(locked.trim())
-        .map_err(|e| format!("db.key is not valid base64: {}", e))?;
-    if buf.len() != NONCE + 32 + MAC + SALT {
-        return Err(format!("db.key has unexpected length {}", buf.len()));
-    }
-
-    let derive = |passphrase: &str,
-                  salt: &[u8; SALT]|
-     -> Result<sodoken::SizedLockedArray<32>, String> {
-        let mut secret = sodoken::SizedLockedArray::<32>::new()
-            .map_err(|e| format!("Secure alloc failed: {}", e))?;
-        sodoken::argon2::blocking_argon2id(
-            &mut *secret.lock(),
-            passphrase.as_bytes(),
-            salt,
-            sodoken::argon2::ARGON2_ID_OPSLIMIT_MODERATE,
-            sodoken::argon2::ARGON2_ID_MEMLIMIT_MODERATE,
-        )
-        .map_err(|e| format!("argon2id failed: {}", e))?;
-        Ok(secret)
-    };
-
-    let mut salt = [0u8; SALT];
-    salt.copy_from_slice(&buf[NONCE + 32 + MAC..]);
-    let nonce: [u8; NONCE] = buf[..NONCE].try_into().unwrap();
-    let cipher = &buf[NONCE..NONCE + 32 + MAC];
-
-    let mut db_key = sodoken::SizedLockedArray::<32>::new()
-        .map_err(|e| format!("Secure alloc failed: {}", e))?;
-
-    let mut secret = derive(current_password, &salt)?;
-    let opens_with_current =
-        sodoken::secretbox::xsalsa_open_easy(&mut *db_key.lock(), cipher, &nonce, &secret.lock())
-            .is_ok();
-    if !opens_with_current {
-        let mut new_secret = derive(new_password, &salt)?;
-        let opens_with_new = sodoken::secretbox::xsalsa_open_easy(
-            &mut *db_key.lock(),
-            cipher,
-            &nonce,
-            &new_secret.lock(),
-        )
-        .is_ok();
-        if opens_with_new {
-            log::warn!("db.key already wrapped with the new password - skipping rewrap");
-            return Ok(());
+    use flowsta_hc_lines::keystore::KeyStoreError;
+    match flowsta_hc_lines::keystore::rekey_db_key(db_key_path, line, current_password, new_password) {
+        Ok(_) => Ok(()),
+        Err(flowsta_hc_lines::Error::KeyStore(KeyStoreError::DbKeyWrongPassword(_))) => {
+            Err("The conductor's database key doesn't open with the current password".into())
         }
-        return Err("The conductor's database key doesn't open with the current password".into());
+        Err(e) => Err(e.to_string()),
     }
-
-    // Re-wrap under the new password with a fresh nonce. The salt MUST be
-    // preserved: holochain also feeds it to SQLCipher as `PRAGMA cipher_salt`
-    // (the databases use a plaintext header, so the salt exists only in this
-    // file) - rotating it would make every database unreadable.
-    let mut new_nonce = [0u8; NONCE];
-    sodoken::random::randombytes_buf(&mut new_nonce).map_err(|e| format!("RNG failed: {}", e))?;
-
-    let mut new_secret = derive(new_password, &salt)?;
-    let mut new_cipher = vec![0u8; 32 + MAC];
-    sodoken::secretbox::xsalsa_easy(
-        &mut new_cipher,
-        &new_nonce,
-        &*db_key.lock(),
-        &new_secret.lock(),
-    )
-    .map_err(|e| format!("secretbox seal failed: {}", e))?;
-
-    let mut out = Vec::with_capacity(NONCE + 32 + MAC + SALT);
-    out.extend_from_slice(&new_nonce);
-    out.extend_from_slice(&new_cipher);
-    out.extend_from_slice(&salt);
-
-    // Atomic replace so a crash can't leave a truncated key file.
-    let tmp = db_key_path.with_extension("key.tmp");
-    std::fs::write(&tmp, b64.encode(&out)).map_err(|e| format!("Failed to write db.key: {}", e))?;
-    std::fs::rename(&tmp, db_key_path).map_err(|e| format!("Failed to replace db.key: {}", e))?;
-
-    log::info!("Conductor db.key re-wrapped under the new password.");
-    Ok(())
 }
 
 /// Change the vault password - fully local, no server involved.
@@ -3749,7 +3663,7 @@ pub(crate) async fn change_vault_password_inner(
     let db_key_present = db_key_path.exists();
     if db_key_present {
         let (path, current, new) = (db_key_path.clone(), current_password.clone(), new_password.clone());
-        let rekey = tokio::task::spawn_blocking(move || rekey_conductor_db_key(&path, &current, &new))
+        let rekey = tokio::task::spawn_blocking(move || rekey_conductor_db_key(&path, crate::hc::Line::V06, &current, &new))
             .await
             .map_err(|e| format!("Rekey task failed: {}", e))
             .and_then(|r| r);
@@ -3772,13 +3686,13 @@ pub(crate) async fn change_vault_password_inner(
     let db_key_present_07 = db_key_path_07.exists();
     if db_key_present_07 {
         let (path, current, new) = (db_key_path_07.clone(), current_password.clone(), new_password.clone());
-        let rekey = tokio::task::spawn_blocking(move || rekey_conductor_db_key(&path, &current, &new))
+        let rekey = tokio::task::spawn_blocking(move || rekey_conductor_db_key(&path, crate::hc::Line::V07, &current, &new))
             .await
             .map_err(|e| format!("Rekey task failed: {}", e))
             .and_then(|r| r);
         if let Err(e) = rekey {
             if db_key_present {
-                let _ = rekey_conductor_db_key(&db_key_path, &new_password, &current_password)
+                let _ = rekey_conductor_db_key(&db_key_path, crate::hc::Line::V06, &new_password, &current_password)
                     .map_err(|re| log::error!("rollback: db.key could not be re-wrapped to the current password: {}", re));
             }
             restore_lair_dir(&lair_dir, &lair_backup);
@@ -3803,12 +3717,12 @@ pub(crate) async fn change_vault_password_inner(
         set_cached_passphrase(state, &current_password, state.vault_config.lock().unwrap().is_some());
         if db_key_present {
             let (path, current, new) = (db_key_path.clone(), current_password.clone(), new_password.clone());
-            if let Err(re) = rekey_conductor_db_key(&path, &new, &current) {
+            if let Err(re) = rekey_conductor_db_key(&path, crate::hc::Line::V06, &new, &current) {
                 log::error!("rollback: db.key could not be re-wrapped to the current password: {}", re);
             }
         }
         if db_key_present_07 {
-            if let Err(re) = rekey_conductor_db_key(&db_key_path_07, &new_password, &current_password) {
+            if let Err(re) = rekey_conductor_db_key(&db_key_path_07, crate::hc::Line::V07, &new_password, &current_password) {
                 log::error!("rollback: the 0.7 db.key could not be re-wrapped to the current password: {}", re);
             }
         }
@@ -3855,11 +3769,11 @@ pub(crate) async fn change_vault_password_inner(
             }
             restore_lair_dir(&lair_dir, &lair_backup);
             restore_lair_dir(&lair_dir_07, &lair_backup_07);
-            for (present, path) in [(db_key_present, &db_key_path), (db_key_present_07, &db_key_path_07)] {
+            for (present, path, line) in [(db_key_present, &db_key_path, crate::hc::Line::V06), (db_key_present_07, &db_key_path_07, crate::hc::Line::V07)] {
                 if present {
                     let (path, current, new) = (path.clone(), current_password.clone(), new_password.clone());
                     let _ = tokio::task::spawn_blocking(move || {
-                        rekey_conductor_db_key(&path, &new, &current).map_err(|re| {
+                        rekey_conductor_db_key(&path, line, &new, &current).map_err(|re| {
                             log::error!("rollback: {:?} could not be re-wrapped to the current password: {}", path, re)
                         })
                     })
@@ -9214,7 +9128,7 @@ mod db_key_rekey_tests {
         let salt = [3u8; SALT];
         write_db_key(&path, "old-password-1", &key, &salt);
 
-        rekey_conductor_db_key(&path, "old-password-1", "new-password-2").unwrap();
+        rekey_conductor_db_key(&path, crate::hc::Line::V06, "old-password-1", "new-password-2").unwrap();
 
         assert!(open_db_key(&path, "old-password-1").is_none(), "old password must no longer open it");
         let (k, s) = open_db_key(&path, "new-password-2").expect("new password opens it");
@@ -9227,14 +9141,14 @@ mod db_key_rekey_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db.key");
         write_db_key(&path, "old-password-1", &[9u8; 32], &[1u8; SALT]);
-        rekey_conductor_db_key(&path, "old-password-1", "new-password-2").unwrap();
+        rekey_conductor_db_key(&path, crate::hc::Line::V06, "old-password-1", "new-password-2").unwrap();
         // Re-running a change that was cut off midway must succeed (already wrapped with NEW).
-        rekey_conductor_db_key(&path, "old-password-1", "new-password-2").unwrap();
+        rekey_conductor_db_key(&path, crate::hc::Line::V06, "old-password-1", "new-password-2").unwrap();
         // A rollback (NEW → OLD) is the same operation in reverse.
-        rekey_conductor_db_key(&path, "new-password-2", "old-password-1").unwrap();
+        rekey_conductor_db_key(&path, crate::hc::Line::V06, "new-password-2", "old-password-1").unwrap();
         assert!(open_db_key(&path, "old-password-1").is_some());
         // Neither password matching is an error, not a silent rewrap.
-        assert!(rekey_conductor_db_key(&path, "nope", "new-password-2").is_err());
+        assert!(rekey_conductor_db_key(&path, crate::hc::Line::V06, "nope", "new-password-2").is_err());
     }
 }
 

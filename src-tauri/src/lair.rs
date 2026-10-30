@@ -1,336 +1,117 @@
-//! Lair-keystore integration for seed import.
+//! The Vault's key stores, one per line, through flowsta-hc-lines
+//! (`keystore`): start, wait, connect and seed import. What stays here is
+//! the Vault's wording for a person, its leftover-folder names and the
+//! quarantine of a store that will not start.
 //!
-//! Provides functions to import our HMAC-derived device seed into lair-keystore,
-//! enabling the Holochain conductor to use the same agent identity as the vault.
-//!
-//! The lair `import_seed` API requires seeds to be encrypted via x25519 crypto_box
-//! (xsalsa20poly1305) for transport security. The `import_seed_to_lair` function
-//! handles this wrapping transparently, following the pattern from lair's official
-//! `deterministic-keys.rs` example.
+//! The device seed is imported under one tag into both lines' stores, so
+//! the agent key is the same on 0.6 and 0.7.
 
-use crate::process_ext::{SidecarChild, SidecarCommand};
-use lair_keystore_api::dependencies::sodoken;
-use lair_keystore_api::prelude::*;
-use percent_encoding::percent_decode_str;
-use std::io::Write;
+use crate::process_ext::SidecarChild;
+use flowsta_hc_lines::keystore::{self, KeyStoreError};
+use lair_keystore_api::prelude::LairClient;
 use std::path::Path;
-use std::sync::Arc;
+use std::time::Duration;
 
-/// Import a 32-byte seed into a running lair keystore.
-///
-/// Handles the x25519 crypto_box encryption wrapping required by lair's
-/// `import_seed` API. Returns `SeedInfo` containing the Ed25519 and X25519
-/// public keys derived from the imported seed.
-///
-/// # Arguments
-/// * `client` - Connected LairClient
-/// * `seed_bytes` - 32-byte seed (e.g. from HMAC-SHA256 derivation)
-/// * `tag` - Identifier for the seed in lair (e.g. "flowsta-device-1")
-pub async fn import_seed_to_lair(
-    client: &LairClient,
-    seed_bytes: &[u8; 32],
-    tag: &str,
-) -> LairResult<SeedInfo> {
-    // Check if this seed tag already exists (e.g. re-unlock after previous import).
-    // If so, just return the existing seed info.
-    match client.get_entry(tag.into()).await {
-        Ok(LairEntryInfo::Seed { seed_info, .. }) => {
-            // The entry is reused only when it holds THIS seed: a tag that
-            // stands for another key would start the conductor as that key.
-            let expected = crate::key_derivation::public_key_of_seed(seed_bytes);
-            if *seed_info.ed25519_pub_key.0 != expected {
-                return Err(lair_keystore_api::dependencies::one_err::OneErr::new(&format!(
-                    "the key store already holds a different key under '{}'",
-                    tag
-                )));
-            }
-            log::info!("Seed '{}' already exists in lair, reusing", tag);
-            return Ok(seed_info);
-        }
-        _ => {} // Not found or different entry type - proceed with import
-    }
-
-    // 1. Create a helper seed in lair to get a recipient x25519 public key.
-    //    Lair requires the import payload to be encrypted to a key it controls.
-    let helper = match client
-        .new_seed("_import_helper".into(), None, false)
-        .await
-    {
-        Ok(h) => h,
-        Err(_) => {
-            // Helper may already exist from a previous run - fetch it instead
-            match client.get_entry("_import_helper".into()).await {
-                Ok(LairEntryInfo::Seed { seed_info, .. }) => seed_info,
-                _ => return Err(lair_keystore_api::dependencies::one_err::OneErr::new("Failed to create or fetch _import_helper seed")),
-            }
-        }
-    };
-
-    // 2. Generate ephemeral x25519 keypair for the sender side of crypto_box.
-    let mut sender_pub = [0u8; sodoken::crypto_box::XSALSA_PUBLICKEYBYTES];
-    let mut sender_sec =
-        sodoken::SizedLockedArray::<{ sodoken::crypto_box::XSALSA_SECRETKEYBYTES }>::new()?;
-    sodoken::crypto_box::xsalsa_keypair(&mut sender_pub, &mut *sender_sec.lock())?;
-
-    // 3. Generate random nonce (24 bytes).
-    let mut nonce = [0u8; sodoken::crypto_box::XSALSA_NONCEBYTES];
-    sodoken::random::randombytes_buf(&mut nonce)?;
-
-    // 4. Encrypt our seed with crypto_box(nonce, seed, helper_pub, ephemeral_sec).
-    let recipient_pub_bytes: &[u8; 32] = &*helper.x25519_pub_key.0;
-    let mut cipher = vec![0u8; seed_bytes.len() + sodoken::crypto_box::XSALSA_MACBYTES];
-    sodoken::crypto_box::xsalsa_easy(
-        &mut cipher,
-        seed_bytes,
-        &nonce,
-        recipient_pub_bytes,
-        &*sender_sec.lock(),
-    )?;
-
-    // 5. Import the encrypted seed into lair.
-    //    Lair decrypts using the helper seed's x25519 private key and stores our seed.
-    let sender_pub_key = BinDataSized(Arc::new(sender_pub));
-    let seed_info = client
-        .import_seed(
-            sender_pub_key,
-            helper.x25519_pub_key,
-            None,
-            nonce,
-            cipher.into(),
-            tag.into(),
-            false,
-        )
-        .await?;
-
-    Ok(seed_info)
+/// Import a 32-byte seed into the running 0.6 lair under `tag` and return
+/// its Ed25519 public key. A tag already present is reused only when it
+/// holds this seed.
+pub async fn import_seed_to_lair(client: &LairClient, seed_bytes: &[u8; 32], tag: &str) -> Result<[u8; 32], String> {
+    Ok(keystore::v06::import_seed(client, seed_bytes, tag).await?)
 }
 
-// ── Process Lifecycle ───────────────────────────────────────────────
-//
-// Functions for managing an external lair-keystore process.
-// In production, these will use Tauri's sidecar API.
-// For development, we use std::process::Command with the cargo-installed binary.
-
-/// Start a lair-keystore process.
-///
-/// On first run (no config file), initializes the keystore.
-/// Then starts the server process.
-/// Returns the child process handle and the connection URL.
-pub fn start_lair_process(
-    lair_dir: &Path,
-    passphrase: &str,
-) -> Result<(SidecarChild, String), String> {
-    start_lair_process_with(lair_dir, passphrase, "vault-lair-keystore")
-}
-
-/// Start a lair-keystore process from the named sidecar: `vault-lair-keystore`
-/// (0.6.3, for the 0.6 conductor) or `vault-lair-keystore-07` (0.7.1, for the
-/// 0.7 one). A conductor accepts only a lair of its own version, so the two
-/// lines run two key stores holding the same seed.
-pub fn start_lair_process_with(
-    lair_dir: &Path,
-    passphrase: &str,
-    binary: &str,
-) -> Result<(SidecarChild, String), String> {
-    std::fs::create_dir_all(lair_dir)
-        .map_err(|e| format!("Failed to create lair directory: {}", e))?;
-
-    let config_path = lair_dir.join("lair-keystore-config.yaml");
-    let is_first_run = !config_path.exists();
-
-    let lair_bin = crate::resolve_sidecar_bin(binary);
-    log::info!("Using lair-keystore binary: {:?}", lair_bin);
-
-    if is_first_run {
-        log::info!("[lair:init] first run - initializing lair-keystore");
-        let init_start = std::time::Instant::now();
-        // Init's output goes to log files next to the store, like the
-        // server's below; a failed init says why in lair-init-stderr.log.
-        let init_stdout = std::fs::File::create(lair_dir.join("lair-init-stdout.log"))
-            .map_err(|e| format!("Failed to create lair init stdout log: {}", e))?;
-        let init_stderr = std::fs::File::create(lair_dir.join("lair-init-stderr.log"))
-            .map_err(|e| format!("Failed to create lair init stderr log: {}", e))?;
-        let mut child = SidecarCommand::new(&lair_bin)
-            .arg("init")
-            .arg("--piped")
-            .current_dir(lair_dir)
-            .stdout(init_stdout)
-            .stderr(init_stderr)
-            .spawn()
-            .map_err(|e| format!("Failed to spawn lair-keystore init: {}", e))?;
-        log::info!("[lair:init] spawned pid {}", child.id());
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(format!("{}\n", passphrase).as_bytes())
-                .map_err(|e| format!("Failed to write passphrase to lair init: {}", e))?;
-        }
-
-        let status = child
-            .wait()
-            .map_err(|e| format!("Failed to wait for lair init: {}", e))?;
-        if !status.success() {
-            let stderr = std::fs::read_to_string(lair_dir.join("lair-init-stderr.log"))
-                .unwrap_or_default();
-            return Err(format!(
-                "lair-keystore init failed with status: {} {}",
-                status,
-                stderr.trim()
-            ));
-        }
-        log::info!(
-            "[lair:init] completed in {}ms",
-            init_start.elapsed().as_millis()
-        );
-    }
-
-    // Lair's default socket sits inside its own directory; where that path
-    // is over the Unix-socket limit, point the config at a short one.
-    #[cfg(not(windows))]
-    ensure_socket_fits(lair_dir, &config_path)?;
-
-    // Read connection URL from config file.
-    let connection_url = read_connection_url(&config_path)?;
-
-    // Clean up stale socket + pid files from a previous run (e.g. if lair was
-    // killed without cleanup). Without this, the new lair process can't bind
-    // - or refuses on the pid check, which runs BEFORE it reads the
-    // passphrase - and exits immediately.
-    for stale in ["socket", "pid_file"] {
-        let path = lair_dir.join(stale);
-        if path.exists() {
-            log::info!("Removing stale lair {}: {:?}", stale, path);
-            let _ = std::fs::remove_file(&path);
-        }
-    }
-    #[cfg(not(windows))]
-    if let Ok(sock) = socket_path_from_url(&connection_url) {
-        if sock.exists() && sock != lair_dir.join("socket") {
-            log::info!("Removing stale lair socket: {:?}", sock);
-            let _ = std::fs::remove_file(&sock);
-        }
-    }
-
-    // Lair's own output goes to log files next to the store (the conductor
-    // does the same). A lair that dies on its passphrase says why on stderr
-    // - with the pipes unread that message was lost, and a full pipe could
-    // even wedge the child.
-    let stdout_file = std::fs::File::create(lair_dir.join("lair-stdout.log"))
-        .map_err(|e| format!("Failed to create lair stdout log: {}", e))?;
-    let stderr_file = std::fs::File::create(lair_dir.join("lair-stderr.log"))
-        .map_err(|e| format!("Failed to create lair stderr log: {}", e))?;
-
-    // Start the lair server.
-    log::info!("[lair:server] starting lair-keystore server");
-    let spawn_start = std::time::Instant::now();
-    let mut child = SidecarCommand::new(&lair_bin)
-        .arg("server")
-        .arg("--piped")
-        .current_dir(lair_dir)
-        .stdout(stdout_file)
-        .stderr(stderr_file)
-        .spawn()
-        .map_err(|e| format!("Failed to spawn lair-keystore server: {}", e))?;
-
-    // Pipe passphrase to stdin.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(format!("{}\n", passphrase).as_bytes())
-            .map_err(|e| format!("Failed to write passphrase to lair server: {}", e))?;
-    }
-
-    log::info!(
-        "[lair:server] started (pid {}) in {}ms",
-        child.id(),
-        spawn_start.elapsed().as_millis()
-    );
-    Ok((child, connection_url))
-}
-
-// ── The 0.7 lair (lair_keystore_api 0.7.1) ───────────────────────────
-//
-// The 0.7.1 conductor refuses a 0.6.3 lair ("Invalid lair server version"),
-// so the 0.7 line runs its own key store under `lair-07/`, started from the
-// `vault-lair-keystore-07` sidecar and spoken to with the 0.7.1 client crate
-// (renamed `lair_keystore_api_07`). The same seed is imported under the same
-// tag, so the agent key is identical on both lines.
-
-/// Connect to a lair 0.7.1 server with the 0.7.1 client (30 s timeout).
-pub async fn connect_to_lair_07(
-    connection_url: &str,
-    passphrase: &str,
-) -> Result<lair_keystore_api_07::prelude::LairClient, String> {
-    let url = lair_keystore_api_07::dependencies::url::Url::parse(connection_url)
-        .map_err(|e| format!("Invalid lair (0.7) connection URL: {}", e))?;
-    let passphrase_array: lair_keystore_api_07::prelude::SharedLockedArray =
-        Arc::new(std::sync::Mutex::new(
-            lair_keystore_api_07::dependencies::sodoken::LockedArray::from(passphrase.as_bytes().to_vec()),
-        ));
-    let connect = lair_keystore_api_07::ipc_keystore_connect(url, passphrase_array);
-    match tokio::time::timeout(std::time::Duration::from_secs(30), connect).await {
-        Ok(Ok(client)) => Ok(client),
-        Ok(Err(e)) => Err(format!("Failed to connect to lair (0.7): {}", e)),
-        Err(_) => Err("The 0.7 key store is running but did not answer within 30 seconds".to_string()),
-    }
-}
-
-/// Import the seed into the 0.7 lair under `tag`, reusing an entry only
-/// when it holds THIS seed (as the 0.6 import does). Returns the Ed25519
-/// public key, which must equal the 0.6 line's.
+/// The same for the 0.7 lair; the key must equal the 0.6 line's.
 pub async fn import_seed_to_lair_07(
     client: &lair_keystore_api_07::prelude::LairClient,
     seed_bytes: &[u8; 32],
     tag: &str,
 ) -> Result<[u8; 32], String> {
-    use lair_keystore_api_07::dependencies::sodoken as sodoken07;
-    use lair_keystore_api_07::prelude::{BinDataSized as BinDataSized07, LairEntryInfo as LairEntryInfo07};
-    if let Ok(LairEntryInfo07::Seed { seed_info, .. }) = client.get_entry(tag.into()).await {
-        let expected = crate::key_derivation::public_key_of_seed(seed_bytes);
-        if *seed_info.ed25519_pub_key.0 != expected {
-            return Err(format!("the 0.7 key store already holds a different key under '{}'", tag));
-        }
-        log::info!("Seed '{}' already exists in lair (0.7), reusing", tag);
-        return Ok(*seed_info.ed25519_pub_key.0);
-    }
-    let helper = match client.new_seed("_import_helper".into(), None, false).await {
-        Ok(h) => h,
-        Err(_) => match client.get_entry("_import_helper".into()).await {
-            Ok(LairEntryInfo07::Seed { seed_info, .. }) => seed_info,
-            _ => return Err("Failed to create or fetch _import_helper seed (0.7)".into()),
-        },
-    };
-    let mut sender_pub = [0u8; sodoken07::crypto_box::XSALSA_PUBLICKEYBYTES];
-    let mut sender_sec =
-        sodoken07::SizedLockedArray::<{ sodoken07::crypto_box::XSALSA_SECRETKEYBYTES }>::new()
-            .map_err(|e| e.to_string())?;
-    sodoken07::crypto_box::xsalsa_keypair(&mut sender_pub, &mut *sender_sec.lock())
-        .map_err(|e| e.to_string())?;
-    let mut nonce = [0u8; sodoken07::crypto_box::XSALSA_NONCEBYTES];
-    sodoken07::random::randombytes_buf(&mut nonce).map_err(|e| e.to_string())?;
-    let recipient_pub_bytes: &[u8; 32] = &*helper.x25519_pub_key.0;
-    let mut cipher = vec![0u8; seed_bytes.len() + sodoken07::crypto_box::XSALSA_MACBYTES];
-    sodoken07::crypto_box::xsalsa_easy(
-        &mut cipher,
-        seed_bytes,
-        &nonce,
-        recipient_pub_bytes,
-        &*sender_sec.lock(),
-    )
-    .map_err(|e| e.to_string())?;
-    let sender_pub_key = BinDataSized07(Arc::new(sender_pub));
-    let info = client
-        .import_seed(
-            sender_pub_key,
-            helper.x25519_pub_key,
-            None,
-            nonce,
-            cipher.into(),
-            tag.into(),
-            false,
-        )
+    Ok(keystore::v07::import_seed(client, seed_bytes, tag).await?)
+}
+
+/// Start the 0.6 key store (`vault-lair-keystore`).
+pub fn start_lair_process(lair_dir: &Path, passphrase: &str) -> Result<(SidecarChild, String), String> {
+    start_lair_process_with(lair_dir, passphrase, "vault-lair-keystore")
+}
+
+/// Start a key store from the named sidecar: `vault-lair-keystore` (0.6.3,
+/// for the 0.6 conductor) or `vault-lair-keystore-07` (0.7.1, for the 0.7
+/// one). A conductor accepts only a lair of its own version.
+pub fn start_lair_process_with(lair_dir: &Path, passphrase: &str, binary: &str) -> Result<(SidecarChild, String), String> {
+    let bin = crate::resolve_sidecar_bin(binary);
+    Ok(keystore::start(lair_dir, &bin, passphrase, &crate::paths::socket_plan())?)
+}
+
+/// Wait for lair to come up, watching the process the whole time (lair
+/// binds its socket before it checks the passphrase).
+pub async fn wait_for_lair_socket(
+    connection_url: &str,
+    timeout_secs: u64,
+    child: &mut SidecarChild,
+    lair_dir: &Path,
+) -> Result<(), String> {
+    keystore::wait_ready(connection_url, Duration::from_secs(timeout_secs), child, lair_dir)
         .await
-        .map_err(|e| format!("seed import into lair (0.7) failed: {}", e))?;
-    Ok(*info.ed25519_pub_key.0)
+        .map_err(vault_text)
+}
+
+/// Connect to a running 0.6 lair (30 s timeout).
+pub async fn connect_to_lair(connection_url: &str, passphrase: &str) -> Result<LairClient, String> {
+    keystore::v06::connect(connection_url, passphrase, Duration::from_secs(30))
+        .await
+        .map_err(|e| connect_text(e, "lair"))
+}
+
+/// Connect to a running 0.7 lair (30 s timeout).
+pub async fn connect_to_lair_07(
+    connection_url: &str,
+    passphrase: &str,
+) -> Result<lair_keystore_api_07::prelude::LairClient, String> {
+    keystore::v07::connect(connection_url, passphrase, Duration::from_secs(30))
+        .await
+        .map_err(|e| connect_text(e, "lair (0.7)"))
+}
+
+/// Connect to the 0.6 lair just started as `child`, with the library's
+/// retries (six tries, stopping as soon as lair has exited).
+pub async fn connect_with_retries(
+    connection_url: &str,
+    passphrase: &str,
+    child: &mut SidecarChild,
+    lair_dir: &Path,
+) -> Result<LairClient, String> {
+    keystore::v06::connect_with_retries(connection_url, passphrase, child, lair_dir)
+        .await
+        .map_err(|e| connect_text(e, "lair"))
+}
+
+/// The same for the 0.7 lair.
+pub async fn connect_with_retries_07(
+    connection_url: &str,
+    passphrase: &str,
+    child: &mut SidecarChild,
+    lair_dir: &Path,
+) -> Result<lair_keystore_api_07::prelude::LairClient, String> {
+    keystore::v07::connect_with_retries(connection_url, passphrase, child, lair_dir)
+        .await
+        .map_err(|e| connect_text(e, "lair (0.7)"))
+}
+
+/// A connect failure in the Vault's words. A timeout is the case a person
+/// can act on.
+fn connect_text(e: flowsta_hc_lines::Error, which: &str) -> String {
+    match e {
+        flowsta_hc_lines::Error::KeyStore(KeyStoreError::ConnectTimeout { .. }) if which == "lair" => {
+            "The local key store is running but did not answer within 30 seconds. \
+             Restart your device and open Flowsta Vault again; if it keeps \
+             happening, reinstall Flowsta Vault."
+                .to_string()
+        }
+        flowsta_hc_lines::Error::KeyStore(KeyStoreError::ConnectTimeout { .. }) => {
+            "The 0.7 key store is running but did not answer within 30 seconds".to_string()
+        }
+        flowsta_hc_lines::Error::KeyStore(KeyStoreError::Connect(detail)) => format!("Failed to connect to {which}: {detail}"),
+        other => vault_text(other),
+    }
 }
 
 /// Remove leftover `lair.old-*` / `lair.broken-*` directories. A password
@@ -354,7 +135,6 @@ pub fn sweep_old_lair_dirs(data_dir: &Path) {
     }
 }
 
-/// Lair's own log output (stderr first, then stdout), trimmed to 500 chars.
 #[cfg(test)]
 mod dir_tests {
     use super::*;
@@ -382,40 +162,25 @@ mod dir_tests {
     }
 }
 
-pub fn read_lair_logs(lair_dir: &Path) -> String {
-    let stderr = std::fs::read_to_string(lair_dir.join("lair-stderr.log")).unwrap_or_default();
-    let stdout = std::fs::read_to_string(lair_dir.join("lair-stdout.log")).unwrap_or_default();
-    let output = if !stderr.trim().is_empty() { stderr } else { stdout };
-    let output = output.trim();
-    // Cut on a char boundary - a byte slice panics inside a multibyte
-    // character (non-ASCII profile paths in the log), and this runs
-    // exactly when we are reporting a failure.
-    let cut = output.char_indices().nth(500).map(|(i, _)| i).unwrap_or(output.len());
-    if cut < output.len() {
-        format!("{}...", &output[..cut])
-    } else {
-        output.to_string()
-    }
-}
-
 /// Prefix of every "lair exited" error - `start_holochain` matches on it to
 /// rebuild the keystore before its second attempt.
 pub const LAIR_STOPPED_MARKER: &str = "The local key store stopped right after starting";
 
-/// The error to report when lair has exited: what lair said, plus the one
-/// cause that produces this in the field. Lair verifies its passphrase
-/// only AFTER binding the socket, so a passphrase mismatch (a vault file
-/// re-saved under a different password than the keystore was created
-/// with) shows up as an immediate exit, never as a connect error.
-fn lair_exit_error(status: std::process::ExitStatus, lair_dir: &Path) -> String {
-    let logs = read_lair_logs(lair_dir);
-    format!(
-        "{} (status {}). Lock the Vault and unlock it again; if it keeps happening, \
-         restart your device or reinstall Flowsta Vault. Details: {}",
-        LAIR_STOPPED_MARKER,
-        status,
-        if logs.is_empty() { "(no output)".to_string() } else { logs }
-    )
+/// A key store error in the Vault's words. A lair that exits right after
+/// starting gets the marker `start_holochain` matches on, plus the one
+/// cause that produces this in the field: lair checks its passphrase only
+/// after binding its socket, so a passphrase mismatch (a vault file
+/// re-saved under a different password than the keystore was created with)
+/// shows up as an immediate exit, never as a connect error.
+fn vault_text(e: flowsta_hc_lines::Error) -> String {
+    match e {
+        flowsta_hc_lines::Error::KeyStore(KeyStoreError::Stopped { status, log_tail }) => format!(
+            "{} (status {}). Lock the Vault and unlock it again; if it keeps happening, \
+             restart your device or reinstall Flowsta Vault. Details: {}",
+            LAIR_STOPPED_MARKER, status, log_tail
+        ),
+        other => other.to_string(),
+    }
 }
 
 /// Set a keystore that will not start aside as `lair.broken-<ts>` so the
@@ -435,211 +200,13 @@ pub fn quarantine_lair_dir(lair_dir: &Path) -> Result<std::path::PathBuf, String
     Ok(target)
 }
 
-/// If the lair child has exited, the error to fail the start with.
-pub fn lair_exited(child: &mut SidecarChild, lair_dir: &Path) -> Option<String> {
-    match child.try_wait() {
-        Ok(Some(status)) => Some(lair_exit_error(status, lair_dir)),
-        Ok(None) => None,
-        Err(e) => Some(format!("Failed to check the key store process: {}", e)),
-    }
-}
-
-/// Read the connection URL from lair's config file.
-/// The socket path inside a `unix:///path?k=...` connection URL.
-#[cfg(not(windows))]
-pub(crate) fn socket_path_from_url(connection_url: &str) -> Result<std::path::PathBuf, String> {
-    let url = lair_keystore_api::dependencies::url::Url::parse(connection_url)
-        .map_err(|e| format!("Invalid lair connection URL: {}", e))?;
-    let decoded = percent_decode_str(url.path()).decode_utf8_lossy();
-    Ok(std::path::PathBuf::from(decoded.as_ref()))
-}
-
-/// Lair writes `connectionUrl: unix://<lair dir>/socket?k=...` at init. On
-/// macOS that path is over the Unix-socket limit for every partitioned
-/// Vault (`~/Library/Application Support/<id>/identities/<key>/lair/socket`
-/// is ~103 of 104 bytes) and lair dies with "path must be shorter than
-/// SUN_LEN". When the in-directory socket does not fit, rewrite the URL's
-/// path to a short per-user runtime path; the store, pid file and the
-/// connection key (`?k=`) stay exactly as lair wrote them. Idempotent: a
-/// config already pointing at a fitting path is left alone.
-/// The short runtime socket for the key store under `lair_dir`. The 0.6
-/// store (`lair/`) keeps the name derived from its identity root, which
-/// every partitioned Mac already points at; any other store under the same
-/// root (the 0.7 line's `lair-07/`) is named after its own directory. Two
-/// stores under one root must never share a socket: the second removes the
-/// first's "stale" file and binds in its place, and a conductor then shakes
-/// hands with a key store of the other version (ProofPoll 0.5.0-beta.2 on
-/// the first macOS install, 2026-10-25).
-#[cfg(not(windows))]
-pub(crate) fn runtime_socket_path(lair_dir: &Path) -> std::path::PathBuf {
-    let legacy = lair_dir.file_name().map(|n| n == crate::paths::LAIR_DIR).unwrap_or(false);
-    if legacy {
-        crate::paths::short_socket_path(lair_dir.parent().unwrap_or(lair_dir))
-    } else {
-        crate::paths::short_socket_path(lair_dir)
-    }
-}
-
-#[cfg(not(windows))]
-fn ensure_socket_fits(lair_dir: &Path, config_path: &Path) -> Result<(), String> {
-    let url = read_connection_url(config_path)?;
-    let current = socket_path_from_url(&url)?;
-    if crate::paths::socket_fits(&current) {
-        return Ok(());
-    }
-    let short = runtime_socket_path(lair_dir);
-    if !crate::paths::socket_fits(&short) {
-        return Err(format!("no socket path short enough for the key store ({:?})", short));
-    }
-    if let Some(dir) = short.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create the socket directory {:?}: {}", dir, e))?;
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-    }
-    const KEEP: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-        .remove(b'/').remove(b'.').remove(b'-').remove(b'_');
-    let encoded = percent_encoding::utf8_percent_encode(&short.to_string_lossy(), KEEP).to_string();
-    let query = url.split_once('?').map(|(_, q)| format!("?{}", q)).unwrap_or_default();
-    let new_url = format!("unix://{}{}", encoded, query);
-    let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read lair config at {:?}: {}", config_path, e))?;
-    let rewritten: String = content
-        .lines()
-        .map(|l| if l.trim_start().starts_with("connectionUrl:") { format!("connectionUrl: {}", new_url) } else { l.to_string() })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    let tmp = config_path.with_extension("yaml.tmp");
-    std::fs::write(&tmp, rewritten).map_err(|e| format!("Failed to write lair config: {}", e))?;
-    std::fs::rename(&tmp, config_path).map_err(|e| format!("Failed to replace lair config: {}", e))?;
-    log::info!(
-        "[lair] socket moved to the runtime dir: {:?} ({} bytes; the in-directory path was {} bytes)",
-        short, short.as_os_str().len(), current.as_os_str().len()
-    );
-    Ok(())
-}
-
-fn read_connection_url(config_path: &Path) -> Result<String, String> {
-    let content = std::fs::read_to_string(config_path)
-        .map_err(|e| format!("Failed to read lair config at {:?}: {}", config_path, e))?;
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with("connectionUrl:") {
-            let url = line
-                .strip_prefix("connectionUrl:")
-                .unwrap()
-                .trim()
-                .to_string();
-            return Ok(url);
-        }
-    }
-
-    Err(format!(
-        "No connectionUrl found in lair config: {:?}",
-        config_path
-    ))
-}
-
-/// Connect to a running lair-keystore via its connection URL.
-///
-/// The connection URL comes from lair's config file (e.g. `unix:///path/to/socket?k=...`).
-/// Returns a LairClient for seed import and signing operations.
-pub async fn connect_to_lair(
-    connection_url: &str,
-    passphrase: &str,
-) -> Result<LairClient, String> {
-    let url = lair_keystore_api::dependencies::url::Url::parse(connection_url)
-        .map_err(|e| format!("Invalid lair connection URL: {}", e))?;
-    let passphrase_array: SharedLockedArray = Arc::new(std::sync::Mutex::new(
-        sodoken::LockedArray::from(passphrase.as_bytes().to_vec()),
-    ));
-    // Wrap in a timeout so the user gets a clear error instead of an
-    // indefinite spinner if the IPC handshake hangs (e.g., a runtime-library
-    // mismatch between our embedded lair_keystore_api and the bundled
-    // lair-keystore binary on certain Linux setups).
-    let connect = lair_keystore_api::ipc_keystore_connect(url, passphrase_array);
-    match tokio::time::timeout(std::time::Duration::from_secs(30), connect).await {
-        Ok(Ok(client)) => Ok(client),
-        Ok(Err(e)) => Err(format!("Failed to connect to lair: {}", e)),
-        Err(_) => Err(
-            "The local key store is running but did not answer within 30 seconds. \
-             Restart your device and open Flowsta Vault again; if it keeps \
-             happening, reinstall Flowsta Vault."
-                .to_string(),
-        ),
-    }
-}
-
-/// Wait for lair to come up, watching the process the whole time.
-///
-/// On Unix, polls until the socket file exists; on Windows (named pipes,
-/// nothing to poll) waits a fixed 3 s. Either way the child is checked every
-/// 200 ms: lair binds its socket BEFORE it verifies the passphrase, so a
-/// lair that dies on a passphrase mismatch leaves a socket file behind and
-/// would otherwise read as "ready" until every connect attempt timed out.
-pub async fn wait_for_lair_socket(
-    connection_url: &str,
-    timeout_secs: u64,
-    child: &mut SidecarChild,
-    lair_dir: &Path,
-) -> Result<(), String> {
-    let tick = std::time::Duration::from_millis(200);
-
-    if cfg!(target_os = "windows") {
-        log::info!("Windows: waiting for lair-keystore to initialize...");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while std::time::Instant::now() < deadline {
-            if let Some(err) = lair_exited(child, lair_dir) {
-                return Err(err);
-            }
-            tokio::time::sleep(tick).await;
-        }
-        return match lair_exited(child, lair_dir) {
-            Some(err) => Err(err),
-            None => Ok(()),
-        };
-    }
-
-    // Unix: Extract socket path from URL like "unix:///path/to/socket?k=..."
-    let url = lair_keystore_api::dependencies::url::Url::parse(connection_url)
-        .map_err(|e| format!("Invalid connection URL: {}", e))?;
-    // url.path() returns percent-encoded path (e.g. %20 for spaces).
-    // Decode it so we match the actual filesystem path.
-    let decoded_path = percent_decode_str(url.path()).decode_utf8_lossy();
-    let socket_path = std::path::PathBuf::from(decoded_path.as_ref());
-
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-
-    while std::time::Instant::now() < deadline {
-        if let Some(err) = lair_exited(child, lair_dir) {
-            return Err(err);
-        }
-        if socket_path.exists() {
-            // The socket appears a moment before the passphrase check; one
-            // more tick catches the common immediate exit here instead of
-            // in the connect loop.
-            tokio::time::sleep(tick).await;
-            if let Some(err) = lair_exited(child, lair_dir) {
-                return Err(err);
-            }
-            log::info!("Lair socket ready at {:?}", socket_path);
-            return Ok(());
-        }
-        tokio::time::sleep(tick).await;
-    }
-
-    Err(format!(
-        "Lair socket not ready after {}s: {:?}",
-        timeout_secs, socket_path
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::key_derivation::{derive_seed, DEVICE_1_CONSTANT};
+    use lair_keystore_api::dependencies::sodoken;
+    use lair_keystore_api::prelude::*;
+    use std::sync::Arc;
     use ed25519_dalek::SigningKey;
     use lair_keystore_api::in_proc_keystore::InProcKeystore;
 
@@ -692,7 +259,7 @@ mod tests {
         let device_seed = derive_seed(TEST_MNEMONIC, DEVICE_1_CONSTANT).unwrap();
 
         // Import into lair via crypto_box wrapping.
-        let seed_info = import_seed_to_lair(&client, &device_seed, "flowsta-device-1")
+        let lair_pub = import_seed_to_lair(&client, &device_seed, "flowsta-device-1")
             .await
             .unwrap();
 
@@ -701,7 +268,7 @@ mod tests {
         let expected_pub = signing_key.verifying_key();
 
         // Compare: lair's derived pub key must match ed25519_dalek's.
-        let lair_pub_bytes: &[u8; 32] = &*seed_info.ed25519_pub_key.0;
+        let lair_pub_bytes: &[u8; 32] = &lair_pub;
         assert_eq!(
             lair_pub_bytes,
             expected_pub.as_bytes(),
@@ -727,7 +294,7 @@ mod tests {
         let first = [3u8; 32];
         let again = import_seed_to_lair(&client, &first, "flowsta-conductor-test").await.expect("first import");
         let same = import_seed_to_lair(&client, &first, "flowsta-conductor-test").await.expect("the same seed is reused");
-        assert_eq!(*again.ed25519_pub_key.0, *same.ed25519_pub_key.0);
+        assert_eq!(again, same);
         let other = import_seed_to_lair(&client, &[4u8; 32], "flowsta-conductor-test").await;
         assert!(other.is_err(), "a different seed under the same tag must be refused");
     }
@@ -737,7 +304,7 @@ mod tests {
         let (_keystore, client) = create_test_keystore().await;
 
         let device_seed = derive_seed(TEST_MNEMONIC, DEVICE_1_CONSTANT).unwrap();
-        let seed_info = import_seed_to_lair(&client, &device_seed, "flowsta-device-1")
+        let lair_pub = import_seed_to_lair(&client, &device_seed, "flowsta-device-1")
             .await
             .unwrap();
 
@@ -745,7 +312,7 @@ mod tests {
         let payload = b"test payload for lair signing";
         let signature = client
             .sign_by_pub_key(
-                seed_info.ed25519_pub_key.clone(),
+                BinDataSized::from(lair_pub),
                 None,
                 payload.to_vec().into(),
             )
@@ -760,61 +327,5 @@ mod tests {
             verifying_key.verify_strict(payload, &sig).is_ok(),
             "Lair-produced signature must be verifiable by ed25519_dalek"
         );
-    }
-}
-
-#[cfg(all(test, not(windows)))]
-mod socket_tests {
-    use super::*;
-
-    #[test]
-    fn a_too_long_default_socket_is_moved_to_the_runtime_dir_and_the_key_is_kept() {
-        let tmp = tempfile::tempdir().unwrap();
-        // a root deep enough that <root>/lair/socket cannot fit
-        let root = tmp.path().join("x".repeat(110));
-        let lair = root.join("lair");
-        std::fs::create_dir_all(&lair).unwrap();
-        let cfg = lair.join("lair-keystore-config.yaml");
-        let original = format!(
-            "---\nconnectionUrl: unix://{0}/socket?k=abc123\npidFile: {0}/pid_file\nstoreFile: {0}/store_file\n",
-            lair.display()
-        );
-        std::fs::write(&cfg, &original).unwrap();
-        ensure_socket_fits(&lair, &cfg).unwrap();
-        let url = read_connection_url(&cfg).unwrap();
-        let sock = socket_path_from_url(&url).unwrap();
-        assert_eq!(sock, crate::paths::short_socket_path(&root));
-        assert!(crate::paths::socket_fits(&sock), "{:?}", sock);
-        assert!(url.ends_with("?k=abc123"), "connection key kept: {}", url);
-        assert!(sock.parent().unwrap().is_dir(), "socket dir created");
-        let after = std::fs::read_to_string(&cfg).unwrap();
-        assert!(after.contains(&format!("pidFile: {}/pid_file", lair.display())), "other paths untouched");
-        assert!(after.contains(&format!("storeFile: {}/store_file", lair.display())));
-        // second call: already fits, nothing changes
-        ensure_socket_fits(&lair, &cfg).unwrap();
-        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), after);
-    }
-
-    #[test]
-    #[cfg(not(windows))]
-    fn two_key_stores_under_one_root_get_different_runtime_sockets() {
-        let root = Path::new("/Users/someone/Library/Application Support/com.flowsta.vault/identities/0123456789abcdef");
-        let legacy = super::runtime_socket_path(&root.join(crate::paths::LAIR_DIR));
-        let line_07 = super::runtime_socket_path(&root.join("lair-07"));
-        assert_ne!(legacy, line_07);
-        assert_eq!(legacy, crate::paths::short_socket_path(root), "the 0.6 store keeps the name existing Macs point at");
-        assert_eq!(line_07, crate::paths::short_socket_path(&root.join("lair-07")));
-    }
-
-    #[test]
-    fn a_fitting_default_socket_is_left_alone() {
-        let tmp = tempfile::tempdir().unwrap();
-        let lair = tmp.path().join("lair");
-        std::fs::create_dir_all(&lair).unwrap();
-        let cfg = lair.join("lair-keystore-config.yaml");
-        let original = format!("connectionUrl: unix://{0}/socket?k=zzz\npidFile: {0}/pid_file\n", lair.display());
-        std::fs::write(&cfg, &original).unwrap();
-        ensure_socket_fits(&lair, &cfg).unwrap();
-        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), original);
     }
 }

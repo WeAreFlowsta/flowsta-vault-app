@@ -1138,39 +1138,9 @@ async fn start_line_06(
     say!(ConductorStatus::Starting {
         message: "Connecting to lair-keystore...".into(),
     });
-    let lair_client = {
-        const MAX_ATTEMPTS: u32 = 6;
-        let mut last_err = String::new();
-        let mut connected = None;
-        for attempt in 1..=MAX_ATTEMPTS {
-            // A lair that has already exited will never answer - say why
-            // now instead of after six 30-second timeouts.
-            if let Some(err) = lair::lair_exited(&mut lair_child, &lair_dir) {
-                last_err = err;
-                break;
-            }
-            match lair::connect_to_lair(&connection_url, &passphrase).await {
-                Ok(c) => { connected = Some(c); break; }
-                Err(e) => {
-                    if let Some(err) = lair::lair_exited(&mut lair_child, &lair_dir) {
-                        last_err = err;
-                        break;
-                    }
-                    last_err = e;
-                    if attempt < MAX_ATTEMPTS {
-                        log::warn!(
-                            "[lair:connect] attempt {}/{} failed ({}), retrying…",
-                            attempt, MAX_ATTEMPTS, last_err
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                    }
-                }
-            }
-        }
-        match connected {
-            Some(c) => c,
-            None => fail_with_lair_cleanup!(last_err),
-        }
+    let lair_client = match lair::connect_with_retries(&connection_url, &passphrase, &mut lair_child, &lair_dir).await {
+        Ok(c) => c,
+        Err(e) => fail_with_lair_cleanup!(e),
     };
     log::info!("Connected to lair-keystore");
 
@@ -1178,22 +1148,20 @@ async fn start_line_06(
     say!(ConductorStatus::Starting {
         message: "Importing device key...".into(),
     });
-    let seed_info = match lair::import_seed_to_lair(&lair_client, &conductor_seed, &conductor_tag)
+    let seed_pub_key = match lair::import_seed_to_lair(&lair_client, &conductor_seed, &conductor_tag)
         .await
     {
-        Ok(s) => s,
+        Ok(k) => k,
         Err(e) => fail_with_lair_cleanup!(format!("Failed to import device seed into lair: {}", e)),
     };
-    let pub_key_hex = hex::encode(&*seed_info.ed25519_pub_key.0);
+    let pub_key_hex = hex::encode(seed_pub_key);
     log::info!("Conductor seed imported under '{}', pub key: {}", conductor_tag, pub_key_hex);
 
     // Convert lair Ed25519 pub key → Holochain AgentPubKey for DNA installation.
     // The conductor runs as the key the Vault gave it (the identity seed on an
     // install made before devices had their own, else this device's own
     // seed), never a key from generate_agent_pub_key().
-    let agent_pub_key = holochain_types::prelude::AgentPubKey::from_raw_32(
-        seed_info.ed25519_pub_key.0.to_vec(),
-    );
+    let agent_pub_key = holochain_types::prelude::AgentPubKey::from_raw_32(seed_pub_key.to_vec());
 
     // 5. Generate conductor config.
     say!(ConductorStatus::Starting {
@@ -1334,7 +1302,7 @@ async fn start_line_06(
     });
     log::info!("Holochain conductor ready (admin: {}, app: {})", admin_port, app_port);
 
-    Ok((Line06Handle { lair_child, conductor_child, lair_client, admin_port, app_port }, *seed_info.ed25519_pub_key.0))
+    Ok((Line06Handle { lair_child, conductor_child, lair_client, admin_port, app_port }, seed_pub_key))
 }
 
 /// One full primary start on the 0.6 line (an identity whose records have
@@ -1499,33 +1467,9 @@ async fn start_line_07(
     if let Err(e) = lair::wait_for_lair_socket(&connection_url, 15, &mut lair_child, &lair_dir).await {
         fail_with_lair_cleanup!(e);
     }
-    let lair_client = {
-        const MAX_ATTEMPTS: u32 = 6;
-        let mut last_err = String::new();
-        let mut connected = None;
-        for attempt in 1..=MAX_ATTEMPTS {
-            if let Some(err) = lair::lair_exited(&mut lair_child, &lair_dir) {
-                last_err = err;
-                break;
-            }
-            match lair::connect_to_lair_07(&connection_url, passphrase).await {
-                Ok(c) => { connected = Some(c); break; }
-                Err(e) => {
-                    if let Some(err) = lair::lair_exited(&mut lair_child, &lair_dir) {
-                        last_err = err;
-                        break;
-                    }
-                    last_err = e;
-                    if attempt < MAX_ATTEMPTS {
-                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                    }
-                }
-            }
-        }
-        match connected {
-            Some(c) => c,
-            None => fail_with_lair_cleanup!(last_err),
-        }
+    let lair_client = match lair::connect_with_retries_07(&connection_url, passphrase, &mut lair_child, &lair_dir).await {
+        Ok(c) => c,
+        Err(e) => fail_with_lair_cleanup!(e),
     };
     let pub_key = match lair::import_seed_to_lair_07(&lair_client, conductor_seed, conductor_tag).await {
         Ok(k) => k,

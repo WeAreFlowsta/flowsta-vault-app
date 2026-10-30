@@ -1964,8 +1964,10 @@ dependencies = [
 [[package]]
 name = "flowsta-hc-lines"
 version = "0.1.0"
-source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=114efa2abf356bc3bd2136bc0113594cbfe90cc3#114efa2abf356bc3bd2136bc0113594cbfe90cc3"
+source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=536905561471ff2d064884b5107cbebd3c0b521b#536905561471ff2d064884b5107cbebd3c0b521b"
 dependencies = [
+ "base64 0.22.1",
+ "hex",
  "holochain_client 0.8.1",
  "holochain_client 0.9.1",
  "holochain_types 0.6.1",
@@ -1976,11 +1978,15 @@ dependencies = [
  "log",
  "mr_bundle 0.6.1",
  "mr_bundle 0.7.1",
+ "percent-encoding",
  "rmp-serde",
  "serde",
  "serde_bytes",
+ "sha2",
  "sysinfo 0.33.1",
  "thiserror 1.0.69",
+ "tokio",
+ "url",
  "windows-sys 0.59.0",
 ]
 

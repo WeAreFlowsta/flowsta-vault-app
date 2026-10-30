@@ -144,16 +144,17 @@ pub fn partition_key(agent_pub_key: &str) -> Option<String> {
     Some(full[..PARTITION_KEY_LEN].to_string())
 }
 
-/// Unix-socket path budget for the key store: Linux 108, macOS 104, minus
-/// a safety margin. Windows key stores use named pipes (no limit).
-#[cfg(not(windows))]
-pub fn socket_path_budget() -> usize {
-    let limit: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
-    limit.saturating_sub(4)
+/// The Vault's key store socket rule (flowsta-hc-lines): short sockets in
+/// `fv`, the first store (`lair/`) named after its identity root, which
+/// every partitioned Mac already points at.
+pub fn socket_plan() -> flowsta_hc_lines::keystore::SocketPlan {
+    flowsta_hc_lines::keystore::SocketPlan::new("fv", LAIR_DIR)
 }
 
+/// Whether a socket path fits the Unix-socket budget (Linux 108, macOS
+/// 104, minus a margin). Windows key stores use named pipes (no limit).
 #[cfg(not(windows))]
-pub fn socket_fits(path: &Path) -> bool { path.as_os_str().len() + 1 <= socket_path_budget() }
+pub fn socket_fits(path: &Path) -> bool { flowsta_hc_lines::keystore::socket_fits(path) }
 
 /// Whether lair's default socket (inside its own directory under `root`)
 /// fits. On macOS it does NOT for any partitioned Vault: `~/Library/
@@ -167,44 +168,16 @@ pub fn in_root_socket_fits(root: &Path) -> bool {
 }
 
 /// A short, per-user, private directory for key store sockets whose
-/// in-root path does not fit: macOS `$TMPDIR` (per-user, mode 700), Linux
-/// `$XDG_RUNTIME_DIR`, else `/tmp/fv-<uid>` (created mode 700).
+/// in-root path does not fit: macOS `$TMPDIR/fv`, Linux
+/// `$XDG_RUNTIME_DIR/fv`, else `/tmp/fv-<uid>`.
 #[cfg(not(windows))]
-pub fn short_socket_dir() -> PathBuf {
-    let base = if cfg!(target_os = "macos") { std::env::var_os("TMPDIR") } else { std::env::var_os("XDG_RUNTIME_DIR") };
-    if let Some(b) = base {
-        let b = PathBuf::from(b);
-        if b.is_absolute() && b.is_dir() { return b.join("fv"); }
-    }
-    PathBuf::from(format!("/tmp/fv-{}", current_uid()))
-}
-
-/// The user's id, read off the home directory (no libc on macOS builds);
-/// a hash of $HOME if that cannot be read.
-#[cfg(not(windows))]
-fn current_uid() -> String {
-    use std::os::unix::fs::MetadataExt;
-    match std::env::var_os("HOME") {
-        Some(h) => match std::fs::metadata(&h) {
-            Ok(m) => m.uid().to_string(),
-            Err(_) => {
-                use sha2::{Digest, Sha256};
-                hex::encode(Sha256::digest(h.to_string_lossy().as_bytes()))[..8].to_string()
-            }
-        },
-        None => "u".to_string(),
-    }
-}
+pub fn short_socket_dir() -> PathBuf { flowsta_hc_lines::keystore::short_socket_dir(&socket_plan()) }
 
 /// The short socket path for the key store under `root`: one name per
 /// root (16 hex of sha256 over the root path), so two instances never
 /// share a socket.
 #[cfg(not(windows))]
-pub fn short_socket_path(root: &Path) -> PathBuf {
-    use sha2::{Digest, Sha256};
-    let h = hex::encode(Sha256::digest(root.to_string_lossy().as_bytes()));
-    short_socket_dir().join(format!("{}.sock", &h[..16]))
-}
+pub fn short_socket_path(root: &Path) -> PathBuf { flowsta_hc_lines::keystore::short_socket_path(root, &socket_plan()) }
 
 /// Whether a key store under `root` can be started at all: its default
 /// socket fits, or the short runtime socket does. A root where neither
@@ -409,6 +382,20 @@ mod tests {
         assert!(s.to_string_lossy().ends_with(".sock"));
         assert_ne!(s, short_socket_path(mac), "one socket per root");
         assert_eq!(s, short_socket_path(Path::new(&deep)), "deterministic");
+    }
+
+    /// The socket names existing Macs point at: fixed bytes, so a library
+    /// change cannot rename them.
+    #[test]
+    #[cfg(not(windows))]
+    fn socket_names_never_change() {
+        let root = Path::new("/Users/someone/Library/Application Support/com.flowsta.vault/identities/0123456789abcdef");
+        let plan = socket_plan();
+        assert_eq!((plan.dir_name.as_str(), plan.legacy_store_dir.as_str()), ("fv", "lair"));
+        let name = |p: PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name(flowsta_hc_lines::keystore::runtime_socket_path(&lair_dir(root), &plan)), "60cde251c026edfd.sock");
+        assert_eq!(name(flowsta_hc_lines::keystore::runtime_socket_path(&lair_dir_07(root), &plan)), "401303a39ae5baaa.sock");
+        assert_eq!(short_socket_dir().file_name().unwrap().to_string_lossy().split('-').next(), Some("fv"));
     }
 
     #[test]

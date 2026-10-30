@@ -695,8 +695,7 @@ mod tests {
         crate::lair::wait_for_lair_socket(&url_06, 15, &mut lair_child_06, &lair_06).await.expect("lair 0.6 socket");
         let key_06 = {
             let client = crate::lair::connect_to_lair(&url_06, pass).await.expect("connect lair 0.6");
-            let info = crate::lair::import_seed_to_lair(&client, conductor_seed, tag).await.expect("import seed 0.6");
-            *info.ed25519_pub_key.0
+            crate::lair::import_seed_to_lair(&client, conductor_seed, tag).await.expect("import seed 0.6")
         };
         // The 0.7 key store, the same seed: the same key.
         let lair_07 = dir.join("l7");
