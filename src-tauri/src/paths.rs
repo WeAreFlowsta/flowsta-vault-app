@@ -167,15 +167,10 @@ pub fn in_root_socket_fits(root: &Path) -> bool {
     { socket_fits(&lair_dir(root).join("socket")) }
 }
 
-/// A short, per-user, private directory for key store sockets whose
-/// in-root path does not fit: macOS `$TMPDIR/fv`, Linux
-/// `$XDG_RUNTIME_DIR/fv`, else `/tmp/fv-<uid>`.
-#[cfg(not(windows))]
-pub fn short_socket_dir() -> PathBuf { flowsta_hc_lines::keystore::short_socket_dir(&socket_plan()) }
-
-/// The short socket path for the key store under `root`: one name per
-/// root (16 hex of sha256 over the root path), so two instances never
-/// share a socket.
+/// The short socket path for the key store under `root`, in a short,
+/// per-user, private folder (macOS `$TMPDIR/fv`, Linux
+/// `$XDG_RUNTIME_DIR/fv`, else `/tmp/fv-<uid>`): one name per root (16 hex
+/// of sha256 over the root path), so two instances never share a socket.
 #[cfg(not(windows))]
 pub fn short_socket_path(root: &Path) -> PathBuf { flowsta_hc_lines::keystore::short_socket_path(root, &socket_plan()) }
 
@@ -395,7 +390,7 @@ mod tests {
         let name = |p: PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(name(flowsta_hc_lines::keystore::runtime_socket_path(&lair_dir(root), &plan)), "60cde251c026edfd.sock");
         assert_eq!(name(flowsta_hc_lines::keystore::runtime_socket_path(&lair_dir_07(root), &plan)), "401303a39ae5baaa.sock");
-        assert_eq!(short_socket_dir().file_name().unwrap().to_string_lossy().split('-').next(), Some("fv"));
+        assert_eq!(flowsta_hc_lines::keystore::short_socket_dir(&plan).file_name().unwrap().to_string_lossy().split('-').next(), Some("fv"));
     }
 
     #[test]

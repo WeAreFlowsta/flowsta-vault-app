@@ -1,17 +1,18 @@
-//! The Vault's key stores, one per line, through flowsta-hc-lines
-//! (`keystore`): start, wait, connect and seed import. What stays here is
+//! The Vault's key stores, one per line, through flowsta-hc-lines: the
+//! conductor start runs them (`supervisor::start_line`); what stays here is
 //! the Vault's wording for a person, its leftover-folder names and the
-//! quarantine of a store that will not start.
+//! quarantine of a store that will not start. The single-step calls below
+//! serve the live tests, which start key stores by hand.
 //!
 //! The device seed is imported under one tag into both lines' stores, so
 //! the agent key is the same on 0.6 and 0.7.
 
-use crate::process_ext::SidecarChild;
-use flowsta_hc_lines::keystore::{self, KeyStoreError};
-use lair_keystore_api::prelude::LairClient;
+use flowsta_hc_lines::keystore::KeyStoreError;
 use std::path::Path;
-use std::time::Duration;
+#[cfg(test)]
+use {crate::process_ext::SidecarChild, flowsta_hc_lines::keystore, lair_keystore_api::prelude::LairClient, std::time::Duration};
 
+#[cfg(test)]
 /// Import a 32-byte seed into the running 0.6 lair under `tag` and return
 /// its Ed25519 public key. A tag already present is reused only when it
 /// holds this seed.
@@ -19,6 +20,7 @@ pub async fn import_seed_to_lair(client: &LairClient, seed_bytes: &[u8; 32], tag
     Ok(keystore::v06::import_seed(client, seed_bytes, tag).await?)
 }
 
+#[cfg(test)]
 /// The same for the 0.7 lair; the key must equal the 0.6 line's.
 pub async fn import_seed_to_lair_07(
     client: &lair_keystore_api_07::prelude::LairClient,
@@ -28,11 +30,7 @@ pub async fn import_seed_to_lair_07(
     Ok(keystore::v07::import_seed(client, seed_bytes, tag).await?)
 }
 
-/// Start the 0.6 key store (`vault-lair-keystore`).
-pub fn start_lair_process(lair_dir: &Path, passphrase: &str) -> Result<(SidecarChild, String), String> {
-    start_lair_process_with(lair_dir, passphrase, "vault-lair-keystore")
-}
-
+#[cfg(test)]
 /// Start a key store from the named sidecar: `vault-lair-keystore` (0.6.3,
 /// for the 0.6 conductor) or `vault-lair-keystore-07` (0.7.1, for the 0.7
 /// one). A conductor accepts only a lair of its own version.
@@ -41,6 +39,7 @@ pub fn start_lair_process_with(lair_dir: &Path, passphrase: &str, binary: &str) 
     Ok(keystore::start(lair_dir, &bin, passphrase, &crate::paths::socket_plan())?)
 }
 
+#[cfg(test)]
 /// Wait for lair to come up, watching the process the whole time (lair
 /// binds its socket before it checks the passphrase).
 pub async fn wait_for_lair_socket(
@@ -54,6 +53,7 @@ pub async fn wait_for_lair_socket(
         .map_err(vault_text)
 }
 
+#[cfg(test)]
 /// Connect to a running 0.6 lair (30 s timeout).
 pub async fn connect_to_lair(connection_url: &str, passphrase: &str) -> Result<LairClient, String> {
     keystore::v06::connect(connection_url, passphrase, Duration::from_secs(30))
@@ -61,6 +61,7 @@ pub async fn connect_to_lair(connection_url: &str, passphrase: &str) -> Result<L
         .map_err(|e| connect_text(e, "lair"))
 }
 
+#[cfg(test)]
 /// Connect to a running 0.7 lair (30 s timeout).
 pub async fn connect_to_lair_07(
     connection_url: &str,
@@ -71,29 +72,11 @@ pub async fn connect_to_lair_07(
         .map_err(|e| connect_text(e, "lair (0.7)"))
 }
 
-/// Connect to the 0.6 lair just started as `child`, with the library's
-/// retries (six tries, stopping as soon as lair has exited).
-pub async fn connect_with_retries(
-    connection_url: &str,
-    passphrase: &str,
-    child: &mut SidecarChild,
-    lair_dir: &Path,
-) -> Result<LairClient, String> {
-    keystore::v06::connect_with_retries(connection_url, passphrase, child, lair_dir)
-        .await
-        .map_err(|e| connect_text(e, "lair"))
-}
-
-/// The same for the 0.7 lair.
-pub async fn connect_with_retries_07(
-    connection_url: &str,
-    passphrase: &str,
-    child: &mut SidecarChild,
-    lair_dir: &Path,
-) -> Result<lair_keystore_api_07::prelude::LairClient, String> {
-    keystore::v07::connect_with_retries(connection_url, passphrase, child, lair_dir)
-        .await
-        .map_err(|e| connect_text(e, "lair (0.7)"))
+/// A line start's failure (flowsta-hc-lines `start_line`) in the Vault's
+/// words: the stopped-key-store marker, the connect timeout a person can
+/// act on.
+pub fn start_error_text(e: flowsta_hc_lines::Error, line: crate::hc::Line) -> String {
+    connect_text(e, if line == crate::hc::Line::V06 { "lair" } else { "lair (0.7)" })
 }
 
 /// A connect failure in the Vault's words. A timeout is the case a person

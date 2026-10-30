@@ -1964,9 +1964,10 @@ dependencies = [
 [[package]]
 name = "flowsta-hc-lines"
 version = "0.1.0"
-source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=536905561471ff2d064884b5107cbebd3c0b521b#536905561471ff2d064884b5107cbebd3c0b521b"
+source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=1a6e3a7fbcf3a039a33a91cbdc4ccd22bc10dbea#1a6e3a7fbcf3a039a33a91cbdc4ccd22bc10dbea"
 dependencies = [
  "base64 0.22.1",
+ "getrandom 0.2.17",
  "hex",
  "holochain_client 0.8.1",
  "holochain_client 0.9.1",

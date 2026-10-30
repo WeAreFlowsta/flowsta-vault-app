@@ -91,7 +91,7 @@ lair_keystore_api_07 = { package = "lair_keystore_api", version = "=0.7.1" }
 mr_bundle = "=0.6.1"
 mr_bundle_07 = { package = "mr_bundle", version = "=0.7.1" }
 # The two-line machinery, extracted into a library other apps share.
-flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "536905561471ff2d064884b5107cbebd3c0b521b" }
+flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "1a6e3a7fbcf3a039a33a91cbdc4ccd22bc10dbea" }
 
 # Save dialog
 tauri-plugin-dialog = "2"
