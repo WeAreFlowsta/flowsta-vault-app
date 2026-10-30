@@ -297,7 +297,7 @@ pub fn run() {
 
             // Catch SIGTERM / SIGINT (Ctrl+C, system shutdown, dpkg postinst kill,
             // `kill <pid>`) and route them through app.exit() so RunEvent::Exit
-            // fires and ConductorHandle::shutdown() kills the holochain conductor
+            // fires and conductor::stop_all_lines() stops the holochain conductor
             // and lair-keystore children cleanly.
             let signal_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -386,7 +386,7 @@ pub fn run() {
                 .build(app)?;
 
             // Keep this device listed on the rendezvous when the conductor's own registration stalls.
-            rendezvous_keeper::start(app.state::<Arc<AppState>>().inner().clone());
+            rendezvous_keeper::start();
 
             // Keep the tray's first line and tooltip saying the state.
             {
@@ -587,14 +587,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
+            // Only the macOS arms below read it.
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            let _ = &app_handle;
             match event {
                 tauri::RunEvent::Exit => {
-                    let state: Arc<AppState> = app_handle.state::<Arc<AppState>>().inner().clone();
-                    if let Ok(mut lock) = state.conductor_handle.lock() {
-                        if let Some(handle) = lock.take() {
-                            handle.shutdown();
-                        }
-                    };
+                    crate::conductor::stop_all_lines();
                 }
                 // Triggered on macOS / iOS when the OS opens files with our
                 // app via Apple Events (Services menu, Open With, drag onto

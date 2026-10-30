@@ -45,6 +45,9 @@ pub fn active_line(state: &AppState) -> Line {
 
 /// The admin and app ports of one line of the running conductor pair.
 pub fn line_ports(state: &AppState, line: Line) -> Result<(u16, u16), String> {
+    // Only the tests' port overrides read the state; the lines are the supervisor's.
+    #[cfg(not(test))]
+    let _ = state;
     #[cfg(test)]
     if let Some(ports) = *state.test_conductor_ports.lock().unwrap() {
         if line == Line::V06 {
@@ -57,14 +60,11 @@ pub fn line_ports(state: &AppState, line: Line) -> Result<(u16, u16), String> {
             return Ok(ports);
         }
     }
-    let handle = state.conductor_handle.lock().unwrap();
-    let h = handle.as_ref().ok_or("Conductor not running")?;
+    let sup = crate::conductor::supervisor();
+    sup.session().ok_or("Conductor not running")?;
     match line {
-        Line::V06 => h.ports_06().ok_or_else(|| "The 0.6 line is not running".to_string()),
-        Line::V07 => {
-            let l = h.line_07.as_ref().ok_or("The 0.7 line is not running")?;
-            Ok((l.admin_port, l.app_port))
-        }
+        Line::V06 => sup.ports(Line::V06).ok_or_else(|| "The 0.6 line is not running".to_string()),
+        Line::V07 => sup.ports(Line::V07).ok_or_else(|| "The 0.7 line is not running".to_string()),
     }
 }
 

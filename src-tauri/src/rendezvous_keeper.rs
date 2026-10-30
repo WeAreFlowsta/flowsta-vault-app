@@ -506,10 +506,10 @@ const WOKE_AFTER: std::time::Duration = std::time::Duration::from_secs(150);
 
 /// Once a minute while the Vault is open, starting a little after the
 /// conductor's first registration has had its chance. Each tick asks the
-/// state which conductor is running (an identity switch starts a new one on
-/// a new port with a new origin) and skips when there is none. Nothing to
-/// do when this build has no rendezvous.
-pub fn start(state: std::sync::Arc<crate::commands::AppState>) {
+/// supervisor which conductor is running (an identity switch starts a new
+/// one on a new port with a new origin) and skips when there is none.
+/// Nothing to do when this build has no rendezvous.
+pub fn start() {
     let servers = servers();
     let servers_07 = servers_07();
     if servers.is_empty() && servers_07.is_empty() {
@@ -535,11 +535,8 @@ pub fn start(state: std::sync::Arc<crate::commands::AppState>) {
             }
             last_tick = now;
             let (port_06, port_07) = {
-                let guard = state.conductor_handle.lock().unwrap();
-                match guard.as_ref() {
-                    Some(h) => (h.admin_port_06(), h.line_07.as_ref().map(|l| l.admin_port)),
-                    None => (None, None),
-                }
+                let sup = crate::conductor::supervisor();
+                (sup.ports(crate::hc::Line::V06).map(|p| p.0), sup.ports(crate::hc::Line::V07).map(|p| p.0))
             };
             if let Some(port) = port_06 {
                 if let Err(e) = keeper.run_once(crate::hc::Line::V06, port, crate::conductor::conductor_rendezvous()).await {

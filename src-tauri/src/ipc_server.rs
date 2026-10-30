@@ -335,16 +335,16 @@ fn holochain_lines(app_state: &AppState) -> Vec<HolochainLine> {
     // state is the conductor's), a background line of one that has
     // (serving when attached, off otherwise), and never there for a born one.
     let primary_06 = !crate::move_07::moved(&app_state.identity_root());
-    let running_06 = app_state.conductor_handle.lock().unwrap().as_ref().map(|h| h.line_06.is_some()).unwrap_or(false);
+    let running_06 = crate::conductor::supervisor().has(crate::hc::Line::V06);
     let line_06 = match *app_state.conductor_status.lock().unwrap() {
         _ if running_06 => "serving",
         crate::conductor::ConductorStatus::Starting { .. } if primary_06 => "starting",
         _ => "off",
     };
-    let line_07 = match crate::conductor::line_07_state() {
-        crate::conductor::Line07State::Serving => "serving",
-        crate::conductor::Line07State::Starting => "starting",
-        crate::conductor::Line07State::Off => "off",
+    let line_07 = match crate::conductor::supervisor().state(crate::hc::Line::V07) {
+        flowsta_hc_lines::supervisor::LineState::Serving => "serving",
+        flowsta_hc_lines::supervisor::LineState::Starting => "starting",
+        flowsta_hc_lines::supervisor::LineState::Off => "off",
     };
     vec![
         HolochainLine { generation: "holochain-0.6", state: line_06 },
@@ -2781,14 +2781,14 @@ async fn wait_for_unlock(state: &Arc<AppState>, secs: u64) -> bool {
 /// Wait for the conductor to come up, up to `secs`. The conductor spawns
 /// on unlock and takes a while on a fresh start - a request that rode
 /// through the unlock would otherwise approve and then fail to commit.
-async fn wait_for_conductor(state: &Arc<AppState>, secs: u64) -> Option<(u16, u16)> {
+async fn wait_for_conductor(secs: u64) -> Option<(u16, u16)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
         // The 0.6 ports where that line runs; an identity on 0.7 alone
         // signs through its active line and the ports are not read.
         let ports = {
-            let handle = state.conductor_handle.lock().unwrap();
-            handle.as_ref().map(|h| h.ports_06().unwrap_or((0, 0)))
+            let sup = crate::conductor::supervisor();
+            sup.session().map(|_| sup.ports(crate::hc::Line::V06).unwrap_or((0, 0)))
         };
         if ports.is_some() {
             return ports;
@@ -3201,7 +3201,7 @@ async fn sign_document_core(
         );
         // Jobs can outwait a full cold start; sync callers stay snappy.
         let conductor_budget = if job_id.is_some() { 300 } else { 90 };
-        let ready = wait_for_conductor(&state.app_state, conductor_budget)
+        let ready = wait_for_conductor(conductor_budget)
             .await
             .is_some();
         let _ = state.app_handle.emit("op-pending-clear", serde_json::json!({}));
@@ -3388,7 +3388,7 @@ async fn sign_document_core(
         None
     };
     let action_hash = if req.commit {
-        let Some((admin_port, app_port)) = wait_for_conductor(&state.app_state, 30).await
+        let Some((admin_port, app_port)) = wait_for_conductor(30).await
         else {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -3716,7 +3716,7 @@ async fn profile_update_core(
     // approval so an approval can always land.
     set_job_stage(&state, &job_id, "preparing");
     let conductor_budget = if job_id.is_some() { 300 } else { 90 };
-    if wait_for_conductor(&state.app_state, conductor_budget)
+    if wait_for_conductor(conductor_budget)
         .await
         .is_none()
     {
@@ -4001,7 +4001,7 @@ async fn cell_op_gate(
     // The operation commits to the signing cell - wait for the conductor
     // before the approval dialog so an approval can always land.
     let conductor_budget = if job_id.is_some() { 300 } else { 90 };
-    if wait_for_conductor(&state.app_state, conductor_budget)
+    if wait_for_conductor(conductor_budget)
         .await
         .is_none()
     {
@@ -4406,7 +4406,7 @@ async fn signatures_handler(
             }),
         ));
     }
-    if wait_for_conductor(&state.app_state, 5).await.is_none() {
+    if wait_for_conductor(5).await.is_none() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(IpcError {

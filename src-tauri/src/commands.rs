@@ -4,7 +4,7 @@ use crate::key_derivation::{
     derive_seed, msgpack_encode_bytes, sign_with_device_seed, validate_mnemonic,
     DEVICE_1_CONSTANT,
 };
-use crate::conductor::{ConductorHandle, ConductorStatus};
+use crate::conductor::ConductorStatus;
 use crate::vault::{
     decrypt_vault, encrypt_vault, load_vault, save_vault, vault_exists, VaultConfig,
 };
@@ -268,7 +268,6 @@ pub struct AppState {
     /// Third-party apps linked via /link-identity.
     pub linked_third_party_apps: Mutex<Vec<LinkedThirdPartyApp>>,
     /// Handle to the running conductor + lair processes (None = not running).
-    pub conductor_handle: Mutex<Option<ConductorHandle>>,
     /// Set while the Vault is locked but its conductor keeps running, so
     /// the identity's devices keep syncing: whose conductor it is and what
     /// it runs as (to bring it back if it stops).
@@ -565,7 +564,6 @@ impl AppState {
             recent_link_approvals: Mutex::new(std::collections::HashMap::new()),
             approved_apps: Mutex::new(approved_sites),
             linked_third_party_apps: Mutex::new(linked_apps),
-            conductor_handle: Mutex::new(None),
             kept_conductor: Mutex::new(None),
             backup_lane: tokio::sync::Mutex::new(None),
             #[cfg(test)]
@@ -748,9 +746,7 @@ pub(crate) fn stop_syncing_while_locked(state: &AppState) {
     if state.kept_conductor.lock().unwrap().take().is_none() {
         return;
     }
-    if let Some(handle) = state.conductor_handle.lock().unwrap().take() {
-        handle.shutdown();
-    }
+    crate::conductor::stop_all_lines();
     *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
     *state.unlock_passphrase.lock().unwrap() = None;
     log::info!("Stopped syncing while locked.");
@@ -1311,7 +1307,7 @@ pub(crate) fn unlock_vault_inner(
     let kept = state.kept_conductor.lock().unwrap().take();
     let was_kept = kept.is_some();
     let kept_for_this_identity = kept.map(|k| k.agent_pub_key == agent_key_for_marker).unwrap_or(false);
-    let still_running = matches!(state.conductor_handle.lock().unwrap().as_mut().map(|h| h.alive()), Some(true));
+    let still_running = crate::conductor::supervisor().primary_alive();
     if kept_for_this_identity && still_running {
         log::info!("Unlocked onto the running conductor.");
         this_device_comes_online(conductor_seed.as_ref().map(|(seed, _)| *seed), state);
@@ -1322,9 +1318,7 @@ pub(crate) fn unlock_vault_inner(
     }
     if was_kept {
         // It stopped, or it was another identity's: start afresh.
-        if let Some(stale) = state.conductor_handle.lock().unwrap().take() {
-            stale.shutdown();
-        }
+        crate::conductor::stop_all_lines();
     }
 
     // Spawn conductor startup in background (if device seed is available)
@@ -1383,10 +1377,7 @@ pub(crate) fn lock_and_keep_syncing(state: &Arc<AppState>, app_handle: tauri::Ap
             if state.vault_config.lock().unwrap().is_some() || state.kept_conductor.lock().unwrap().is_none() {
                 break;
             }
-            let stopped = match state.conductor_handle.lock().unwrap().as_mut() {
-                Some(handle) => !handle.alive(),
-                None => true,
-            };
+            let stopped = !crate::conductor::supervisor().primary_alive();
             if stopped {
                 if let Err(e) = ensure_conductor_alive(&state, &app_handle).await {
                     log::warn!("[locked] conductor not restarted: {}", e);
@@ -1469,9 +1460,7 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
     }
 
     // Shutdown conductor + lair if running
-    if let Some(handle) = state.conductor_handle.lock().unwrap().take() {
-        handle.shutdown();
-    }
+    crate::conductor::stop_all_lines();
     *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
 
     // Drop the cached passphrase. `LockedArray::Drop` zeroes the bytes
@@ -1585,13 +1574,7 @@ pub fn joined_setup_pending(state: State<'_, Arc<AppState>>) -> Result<bool, Str
 /// 0.7-only start never fills the 0.6 cache, so reading that one alone kept
 /// the badge on "still starting" for the whole session (beta6, every OS).
 pub fn primary_cells_ready(state: &AppState) -> bool {
-    let primary_07 = state
-        .conductor_handle
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|h| h.primary == crate::hc::Line::V07)
-        .unwrap_or(false);
+    let primary_07 = crate::conductor::supervisor().primary() == Some(crate::hc::Line::V07);
     if primary_07 {
         !state.cell_credentials_07.lock().unwrap().is_empty()
     } else {
@@ -1628,26 +1611,20 @@ pub(crate) async fn ensure_conductor_alive(
 
     // Re-check liveness inside the lock. If a previous holder of the
     // lock already restarted, we have nothing to do.
-    let needs_restart = {
-        let mut handle_guard = state.conductor_handle.lock().unwrap();
-        match handle_guard.as_mut() {
-            Some(h) => {
-                if h.alive() {
-                    false
-                } else {
-                    log::warn!("[watchdog] conductor process exited - will restart");
-                    true
-                }
-            }
-            None => true, // no handle at all
+    let needs_restart = match (crate::conductor::supervisor().session(), crate::conductor::supervisor().primary_alive()) {
+        (_, true) => false,
+        (Some(_), false) => {
+            log::warn!("[watchdog] conductor process exited - will restart");
+            true
         }
+        (None, false) => true, // no session at all
     };
 
     // The 0.7 line beside a living 0.6 one: a conductor that died
     // mid-session (a moved identity's writes all fail while it is down,
     // and nothing else notices).
     let line_07_dead = !needs_restart
-        && matches!(state.conductor_handle.lock().unwrap().as_mut().map(|h| h.line_07_alive()), Some(Some(false)));
+        && crate::conductor::supervisor().alive(crate::hc::Line::V07) == Some(false);
 
     if !needs_restart && !line_07_dead {
         log::info!("[watchdog] conductor is alive (recovered by an earlier caller)");
@@ -1671,9 +1648,7 @@ pub(crate) async fn ensure_conductor_alive(
 
     if line_07_dead {
         log::warn!("[watchdog] the 0.7 conductor exited - restarting that line");
-        if let Some(h) = state.conductor_handle.lock().unwrap().as_mut() {
-            h.drop_dead_line_07();
-        }
+        crate::conductor::supervisor().stop_line(crate::hc::Line::V07);
         let resource_dir = resolve_resource_dir(app_handle, &state.data_dir);
         let starter = crate::conductor::line_07_starter_from_state(state, resource_dir, passphrase)
             .ok_or("[watchdog] no 0.7 starter (vault config not available)")?;
@@ -1684,9 +1659,8 @@ pub(crate) async fn ensure_conductor_alive(
     // Take the old (dead) handle and shut it down - this kills any
     // leftover lair-keystore process so the new conductor can take its
     // socket / port cleanly.
-    if let Some(old) = state.conductor_handle.lock().unwrap().take() {
-        log::info!("[watchdog] cleaning up old handle");
-        old.shutdown();
+    if crate::conductor::stop_all_lines() {
+        log::info!("[watchdog] stopped what was left of the last start");
     }
     *state.conductor_status.lock().unwrap() = ConductorStatus::Starting {
         message: "Recovering conductor...".into(),
@@ -1716,7 +1690,7 @@ pub(crate) async fn ensure_conductor_alive(
     let resource_dir = resolve_resource_dir(app_handle, &state.data_dir);
 
     log::info!("[watchdog] running start_holochain to bring conductor back");
-    let (new_handle, line_07) = match crate::conductor::start_holochain(
+    let line_07 = match crate::conductor::start_holochain(
         app_handle.clone(),
         data_dir,
         resource_dir,
@@ -1737,12 +1711,8 @@ pub(crate) async fn ensure_conductor_alive(
         }
     };
 
-    log::info!(
-        "[watchdog] conductor recovered (admin port {})",
-        new_handle.primary_admin_port(),
-    );
-    let port = new_handle.primary_admin_port();
-    *state.conductor_handle.lock().unwrap() = Some(new_handle);
+    let port = crate::conductor::supervisor().primary_admin_port();
+    log::info!("[watchdog] conductor recovered (admin port {})", port);
     // The 0.7 line follows from a task; nothing here waits for it.
     if let Some(starter) = line_07 {
         crate::conductor::attach_line(state.clone(), starter);
@@ -1858,7 +1828,7 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                 DevicesRound::Done => {
                     // A 0.7 conductor that died since the last round is
                     // brought back (the watchdog's cheap check).
-                    let line_07_dead = matches!(devices_state.conductor_handle.lock().unwrap().as_mut().map(|h| h.line_07_alive()), Some(Some(false)));
+                    let line_07_dead = crate::conductor::supervisor().alive(crate::hc::Line::V07) == Some(false);
                     if line_07_dead {
                         if let Err(e) = ensure_conductor_alive(&devices_state, &devices_app).await {
                             log::warn!("[devices] the 0.7 line was not brought back: {}", e);
@@ -1869,18 +1839,12 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                     // 0.6, the web-era carry owed, or a restored identity
                     // that has heard from nobody).
                     {
-                        let (primary_07, has_06, dead_06) = {
-                            let mut guard = devices_state.conductor_handle.lock().unwrap();
-                            match guard.as_mut() {
-                                Some(h) => (h.primary == crate::hc::Line::V07, h.line_06.is_some(), h.line_06_alive() == Some(false)),
-                                None => (false, false, false),
-                            }
-                        };
+                        let sup = crate::conductor::supervisor();
+                        let (primary_07, has_06, dead_06) =
+                            (sup.primary() == Some(crate::hc::Line::V07), sup.has(crate::hc::Line::V06), sup.alive(crate::hc::Line::V06) == Some(false));
                         if dead_06 {
                             log::warn!("[0.6] the 0.6 conductor exited - let go; attached again next round if still wanted");
-                            if let Some(h) = devices_state.conductor_handle.lock().unwrap().as_mut() {
-                                h.drop_dead_line_06();
-                            }
+                            crate::conductor::supervisor().stop_line(crate::hc::Line::V06);
                         } else if primary_07 && !has_06 {
                             if crate::move_07::line_06_wanted_now(&devices_state).await == Some(true) {
                                 let passphrase = devices_state.unlock_passphrase.lock().unwrap().as_mut().and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok());
@@ -2266,12 +2230,7 @@ fn spawn_conductor_startup_inner(
                 // One start at a time: a command that finds the conductor
                 // down waits here instead of starting a second one.
                 let start_guard = state.conductor_restart_lock.lock().await;
-                let running_port = state
-                    .conductor_handle
-                    .lock()
-                    .unwrap()
-                    .as_mut()
-                    .and_then(|h| h.alive().then_some(h.primary_admin_port()));
+                let running_port = crate::conductor::supervisor().primary_alive().then(|| crate::conductor::supervisor().primary_admin_port());
                 let started = match running_port {
                     // The watchdog got here first. What follows a start
                     // still runs once, here.
@@ -2289,9 +2248,8 @@ fn spawn_conductor_startup_inner(
                     )
                     .await
                     {
-                        Ok((handle, line_07)) => {
-                            let port = handle.primary_admin_port();
-                            *state.conductor_handle.lock().unwrap() = Some(handle);
+                        Ok(line_07) => {
+                            let port = crate::conductor::supervisor().primary_admin_port();
                             // The 0.7 line follows from a task: the Vault is
                             // Ready on 0.6 now, not after the second line.
                             // (An identity born on 1.7.0 started on 0.7 alone.)
@@ -2488,12 +2446,7 @@ async fn check_dna_updates(
     // the vault was set up on an older derivation, so we authoritatively use
     // what lair reports - that's what the already-installed cells use, and
     // what install_app needs to be able to sign genesis records.
-    let lair_agent_key = {
-        let handle_guard = state.conductor_handle.lock().unwrap();
-        handle_guard
-            .as_ref()
-            .map(|h| holochain_types::prelude::AgentPubKey::from_raw_32(h.agent_key_32.to_vec()))
-    };
+    let lair_agent_key = crate::conductor::supervisor().agent_key().map(|k| holochain_types::prelude::AgentPubKey::from_raw_32(k.to_vec()));
 
     let agent_key = if let Some(k) = lair_agent_key {
         k
@@ -2638,9 +2591,7 @@ pub fn erase_device(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 /// conductor files.
 fn shutdown_for_erase(state: &Arc<AppState>) {
     *state.kept_conductor.lock().unwrap() = None;
-    if let Some(h) = state.conductor_handle.lock().unwrap().take() {
-        h.shutdown();
-    }
+    crate::conductor::stop_all_lines();
     *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
     *state.vault_config.lock().unwrap() = None;
     // Nothing signed in by the identity being erased may outlive it.
@@ -3605,11 +3556,8 @@ pub(crate) async fn change_vault_password_inner(
 
     // 3. Stop the conductor + lair. Bind the handle first so the state lock
     // is not held across the blocking kill/wait.
-    let old_handle = state.conductor_handle.lock().unwrap().take();
     emit_starting(state, &app_handle, "Applying new password...");
-    if let Some(handle) = old_handle {
-        let _ = tokio::task::spawn_blocking(move || handle.shutdown()).await;
-    }
+    let _ = tokio::task::spawn_blocking(crate::conductor::stop_all_lines).await;
 
     // From here on every failure must leave the device consistent under
     // the CURRENT password and bring the stack back up.
@@ -3763,10 +3711,7 @@ pub(crate) async fn change_vault_password_inner(
             log::error!("post-password-change start failed - rolling back: {}", e);
             let guard = state.conductor_restart_lock.lock().await;
             emit_starting(state, &app_handle, "Restoring your current password...");
-            let stale = state.conductor_handle.lock().unwrap().take();
-            if let Some(handle) = stale {
-                let _ = tokio::task::spawn_blocking(move || handle.shutdown()).await;
-            }
+            let _ = tokio::task::spawn_blocking(crate::conductor::stop_all_lines).await;
             restore_lair_dir(&lair_dir, &lair_backup);
             restore_lair_dir(&lair_dir_07, &lair_backup_07);
             for (present, path, line) in [(db_key_present, &db_key_path, crate::hc::Line::V06), (db_key_present_07, &db_key_path_07, crate::hc::Line::V07)] {
@@ -5906,10 +5851,10 @@ pub async fn sign_file(
     // 3. Commit SignatureRecord to signing DNA via conductor zome call
     // Extract ports from conductor handle (drop MutexGuard before any await)
     let conductor_ports = {
-        let conductor = state.conductor_handle.lock().unwrap();
+        let sup = crate::conductor::supervisor();
         // The 0.6 line's ports; an identity whose records are on 0.7 alone
         // takes the 0.7 branch of the call below and never reads them.
-        conductor.as_ref().and_then(|h| h.ports_06().or_else(|| (crate::hc::active_line(&state) == crate::hc::Line::V07).then_some((0, 0))))
+        sup.session().and_then(|_| sup.ports(crate::hc::Line::V06).or_else(|| (crate::hc::active_line(&state) == crate::hc::Line::V07).then_some((0, 0))))
     };
 
     // Decode supersedes hex to bytes once (any error → reject upfront so
@@ -7217,10 +7162,10 @@ async fn revoke_signature_attempt(
     }
 
     let conductor_ports = {
-        let conductor = state.conductor_handle.lock().unwrap();
+        let sup = crate::conductor::supervisor();
         // The 0.6 line's ports; an identity whose records are on 0.7 alone
         // takes the 0.7 branch of the call below and never reads them.
-        conductor.as_ref().and_then(|h| h.ports_06().or_else(|| (crate::hc::active_line(&state) == crate::hc::Line::V07).then_some((0, 0))))
+        sup.session().and_then(|_| sup.ports(crate::hc::Line::V06).or_else(|| (crate::hc::active_line(&state) == crate::hc::Line::V07).then_some((0, 0))))
     };
 
     let (admin_port, app_port) = conductor_ports.ok_or("Conductor not running")?;
@@ -7326,10 +7271,10 @@ pub(crate) async fn set_thumbnail_inner(
     }
 
     let conductor_ports = {
-        let conductor = state.conductor_handle.lock().unwrap();
+        let sup = crate::conductor::supervisor();
         // The 0.6 line's ports; an identity whose records are on 0.7 alone
         // takes the 0.7 branch of the call below and never reads them.
-        conductor.as_ref().and_then(|h| h.ports_06().or_else(|| (crate::hc::active_line(&state) == crate::hc::Line::V07).then_some((0, 0))))
+        sup.session().and_then(|_| sup.ports(crate::hc::Line::V06).or_else(|| (crate::hc::active_line(&state) == crate::hc::Line::V07).then_some((0, 0))))
     };
 
     let (admin_port, app_port) = conductor_ports.ok_or("Conductor not running")?;
