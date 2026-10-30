@@ -1964,7 +1964,7 @@ dependencies = [
 [[package]]
 name = "flowsta-hc-lines"
 version = "0.1.0"
-source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=2d892851741b376c7aa4278d681d298278afd420#2d892851741b376c7aa4278d681d298278afd420"
+source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=114efa2abf356bc3bd2136bc0113594cbfe90cc3#114efa2abf356bc3bd2136bc0113594cbfe90cc3"
 dependencies = [
  "holochain_client 0.8.1",
  "holochain_client 0.9.1",
@@ -1972,12 +1972,16 @@ dependencies = [
  "holochain_types 0.7.1",
  "lair_keystore_api 0.6.3",
  "lair_keystore_api 0.7.1",
+ "libc",
+ "log",
  "mr_bundle 0.6.1",
  "mr_bundle 0.7.1",
  "rmp-serde",
  "serde",
  "serde_bytes",
+ "sysinfo 0.33.1",
  "thiserror 1.0.69",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

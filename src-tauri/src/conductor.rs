@@ -34,16 +34,7 @@ pub struct Line07Handle {
 
 impl Line07Handle {
     fn shutdown(mut self) {
-        log::info!("Shutting down the 0.7 conductor...");
-        if let Err(e) = self.conductor_child.kill() {
-            log::warn!("Failed to kill the 0.7 conductor process: {}", e);
-        }
-        let _ = self.conductor_child.wait();
-        log::info!("Shutting down the 0.7 lair-keystore...");
-        if let Err(e) = self.lair_child.kill() {
-            log::warn!("Failed to kill the 0.7 lair-keystore process: {}", e);
-        }
-        let _ = self.lair_child.wait();
+        stop_line_children("0.7", &mut self.conductor_child, &mut self.lair_child);
     }
 }
 
@@ -59,17 +50,22 @@ pub struct Line06Handle {
 
 impl Line06Handle {
     fn shutdown(mut self) {
-        log::info!("Shutting down conductor...");
-        if let Err(e) = self.conductor_child.kill() {
-            log::warn!("Failed to kill conductor process: {}", e);
+        stop_line_children("0.6", &mut self.conductor_child, &mut self.lair_child);
+    }
+}
+
+/// Stop one line's conductor, then its key store: asked first, killed only
+/// if still running after the grace (measured 2026-10-30: both lines'
+/// conductors exit about 0.1 s after SIGTERM, lair in under 10 ms). A
+/// conductor killed in the middle of a write is what a clean stop avoids.
+fn stop_line_children(line: &str, conductor: &mut SidecarChild, lair: &mut SidecarChild) {
+    use crate::process_ext::{stop_gracefully, StopOutcome};
+    for (what, child, grace) in [("conductor", conductor, 5), ("lair-keystore", lair, 2)] {
+        match stop_gracefully(child, std::time::Duration::from_secs(grace)) {
+            Ok(StopOutcome::Killed) => log::warn!("The {} {} did not stop within {} s and was killed", line, what, grace),
+            Ok(_) => log::info!("The {} {} stopped", line, what),
+            Err(e) => log::warn!("Stopping the {} {}: {}", line, what, e),
         }
-        let _ = self.conductor_child.wait();
-        log::info!("Shutting down lair-keystore...");
-        if let Err(e) = self.lair_child.kill() {
-            log::warn!("Failed to kill lair-keystore process: {}", e);
-        }
-        let _ = self.lair_child.wait();
-        log::info!("Conductor and lair-keystore stopped");
     }
 }
 
@@ -652,25 +648,7 @@ pub(crate) fn node_origin_for_tests() -> String {
 
 /// Write a file only this OS account can read.
 fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        // A file left by an earlier version may be readable by others, and
-        // the mode below applies only when the file is created.
-        let _ = std::fs::remove_file(path);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(contents.as_bytes())
-    }
-    #[cfg(not(unix))]
-    {
-        // The app's data folder is private to the account on Windows.
-        std::fs::write(path, contents)
-    }
+    flowsta_hc_lines::files::write_private(path, contents.as_bytes())
 }
 
 /// Start the holochain conductor process.

@@ -45,47 +45,12 @@ use std::sync::Arc;
 /// inside `src-tauri/binaries/` first (matching how CI populates that
 /// directory) so devs don't need a `vault-`-prefixed binary on PATH.
 pub fn resolve_sidecar_bin(name: &str) -> PathBuf {
-    if cfg!(debug_assertions) {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let binaries = std::path::Path::new(manifest).join("binaries");
-        // Exact `name-<triple>` first: `vault-holochain-` is also a prefix of
-        // `vault-holochain-07-<triple>`, and the two lines must never swap.
-        if let Some(triple) = option_env!("VAULT_TARGET_TRIPLE") {
-            let exact = binaries.join(format!("{}-{}", name, triple));
-            if exact.exists() {
-                return exact;
-            }
-        }
-        let prefix = format!("{}-", name);
-        if let Ok(entries) = std::fs::read_dir(&binaries) {
-            for entry in entries.flatten() {
-                if let Some(s) = entry.file_name().to_str() {
-                    let rest = s.strip_prefix(&prefix);
-                    if let Some(rest) = rest {
-                        // Skip the other line's binary when ours has no suffix.
-                        if !name.ends_with("-07") && rest.starts_with("07-") {
-                            continue;
-                        }
-                        return entry.path();
-                    }
-                }
-            }
-        }
-        return PathBuf::from(name);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = if cfg!(target_os = "windows") {
-                dir.join(format!("{}.exe", name))
-            } else {
-                dir.join(name)
-            };
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-    }
-    PathBuf::from(name)
+    let source = flowsta_hc_lines::SidecarSource {
+        dev_dir: cfg!(debug_assertions).then(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries")),
+        exe_dir: None,
+        allow_path_lookup: true,
+    };
+    flowsta_hc_lines::resolve_sidecar(name, &source).unwrap_or_else(|_| PathBuf::from(name))
 }
 use tauri::{
     image::Image,
@@ -245,6 +210,7 @@ pub fn run() {
             // would make this launch take the next admin port and run a
             // SECOND conductor on the same agent key. Stop them first; a
             // staging Vault beside this one keeps its own.
+            process_ext::register_title_markers(&["vault-holochain", "vault-lair-keystore"]);
             let reaped = instance_guard::reap_orphaned_sidecars();
             if reaped > 0 {
                 log::warn!("[instance] {} orphaned sidecar(s) from an earlier launch stopped", reaped);
