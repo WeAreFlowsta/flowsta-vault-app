@@ -1964,8 +1964,9 @@ dependencies = [
 [[package]]
 name = "flowsta-hc-lines"
 version = "0.1.0"
-source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=1a6e3a7fbcf3a039a33a91cbdc4ccd22bc10dbea#1a6e3a7fbcf3a039a33a91cbdc4ccd22bc10dbea"
+source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=9692089827d68c420ccd7e2ddc0dd84031b58bf0#9692089827d68c420ccd7e2ddc0dd84031b58bf0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "getrandom 0.2.17",
  "hex",
@@ -1997,6 +1998,7 @@ version = "1.7.0"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "async-trait",
  "axum 0.7.9",
  "base64 0.22.1",
  "bip39",

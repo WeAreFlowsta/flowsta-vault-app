@@ -1650,9 +1650,8 @@ pub(crate) async fn ensure_conductor_alive(
         log::warn!("[watchdog] the 0.7 conductor exited - restarting that line");
         crate::conductor::supervisor().stop_line(crate::hc::Line::V07);
         let resource_dir = resolve_resource_dir(app_handle, &state.data_dir);
-        let starter = crate::conductor::line_07_starter_from_state(state, resource_dir, passphrase)
-            .ok_or("[watchdog] no 0.7 starter (vault config not available)")?;
-        crate::conductor::attach_line_07(state.clone(), starter);
+        crate::conductor::attach_line_from_state(state.clone(), crate::hc::Line::V07, resource_dir, passphrase, "the 0.7 conductor exited")
+            .map_err(|e| format!("[watchdog] the 0.7 line not restarted: {}", e))?;
         return Ok(());
     }
 
@@ -1690,7 +1689,7 @@ pub(crate) async fn ensure_conductor_alive(
     let resource_dir = resolve_resource_dir(app_handle, &state.data_dir);
 
     log::info!("[watchdog] running start_holochain to bring conductor back");
-    let line_07 = match crate::conductor::start_holochain(
+    match crate::conductor::start_holochain(
         app_handle.clone(),
         data_dir,
         resource_dir,
@@ -1700,7 +1699,7 @@ pub(crate) async fn ensure_conductor_alive(
     )
     .await
     {
-        Ok(h) => h,
+        Ok(_session) => {}
         Err(e) => {
             // Say so in the sidebar - otherwise it sits on "Recovering
             // conductor..." forever with the real reason only in the log.
@@ -1713,10 +1712,6 @@ pub(crate) async fn ensure_conductor_alive(
 
     let port = crate::conductor::supervisor().primary_admin_port();
     log::info!("[watchdog] conductor recovered (admin port {})", port);
-    // The 0.7 line follows from a task; nothing here waits for it.
-    if let Some(starter) = line_07 {
-        crate::conductor::attach_line(state.clone(), starter);
-    }
     *state.conductor_status.lock().unwrap() = ConductorStatus::Ready { admin_port: port };
     let _ = app_handle.emit(
         "conductor-status",
@@ -1850,7 +1845,9 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                                 let passphrase = devices_state.unlock_passphrase.lock().unwrap().as_mut().and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok());
                                 if let Some(passphrase) = passphrase {
                                     let resource_dir = resolve_resource_dir(&devices_app, &devices_state.data_dir);
-                                    crate::conductor::attach_line_06_now(devices_state.clone(), resource_dir, passphrase, "a device still on 0.6, or nothing heard yet");
+                                    if let Err(e) = crate::conductor::attach_line_from_state(devices_state.clone(), crate::hc::Line::V06, resource_dir, passphrase, "a device still on 0.6, or nothing heard yet") {
+                                        log::warn!("[0.6] not attached: {}", e);
+                                    }
                                 }
                             }
                         }
@@ -1864,8 +1861,20 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                     pass += 1;
                     DEVICES_ROUND_EVERY
                 }
-                // The cells of a returning identity can take minutes to answer.
-                DevicesRound::NotReady => DEVICES_ROUND_RETRY,
+                // The cells of a returning identity can take minutes to
+                // answer. A conductor that has exited never answers: with the
+                // primary down every round ends here, so a dead process is
+                // brought back from here too (found when the 0.7 primary was
+                // killed seconds after its start, before the first round).
+                DevicesRound::NotReady => {
+                    let sup = crate::conductor::supervisor();
+                    if sup.session().is_some() && (!sup.primary_alive() || sup.alive(crate::hc::Line::V07) == Some(false)) {
+                        if let Err(e) = ensure_conductor_alive(&devices_state, &devices_app).await {
+                            log::warn!("[devices] the conductor was not brought back: {}", e);
+                        }
+                    }
+                    DEVICES_ROUND_RETRY
+                }
             };
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
@@ -2248,15 +2257,11 @@ fn spawn_conductor_startup_inner(
                     )
                     .await
                     {
-                        Ok(line_07) => {
-                            let port = crate::conductor::supervisor().primary_admin_port();
-                            // The 0.7 line follows from a task: the Vault is
-                            // Ready on 0.6 now, not after the second line.
-                            // (An identity born on 1.7.0 started on 0.7 alone.)
-                            if let Some(starter) = line_07 {
-                                crate::conductor::attach_line(state.clone(), starter);
-                            }
-                            Ok(port)
+                        Ok(_session) => {
+                            // The other line follows from a task (the
+                            // supervisor's start order): the Vault is Ready on
+                            // its primary now, not after the second line.
+                            Ok(crate::conductor::supervisor().primary_admin_port())
                         }
                         Err(e) => Err(e),
                     },
