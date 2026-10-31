@@ -13,13 +13,19 @@
 //! Every step is idempotent: a Vault killed anywhere in the pass reopens on
 //! the line the marker says and the next pass carries on from what the
 //! destination holds.
+//!
+//! The pass runs on flowsta-hc-lines' `pass` runner; this module gives it
+//! the Vault's kinds and the flip's marker fields.
 
 use crate::commands::AppState;
 use crate::hc::Line;
-use crate::sealed::{latest_versions, StoreSpec, StoredVersion};
+use crate::sealed::{StoreSpec, StoredVersion};
+use flowsta_hc_lines::pass::{
+    self as lines_pass, Carried, CarriedRecords, CarryReport, CopyUnit, CopyUnits, FlipHook, HookError, OwnKind, PassApp, PassCx, PassRunner, Version, VersionedKind,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// What `moved-07` holds: when the identity's writes went to 0.7 and what
 /// had been carried by then.
@@ -254,7 +260,8 @@ pub(crate) fn line_facts(root: &Path, own_install_id: Option<&str>, siblings: fl
     }
 }
 
-/// What one pass did.
+/// What one pass did (what `move_status` and `/status` show), from the
+/// library's per-kind outcome.
 #[derive(Serialize, Clone, Debug, Default, PartialEq)]
 pub struct PassOutcome {
     pub reason: String,
@@ -286,8 +293,53 @@ pub struct PassOutcome {
     pub skipped: Option<String>,
 }
 
-static LAST_PASS: Mutex<Option<(PathBuf, PassOutcome)>> = Mutex::new(None);
-static RUNNING: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// The kinds the pass moves, by the names its errors use.
+const PRIVATE: &str = "private records";
+const SIGNATURES: &str = "signatures";
+const WEB_ERA: &str = "web-era signatures";
+const REVOCATIONS: &str = "revocations";
+const THUMBNAILS: &str = "thumbnails";
+
+impl From<&lines_pass::PassOutcome> for PassOutcome {
+    fn from(o: &lines_pass::PassOutcome) -> Self {
+        let kind = |name: &str| o.kind(name).cloned().unwrap_or_default();
+        let (private, signing, web_era) = (kind(PRIVATE), kind(SIGNATURES), kind(WEB_ERA));
+        PassOutcome {
+            reason: o.reason.clone(),
+            started_ms: o.started_ms,
+            took_ms: o.took_ms,
+            private_06: private.total,
+            private_present: private.present,
+            private_written: private.written,
+            private_complete: private.complete,
+            signatures_06: signing.total,
+            signatures_carried: signing.written,
+            revocations_carried: signing.detail(REVOCATIONS),
+            thumbnails_carried: signing.detail(THUMBNAILS),
+            signing_complete: signing.complete,
+            web_era_06: web_era.total,
+            web_era_carried: web_era.written,
+            web_era_complete: web_era.complete,
+            flipped: o.flipped,
+            error: o.error.clone(),
+            skipped: o.skipped.clone(),
+        }
+    }
+}
+
+/// The pass: flowsta-hc-lines' runner with the Vault's kinds. One private
+/// unit (the private records, when this identity has a private cell); the
+/// own signatures carried before the flip and holding it; the web key's
+/// signatures carried until done, never holding it.
+static PASSES: std::sync::LazyLock<PassRunner<AppState>> = std::sync::LazyLock::new(|| {
+    PassRunner::new(
+        MARKER_SPEC,
+        Arc::new(PrivateUnit),
+        vec![OwnKind::Versioned(Arc::new(SealedRecords))],
+        vec![Arc::new(OwnSignatures), Arc::new(WebEra)],
+        Arc::new(VaultFlip),
+    )
+});
 
 /// What the Identity page and `/status` say about the move.
 #[derive(Serialize, Clone, Debug)]
@@ -301,11 +353,12 @@ pub struct MoveStatus {
 
 pub fn status(state: &AppState) -> MoveStatus {
     let root = state.identity_root();
+    let pass = PASSES.status(&root);
     MoveStatus {
         moved: moved(&root),
         marker: marker(&root),
-        running: RUNNING.lock().unwrap().as_deref() == Some(root.as_path()),
-        last_pass: LAST_PASS.lock().unwrap().as_ref().filter(|(r, _)| r == &root).map(|(_, o)| o.clone()),
+        running: pass.running,
+        last_pass: pass.last.as_ref().map(PassOutcome::from),
         line: crate::hc::active_line(state),
     }
 }
@@ -319,180 +372,248 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-/// Run a pass in the background unless one is running for this identity or
-/// a line is not up. Called when the 0.7 line comes up and from every
-/// devices round.
+/// Run a pass in the background unless one is running or a line is not up.
+/// Called when a line comes up and from every devices round.
 pub fn schedule_pass(state: Arc<AppState>, reason: &'static str) {
     let root = state.identity_root();
-    if crate::hc::line_ports(&state, Line::V06).is_err() || crate::hc::line_ports(&state, Line::V07).is_err() {
-        return;
-    }
-    {
-        let mut running = RUNNING.lock().unwrap();
-        if running.is_some() {
-            return;
-        }
-        *running = Some(root.clone());
-    }
+    let Some(claim) = PASSES.claim(&state, &root) else { return };
     tauri::async_runtime::spawn(async move {
-        struct Done;
-        impl Drop for Done {
-            fn drop(&mut self) {
-                *RUNNING.lock().unwrap() = None;
-            }
-        }
-        let _done = Done;
-        let outcome = run_pass(&state, reason).await;
-        *LAST_PASS.lock().unwrap() = Some((root, outcome));
+        let outcome = pass(&state, &root, reason).await;
+        claim.finished(outcome);
     });
 }
 
 /// The pass itself; see the module doc. Never fails the caller: the
 /// outcome carries the error.
 pub async fn run_pass(state: &Arc<AppState>, reason: &str) -> PassOutcome {
-    let started = std::time::Instant::now();
-    let root = state.identity_root();
-    let mut out = PassOutcome { reason: reason.to_string(), started_ms: now_ms(), ..Default::default() };
-    let already_moved = moved(&root);
-
-    // The private step needs a private cell on both lines, which exists only
-    // for a device-hosted identity that holds its private-network seed and
-    // data key (an identity from before 1.6.0 whose owner never re-entered
-    // the phrase has neither, on either line: it carries signatures only).
-    let (has_private_cell, unlocked) = {
-        let cfg = state.vault_config.lock().unwrap();
-        (
-            cfg.as_ref()
-                .map(|c| c.hosting_model.as_deref() == Some("device-hosted") && c.private_network_seed.is_some() && c.data_key.is_some())
-                .unwrap_or(false),
-            cfg.is_some(),
-        )
-    };
-    if !unlocked {
-        out.skipped = Some("the Vault is locked".into());
-        return out;
-    }
-    if crate::hc::line_ports(state, Line::V07).is_err() {
-        out.skipped = Some("the 0.7 line is not running".into());
-        return out;
-    }
-    if crate::hc::line_ports(state, Line::V06).is_err() {
-        out.skipped = Some("the 0.6 line is not running (nothing to carry from)".into());
-        return out;
-    }
-
-    // ── Private records ──
-    if has_private_cell {
-        match private_pass(state, &mut out).await {
-            Ok(()) => {}
-            Err(e) => {
-                out.error = Some(format!("private records: {}", e));
-                finish(&root, started, &mut out);
-                return out;
-            }
-        }
-    } else {
-        // No private cell on either line: a custodial-linked vault (its
-        // records cross with the account) or a pre-1.6.0 identity without
-        // its seed. Nothing private to move; the signatures still are.
-        out.private_complete = true;
-    }
-
-    // ── Signatures (once: nothing new lands on this device's 0.6 cell
-    // after the flip, its writes go to 0.7) ──
-    if already_moved {
-        out.signing_complete = true;
-    } else {
-        match signing_pass(state, &mut out).await {
-            Ok(()) => {}
-            Err(e) => {
-                out.error = Some(format!("signatures: {}", e));
-                finish(&root, started, &mut out);
-                return out;
-            }
-        }
-    }
-
-    // ── The web key's signatures (a migrated account) ──
-    // Carried by this device as witness; the originals stay where they are.
-    // Does not hold up the flip: the 0.6 line keeps running until this is
-    // done, and the step runs again every round until then.
-    let web_key = state.linked_web_agent_key.lock().unwrap().clone();
-    let web_era_done_before = marker(&root).map(|m| m.web_era_carried).unwrap_or(false);
-    match web_key.as_deref().filter(|_| !web_era_done_before) {
-        None => out.web_era_complete = true,
-        Some(key_b64) => match web_era_pass(state, key_b64, &mut out).await {
-            Ok(()) => {
-                if out.web_era_complete && already_moved {
-                    let (n,) = (out.web_era_carried,);
-                    if let Err(e) = update_marker(&root, |m| {
-                        m.web_era_carried = true;
-                        m.web_era_signatures = n;
-                    }) {
-                        out.error = Some(format!("the marker was not updated: {}", e));
-                    }
-                }
-            }
-            Err(e) => {
-                // Not fatal to the pass: the own records and the flip stand.
-                log::info!("[move] web-era signatures not carried this pass ({}): {}", out.reason, e.chars().take(160).collect::<String>());
-                out.web_era_complete = false;
-            }
-        },
-    }
-
-    // ── The flip ──
-    if !already_moved && out.private_complete && out.signing_complete {
-        let marker = Marker {
-            v: 1,
-            moved_at_ms: now_ms(),
-            vault_version: env!("CARGO_PKG_VERSION").to_string(),
-            private_records: out.private_06,
-            signatures: out.signatures_06,
-            revocations: out.revocations_carried,
-            thumbnails: out.thumbnails_carried,
-            born: false,
-            web_era_carried: out.web_era_complete,
-            web_era_signatures: out.web_era_carried,
-            restored: false,
-            line_06_needed: Some(true),
-        };
-        match write_marker(&root, &marker, true) {
-            Ok(()) => {
-                out.flipped = true;
-                crate::sealed::forget_recent_versions();
-                crate::devices::announce_again();
-                crate::commands::own_record_due();
-                // One entry per device, since every device does its own
-                // move and the feed is shared: the device that wrote records
-                // says what it synced; one that found them there says so,
-                // without counts that read as "this device lost six".
-                let detail = if out.private_written > 0 || out.signatures_carried > 0 {
-                    format!(
-                        "{} record{} and {} signature{} synced",
-                        out.private_06, if out.private_06 == 1 { "" } else { "s" },
-                        out.signatures_carried, if out.signatures_carried == 1 { "" } else { "s" }
-                    )
-                } else {
-                    "Everything was already synced".to_string()
-                };
-                state.activity.record(
-                    "records_moved",
-                    "Your Vault synced to the new network",
-                    Some(detail),
-                    None,
-                    None,
-                );
-            }
-            Err(e) => out.error = Some(format!("the marker was not written: {}", e)),
-        }
-    }
-    finish(&root, started, &mut out);
-    out
+    PassOutcome::from(&pass(state, &state.identity_root(), reason).await)
 }
 
-fn finish(root: &Path, started: std::time::Instant, out: &mut PassOutcome) {
-    out.took_ms = started.elapsed().as_millis() as u64;
+async fn pass(state: &Arc<AppState>, root: &Path, reason: &str) -> lines_pass::PassOutcome {
+    let outcome = PASSES.run(state, root, reason).await;
+    if outcome.skipped.is_none() {
+        if let Some(e) = outcome.kind(WEB_ERA).and_then(|k| k.error.as_deref()) {
+            // Not fatal to the pass: the own records and the flip stand.
+            log::info!("[move] web-era signatures not carried this pass ({}): {}", reason, e.chars().take(160).collect::<String>());
+        }
+        finish(root, &PassOutcome::from(&outcome));
+    }
+    outcome
+}
+
+impl PassApp for AppState {
+    fn line_up(&self, line: Line) -> bool {
+        crate::hc::line_ports(self, line).is_ok()
+    }
+    fn blocked(&self) -> Option<String> {
+        self.vault_config.lock().unwrap().is_none().then(|| "the Vault is locked".to_string())
+    }
+}
+
+/// The private records move as one unit. The private step needs a private
+/// cell on both lines, which exists only for a device-hosted identity that
+/// holds its private-network seed and data key. An identity from before
+/// 1.6.0 whose owner never re-entered the phrase has neither, on either
+/// line, and a custodial-linked vault's records cross with the account:
+/// nothing private to move; the signatures still are.
+struct PrivateUnit;
+
+#[async_trait::async_trait]
+impl CopyUnits<AppState> for PrivateUnit {
+    async fn units(&self, cx: &PassCx<'_, AppState>) -> Result<Vec<CopyUnit>, HookError> {
+        let has_private_cell = cx
+            .app
+            .vault_config
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.hosting_model.as_deref() == Some("device-hosted") && c.private_network_seed.is_some() && c.data_key.is_some())
+            .unwrap_or(false);
+        Ok(if has_private_cell { vec![CopyUnit { id: "private".into() }] } else { vec![] })
+    }
+}
+
+/// The private records, by logical id and version time.
+struct SealedRecords;
+
+fn version_of(v: &StoredVersion) -> Result<Version, HookError> {
+    use flowsta_hc_lines::Versioned;
+    Ok(Version {
+        logical_id: v.logical_id(),
+        version_time: v.version_time(),
+        created_at: v.created_at(),
+        deleted: v.deleted(),
+        action_hash: v.action_hash.clone(),
+        body: rmp_serde::to_vec_named(&v.payload)?,
+    })
+}
+
+#[async_trait::async_trait]
+impl VersionedKind<AppState> for SealedRecords {
+    fn name(&self) -> &'static str {
+        PRIVATE
+    }
+    async fn versions(&self, cx: &PassCx<'_, AppState>, line: Line, _unit: &CopyUnit) -> Result<Vec<Version>, HookError> {
+        crate::sealed::sealed_versions_on(cx.app, line).await?.iter().map(version_of).collect()
+    }
+    async fn write(&self, cx: &PassCx<'_, AppState>, line: Line, _unit: &CopyUnit, v: &Version, supersedes: Option<&[u8]>) -> Result<Vec<u8>, HookError> {
+        let stored = StoredVersion { action_hash: v.action_hash.clone(), payload: rmp_serde::from_slice(&v.body)? };
+        let _one_write_at_a_time = cx.app.commit_serial.lock().await;
+        let hash = crate::sealed::sealed_store_spec_as(
+            cx.app,
+            line,
+            spec_of(&stored),
+            supersedes.filter(|h| h.len() == 39).map(|h| holochain_types::prelude::ActionHash::from_raw_39(h.to_vec())),
+            stored.payload.device.clone(),
+        )
+        .await?;
+        Ok(hex::decode(&hash).unwrap_or_default())
+    }
+    fn forget_cache(&self, _cx: &PassCx<'_, AppState>) {
+        crate::sealed::forget_recent_versions();
+    }
+}
+
+/// The person's own signatures, with their revocations and thumbnails, by
+/// `carry_*` (idempotent by the old action hash). Once: nothing new lands
+/// on this device's 0.6 cell after the flip, its writes go to 0.7.
+struct OwnSignatures;
+
+#[async_trait::async_trait]
+impl CarriedRecords<AppState> for OwnSignatures {
+    fn name(&self) -> &'static str {
+        SIGNATURES
+    }
+    fn blocks_flip(&self) -> bool {
+        true
+    }
+    fn only_before_flip(&self) -> bool {
+        true
+    }
+    async fn carry(&self, cx: &PassCx<'_, AppState>, report: &mut CarryReport) -> Result<Carried, HookError> {
+        let (c06, r06) = match crate::signing_07::signing_client(cx.app, Line::V06).await {
+            Ok(c) => c,
+            Err(e) if e.contains("not installed") => return Ok(Carried::Nothing),
+            Err(e) => return Err(e.into()),
+        };
+        let (c07, r07) = crate::signing_07::signing_client(cx.app, Line::V07).await?;
+        let own = crate::signing_07::own_records_06(&c06, &r06).await?;
+        report.total = own.len();
+        for (record, _entry) in &own {
+            let on_07 = crate::signing_07::carry_signature(&c07, &r07, record).await?;
+            report.carried += 1;
+            for rev in crate::signing_07::revocations_06(&c06, &r06, &record.action_hash).await? {
+                crate::signing_07::carry_revocation(&c07, &r07, &on_07, &rev).await?;
+                report.add(REVOCATIONS, 1);
+            }
+            if let Some(thumb) = crate::signing_07::thumbnail_06(&c06, &r06, &record.action_hash).await? {
+                crate::signing_07::carry_thumbnail(&c07, &r07, &on_07, &thumb).await?;
+                report.add(THUMBNAILS, 1);
+            }
+        }
+        Ok(Carried::Ran)
+    }
+}
+
+/// The records the web key this identity came from signed on the 0.6
+/// network (a migrated account), carried to 0.7 with their revocations and
+/// thumbnails, this device as witness; the originals stay where they are.
+/// Idempotent per witness (the DNA); two devices carrying the same record
+/// are one record at read time (`signing_07::merge_own`, the API's dedupe).
+/// Does not hold up the flip: the 0.6 line keeps running until this is
+/// done, and it runs again every pass until then.
+struct WebEra;
+
+#[async_trait::async_trait]
+impl CarriedRecords<AppState> for WebEra {
+    fn name(&self) -> &'static str {
+        WEB_ERA
+    }
+    fn blocks_flip(&self) -> bool {
+        false
+    }
+    async fn carry(&self, cx: &PassCx<'_, AppState>, report: &mut CarryReport) -> Result<Carried, HookError> {
+        let web_key = cx.app.linked_web_agent_key.lock().unwrap().clone();
+        let done_before = marker(cx.root).map(|m| m.web_era_carried).unwrap_or(false);
+        let Some(web_key_b64) = web_key.filter(|_| !done_before) else { return Ok(Carried::Nothing) };
+        let raw = crate::commands::base64_standard_decode(&web_key_b64).map_err(|_| "the cached web key does not decode".to_string())?;
+        if raw.len() != 39 {
+            return Err(format!("the cached web key is {} bytes, expected 39", raw.len()).into());
+        }
+        let web_key = holochain_types::prelude::AgentPubKey::from_raw_39(raw);
+        // No 0.6 signing cell here: nothing to read the web key's records from.
+        let (c06, r06) = crate::signing_07::signing_client(cx.app, Line::V06).await?;
+        let (c07, r07) = crate::signing_07::signing_client(cx.app, Line::V07).await?;
+        let theirs = crate::signing_07::records_for_agent_06(&c06, &r06, &web_key).await?;
+        report.total = theirs.len();
+        for (record, _entry) in &theirs {
+            let on_07 = crate::signing_07::carry_signature(&c07, &r07, record).await?;
+            report.carried += 1;
+            for rev in crate::signing_07::revocations_network_06(&c06, &r06, &record.action_hash).await? {
+                crate::signing_07::carry_revocation(&c07, &r07, &on_07, &rev).await?;
+            }
+            if let Some(thumb) = crate::signing_07::thumbnail_06(&c06, &r06, &record.action_hash).await? {
+                crate::signing_07::carry_thumbnail(&c07, &r07, &on_07, &thumb).await?;
+            }
+        }
+        Ok(Carried::Ran)
+    }
+    fn mark_complete(&self, m: &mut flowsta_hc_lines::marker::Marker, report: &CarryReport) -> bool {
+        m.app.insert("web_era_carried".into(), serde_json::Value::from(true));
+        m.app.insert("web_era_signatures".into(), serde_json::Value::from(report.carried));
+        true
+    }
+}
+
+/// The flip: the marker carries the counts Vault 1.7.0 requires, then this
+/// device says it moved.
+struct VaultFlip;
+
+/// The Vault's own keys in a new marker (the counts, for the words; 1.7.0
+/// requires them). The line fields are the library's.
+fn flip_fields(out: &PassOutcome) -> serde_json::Map<String, serde_json::Value> {
+    let serde_json::Value::Object(map) = serde_json::json!({
+        "vault_version": env!("CARGO_PKG_VERSION"),
+        "private_records": out.private_06,
+        "signatures": out.signatures_06,
+        "revocations": out.revocations_carried,
+        "thumbnails": out.thumbnails_carried,
+        "web_era_carried": out.web_era_complete,
+        "web_era_signatures": out.web_era_carried,
+    }) else {
+        unreachable!("an object")
+    };
+    map
+}
+
+#[async_trait::async_trait]
+impl FlipHook<AppState> for VaultFlip {
+    fn marker_fields(&self, outcome: &lines_pass::PassOutcome) -> serde_json::Map<String, serde_json::Value> {
+        flip_fields(&PassOutcome::from(outcome))
+    }
+    async fn flipped(&self, cx: &PassCx<'_, AppState>, _marker: &flowsta_hc_lines::marker::Marker, outcome: &lines_pass::PassOutcome) {
+        let out = PassOutcome::from(outcome);
+        crate::sealed::forget_recent_versions();
+        crate::devices::announce_again();
+        crate::commands::own_record_due();
+        // One entry per device, since every device does its own move and
+        // the feed is shared: the device that wrote records says what it
+        // synced; one that found them there says so, without counts that
+        // read as "this device lost six".
+        let detail = if out.private_written > 0 || out.signatures_carried > 0 {
+            format!(
+                "{} record{} and {} signature{} synced",
+                out.private_06, if out.private_06 == 1 { "" } else { "s" },
+                out.signatures_carried, if out.signatures_carried == 1 { "" } else { "s" }
+            )
+        } else {
+            "Everything was already synced".to_string()
+        };
+        cx.app.activity.record("records_moved", "Your Vault synced to the new network", Some(detail), None, None);
+    }
+}
+
+fn finish(root: &Path, out: &PassOutcome) {
     let id: String = root.file_name().and_then(|n| n.to_str()).unwrap_or("?").chars().take(8).collect();
     match (&out.error, out.flipped) {
         (Some(e), _) => log::warn!(
@@ -540,102 +661,10 @@ pub(crate) fn missing_on_07<'a>(
     flowsta_hc_lines::missing_on(winners_06, held_07)
 }
 
-async fn private_pass(state: &Arc<AppState>, out: &mut PassOutcome) -> Result<(), String> {
-    let (winners_06, _) = latest_versions(crate::sealed::sealed_versions_on(state, Line::V06).await?);
-    let mut held_07 = crate::sealed::sealed_held_on(state, Line::V07).await?;
-    out.private_06 = winners_06.len();
-    let missing = missing_on_07(&winners_06, &held_07);
-    out.private_present = winners_06.len() - missing.len();
-    for (v, supersedes) in missing {
-        let id = v.payload.logical_id();
-        let stored = {
-            let _one_write_at_a_time = state.commit_serial.lock().await;
-            crate::sealed::sealed_store_spec_as(
-                state,
-                Line::V07,
-                spec_of(v),
-                supersedes.filter(|h| h.len() == 39).map(holochain_types::prelude::ActionHash::from_raw_39),
-                v.payload.device.clone(),
-            )
-            .await?
-        };
-        held_07.insert(id, StoredVersion { action_hash: hex::decode(&stored).unwrap_or_default(), payload: v.payload.clone() });
-        out.private_written += 1;
-    }
-    // The check reads the 0.7 cell again rather than trusting the writes.
-    crate::sealed::forget_recent_versions();
-    let held_after = crate::sealed::sealed_held_on(state, Line::V07).await?;
-    out.private_complete = missing_on_07(&winners_06, &held_after).is_empty();
-    Ok(())
-}
-
-async fn signing_pass(state: &Arc<AppState>, out: &mut PassOutcome) -> Result<(), String> {
-    let (c06, r06) = match crate::signing_07::signing_client(state, Line::V06).await {
-        Ok(c) => c,
-        Err(e) if e.contains("not installed") => {
-            out.signing_complete = true;
-            return Ok(());
-        }
-        Err(e) => return Err(e),
-    };
-    let (c07, r07) = crate::signing_07::signing_client(state, Line::V07).await?;
-    let own = crate::signing_07::own_records_06(&c06, &r06).await?;
-    out.signatures_06 = own.len();
-    for (record, _entry) in &own {
-        let on_07 = crate::signing_07::carry_signature(&c07, &r07, record).await?;
-        out.signatures_carried += 1;
-        for rev in crate::signing_07::revocations_06(&c06, &r06, &record.action_hash).await? {
-            crate::signing_07::carry_revocation(&c07, &r07, &on_07, &rev).await?;
-            out.revocations_carried += 1;
-        }
-        if let Some(thumb) = crate::signing_07::thumbnail_06(&c06, &r06, &record.action_hash).await? {
-            crate::signing_07::carry_thumbnail(&c07, &r07, &on_07, &thumb).await?;
-            out.thumbnails_carried += 1;
-        }
-    }
-    out.signing_complete = out.signatures_carried == out.signatures_06;
-    Ok(())
-}
-
-/// The records the web key signed on the 0.6 network, carried to 0.7 with
-/// their revocations and thumbnails, this device as witness. Idempotent per
-/// witness (the DNA); two devices carrying the same record are one record
-/// at read time (`signing_07::merge_own`, the API's dedupe).
-async fn web_era_pass(state: &Arc<AppState>, web_key_b64: &str, out: &mut PassOutcome) -> Result<(), String> {
-    let raw = crate::commands::base64_standard_decode(web_key_b64).map_err(|_| "the cached web key does not decode".to_string())?;
-    if raw.len() != 39 {
-        return Err(format!("the cached web key is {} bytes, expected 39", raw.len()));
-    }
-    let web_key = holochain_types::prelude::AgentPubKey::from_raw_39(raw);
-    let (c06, r06) = match crate::signing_07::signing_client(state, Line::V06).await {
-        Ok(c) => c,
-        Err(e) if e.contains("not installed") || e.contains("not running") => {
-            // No 0.6 signing cell here: nothing to read the web key's records from.
-            return Err(e);
-        }
-        Err(e) => return Err(e),
-    };
-    let (c07, r07) = crate::signing_07::signing_client(state, Line::V07).await?;
-    let theirs = crate::signing_07::records_for_agent_06(&c06, &r06, &web_key).await?;
-    out.web_era_06 = theirs.len();
-    for (record, _entry) in &theirs {
-        let on_07 = crate::signing_07::carry_signature(&c07, &r07, record).await?;
-        out.web_era_carried += 1;
-        for rev in crate::signing_07::revocations_network_06(&c06, &r06, &record.action_hash).await? {
-            crate::signing_07::carry_revocation(&c07, &r07, &on_07, &rev).await?;
-        }
-        if let Some(thumb) = crate::signing_07::thumbnail_06(&c06, &r06, &record.action_hash).await? {
-            crate::signing_07::carry_thumbnail(&c07, &r07, &on_07, &thumb).await?;
-        }
-    }
-    out.web_era_complete = out.web_era_carried == out.web_era_06;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sealed::{SealedPayload, SEALED_PAYLOAD_V2};
+    use crate::sealed::{latest_versions, SealedPayload, SEALED_PAYLOAD_V2};
 
     fn version(id: &str, time: u64, hash: u8) -> StoredVersion {
         StoredVersion {
@@ -677,6 +706,54 @@ mod tests {
         let mut held_07 = std::collections::HashMap::new();
         held_07.insert("a".to_string(), version("a", 5000, 11));
         assert!(missing_on_07(&winners_06, &held_07).is_empty());
+    }
+
+    #[test]
+    fn the_flip_marker_reads_as_the_vaults_own() {
+        // The library writes the line fields; the Vault's keys come from
+        // `flip_fields`. Together they are the marker 1.7.0 reads.
+        let dir = tempfile::tempdir().unwrap();
+        let out = PassOutcome {
+            private_06: 4,
+            signatures_06: 2,
+            signatures_carried: 2,
+            revocations_carried: 1,
+            thumbnails_carried: 1,
+            web_era_complete: true,
+            web_era_carried: 3,
+            ..Default::default()
+        };
+        let mut m = flowsta_hc_lines::marker::Marker::new(&MARKER_SPEC, 7);
+        m.old_line_needed = Some(true);
+        m.app.extend(flip_fields(&out));
+        m.save(dir.path(), &MARKER_SPEC).unwrap();
+        let read = marker(dir.path()).expect("every field 1.7.0 requires");
+        assert_eq!(
+            (read.private_records, read.signatures, read.revocations, read.thumbnails, read.web_era_carried, read.web_era_signatures),
+            (4, 2, 1, 1, true, 3)
+        );
+        assert_eq!((read.moved_at_ms, read.born, read.restored, read.line_06_needed), (7, false, false, Some(true)));
+        assert!(moved(dir.path()));
+    }
+
+    #[test]
+    fn the_outcome_reads_the_kinds_by_name() {
+        use lines_pass::KindOutcome;
+        let lib = lines_pass::PassOutcome {
+            reason: "devices round".into(),
+            kinds: vec![
+                KindOutcome { name: PRIVATE, total: 5, present: 3, written: 2, complete: true, ..Default::default() },
+                KindOutcome { name: SIGNATURES, total: 2, written: 1, details: vec![(REVOCATIONS, 1)], ..Default::default() },
+            ],
+            error: Some("signatures: gone".into()),
+            ..Default::default()
+        };
+        let out = PassOutcome::from(&lib);
+        assert_eq!((out.private_06, out.private_present, out.private_written, out.private_complete), (5, 3, 2, true));
+        assert_eq!((out.signatures_06, out.signatures_carried, out.revocations_carried, out.thumbnails_carried, out.signing_complete), (2, 1, 1, 0, false));
+        // The pass stopped before the web era: not complete, nothing counted.
+        assert_eq!((out.web_era_06, out.web_era_complete), (0, false));
+        assert_eq!(out.error.as_deref(), Some("signatures: gone"));
     }
 
     #[test]
