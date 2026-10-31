@@ -9,6 +9,10 @@
 set -u
 cd "$(dirname "$0")/.."
 LOGS="${1:-/tmp/vault-matrix-$$}"; mkdir -p "$LOGS"; set -- "$LOGS"
+# The test conductors log their network side (arc changes, peer discovery,
+# publish targets), so a slow or failed run keeps its evidence. A RUST_LOG
+# already set wins.
+export RUST_LOG="${RUST_LOG:-warn,kitsune2=info,kitsune2_gossip=info,kitsune2_core=info,kitsune2_dht=info,holochain_p2p=info}"
 echo "== build $(date -u +%H:%M:%S)"
 [ -n "${SKIP_BUILD:-}" ] || scripts/build-test-binary.sh > "$1/matrix-build.log" 2>&1 || { echo "BUILD FAILED"; tail -20 "$1/matrix-build.log"; exit 1; }
 rm -rf "$HOME/.local/share/flowsta-vault-md-c" "$HOME/.local/share/flowsta-vault-md-d"
@@ -34,4 +38,14 @@ killtests() {
   for pid in $(pgrep -f "flowsta-vault-md-[cd]/"); do [ "$pid" != "$$" ] && kill -9 $pid 2>/dev/null; done
 }
 killtests; sleep 3; killtests
+# Keep both instances' logs with the run: the next run starts by deleting
+# the instance folders.
+for s in md-c md-d; do
+  d="$HOME/.local/share/flowsta-vault-$s"; mkdir -p "$1/$s"
+  cp "$d/xdg/com.flowsta.vault/logs/Flowsta Vault.log" "$1/$s/app.log" 2>/dev/null
+  for f in "$d"/identities/*/conductor*/holochain-stderr.log; do
+    [ -f "$f" ] && cp "$f" "$1/$s/$(basename "$(dirname "$f")")-holochain-stderr.log"
+  done
+done
+echo "== logs kept in $1 (md-c, md-d)"
 exit $rc
