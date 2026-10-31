@@ -7369,15 +7369,17 @@ pub(crate) async fn set_thumbnail_inner(
                 return Ok(thumb_hash);
             }
             Err(e) => {
+                use crate::hc::ZomeErrorKind as K;
+                let kind = flowsta_hc_lines::client::kind_06(&e);
                 last_err = format!("{}", e);
-                if last_err.contains("nauthorized") {
+                if kind == K::Unauthorized {
                     // Stale cached grant - invalidate so the NEXT call (this
                     // connection's signer is already built) re-authorizes.
                     invalidate_cell_credentials(state);
                 }
-                let transient = last_err.contains("response timeout")
-                    || last_err.contains("channel dropped")
-                    || last_err.contains("chain head has moved");
+                // Only failures that wrote nothing: the conductor's own
+                // network timeout, or a chain head that moved.
+                let transient = matches!(kind, K::Timeout | K::ChainHeadMoved);
                 log::warn!(
                     "set_thumbnail attempt {}/3 failed after {:?}: {}",
                     attempt,
@@ -7530,17 +7532,17 @@ pub(crate) async fn commit_signature_to_dht(
                 break;
             }
             Err(e) => {
+                use crate::hc::ZomeErrorKind as K;
+                let kind = flowsta_hc_lines::client::kind_06(&e);
                 last_err = format!("Zome call create_signature failed: {}", e);
-                let retriable = last_err.contains("chain head has moved")
-                    || last_err.contains("CellDisabled")
-                    || last_err.contains("CellNotRunning");
+                let retriable = matches!(kind, K::ChainHeadMoved | K::CellNotRunning);
                 log::warn!("create_signature attempt {}/3 failed: {}", attempt, last_err);
                 if !retriable || attempt == 3 {
                     return Err(last_err);
                 }
                 // Cell re-enable (conductor restarted underneath us) takes
                 // seconds; a lost head race resolves immediately.
-                let gap = if last_err.contains("CellDisabled") || last_err.contains("CellNotRunning") { 5 } else { 2 };
+                let gap = if kind == K::CellNotRunning { 5 } else { 2 };
                 tokio::time::sleep(std::time::Duration::from_secs(gap)).await;
             }
         }

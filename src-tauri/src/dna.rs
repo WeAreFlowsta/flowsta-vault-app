@@ -1154,8 +1154,7 @@ pub async fn ensure_apps_enabled(
                         return;
                     }
                     Err(e) => {
-                        let err_str = format!("{}", e);
-                        if (err_str.contains("CellDisabled") || err_str.contains("CellNotRunning")) && attempt < MAX_ATTEMPTS {
+                        if flowsta_hc_lines::client::kind_06(&e) == crate::hc::ZomeErrorKind::CellNotRunning && attempt < MAX_ATTEMPTS {
                             log::info!(
                                 "ensure_apps_enabled: cells not ready yet (attempt {}/{}), waiting 3s...",
                                 attempt, MAX_ATTEMPTS,
@@ -1416,8 +1415,7 @@ pub async fn ensure_cells_ready_07(admin_port: u16, state: &std::sync::Arc<crate
                 return;
             }
             Err(e) => {
-                let text = format!("{}", e);
-                if (text.contains("CellNotRunning") || text.contains("CellDisabled")) && attempt < MAX_ATTEMPTS {
+                if flowsta_hc_lines::client::kind_07(&e) == crate::hc::ZomeErrorKind::CellNotRunning && attempt < MAX_ATTEMPTS {
                     log::info!("[0.7] cells not ready yet (attempt {}/{}), waiting 3 s", attempt, MAX_ATTEMPTS);
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 } else {
