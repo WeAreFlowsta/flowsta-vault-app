@@ -7,9 +7,8 @@
 //! Version constants define what ships with this app build. The DNA updater
 //! can override these with newer versions downloaded from the API.
 
-use holochain_client::{AdminWebsocket, AppStatusFilter, InstallAppPayload};
-use flowsta_hc_lines::{AdminClient, CoordinatorZome, Line};
-use holochain_types::app::AppBundleSource;
+use holochain_client::{AdminWebsocket, AppStatusFilter};
+use flowsta_hc_lines::{AdminClient, CoordinatorZome, InstallRequest, Line, Recovery};
 use holochain_types::prelude::AgentPubKey;
 use std::path::Path;
 use crate::process_ext::SidecarChild;
@@ -305,240 +304,11 @@ mod coordinator_bundle_tests {
     }
 }
 
-/// Reconnect to the admin WebSocket. Used during recovery from a WS reset.
-async fn reconnect_admin(admin_port: u16) -> Result<AdminWebsocket, String> {
-    AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("admin WS reconnect failed: {}", e))
-}
-
-/// Install an app, surviving a WebSocket reset mid-call.
-///
-/// `install_app` for the identity hApp (~3.9 MB) on a clean conductor blocks
-/// long enough on first-time WASM compilation that the conductor's WS server
-/// resets the long-running admin request before responding (Windows error
-/// 10054 / `Websocket closed: ConnectionClosed`). The conductor itself
-/// stays alive and the WASM is cached server-side, so a retry on a fresh
-/// WebSocket completes quickly.
-///
-/// `make_payload` is called once per attempt because `InstallAppPayload`
-/// isn't `Clone` and we need a fresh value for each retry.
-async fn install_app_resilient<F>(
-    admin_ws: &mut AdminWebsocket,
-    admin_port: u16,
-    conductor_child: &mut SidecarChild,
-    app_id: &str,
-    mut make_payload: F,
-) -> Result<(), String>
-where
-    F: FnMut() -> InstallAppPayload,
-{
-    if admin_ws.install_app(make_payload()).await.is_ok() {
-        return Ok(());
-    }
-
-    log::warn!(
-        "[install] {} initial install_app failed - reconnecting and polling for status",
-        app_id,
-    );
-
-    let started = std::time::Instant::now();
-    // 30 s is plenty for a healthy conductor's slow WASM compile.
-    // If the conductor has actually died (its WS server stops accepting
-    // connections - Windows error 10061) burning more time here is futile;
-    // the outer `start_holochain` retry will restart the conductor entirely.
-    let deadline = started + std::time::Duration::from_secs(30);
-    let mut attempts: u32 = 0;
-
-    while std::time::Instant::now() < deadline {
-        attempts += 1;
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-        // Bail fast if the conductor process exited - no amount of WS
-        // reconnecting will recover from that. The outer start_holochain
-        // wrapper will spawn a fresh conductor that warm-starts against
-        // the on-disk state populated so far.
-        if let Ok(Some(status)) = conductor_child.try_wait() {
-            return Err(format!(
-                "install_app({}) bailing: conductor process exited (status {}) after {}ms",
-                app_id,
-                status,
-                started.elapsed().as_millis(),
-            ));
-        }
-
-        match reconnect_admin(admin_port).await {
-            Ok(ws) => *admin_ws = ws,
-            Err(e) => {
-                log::warn!("[install] {} reconnect attempt {} failed: {}", app_id, attempts, e);
-                continue;
-            }
-        }
-
-        // Did the install actually complete server-side despite the WS error?
-        match admin_ws.list_apps(None).await {
-            Ok(apps) if apps.iter().any(|a| a.installed_app_id == app_id) => {
-                log::info!(
-                    "[install] {} confirmed registered after {}ms ({} attempts)",
-                    app_id,
-                    started.elapsed().as_millis(),
-                    attempts,
-                );
-                return Ok(());
-            }
-            Ok(_) => {
-                // Not yet registered - try again on the fresh connection.
-                // The first attempt's WASM compile is cached server-side
-                // even when the response was lost, so this retry is fast.
-                match admin_ws.install_app(make_payload()).await {
-                    Ok(_) => {
-                        log::info!(
-                            "[install] {} retry succeeded after {}ms ({} attempts)",
-                            app_id,
-                            started.elapsed().as_millis(),
-                            attempts,
-                        );
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[install] {} retry attempt {} failed: {} - continuing to poll",
-                            app_id, attempts, e,
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!(
-                    "[install] {} list_apps attempt {} failed: {} - continuing to poll",
-                    app_id, attempts, e,
-                );
-            }
-        }
-    }
-
-    Err(format!(
-        "install_app({}) gave up after {}s ({} attempts)",
-        app_id,
-        started.elapsed().as_secs(),
-        attempts,
-    ))
-}
-
-/// Enable an app, surviving a WebSocket reset mid-call.
-///
-/// On a fresh install, the conductor's first `enable_app` of a sizeable hApp
-/// (identity DNA, ~3.9 MB) blocks long enough on WASM compilation that the
-/// conductor's WS server forcibly closes the long-running admin request
-/// (Windows error 10054 / `Websocket closed: ConnectionClosed`). The
-/// conductor process itself stays alive - only the WebSocket dies - and
-/// the work usually does complete server-side.
-///
-/// This helper:
-/// 1. Tries `enable_app` once on the existing connection.
-/// 2. On error, reconnects the admin WS, polls `list_apps(Enabled)` until
-///    the target app shows Enabled, and retries `enable_app` against the
-///    fresh connection on each iteration. Total budget 120 s.
-/// 3. Treats already-Enabled (after the first call) as success - the
-///    server-side enable completed even though the response was lost.
-///
-/// `admin_ws` is replaced with a fresh connection on recovery so subsequent
-/// calls in the install sequence don't try to use a dead socket.
-async fn enable_app_resilient(
-    admin_ws: &mut AdminWebsocket,
-    admin_port: u16,
-    conductor_child: &mut SidecarChild,
-    app_id: &str,
-) -> Result<(), String> {
-    if admin_ws.enable_app(app_id.to_string()).await.is_ok() {
-        return Ok(());
-    }
-
-    log::warn!(
-        "[enable] {} initial enable_app failed - reconnecting and polling for status",
-        app_id,
-    );
-
-    let started = std::time::Instant::now();
-    // 30 s is plenty for a healthy conductor's slow WASM compile.
-    // If the conductor has actually died (its WS server stops accepting
-    // connections - Windows error 10061) burning more time here is futile;
-    // the outer `start_holochain` retry will restart the conductor entirely.
-    let deadline = started + std::time::Duration::from_secs(30);
-    let mut attempts: u32 = 0;
-
-    while std::time::Instant::now() < deadline {
-        attempts += 1;
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-        // Bail fast if the conductor process exited - no amount of WS
-        // reconnecting will recover from that. The outer start_holochain
-        // wrapper will spawn a fresh conductor that warm-starts against
-        // the on-disk state populated so far.
-        if let Ok(Some(status)) = conductor_child.try_wait() {
-            return Err(format!(
-                "enable_app({}) bailing: conductor process exited (status {}) after {}ms",
-                app_id,
-                status,
-                started.elapsed().as_millis(),
-            ));
-        }
-
-        match reconnect_admin(admin_port).await {
-            Ok(ws) => *admin_ws = ws,
-            Err(e) => {
-                log::warn!("[enable] {} reconnect attempt {} failed: {}", app_id, attempts, e);
-                continue;
-            }
-        }
-
-        match admin_ws.list_apps(Some(AppStatusFilter::Enabled)).await {
-            Ok(enabled) if enabled.iter().any(|a| a.installed_app_id == app_id) => {
-                log::info!(
-                    "[enable] {} confirmed Enabled after {}ms ({} attempts)",
-                    app_id,
-                    started.elapsed().as_millis(),
-                    attempts,
-                );
-                return Ok(());
-            }
-            Ok(_) => {
-                match admin_ws.enable_app(app_id.to_string()).await {
-                    Ok(_) => {
-                        log::info!(
-                            "[enable] {} retry succeeded after {}ms ({} attempts)",
-                            app_id,
-                            started.elapsed().as_millis(),
-                            attempts,
-                        );
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[enable] {} retry attempt {} failed: {} - continuing to poll",
-                            app_id, attempts, e,
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!(
-                    "[enable] {} list_apps attempt {} failed: {} - continuing to poll",
-                    app_id, attempts, e,
-                );
-            }
-        }
-    }
-
-    Err(format!(
-        "enable_app({}) gave up after {}s ({} attempts)",
-        app_id,
-        started.elapsed().as_secs(),
-        attempts,
-    ))
+/// The 0.6 admin websocket behind `admin`, for the calls the library's
+/// client does not wrap (read again after each resilient call, which may
+/// have reconnected).
+fn ws06(admin: &AdminClient) -> &AdminWebsocket {
+    admin.as_v06().expect("a 0.6 admin client")
 }
 
 /// Install Flowsta DNAs into the conductor if not already present.
@@ -586,19 +356,17 @@ pub async fn install_dnas(
     };
 
     // 1. Connect to admin WebSocket.
-    //    Mutable: enable_app_resilient may swap in a fresh connection if
+    //    Mutable: the resilient install and enable may swap in a fresh connection if
     //    the conductor's WS server resets a long-running admin call.
-    let mut admin_ws = AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
+    let origin = crate::conductor::node_origin();
+    let mut admin = AdminClient::connect(Line::V06, admin_port, &origin)
+        .await
+        .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
 
     // 2. Check which apps are already installed and verify agent key matches.
     //    If an app was installed with a different key (e.g. from generate_agent_pub_key),
     //    uninstall it so it gets reinstalled with the correct deterministic key.
-    let existing_apps = admin_ws
+    let existing_apps = ws06(&admin)
         .list_apps(None)
         .await
         .map_err(|e| format!("Failed to list apps: {}", e))?;
@@ -624,7 +392,7 @@ pub async fn install_dnas(
                 private_installed = true;
             } else {
                 log::warn!("Private app installed with wrong agent key, reinstalling...");
-                admin_ws
+                ws06(&admin)
                     .uninstall_app(private_app_id.clone(), false)
                     .await
                     .map_err(|e| format!("Failed to uninstall private app: {}", e))?;
@@ -635,7 +403,7 @@ pub async fn install_dnas(
                 identity_installed = true;
             } else {
                 log::warn!("Identity app installed with wrong agent key, reinstalling...");
-                admin_ws
+                ws06(&admin)
                     .uninstall_app(identity_app_id.clone(), false)
                     .await
                     .map_err(|e| format!("Failed to uninstall identity app: {}", e))?;
@@ -646,7 +414,7 @@ pub async fn install_dnas(
                 signing_installed = true;
             } else {
                 log::warn!("Signing app installed with wrong agent key, reinstalling...");
-                admin_ws
+                ws06(&admin)
                     .uninstall_app(signing_app_id.clone(), false)
                     .await
                     .map_err(|e| format!("Failed to uninstall signing app: {}", e))?;
@@ -672,7 +440,7 @@ pub async fn install_dnas(
                 app.installed_app_id,
                 private_v2_app_id,
             );
-            admin_ws
+            ws06(&admin)
                 .uninstall_app(app.installed_app_id.clone(), false)
                 .await
                 .map_err(|e| format!("Failed to uninstall stale private v2 app: {}", e))?;
@@ -688,7 +456,7 @@ pub async fn install_dnas(
     //      retry but the cell would never get enabled - DNA verification
     //      then fails with `private=true, identity=false`.
     //
-    //      Uses enable_app_resilient so a long compile that resets the WS
+    //      Uses the resilient enable so a long compile that resets the WS
     //      again is also handled here.
     for app in &existing_apps {
         let is_target = app.installed_app_id == private_app_id
@@ -708,7 +476,7 @@ pub async fn install_dnas(
             app.installed_app_id,
             app.status,
         );
-        enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &app.installed_app_id)
+        admin.enable_resilient(&app.installed_app_id, Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child })
             .await
             .map_err(|e| format!("Failed to enable existing {}: {}", app.installed_app_id, e))?;
     }
@@ -740,19 +508,9 @@ pub async fn install_dnas(
             private_version, happ_size, happ_path,
         );
         let install_start = std::time::Instant::now();
-        install_app_resilient(
-            &mut admin_ws,
-            admin_port,
-            conductor_child,
-            &private_app_id,
-            || InstallAppPayload {
-                source: AppBundleSource::Path(happ_path.clone()),
-                agent_key: Some(agent_key.clone()),
-                installed_app_id: Some(private_app_id.clone()),
-                network_seed: None,
-                roles_settings: None,
-                ignore_genesis_failure: false,
-            },
+        admin.install_resilient(
+            &InstallRequest { app_id: &private_app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: None },
+            Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child },
         )
         .await
         .map_err(|e| format!("Failed to install private DNA: {}", e))?;
@@ -762,7 +520,7 @@ pub async fn install_dnas(
         );
 
         let enable_start = std::time::Instant::now();
-        enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &private_app_id)
+        admin.enable_resilient(&private_app_id, Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child })
             .await
             .map_err(|e| format!("Failed to enable private DNA: {}", e))?;
 
@@ -789,19 +547,9 @@ pub async fn install_dnas(
             identity_version, happ_size, happ_path,
         );
         let install_start = std::time::Instant::now();
-        install_app_resilient(
-            &mut admin_ws,
-            admin_port,
-            conductor_child,
-            &identity_app_id,
-            || InstallAppPayload {
-                source: AppBundleSource::Path(happ_path.clone()),
-                agent_key: Some(agent_key.clone()),
-                installed_app_id: Some(identity_app_id.clone()),
-                network_seed: None,
-                roles_settings: None,
-                ignore_genesis_failure: false,
-            },
+        admin.install_resilient(
+            &InstallRequest { app_id: &identity_app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: None },
+            Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child },
         )
         .await
         .map_err(|e| format!("Failed to install identity DNA: {}", e))?;
@@ -811,7 +559,7 @@ pub async fn install_dnas(
         );
 
         let enable_start = std::time::Instant::now();
-        enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &identity_app_id)
+        admin.enable_resilient(&identity_app_id, Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child })
             .await
             .map_err(|e| format!("Failed to enable identity DNA: {}", e))?;
 
@@ -839,20 +587,10 @@ pub async fn install_dnas(
                 signing_version, happ_size, happ_path,
             );
             let install_start = std::time::Instant::now();
-            install_app_resilient(
-                &mut admin_ws,
-                admin_port,
-                conductor_child,
-                &signing_app_id,
-                || InstallAppPayload {
-                    source: AppBundleSource::Path(happ_path.clone()),
-                    agent_key: Some(agent_key.clone()),
-                    installed_app_id: Some(signing_app_id.clone()),
-                    network_seed: None,
-                    roles_settings: None,
-                    ignore_genesis_failure: false,
-                },
-            )
+            admin.install_resilient(
+            &InstallRequest { app_id: &signing_app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: None },
+            Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child },
+        )
             .await
             .map_err(|e| format!("Failed to install signing DNA: {}", e))?;
             log::info!(
@@ -861,7 +599,7 @@ pub async fn install_dnas(
             );
 
             let enable_start = std::time::Instant::now();
-            enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &signing_app_id)
+            admin.enable_resilient(&signing_app_id, Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child })
                 .await
                 .map_err(|e| format!("Failed to enable signing DNA: {}", e))?;
 
@@ -875,7 +613,7 @@ pub async fn install_dnas(
     }
 
     // 6. Verify apps are enabled.
-    let enabled_apps = admin_ws
+    let enabled_apps = ws06(&admin)
         .list_apps(Some(AppStatusFilter::Enabled))
         .await
         .map_err(|e| format!("Failed to verify installed apps: {}", e))?;
@@ -928,24 +666,14 @@ pub async fn install_dnas(
                 );
                 let install_start = std::time::Instant::now();
                 let seed_owned = seed.to_string();
-                install_app_resilient(
-                    &mut admin_ws,
-                    admin_port,
-                    conductor_child,
-                    &private_v2_app_id,
-                    || InstallAppPayload {
-                        source: AppBundleSource::Path(happ_path.clone()),
-                        agent_key: Some(agent_key.clone()),
-                        installed_app_id: Some(private_v2_app_id.clone()),
-                        network_seed: Some(seed_owned.clone()),
-                        roles_settings: None,
-                        ignore_genesis_failure: false,
-                    },
-                )
+                admin.install_resilient(
+            &InstallRequest { app_id: &private_v2_app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: Some(seed_owned.as_str()) },
+            Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child },
+        )
                 .await
                 .map_err(|e| format!("Failed to install private v2 DNA: {}", e))?;
 
-                enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &private_v2_app_id)
+                admin.enable_resilient(&private_v2_app_id, Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child })
                     .await
                     .map_err(|e| format!("Failed to enable private v2 DNA: {}", e))?;
                 log::info!(
@@ -1104,29 +832,21 @@ pub async fn install_dnas_07(
     agent_key_raw32: &[u8],
     private_v2_seed: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    use holochain_client_07::{AdminWebsocket, InstallAppPayload};
-    use holochain_types_07::app::AppBundleSource;
     use holochain_types_07::prelude::AgentPubKey;
 
-    let admin_ws = AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
-    let existing = admin_ws
-        .list_apps(None)
+    let admin = AdminClient::connect(Line::V07, admin_port, &crate::conductor::node_origin())
         .await
-        .map_err(|e| format!("Failed to list apps (0.7): {}", e))?;
+        .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
+    let existing = admin.list_apps().await.map_err(|e| format!("Failed to list apps (0.7): {}", e))?;
     let agent_key = AgentPubKey::from_raw_32(agent_key_raw32.to_vec());
     let mut installed = Vec::new();
     for (app_id, file) in [
         (make_app_id("identity", BUNDLED_IDENTITY_VERSION_07), BUNDLED_IDENTITY_V1_5_HAPP_FILE),
         (make_app_id("signing", BUNDLED_SIGNING_VERSION_07), BUNDLED_SIGNING_V1_5_HAPP_FILE),
     ] {
-        if existing.iter().any(|a| a.installed_app_id == app_id) {
-            admin_ws
-                .enable_app(app_id.clone())
+        if existing.iter().any(|a| a.app_id == app_id) {
+            admin
+                .enable(&app_id)
                 .await
                 .map_err(|e| format!("Failed to re-enable {} (0.7): {}", app_id, e))?;
             log::info!("[0.7] {} present and enabled", app_id);
@@ -1138,21 +858,12 @@ pub async fn install_dnas_07(
             return Err(format!("{} not found at {:?}", file, happ_path));
         }
         log::info!("[0.7] installing {} from {:?}", app_id, happ_path);
-        let payload = InstallAppPayload {
-            source: AppBundleSource::Path(happ_path),
-            agent_key: Some(agent_key.clone()),
-            installed_app_id: Some(app_id.clone()),
-            network_seed: None,
-            roles_settings: None,
-            ignore_genesis_failure: false,
-            restore_from_dht: false,
-        };
-        admin_ws
-            .install_app(payload)
+        admin
+            .install(&InstallRequest { app_id: &app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: None })
             .await
             .map_err(|e| format!("Failed to install {} (0.7): {}", app_id, e))?;
-        admin_ws
-            .enable_app(app_id.clone())
+        admin
+            .enable(&app_id)
             .await
             .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
         log::info!("[0.7] {} installed and enabled", app_id);
@@ -1163,15 +874,15 @@ pub async fn install_dnas_07(
     // it from the 0.6 cell and compares counts before any write goes to it.
     if let Some(seed) = private_v2_seed {
         let app_id = private_v2_app_id_07();
-        if let Some(app) = existing.iter().find(|a| a.installed_app_id == app_id) {
-            if app.agent_pub_key != agent_key {
+        if let Some(app) = existing.iter().find(|a| a.app_id == app_id) {
+            if app.agent_key.as_slice() != agent_key.get_raw_39() {
                 return Err(format!(
                     "The 0.7 private data cell on this device belongs to a different conductor key ({}). Nothing was changed.",
-                    app.agent_pub_key
+                    AgentPubKey::from_raw_39(app.agent_key.clone())
                 ));
             }
-            admin_ws
-                .enable_app(app_id.clone())
+            admin
+                .enable(&app_id)
                 .await
                 .map_err(|e| format!("Failed to re-enable {} (0.7): {}", app_id, e))?;
             log::info!("[0.7] {} present and enabled", app_id);
@@ -1182,21 +893,12 @@ pub async fn install_dnas_07(
                 return Err(format!("{} not found at {:?}", BUNDLED_PRIVATE_V2_1_HAPP_FILE, happ_path));
             }
             log::info!("[0.7] installing {} from {:?} with the identity's network seed", app_id, happ_path);
-            let payload = InstallAppPayload {
-                source: AppBundleSource::Path(happ_path),
-                agent_key: Some(agent_key.clone()),
-                installed_app_id: Some(app_id.clone()),
-                network_seed: Some(seed.to_string()),
-                roles_settings: None,
-                ignore_genesis_failure: false,
-                restore_from_dht: false,
-            };
-            admin_ws
-                .install_app(payload)
+            admin
+                .install(&InstallRequest { app_id: &app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: Some(seed) })
                 .await
                 .map_err(|e| format!("Failed to install {} (0.7): {}", app_id, e))?;
-            admin_ws
-                .enable_app(app_id.clone())
+            admin
+                .enable(&app_id)
                 .await
                 .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
             log::info!("[0.7] {} installed and enabled", app_id);
