@@ -57,22 +57,54 @@ pub struct Marker {
     pub line_06_needed: Option<bool>,
 }
 
+/// The marker as flowsta-hc-lines reads it: `moved-07` under the identity
+/// root, the old-line decision under its 1.7.0 key. The library's rule: no
+/// file, writes go to 0.6; any file, even one that does not read, to 0.7.
+pub(crate) const MARKER_SPEC: flowsta_hc_lines::marker::MarkerSpec = flowsta_hc_lines::marker::MarkerSpec {
+    file_name: "moved-07",
+    old_line_key: "line_06_needed",
+    previous: Line::V06,
+    current: Line::V07,
+};
+
+/// Write the marker. `creating`: this write moves the identity's writes to
+/// 0.7 (born, restored, the flip) and says so in `writes_to`. Keys this
+/// version does not know (a later version's) are kept as they are.
+fn write_marker(root: &Path, m: &Marker, creating: bool) -> Result<(), String> {
+    use flowsta_hc_lines::marker::{Marker as LineMarker, MarkerRead};
+    let serde_json::Value::Object(ours) = serde_json::to_value(m).map_err(|e| e.to_string())? else {
+        return Err("the marker is not an object".into());
+    };
+    let mut map = match LineMarker::load(root, &MARKER_SPEC) {
+        MarkerRead::Present(found) => found.to_map(&MARKER_SPEC),
+        _ => serde_json::Map::new(),
+    };
+    map.extend(ours);
+    let mut line = LineMarker::from_map(map, &MARKER_SPEC)?;
+    if creating {
+        line.writes_to = Some(Line::V07);
+    }
+    line.save(root, &MARKER_SPEC).map_err(|e| e.to_string())
+}
+
 /// Rewrite the marker in place (the fields a later pass learns).
 fn update_marker(root: &Path, change: impl FnOnce(&mut Marker)) -> Result<(), String> {
     let mut m = marker(root).ok_or("no marker")?;
     change(&mut m);
-    let bytes = serde_json::to_vec_pretty(&m).map_err(|e| e.to_string())?;
-    crate::vault::write_atomic(&crate::paths::moved_07_path(root), &bytes).map_err(|e| e.to_string())
+    write_marker(root, &m, false)
 }
 
 pub fn marker(root: &Path) -> Option<Marker> {
-    let bytes = std::fs::read(crate::paths::moved_07_path(root)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    match flowsta_hc_lines::marker::Marker::load(root, &MARKER_SPEC) {
+        flowsta_hc_lines::marker::MarkerRead::Present(m) => serde_json::from_value(serde_json::Value::Object(m.to_map(&MARKER_SPEC))).ok(),
+        _ => None,
+    }
 }
 
 /// Whether this identity's records have moved (its writes go to 0.7).
 pub fn moved(root: &Path) -> bool {
-    crate::paths::moved_07_path(root).exists()
+    let read = flowsta_hc_lines::marker::Marker::load(root, &MARKER_SPEC);
+    flowsta_hc_lines::marker::Marker::writes_to(&read, &MARKER_SPEC) == Line::V07
 }
 
 /// Whether this identity was born on 1.7.0 (no 0.6 line, ever).
@@ -99,8 +131,7 @@ pub fn mark_born(root: &Path) -> Result<(), String> {
         restored: false,
         line_06_needed: Some(false),
     };
-    let bytes = serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?;
-    crate::vault::write_atomic(&crate::paths::moved_07_path(root), &bytes).map_err(|e| e.to_string())
+    write_marker(root, &marker, true)
 }
 
 /// Write the marker for an identity restored, joined or brought over from
@@ -124,8 +155,7 @@ pub fn mark_restored(root: &Path, web_key_present: bool) -> Result<(), String> {
         restored: true,
         line_06_needed: None,
     };
-    let bytes = serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?;
-    crate::vault::write_atomic(&crate::paths::moved_07_path(root), &bytes).map_err(|e| e.to_string())
+    write_marker(root, &marker, true)
 }
 
 /// The identity's web key became known after its marker was written (an
@@ -386,7 +416,7 @@ pub async fn run_pass(state: &Arc<AppState>, reason: &str) -> PassOutcome {
             restored: false,
             line_06_needed: Some(true),
         };
-        match serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string()).and_then(|b| crate::vault::write_atomic(&crate::paths::moved_07_path(&root), &b).map_err(|e| e.to_string())) {
+        match write_marker(&root, &marker, true) {
             Ok(()) => {
                 out.flipped = true;
                 crate::sealed::forget_recent_versions();
@@ -1281,6 +1311,29 @@ mod tests {
         mark_restored(&alone.identity_root(), false).unwrap();
         assert_eq!(super::status(&alone).line, Line::V07);
         println!("born on 0.7: both devices, {} s total", started.elapsed().as_secs());
+    }
+
+    #[test]
+    fn an_update_keeps_what_a_later_version_wrote_and_a_new_marker_names_its_line() {
+        let dir = std::env::temp_dir().join(format!("fv-move-marker-later-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            crate::paths::moved_07_path(&dir),
+            br#"{"v":1,"moved_at_ms":1,"vault_version":"1.9.0","private_records":0,"signatures":0,"revocations":0,"thumbnails":0,"writes_to":"holochain-0.7","listening_since_ms":5,"later":{"x":1},"line_06_needed":null}"#,
+        )
+        .unwrap();
+        record_line_06_decision(&dir, false);
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(crate::paths::moved_07_path(&dir)).unwrap()).unwrap();
+        assert_eq!(v["line_06_needed"], serde_json::Value::from(false));
+        assert_eq!((v["listening_since_ms"].clone(), v["later"]["x"].clone(), v["writes_to"].clone()), (5.into(), 1.into(), "holochain-0.7".into()), "a later version's keys survive");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        mark_born(&dir).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(crate::paths::moved_07_path(&dir)).unwrap()).unwrap();
+        assert_eq!(v["writes_to"], serde_json::Value::from("holochain-0.7"), "a new marker says where the writes go");
+        assert!(moved(&dir) && born_on_07(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

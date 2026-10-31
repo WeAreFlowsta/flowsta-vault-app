@@ -36,7 +36,7 @@ impl LineFiles for Line {
 /// The marker is the only switch; nothing else decides which line a read
 /// or write goes to.
 pub fn active_line(state: &AppState) -> Line {
-    if crate::paths::moved_07_path(&state.identity_root()).exists() {
+    if crate::move_07::moved(&state.identity_root()) {
         Line::V07
     } else {
         Line::V06
