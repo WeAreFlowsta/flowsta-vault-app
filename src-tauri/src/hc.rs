@@ -68,45 +68,10 @@ pub fn line_ports(state: &AppState, line: Line) -> Result<(u16, u16), String> {
     }
 }
 
-/// An app websocket on one of the two lines.
-pub enum AppClient {
-    V06(holochain_client::AppWebsocket),
-    V07(holochain_client_07::AppWebsocket),
-}
-
-impl AppClient {
-    pub fn line(&self) -> Line {
-        match self {
-            AppClient::V06(_) => Line::V06,
-            AppClient::V07(_) => Line::V07,
-        }
-    }
-
-    /// Call a zome function. `payload` is the msgpack of the input; the
-    /// result is the msgpack of the output. Errors are the client's Debug
-    /// text, as the callers' substring checks expect ("chain head has
-    /// moved", "zome function that doesn't exist", "nauthorized", ...).
-    pub async fn call_zome(&self, role: &str, zome: &str, fn_name: &str, payload: Vec<u8>) -> Result<Vec<u8>, String> {
-        match self {
-            AppClient::V06(c) => {
-                use holochain_client::ZomeCallTarget;
-                use holochain_types::prelude::ExternIO;
-                c.call_zome(ZomeCallTarget::RoleName(role.into()), zome.into(), fn_name.into(), ExternIO::from(payload))
-                    .await
-                    .map(|io| io.into_vec())
-                    .map_err(|e| format!("{} failed: {:?}", fn_name, e))
-            }
-            AppClient::V07(c) => {
-                use holochain_client_07::ZomeCallTarget;
-                use holochain_types_07::prelude::ExternIO;
-                c.call_zome(ZomeCallTarget::RoleName(role.into()), zome.into(), fn_name.into(), ExternIO::from(payload))
-                    .await
-                    .map(|io| io.into_vec())
-                    .map_err(|e| format!("{} failed: {:?}", fn_name, e))
-            }
-        }
-    }
-}
+/// An app websocket on one of the two lines; a failed call is a
+/// [`ZomeCallError`] whose kind callers decide on (its text is the text
+/// callers searched before).
+pub use flowsta_hc_lines::{AppClient, ZomeCallError, ZomeErrorKind};
 
 /// Decode a zome output of `Vec<Record>` from the given line.
 pub fn records(line: Line, bytes: &[u8]) -> Result<Vec<RecordView>, String> {

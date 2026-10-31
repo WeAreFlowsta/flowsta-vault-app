@@ -824,7 +824,7 @@ mod tests {
             comment: Some(format!("file {}", byte)),
         })
         .unwrap();
-        let out = client.call_zome(role, "signing", "sign_and_create", input).await.expect("sign_and_create");
+        let out = client.call(role, "signing", "sign_and_create", input).await.expect("sign_and_create");
         let h: holochain_types::prelude::ActionHash = rmp_serde::from_slice(&out).unwrap();
         h.get_raw_39().to_vec()
     }
@@ -882,7 +882,7 @@ mod tests {
         let s1 = sign_on_06(&c06, &r06, 1, 10_000, None).await;
         let s2 = sign_on_06(&c06, &r06, 2, 20_000, Some(s1.clone())).await;
         let s3 = sign_on_06(&c06, &r06, 3, 30_000, None).await;
-        c06.call_zome(&r06, "signing", "revoke_signature", rmp_serde::to_vec_named(&RevokeInput { signature_action: holochain_types::prelude::ActionHash::from_raw_39(s3.clone()), reason: Some("wrong file".into()) }).unwrap())
+        c06.call(&r06, "signing", "revoke_signature", rmp_serde::to_vec_named(&RevokeInput { signature_action: holochain_types::prelude::ActionHash::from_raw_39(s3.clone()), reason: Some("wrong file".into()) }).unwrap())
             .await
             .expect("revoke on 0.6");
         #[derive(Serialize)]
@@ -890,7 +890,7 @@ mod tests {
             signature_action: holochain_types::prelude::ActionHash,
             thumbnail: String,
         }
-        c06.call_zome(&r06, "signing", "set_thumbnail", rmp_serde::to_vec_named(&SetThumbnailInput { signature_action: holochain_types::prelude::ActionHash::from_raw_39(s2.clone()), thumbnail: "data:image/png;base64,AAAA".into() }).unwrap())
+        c06.call(&r06, "signing", "set_thumbnail", rmp_serde::to_vec_named(&SetThumbnailInput { signature_action: holochain_types::prelude::ActionHash::from_raw_39(s2.clone()), thumbnail: "data:image/png;base64,AAAA".into() }).unwrap())
             .await
             .expect("thumbnail on 0.6");
 
@@ -921,7 +921,7 @@ mod tests {
             let web = crate::hc::AppClient::V06(ws);
             let w1 = sign_on_06(&web, &role, 21, 50_000, None).await;
             let w2 = sign_on_06(&web, &role, 22, 60_000, None).await;
-            web.call_zome(&role, "signing", "revoke_signature", rmp_serde::to_vec_named(&RevokeInput { signature_action: holochain_types::prelude::ActionHash::from_raw_39(w2.clone()), reason: Some("web-era revocation".into()) }).unwrap())
+            web.call(&role, "signing", "revoke_signature", rmp_serde::to_vec_named(&RevokeInput { signature_action: holochain_types::prelude::ActionHash::from_raw_39(w2.clone()), reason: Some("web-era revocation".into()) }).unwrap())
                 .await
                 .expect("revoke on the web cell");
             (crate::key_derivation::base64_standard_encode(web_key.get_raw_39()), w1, w2)
@@ -968,7 +968,7 @@ mod tests {
         // The web-era revocation travelled with it (read with the enrichment the own view uses).
         let (c07w, r07w) = crate::signing_07::signing_client(state, Line::V07).await.unwrap();
         let w2_on_07 = web_on_07.iter().find(|s| s["original_action_hash"] == hex::encode(&w2)).unwrap()["action_hash"].as_str().unwrap().to_string();
-        let revs = c07w.call_zome(&r07w, "signing", "get_revocations_for_signature", rmp_serde::to_vec_named(&holochain_types::prelude::ActionHash::from_raw_39(hex::decode(&w2_on_07).unwrap())).unwrap()).await.unwrap();
+        let revs = c07w.call(&r07w, "signing", "get_revocations_for_signature", rmp_serde::to_vec_named(&holochain_types::prelude::ActionHash::from_raw_39(hex::decode(&w2_on_07).unwrap())).unwrap()).await.unwrap();
         assert_eq!(crate::hc::records(Line::V07, &revs).unwrap().len(), 1, "the carried revocation hangs off the carried signature");
         assert_eq!(crate::hc::active_line(state), Line::V07);
 

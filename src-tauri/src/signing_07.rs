@@ -72,25 +72,26 @@ fn mp<T: Serialize>(v: &T) -> Result<Vec<u8>, String> {
 async fn committing<F, Fut>(what: &str, mut call: F) -> Result<Vec<u8>, String>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
+    Fut: std::future::Future<Output = Result<Vec<u8>, crate::hc::ZomeCallError>>,
 {
-    let mut last_err = String::new();
+    use crate::hc::ZomeErrorKind as K;
+    let mut last_err = None;
     for attempt in 1..=3u32 {
         match call().await {
             Ok(r) => return Ok(r),
             Err(e) => {
-                last_err = e;
-                let retriable = ["chain head has moved", "CellDisabled", "CellNotRunning"].iter().any(|m| last_err.contains(m));
-                log::warn!("{} attempt {}/3 failed (0.7): {}", what, attempt, last_err);
+                log::warn!("{} attempt {}/3 failed (0.7): {}", what, attempt, e);
+                let retriable = matches!(e.kind, K::ChainHeadMoved | K::CellNotRunning);
+                let gap = if e.kind == K::CellNotRunning { 5 } else { 2 };
+                last_err = Some(e);
                 if !retriable || attempt == 3 {
                     break;
                 }
-                let gap = if last_err.contains("Cell") { 5 } else { 2 };
                 tokio::time::sleep(std::time::Duration::from_secs(gap)).await;
             }
         }
     }
-    Err(last_err)
+    Err(last_err.map(|e| e.to_string()).unwrap_or_default())
 }
 
 fn action_hash_hex(bytes: &[u8]) -> Result<String, String> {
@@ -105,7 +106,7 @@ fn action_hash_hex(bytes: &[u8]) -> Result<String, String> {
 /// optional `carried_from`, absent on a native record).
 pub(crate) async fn create_signature(state: &Arc<AppState>, payload_mp: Vec<u8>) -> Result<String, String> {
     let (client, role) = signing_client(state, Line::V07).await?;
-    let result = committing("create_signature", || client.call_zome(&role, "signing", "create_signature", payload_mp.clone())).await?;
+    let result = committing("create_signature", || client.call(&role, "signing", "create_signature", payload_mp.clone())).await?;
     let hex = action_hash_hex(&result)?;
     log::info!("Signature committed on the 0.7 line, action_hash: {}", hex);
     Ok(hex)
@@ -119,7 +120,7 @@ pub(crate) async fn revoke_signature(state: &Arc<AppState>, action_hash_39: Vec<
     }
     let payload = mp(&RevokeInput { signature_action: ActionHash::from_raw_39(action_hash_39), reason })?;
     let (client, role) = signing_client(state, Line::V07).await?;
-    let result = committing("revoke_signature", || client.call_zome(&role, "signing", "revoke_signature", payload.clone())).await?;
+    let result = committing("revoke_signature", || client.call(&role, "signing", "revoke_signature", payload.clone())).await?;
     let hex = hex::encode(&result);
     log::info!("Signature revoked on the 0.7 line, revocation_hash: {}", hex);
     Ok(hex)
@@ -133,7 +134,7 @@ pub(crate) async fn set_thumbnail(state: &Arc<AppState>, action_hash_39: Vec<u8>
     }
     let payload = mp(&SetThumbnailInput { signature_action: ActionHash::from_raw_39(action_hash_39), thumbnail })?;
     let (client, role) = signing_client(state, Line::V07).await?;
-    let result = committing("set_thumbnail", || client.call_zome(&role, "signing", "set_thumbnail", payload.clone())).await?;
+    let result = committing("set_thumbnail", || client.call(&role, "signing", "set_thumbnail", payload.clone())).await?;
     Ok(hex::encode(&result))
 }
 
@@ -192,7 +193,7 @@ const ENRICH_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 async fn revocation_of(client: &AppClient, role: &str, hash: &ActionHash) -> (bool, Option<i64>, Option<String>) {
     let Ok(payload) = mp(hash) else { return (false, None, None) };
-    let call = client.call_zome(role, "signing", "get_own_revocations_for_signature", payload);
+    let call = client.call(role, "signing", "get_own_revocations_for_signature", payload);
     let bytes = match tokio::time::timeout(ENRICH_WAIT, call).await {
         Ok(Ok(b)) => b,
         Ok(Err(e)) => {
@@ -217,7 +218,7 @@ async fn revocation_of(client: &AppClient, role: &str, hash: &ActionHash) -> (bo
 
 async fn thumbnail_of(client: &AppClient, role: &str, hash: &ActionHash) -> Option<String> {
     let payload = mp(hash).ok()?;
-    let call = client.call_zome(role, "signing", "get_thumbnail", payload);
+    let call = client.call(role, "signing", "get_thumbnail", payload);
     let bytes = match tokio::time::timeout(ENRICH_WAIT, call).await {
         Ok(Ok(b)) => b,
         Ok(Err(e)) => {
@@ -266,7 +267,7 @@ fn signature_json(record: &RecordView, entry: &SignatureEntry, label: &str, revo
 /// view rather than showing a partial count).
 pub(crate) async fn own_signatures(state: &Arc<AppState>) -> Result<Vec<serde_json::Value>, String> {
     let (client, role) = signing_client(state, Line::V07).await?;
-    let bytes = client.call_zome(&role, "signing", "get_my_signatures", mp(&())?).await?;
+    let bytes = client.call(&role, "signing", "get_my_signatures", mp(&())?).await?;
     let records = crate::hc::records(Line::V07, &bytes)?;
     log::info!("Got {} signatures from {}", records.len(), signing_app_label(Line::V07));
     let label = signing_app_label(Line::V07);
@@ -289,7 +290,7 @@ pub(crate) async fn linked_signatures(state: &Arc<AppState>, linked_keys: &[Agen
     for key in linked_keys {
         // A network read: a cold conductor must not hold the list for the
         // websocket's five minutes (the v1.4 rev 2 lesson).
-        let call = client.call_zome(&role, "signing", "get_signatures_for_agent", mp(key)?);
+        let call = client.call(&role, "signing", "get_signatures_for_agent", mp(key)?);
         let bytes = match tokio::time::timeout(ENRICH_WAIT, call).await {
             Ok(r) => r?,
             Err(_) => return Err(format!("get_signatures_for_agent timed out after {} s (0.7)", ENRICH_WAIT.as_secs())),
@@ -370,7 +371,7 @@ pub(crate) fn one_copy_per_original(sigs: Vec<serde_json::Value>) -> Vec<serde_j
 /// The hash on the 0.7 network of a record carried from `original` (39
 /// bytes), or None when it has not been carried.
 pub(crate) async fn carried(client: &AppClient, role: &str, original: &[u8]) -> Result<Option<Vec<u8>>, String> {
-    let bytes = client.call_zome(role, "signing", "get_carried", mp(&ActionHash::from_raw_39(original.to_vec()))?).await?;
+    let bytes = client.call(role, "signing", "get_carried", mp(&ActionHash::from_raw_39(original.to_vec()))?).await?;
     let h: Option<ActionHash> = rmp_serde::from_slice(&bytes).map_err(|e| format!("get_carried decode: {}", e))?;
     Ok(h.map(|h| h.get_raw_39().to_vec()))
 }
@@ -390,7 +391,7 @@ pub(crate) async fn carry_signature(client: &AppClient, role: &str, original: &R
     buf.extend_from_slice(&mp(&original.timestamp_us)?);
     rmp::encode::write_str(&mut buf, "original_signed_action").map_err(|e| e.to_string())?;
     buf.extend_from_slice(&mp(&Some(original.signed_action.clone()))?);
-    let result = committing("carry_signature", || client.call_zome(role, "signing", "carry_signature", buf.clone())).await?;
+    let result = committing("carry_signature", || client.call(role, "signing", "carry_signature", buf.clone())).await?;
     let h: ActionHash = rmp_serde::from_slice(&result).map_err(|e| format!("carry_signature decode: {}", e))?;
     Ok(h.get_raw_39().to_vec())
 }
@@ -405,7 +406,7 @@ pub(crate) struct Revocation06 {
 /// The person's own revocations of one v1.4 signature.
 pub(crate) async fn revocations_06(client: &AppClient, role: &str, signature_action: &[u8]) -> Result<Vec<Revocation06>, String> {
     let bytes = client
-        .call_zome(role, "signing", "get_own_revocations_for_signature", mp(&ActionHash::from_raw_39(signature_action.to_vec()))?)
+        .call(role, "signing", "get_own_revocations_for_signature", mp(&ActionHash::from_raw_39(signature_action.to_vec()))?)
         .await?;
     let records = crate::hc::records(client.line(), &bytes)?;
     Ok(records
@@ -439,7 +440,7 @@ pub(crate) async fn carry_revocation(client: &AppClient, role: &str, signature_o
         original_timestamp: rev.record.timestamp_us,
         original_signed_action: rev.record.signed_action.clone(),
     })?;
-    let result = committing("carry_revocation", || client.call_zome(role, "signing", "carry_revocation", payload.clone())).await?;
+    let result = committing("carry_revocation", || client.call(role, "signing", "carry_revocation", payload.clone())).await?;
     let h: ActionHash = rmp_serde::from_slice(&result).map_err(|e| format!("carry_revocation decode: {}", e))?;
     Ok(h.get_raw_39().to_vec())
 }
@@ -452,7 +453,7 @@ pub(crate) struct Thumbnail06 {
 }
 
 pub(crate) async fn thumbnail_06(client: &AppClient, role: &str, signature_action: &[u8]) -> Result<Option<Thumbnail06>, String> {
-    let bytes = client.call_zome(role, "signing", "get_thumbnail", mp(&ActionHash::from_raw_39(signature_action.to_vec()))?).await?;
+    let bytes = client.call(role, "signing", "get_thumbnail", mp(&ActionHash::from_raw_39(signature_action.to_vec()))?).await?;
     let Some(record) = crate::hc::record_opt(client.line(), &bytes)? else { return Ok(None) };
     let e = record.entry_as::<ThumbnailEntry>()?;
     let updated_at = if e.updated_at > 0 { e.updated_at } else { record.timestamp_us / 1000 };
@@ -479,7 +480,7 @@ pub(crate) async fn carry_thumbnail(client: &AppClient, role: &str, signature_on
         original_timestamp: thumb.record.timestamp_us,
         original_signed_action: thumb.record.signed_action.clone(),
     })?;
-    let result = committing("carry_thumbnail", || client.call_zome(role, "signing", "carry_thumbnail", payload.clone())).await?;
+    let result = committing("carry_thumbnail", || client.call(role, "signing", "carry_thumbnail", payload.clone())).await?;
     let h: ActionHash = rmp_serde::from_slice(&result).map_err(|e| format!("carry_thumbnail decode: {}", e))?;
     Ok(h.get_raw_39().to_vec())
 }
@@ -488,7 +489,7 @@ pub(crate) async fn carry_thumbnail(client: &AppClient, role: &str, signature_on
 /// key a migrated identity came from. A network read with a budget (the
 /// pass runs in the background and tries again next round).
 pub(crate) async fn records_for_agent_06(client: &AppClient, role: &str, agent: &AgentPubKey) -> Result<Vec<(RecordView, SignatureEntry)>, String> {
-    let call = client.call_zome(role, "signing", "get_signatures_for_agent", mp(agent)?);
+    let call = client.call(role, "signing", "get_signatures_for_agent", mp(agent)?);
     let bytes = match tokio::time::timeout(CARRY_READ_WAIT, call).await {
         Ok(r) => r?,
         Err(_) => return Err(format!("get_signatures_for_agent timed out after {} s (0.6)", CARRY_READ_WAIT.as_secs())),
@@ -507,7 +508,7 @@ pub(crate) async fn records_for_agent_06(client: &AppClient, role: &str, agent: 
 /// Every revocation of one v1.4 signature, whoever wrote it (a network
 /// read): for the web key's records, whose revocations the web key made.
 pub(crate) async fn revocations_network_06(client: &AppClient, role: &str, signature_action: &[u8]) -> Result<Vec<Revocation06>, String> {
-    let call = client.call_zome(role, "signing", "get_revocations_for_signature", mp(&ActionHash::from_raw_39(signature_action.to_vec()))?);
+    let call = client.call(role, "signing", "get_revocations_for_signature", mp(&ActionHash::from_raw_39(signature_action.to_vec()))?);
     let bytes = match tokio::time::timeout(CARRY_READ_WAIT, call).await {
         Ok(r) => r?,
         Err(_) => return Err(format!("get_revocations_for_signature timed out after {} s (0.6)", CARRY_READ_WAIT.as_secs())),
@@ -528,7 +529,7 @@ const CARRY_READ_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// The person's own v1.4 records (native ones; a v1.4 cell carries none),
 /// oldest first, as the carry wants them.
 pub(crate) async fn own_records_06(client: &AppClient, role: &str) -> Result<Vec<(RecordView, SignatureEntry)>, String> {
-    let bytes = client.call_zome(role, "signing", "get_my_signatures", mp(&())?).await?;
+    let bytes = client.call(role, "signing", "get_my_signatures", mp(&())?).await?;
     let records = crate::hc::records(client.line(), &bytes)?;
     // A record reached through two links (the zome's own signing path links
     // it twice) is one record.
