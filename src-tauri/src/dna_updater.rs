@@ -485,8 +485,9 @@ async fn update_single_dna(
             }
         }
         Err(e) => {
-            let err_str = format!("{}", e);
-            if err_str.contains("AppAlreadyInstalled") {
+            use flowsta_hc_lines::InstallFailure;
+            let failure = flowsta_hc_lines::client::install_failure_06(&e);
+            if failure == InstallFailure::AppAlreadyInstalled {
                 // App was installed by a previous attempt that failed before completing.
                 // Just enable it and uninstall the old one.
                 log::info!(
@@ -520,7 +521,7 @@ async fn update_single_dna(
                         old_app_id
                     );
                 }
-            } else if err_str.contains("CellAlreadyExists") {
+            } else if failure == InstallFailure::CellAlreadyExists {
                 // Same DNA hash - the new bundle has the same integrity zomes + network seed.
                 // The cell is already running correctly under the old app ID.
                 // No install/uninstall possible; Holochain won't allow a duplicate cell.

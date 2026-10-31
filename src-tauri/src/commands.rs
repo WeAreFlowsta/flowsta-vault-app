@@ -450,7 +450,7 @@ pub(crate) async fn cell_credentials_cached_07(
             functions: None,
         })
         .await
-        .map_err(|e| format!("auth creds (0.7): {}", e))?;
+        .map_err(|e| format!("{AUTH_CREDS} (0.7): {}", e))?;
     state
         .cell_credentials_07
         .lock()
@@ -458,6 +458,11 @@ pub(crate) async fn cell_credentials_cached_07(
         .insert(cell_id.clone(), CachedCellCredentials07::from_signing(&creds));
     Ok(creds)
 }
+
+/// The label a failed credential grant carries in its error text. A grant
+/// that fails right after an unlock usually passes on a retry, whatever the
+/// conductor said, so retry loops check for it.
+pub(crate) const AUTH_CREDS: &str = "auth creds";
 
 /// Authorize-once-per-session: return cached credentials for the cell, or
 /// authorize (ONE chain write) and cache them. All zome-call setup paths
@@ -488,7 +493,7 @@ pub(crate) async fn cell_credentials_cached(
             functions: None,
         })
         .await
-        .map_err(|e| format!("auth creds: {}", e))?;
+        .map_err(|e| format!("{AUTH_CREDS}: {}", e))?;
     state
         .cell_credentials
         .lock()
@@ -6623,12 +6628,8 @@ async fn query_linked_sigs_for_version(
 /// admin WebSocket can't be reached - either the conductor closed the
 /// connection (10054) or the process is gone entirely (10061).
 fn is_conductor_unreachable_error(err: &str) -> bool {
-    err.contains("Websocket")
-        || err.contains("ConnectionReset")
-        || err.contains("ConnectionClosed")
-        || err.contains("ConnectionRefused")
-        || err.contains("os error 10054")
-        || err.contains("os error 10061")
+    use crate::hc::ZomeErrorKind as K;
+    matches!(flowsta_hc_lines::kind_of_message(err), K::ConnectionRefused | K::ConnectionClosed | K::NoAnswer)
 }
 
 /// Shared setup: open admin WS, ensure all apps enabled, list apps and
@@ -7130,17 +7131,16 @@ pub(crate) async fn revoke_signature_inner(
         match revoke_signature_attempt(state, action_hash_hex.clone(), reason.clone()).await {
             Ok(h) => return Ok(h),
             Err(e) => {
+                use crate::hc::ZomeErrorKind as K;
                 last_err = e;
+                let kind = flowsta_hc_lines::kind_of_message(&last_err);
                 // Stale cached grant (chain reset) → drop the cache so the
                 // retry re-authorizes fresh credentials.
-                if last_err.contains("nauthorized") {
+                if kind == K::Unauthorized {
                     invalidate_cell_credentials(state);
                 }
-                let transient = ["auth creds", "CellDisabled", "CellNotRunning", "response timeout",
-                    "channel dropped", "chain head has moved", "InternalError",
-                    "nauthorized"]
-                    .iter()
-                    .any(|m| last_err.contains(m));
+                let transient = last_err.contains(AUTH_CREDS)
+                    || matches!(kind, K::Unauthorized | K::CellNotRunning | K::Timeout | K::ChainHeadMoved | K::Internal);
                 log::warn!("revoke_signature attempt {}/3 failed: {}", attempt, last_err);
                 if !transient || attempt == 3 {
                     break;

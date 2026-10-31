@@ -296,9 +296,9 @@ async fn sealed_zome_call(
     input: Vec<u8>,
 ) -> Result<Vec<u8>, SealedCallError> {
     use crate::hc::ZomeErrorKind as K;
-    // A failed call has a kind. A failed connect is still the text of the
-    // admin calls behind it, read the old way until the admin client's
-    // errors are typed too.
+    // A failed call has a kind. A failed connect is the text of the admin
+    // calls behind it, whose kind the library reads from that text until the
+    // admin client's errors are typed too.
     enum Failed {
         Connect(String),
         Call(crate::hc::ZomeCallError),
@@ -321,13 +321,14 @@ async fn sealed_zome_call(
                         e.kind == K::Unauthorized,
                         matches!(e.kind, K::Unauthorized | K::CellNotRunning | K::Timeout | K::ChainHeadMoved | K::Internal),
                     ),
-                    Failed::Connect(t) => (
-                        t.contains("nauthorized"),
-                        !t.contains("ModuleBuild")
-                            && ["auth creds", "CellDisabled", "CellNotRunning", "response timeout", "channel dropped", "chain head has moved", "InternalError", "nauthorized"]
-                                .iter()
-                                .any(|m| t.contains(m)),
-                    ),
+                    Failed::Connect(t) => {
+                        let kind = flowsta_hc_lines::kind_of_message(t);
+                        (
+                            kind == K::Unauthorized,
+                            t.contains(crate::commands::AUTH_CREDS)
+                                || matches!(kind, K::Unauthorized | K::CellNotRunning | K::Timeout | K::ChainHeadMoved | K::Internal),
+                        )
+                    }
                 };
                 last_kind = match &f {
                     Failed::Call(e) => Some(e.kind),
