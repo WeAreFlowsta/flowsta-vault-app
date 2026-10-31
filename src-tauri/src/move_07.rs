@@ -193,24 +193,65 @@ pub fn record_line_06_decision(root: &Path, wanted: bool) {
 /// identity that has heard from no other device yet (its others may all be
 /// on 1.6.1). `None` = no marker or born: not this function's call.
 pub async fn line_06_wanted_now(state: &Arc<AppState>) -> Option<bool> {
+    use flowsta_hc_lines::policy::{old_line_wanted, RetirementPolicy, Siblings};
     let root = state.identity_root();
     let m = marker(&root)?;
     if m.born {
         return None;
     }
-    if !m.web_era_carried {
-        return Some(true);
-    }
-    let records = crate::sealed::sealed_list_inner(state).await.ok()?;
     let me = crate::paths::install_id(&state.data_dir).unwrap_or_default();
-    let others: Vec<crate::devices::DeviceRecord> = crate::devices::devices_in(&records)
+    // An owed carry decides it without reading the records.
+    let siblings = if !m.web_era_carried {
+        Siblings::Heard(Vec::new())
+    } else {
+        let records = crate::sealed::sealed_list_inner(state).await.ok()?;
+        let others = siblings_of(&crate::devices::devices_in(&records), Some(&me));
+        if others.is_empty() { Siblings::NoneHeardYet } else { Siblings::Heard(others) }
+    };
+    let facts = line_facts(&root, Some(&me), siblings);
+    // Vault 1.7.0's policy: a restored identity listens for its other
+    // devices for as long as it runs.
+    Some(old_line_wanted(&facts, &RetirementPolicy::NEVER_ALONE, &MARKER_SPEC).wanted())
+}
+
+/// The other devices the 0.6 decision weighs: unremoved, not this one, each
+/// on 0.7 or, whatever else its record says (as 1.7.0 read it), on 0.6.
+pub(crate) fn siblings_of<'a>(devices: impl IntoIterator<Item = &'a crate::devices::DeviceRecord>, me: Option<&str>) -> Vec<flowsta_hc_lines::policy::Sibling> {
+    devices
         .into_iter()
-        .filter(|d| d.install_id != me && d.removed_at.is_none())
-        .collect();
-    if others.iter().any(|d| d.generation != Line::V07.generation()) {
-        return Some(true);
+        .filter(|d| d.removed_at.is_none() && me.map(|me| d.install_id != me).unwrap_or(true))
+        .map(|d| flowsta_hc_lines::policy::Sibling {
+            device_id: d.install_id.clone(),
+            generation: if d.generation == Line::V07.generation() { Line::V07 } else { Line::V06 }.generation().to_string(),
+            removed: false,
+        })
+        .collect()
+}
+
+/// The facts flowsta-hc-lines decides the 0.6 line from. A marker the
+/// library reads but this version cannot (no Vault fields) counts as
+/// unreadable, so the 0.6 line stays wanted, as before; the web-era carry
+/// is the one kind that can be owed.
+pub(crate) fn line_facts(root: &Path, own_install_id: Option<&str>, siblings: flowsta_hc_lines::policy::Siblings) -> flowsta_hc_lines::policy::Facts {
+    use flowsta_hc_lines::marker::{Marker as LineMarker, MarkerRead};
+    let typed = marker(root);
+    let read = match LineMarker::load(root, &MARKER_SPEC) {
+        MarkerRead::Present(_) if typed.is_none() => MarkerRead::Unreadable("not a Vault marker".into()),
+        other => other,
+    };
+    let owed = match &typed {
+        Some(m) if !m.web_era_carried => vec!["web_era".to_string()],
+        _ => Vec::new(),
+    };
+    flowsta_hc_lines::policy::Facts {
+        marker: read,
+        old_line_data_present: true,
+        own_device_id: own_install_id.map(str::to_string),
+        siblings,
+        owed,
+        reachable_rounds: 0,
+        now_ms: now_ms(),
     }
-    Some(m.restored && others.is_empty())
 }
 
 /// What one pass did.
