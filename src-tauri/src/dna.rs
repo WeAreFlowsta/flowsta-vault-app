@@ -8,7 +8,7 @@
 //! can override these with newer versions downloaded from the API.
 
 use holochain_client::{AdminWebsocket, AppStatusFilter};
-use flowsta_hc_lines::{AdminClient, CoordinatorZome, InstallRequest, Line, Recovery};
+use flowsta_hc_lines::{AdminClient, CoordinatorZome, InstallRequest, Line, ReadyWait, Recovery};
 use holochain_types::prelude::AgentPubKey;
 use std::path::Path;
 use crate::process_ext::SidecarChild;
@@ -727,7 +727,7 @@ pub async fn ensure_apps_enabled(
     admin_ws: &AdminWebsocket,
     state: &std::sync::Arc<crate::commands::AppState>,
 ) {
-    use holochain_client::{AuthorizeSigningCredentialsPayload, CellInfo};
+    use holochain_client::CellInfo;
 
     let apps = match admin_ws.list_apps(None).await {
         Ok(a) => a,
@@ -778,43 +778,23 @@ pub async fn ensure_apps_enabled(
             // cells ready 3 s later - the next round then proceeded with
             // every signing-DNA auth_creds returning CellDisabled, blanking
             // the result and overwriting the cache with 0 sigs).
-            const MAX_ATTEMPTS: u32 = 15;
-            for attempt in 1..=MAX_ATTEMPTS {
-                match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-                    cell_id: cell_id.clone(),
-                    functions: None,
-                }).await {
-                    Ok(creds) => {
-                        // The probe's grant becomes THE session grant for
-                        // this cell - store it so no caller re-authorizes.
-                        state.cell_credentials.lock().unwrap().insert(
-                            cell_id.clone(),
-                            crate::commands::CachedCellCredentials::from_signing(&creds),
-                        );
-                        if attempt > 1 {
-                            log::info!("ensure_apps_enabled: cells ready after {}s wait", (attempt - 1) * 3);
-                        } else {
-                            log::info!("ensure_apps_enabled: cells ready");
-                        }
-                        return;
-                    }
-                    Err(e) => {
-                        if flowsta_hc_lines::client::kind_06(&e) == crate::hc::ZomeErrorKind::CellNotRunning && attempt < MAX_ATTEMPTS {
-                            log::info!(
-                                "ensure_apps_enabled: cells not ready yet (attempt {}/{}), waiting 3s...",
-                                attempt, MAX_ATTEMPTS,
-                            );
-                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                            // Re-enable all apps before retrying
-                            for app in &apps {
-                                let _ = admin_ws.enable_app(app.installed_app_id.clone()).await;
-                            }
-                        } else {
-                            log::warn!("ensure_apps_enabled: cell readiness check failed: {}", e);
-                            return;
-                        }
+            let reenable: Vec<String> = apps.iter().map(|a| a.installed_app_id.clone()).collect();
+            let wait = ReadyWait { attempts: 15, gap: std::time::Duration::from_secs(3), reenable: &reenable, label: "ensure_apps_enabled:" };
+            match flowsta_hc_lines::admin::wait_cell_ready_06(admin_ws, &cell_id, &wait).await {
+                Ok((creds, attempt)) => {
+                    // The probe's grant becomes THE session grant for
+                    // this cell - store it so no caller re-authorizes.
+                    state.cell_credentials.lock().unwrap().insert(
+                        cell_id.clone(),
+                        crate::commands::CachedCellCredentials::from_signing(&creds),
+                    );
+                    if attempt > 1 {
+                        log::info!("ensure_apps_enabled: cells ready after {}s wait", (attempt - 1) * 3);
+                    } else {
+                        log::info!("ensure_apps_enabled: cells ready");
                     }
                 }
+                Err(e) => log::warn!("ensure_apps_enabled: cell readiness check failed: {}", e),
             }
         }
     }
@@ -955,7 +935,7 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<u16, String> {
 /// skipped on both boxes. One cap grant on the signing cell, retried every
 /// 3 s for up to 45 s, cached so no caller authorizes again this session.
 pub async fn ensure_cells_ready_07(admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>) {
-    use holochain_client_07::{AdminWebsocket, AuthorizeSigningCredentialsPayload, CellInfo};
+    use holochain_client_07::{AdminWebsocket, CellInfo};
     let admin_ws = match AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin())).await {
         Ok(a) => a,
         Err(e) => {
@@ -989,34 +969,20 @@ pub async fn ensure_cells_ready_07(admin_port: u16, state: &std::sync::Arc<crate
     if state.cell_credentials_07.lock().unwrap().contains_key(&cell_id) {
         return;
     }
-    const MAX_ATTEMPTS: u32 = 15;
-    for attempt in 1..=MAX_ATTEMPTS {
-        match admin_ws
-            .authorize_signing_credentials(AuthorizeSigningCredentialsPayload { cell_id: cell_id.clone(), functions: None })
-            .await
-        {
-            Ok(creds) => {
-                state
-                    .cell_credentials_07
-                    .lock()
-                    .unwrap()
-                    .insert(cell_id.clone(), crate::commands::CachedCellCredentials07::from_signing(&creds));
-                if attempt > 1 {
-                    log::info!("[0.7] cells ready after {} s", (attempt - 1) * 3);
-                } else {
-                    log::info!("[0.7] cells ready");
-                }
-                return;
-            }
-            Err(e) => {
-                if flowsta_hc_lines::client::kind_07(&e) == crate::hc::ZomeErrorKind::CellNotRunning && attempt < MAX_ATTEMPTS {
-                    log::info!("[0.7] cells not ready yet (attempt {}/{}), waiting 3 s", attempt, MAX_ATTEMPTS);
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                } else {
-                    log::warn!("[0.7] cell readiness check failed: {}", e);
-                    return;
-                }
+    let wait = ReadyWait { attempts: 15, gap: std::time::Duration::from_secs(3), reenable: &[], label: "[0.7]" };
+    match flowsta_hc_lines::admin::wait_cell_ready_07(&admin_ws, &cell_id, &wait).await {
+        Ok((creds, attempt)) => {
+            state
+                .cell_credentials_07
+                .lock()
+                .unwrap()
+                .insert(cell_id.clone(), crate::commands::CachedCellCredentials07::from_signing(&creds));
+            if attempt > 1 {
+                log::info!("[0.7] cells ready after {} s", (attempt - 1) * 3);
+            } else {
+                log::info!("[0.7] cells ready");
             }
         }
+        Err(e) => log::warn!("[0.7] cell readiness check failed: {}", e),
     }
 }
