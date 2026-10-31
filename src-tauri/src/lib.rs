@@ -29,7 +29,6 @@ mod relocate;
 mod identities;
 mod instance_guard;
 mod relay_login;
-mod rendezvous_keeper;
 mod sealed;
 mod signing_07;
 mod vault;
@@ -396,8 +395,12 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Keep this device listed on the rendezvous when the conductor's own registration stalls.
-            rendezvous_keeper::start();
+            // Keep this device listed on the rendezvous when the conductor's own
+            // registration stalls: flowsta-hc-lines' keeper, one per line, run
+            // by the supervisor (on Tauri's runtime: setup is not inside it).
+            tauri::async_runtime::spawn(async {
+                crate::conductor::supervisor().start_keeper([crate::conductor::rendezvous_servers(), crate::conductor::rendezvous_servers_07()]);
+            });
 
             // Keep the tray's first line and tooltip saying the state.
             {
