@@ -7,7 +7,8 @@
 //! Version constants define what ships with this app build. The DNA updater
 //! can override these with newer versions downloaded from the API.
 
-use holochain_client::{AdminWebsocket, AllowedOrigins, AppStatusFilter, InstallAppPayload};
+use holochain_client::{AdminWebsocket, AppStatusFilter, InstallAppPayload};
+use flowsta_hc_lines::{AdminClient, CoordinatorZome, Line};
 use holochain_types::app::AppBundleSource;
 use holochain_types::prelude::AgentPubKey;
 use std::path::Path;
@@ -170,62 +171,24 @@ pub async fn ensure_signing_coordinators(
     resource_dir: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> Result<(), String> {
-    use holochain_types::prelude::{
-        CoordinatorBundle, CoordinatorManifest, CoordinatorSource, UpdateCoordinatorsPayload,
-        ZomeDependency, ZomeManifest,
-    };
-
     // Remove the retired gate marker so nothing ever reads it as truth again.
     let _ = std::fs::remove_file(data_dir.join("signing-coordinator-rev"));
 
     let wasm = std::fs::read(resource_dir.join(SIGNING_COORDINATOR_WASM))
         .map_err(|e| format!("read {}: {}", SIGNING_COORDINATOR_WASM, e))?;
-
-    let admin_ws = AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("Admin WS: {}", e))?;
-
-    let apps = admin_ws
-        .list_apps(None)
+    let admin = AdminClient::connect(Line::V06, admin_port, &crate::conductor::node_origin())
         .await
-        .map_err(|e| format!("list_apps: {}", e))?;
+        .map_err(|e| format!("Admin WS: {}", e))?;
+    let apps = admin.list_apps().await.map_err(|e| format!("list_apps: {}", e))?;
     let signing_app_id = make_app_id("signing", BUNDLED_SIGNING_VERSION);
-    let Some(app) = apps.iter().find(|a| a.installed_app_id == signing_app_id) else {
+    let Some(app) = apps.iter().find(|a| a.app_id == signing_app_id) else {
         // No signing cell yet (nothing to swap) - the next start after the
         // install applies it.
         return Ok(());
     };
-    let cell_id = app
-        .cell_info
-        .values()
-        .flat_map(|cells| cells.iter())
-        .find_map(|c| match c {
-            holochain_client::CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-            _ => None,
-        })
-        .ok_or("No provisioned signing cell")?;
-
-    let zome = ZomeManifest {
-        name: "signing".into(),
-        hash: None,
-        path: "signing_coordinator.wasm".into(),
-        dependencies: Some(vec![ZomeDependency {
-            name: "signing_integrity".into(),
-        }]),
-    };
-    let resource_id = zome.resource_id();
-    let manifest = CoordinatorManifest { zomes: vec![zome] };
-    let bundle = mr_bundle::Bundle::new(manifest, [(resource_id, wasm.into())])
-        .map_err(|e| format!("coordinator bundle: {}", e))?;
-
-    admin_ws
-        .update_coordinators(UpdateCoordinatorsPayload {
-            cell_id,
-            source: CoordinatorSource::Bundle(Box::new(CoordinatorBundle::from(bundle))),
-        })
+    let cell = app.first_cell().ok_or("No provisioned signing cell")?;
+    admin
+        .update_coordinators(cell, CoordinatorZome { name: "signing", wasm })
         .await
         .map_err(|e| format!("update_coordinators: {}", e))?;
 
@@ -256,58 +219,20 @@ pub async fn ensure_private_v2_coordinators(
     admin_port: u16,
     resource_dir: &std::path::Path,
 ) -> Result<(), String> {
-    use holochain_types::prelude::{
-        CoordinatorBundle, CoordinatorManifest, CoordinatorSource, UpdateCoordinatorsPayload,
-        ZomeDependency, ZomeManifest,
-    };
-
     let wasm = std::fs::read(resource_dir.join(PRIVATE_V2_COORDINATOR_WASM))
         .map_err(|e| format!("read {}: {}", PRIVATE_V2_COORDINATOR_WASM, e))?;
-
-    let admin_ws = AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("Admin WS: {}", e))?;
-
-    let apps = admin_ws
-        .list_apps(None)
+    let admin = AdminClient::connect(Line::V06, admin_port, &crate::conductor::node_origin())
         .await
-        .map_err(|e| format!("list_apps: {}", e))?;
+        .map_err(|e| format!("Admin WS: {}", e))?;
+    let apps = admin.list_apps().await.map_err(|e| format!("list_apps: {}", e))?;
     let app_id = private_v2_app_id();
-    let Some(app) = apps.iter().find(|a| a.installed_app_id == app_id) else {
+    let Some(app) = apps.iter().find(|a| a.app_id == app_id) else {
         // No private v2 cell on this install (nothing to swap).
         return Ok(());
     };
-    let cell_id = app
-        .cell_info
-        .values()
-        .flat_map(|cells| cells.iter())
-        .find_map(|c| match c {
-            holochain_client::CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-            _ => None,
-        })
-        .ok_or("No provisioned private v2 cell")?;
-
-    let zome = ZomeManifest {
-        name: "private_data".into(),
-        hash: None,
-        path: "private_data_coordinator.wasm".into(),
-        dependencies: Some(vec![ZomeDependency {
-            name: "private_data_integrity".into(),
-        }]),
-    };
-    let resource_id = zome.resource_id();
-    let manifest = CoordinatorManifest { zomes: vec![zome] };
-    let bundle = mr_bundle::Bundle::new(manifest, [(resource_id, wasm.into())])
-        .map_err(|e| format!("coordinator bundle: {}", e))?;
-
-    admin_ws
-        .update_coordinators(UpdateCoordinatorsPayload {
-            cell_id,
-            source: CoordinatorSource::Bundle(Box::new(CoordinatorBundle::from(bundle))),
-        })
+    let cell = app.first_cell().ok_or("No provisioned private v2 cell")?;
+    admin
+        .update_coordinators(cell, CoordinatorZome { name: "private_data", wasm })
         .await
         .map_err(|e| format!("update_coordinators: {}", e))?;
 
@@ -1045,20 +970,12 @@ pub async fn install_dnas(
 /// Uses port 0 (auto-assign) and returns the OS-assigned port.
 /// Called once during conductor startup after DNA installation.
 pub async fn setup_app_interface(admin_port: u16) -> Result<u16, String> {
-    let admin_ws = AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
-
-    let app_port = admin_ws
-        .attach_app_interface(
-            0,
-            None,
-            AllowedOrigins::Origins([crate::conductor::node_origin()].into_iter().collect()),
-            None,
-        )
+    let origin = crate::conductor::node_origin();
+    let admin = AdminClient::connect(Line::V06, admin_port, &origin)
+        .await
+        .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
+    let app_port = admin
+        .attach_app_interface(&origin)
         .await
         .map_err(|e| format!("Failed to attach app interface: {}", e))?;
 
@@ -1294,39 +1211,19 @@ pub async fn install_dnas_07(
 /// bundle carries rev 1 and is never rebuilt; the admin call is cheap and
 /// idempotent, so it is applied unconditionally and never gated by a marker).
 pub async fn ensure_signing_coordinators_07(admin_port: u16, resource_dir: &Path) -> Result<(), String> {
-    use holochain_client_07::{AdminWebsocket, CellInfo};
-    use holochain_types_07::prelude::{CoordinatorBundle, CoordinatorManifest, CoordinatorSource, UpdateCoordinatorsPayload, ZomeDependency, ZomeManifest};
-
     let wasm = std::fs::read(resource_dir.join(SIGNING_COORDINATOR_WASM_07))
         .map_err(|e| format!("read {}: {}", SIGNING_COORDINATOR_WASM_07, e))?;
-    let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+    let admin = AdminClient::connect(Line::V07, admin_port, &crate::conductor::node_origin())
         .await
         .map_err(|e| format!("Admin WS (0.7): {}", e))?;
-    let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps (0.7): {}", e))?;
+    let apps = admin.list_apps().await.map_err(|e| format!("list_apps (0.7): {}", e))?;
     let signing_app_id = make_app_id("signing", BUNDLED_SIGNING_VERSION_07);
-    let Some(app) = apps.iter().find(|a| a.installed_app_id == signing_app_id) else {
+    let Some(app) = apps.iter().find(|a| a.app_id == signing_app_id) else {
         return Ok(());
     };
-    let cell_id = app
-        .cell_info
-        .values()
-        .flat_map(|cells| cells.iter())
-        .find_map(|c| match c {
-            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-            _ => None,
-        })
-        .ok_or("No provisioned signing cell (0.7)")?;
-    let zome = ZomeManifest {
-        name: "signing".into(),
-        hash: None,
-        path: "signing_coordinator.wasm".into(),
-        dependencies: Some(vec![ZomeDependency { name: "signing_integrity".into() }]),
-    };
-    let resource_id = zome.resource_id();
-    let manifest = CoordinatorManifest { zomes: vec![zome] };
-    let bundle = mr_bundle_07::Bundle::new(manifest, [(resource_id, wasm.into())]).map_err(|e| format!("coordinator bundle (0.7): {}", e))?;
-    admin_ws
-        .update_coordinators(UpdateCoordinatorsPayload { cell_id, source: CoordinatorSource::Bundle(Box::new(CoordinatorBundle::from(bundle))) })
+    let cell = app.first_cell().ok_or("No provisioned signing cell (0.7)")?;
+    admin
+        .update_coordinators(cell, CoordinatorZome { name: "signing", wasm })
         .await
         .map_err(|e| format!("update_coordinators (0.7): {}", e))?;
     log::info!("[0.7] signing coordinator ensured at rev {} on {}", SIGNING_COORDINATOR_REV_07, signing_app_id);
@@ -1336,17 +1233,12 @@ pub async fn ensure_signing_coordinators_07(admin_port: u16, resource_dir: &Path
 /// Attach the 0.7 conductor's app interface (the twin of
 /// `setup_app_interface`): a free port, this start's origin only.
 pub async fn setup_app_interface_07(admin_port: u16) -> Result<u16, String> {
-    use holochain_client_07::{AdminWebsocket, AllowedOrigins};
-    let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+    let origin = crate::conductor::node_origin();
+    let admin = AdminClient::connect(Line::V07, admin_port, &origin)
         .await
         .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
-    let app_port = admin_ws
-        .attach_app_interface(
-            0,
-            None,
-            AllowedOrigins::Origins([crate::conductor::node_origin()].into_iter().collect()),
-            None,
-        )
+    let app_port = admin
+        .attach_app_interface(&origin)
         .await
         .map_err(|e| format!("Failed to attach the 0.7 app interface: {}", e))?;
     log::info!("[0.7] app interface attached on port {}", app_port);
