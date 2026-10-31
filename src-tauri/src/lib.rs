@@ -104,8 +104,16 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// What the webview's platform fix did at startup; logged once the logger is up.
+static WEBVIEW_FIX: std::sync::OnceLock<flowsta_hc_lines::webview::Outcome> = std::sync::OnceLock::new();
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, before anything starts a thread: on Linux with the NVIDIA driver
+    // loaded, WebKitGTK 2.52 segfaults on a page change when NVIDIA's EGL
+    // draws the window. The fix sets two environment variables for the
+    // webview only (the sidecars never inherit them).
+    let _ = WEBVIEW_FIX.set(flowsta_hc_lines::webview::apply());
     let builder = tauri::Builder::default();
     // UI test harness (e2e/README.md): the embedded WebDriver server that
     // @wdio/tauri-service drives. Compiled in ONLY with the `e2e` feature -
@@ -169,6 +177,9 @@ pub fn run() {
                     .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
                     .build(),
             )?;
+            if let Some(fix) = WEBVIEW_FIX.get() {
+                log::info!("[webview] Linux NVIDIA fix: {fix:?}");
+            }
 
             // Set up data directory for vault storage.
             // Debug builds honor FLOWSTA_VAULT_DATA_DIR so test instances
