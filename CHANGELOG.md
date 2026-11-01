@@ -5,6 +5,54 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0-beta1] - 2026-11-02
+
+The first beta of 1.8.0. Most of it is under the hood: the parts of the
+Vault that start, watch and update Holochain now come from
+`flowsta-hc-lines`, an open-source component other Holochain apps can use
+too.
+
+### Highlights
+- **When Holochain keeps stopping, the Vault paces itself.** After three
+  restarts within ten minutes it waits a few minutes before trying again,
+  and the sidebar says so: "Holochain keeps stopping. The Vault tries
+  again in a few minutes. Restarting the Vault may also help."
+- **A copy of each Holochain version, kept on your computer.** The Vault
+  keeps a compressed copy of each Holochain version it uses (about 30 MB
+  each) in its own folder, and removes a version nothing on your computer
+  needs any more. A later update can then leave an older version out of
+  the download while your computer keeps running it, offline too.
+- **The previous Holochain version steps aside as soon as nothing needs
+  it.** After the move to Holochain 0.7.1 it keeps running only while one
+  of your devices still uses it or your data is not yet all copied
+  across, and it now stops without waiting for the Vault to restart.
+
+### Changed
+- The previous Holochain version stays until the Vault has recorded a
+  complete copy of everything on it.
+- New records go to the previous Holochain version as well only while one
+  of your devices still reads them there.
+- An identity restored from its recovery phrase that hears from no device
+  on the previous Holochain version stops listening there after 14 days
+  and 30 rounds in which it could reach the network.
+- Quitting the Vault asks Holochain and the key store to shut down before
+  closing them.
+- Retries after a Holochain error depend on the kind of error, not its
+  wording, so they hold across Holochain versions.
+- On Linux, the fix for NVIDIA graphics is applied before anything else
+  at startup.
+
+### Fixed
+- A record Holochain returns in a form the Vault cannot read back is left
+  out, instead of being kept with its details empty.
+
+### Security
+- Every Holochain program in the download is checked against its
+  published SHA-256 fingerprint when the release is built, and a mismatch
+  stops the build.
+- The Windows code-signing tool is checked against its SHA-256
+  fingerprint before it signs anything.
+
 ## [1.7.0] - 2026-10-29
 
 ### Highlights
