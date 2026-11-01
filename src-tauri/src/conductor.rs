@@ -36,6 +36,15 @@ pub fn supervisor() -> &'static Arc<Supervisor> {
     &SUPERVISOR
 }
 
+/// How a line that stopped is recovered: a dead primary restarts the
+/// session, a dead 0.7 line beside a 0.6 primary is attached again, a dead
+/// 0.6 line beside a 0.7 primary is let go (attached again next round if
+/// still wanted). No limit on recoveries yet, as in 1.7.0.
+pub(crate) const WATCH_POLICY: flowsta_hc_lines::watch::WatchPolicy = flowsta_hc_lines::watch::WatchPolicy { current: crate::hc::Line::V07, limit: None };
+
+/// The recoveries handed out so far (what the policy's limit counts).
+pub(crate) static WATCHDOG: flowsta_hc_lines::watch::Watchdog = flowsta_hc_lines::watch::Watchdog::new();
+
 /// Stop every line of the unlocked identity (blocking: each process gets
 /// its grace before it is killed). Returns whether any session ran.
 pub fn stop_all_lines() -> bool {

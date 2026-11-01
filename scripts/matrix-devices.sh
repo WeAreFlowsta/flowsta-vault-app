@@ -30,6 +30,12 @@ VAULT_MATRIX_MIXED="${LEGACY_A_BIN:+1}" VAULT_MATRIX_PORT=$A VAULT_MATRIX_RESTOR
 rc=$?
 echo "== leg rc=$rc $(date -u +%H:%M:%S)"
 grep -E 'RESULT|✗' "$1/matrix-devices.log" | head -20
+# Mixed household: B (0.7 primary) keeps a 0.6 line for A on 1.6.1. Kill
+# that 0.6 conductor: let go, then attached again the next round.
+if [ -n "${LEGACY_A_BIN:-}" ]; then
+  echo "== kill B's 0.6 conductor $(date -u +%H:%M:%S)"
+  scripts/matrix-kill-07.sh "$B" md-d 06 > "$1/kill-06.log" 2>&1; krc=$?; cat "$1/kill-06.log"; [ $krc -eq 0 ] || rc=1
+fi
 # Test instances: the 1.7.0 build under target/debug and, on a mixed run, the
 # 1.6.1 build in LEGACY_A_BIN - plus the conductors and key stores they left.
 killtests() {

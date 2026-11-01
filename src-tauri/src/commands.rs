@@ -1614,27 +1614,37 @@ pub(crate) async fn ensure_conductor_alive(
     // to bring the conductor up.
     let _guard = state.conductor_restart_lock.lock().await;
 
-    // Re-check liveness inside the lock. If a previous holder of the
-    // lock already restarted, we have nothing to do.
-    let needs_restart = match (crate::conductor::supervisor().session(), crate::conductor::supervisor().primary_alive()) {
-        (_, true) => false,
-        (Some(_), false) => {
-            log::warn!("[watchdog] conductor process exited - will restart");
-            true
+    // Decide inside the lock: if a previous holder of the lock already
+    // recovered, there is nothing to do.
+    use flowsta_hc_lines::watch::WatchAction;
+    let reattach = match crate::conductor::WATCHDOG.action(crate::conductor::supervisor(), &crate::conductor::WATCH_POLICY) {
+        WatchAction::Nothing => {
+            log::info!("[watchdog] conductor is alive (recovered by an earlier caller)");
+            return Ok(());
         }
-        (None, false) => true, // no session at all
+        WatchAction::LetGo(line) => {
+            log::warn!("[watchdog] the {} conductor exited - let go; attached again next round if still wanted", line);
+            crate::conductor::supervisor().stop_line(line);
+            return Ok(());
+        }
+        WatchAction::Hold => {
+            let message = "The conductor keeps stopping. Restart the Vault, or send a report.".to_string();
+            let status = ConductorStatus::Error { message: message.clone() };
+            *state.conductor_status.lock().unwrap() = status.clone();
+            let _ = app_handle.emit("conductor-status", status);
+            return Err(format!("[watchdog] not restarted: {}", message));
+        }
+        WatchAction::RestartSession => {
+            if crate::conductor::supervisor().session().is_some() {
+                log::warn!("[watchdog] conductor process exited - will restart");
+            }
+            None
+        }
+        // The current line beside a living primary: a conductor that died
+        // mid-session (a moved identity's writes all fail while it is down,
+        // and nothing else notices).
+        WatchAction::Reattach(line) => Some(line),
     };
-
-    // The 0.7 line beside a living 0.6 one: a conductor that died
-    // mid-session (a moved identity's writes all fail while it is down,
-    // and nothing else notices).
-    let line_07_dead = !needs_restart
-        && crate::conductor::supervisor().alive(crate::hc::Line::V07) == Some(false);
-
-    if !needs_restart && !line_07_dead {
-        log::info!("[watchdog] conductor is alive (recovered by an earlier caller)");
-        return Ok(());
-    }
 
     // Extract the cached passphrase. Briefly copies the bytes into a
     // `String` for the duration of the start_holochain call; the
@@ -1651,12 +1661,12 @@ pub(crate) async fn ensure_conductor_alive(
             .map_err(|_| "[watchdog] cached passphrase is not valid UTF-8".to_string())?
     };
 
-    if line_07_dead {
-        log::warn!("[watchdog] the 0.7 conductor exited - restarting that line");
-        crate::conductor::supervisor().stop_line(crate::hc::Line::V07);
+    if let Some(line) = reattach {
+        log::warn!("[watchdog] the {} conductor exited - restarting that line", line);
+        crate::conductor::supervisor().stop_line(line);
         let resource_dir = resolve_resource_dir(app_handle, &state.data_dir);
-        crate::conductor::attach_line_from_state(state.clone(), crate::hc::Line::V07, resource_dir, passphrase, "the 0.7 conductor exited")
-            .map_err(|e| format!("[watchdog] the 0.7 line not restarted: {}", e))?;
+        crate::conductor::attach_line_from_state(state.clone(), line, resource_dir, passphrase, &format!("the {} conductor exited", line))
+            .map_err(|e| format!("[watchdog] the {} line not restarted: {}", line, e))?;
         return Ok(());
     }
 
@@ -1826,26 +1836,21 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
             let wait = match devices_round(&devices_state, &devices_app, full).await {
                 DevicesRound::StoodDown => break,
                 DevicesRound::Done => {
-                    // A 0.7 conductor that died since the last round is
-                    // brought back (the watchdog's cheap check).
-                    let line_07_dead = crate::conductor::supervisor().alive(crate::hc::Line::V07) == Some(false);
-                    if line_07_dead {
-                        if let Err(e) = ensure_conductor_alive(&devices_state, &devices_app).await {
-                            log::warn!("[devices] the 0.7 line was not brought back: {}", e);
-                        }
-                    }
-                    // The 0.6 line beside a 0.7 primary: a dead one is let
-                    // go; a wanted one is attached (a device record naming
-                    // 0.6, the web-era carry owed, a pass not yet complete,
-                    // or a restored identity that has heard from nobody); one
-                    // nothing wants any more is stopped.
+                    // A line that died since the last round is the
+                    // watchdog's (its cheap check: the decision alone, the
+                    // recovery only when there is one). Otherwise, the 0.6
+                    // line beside a 0.7 primary: a wanted one is attached (a
+                    // device record naming 0.6, the web-era carry owed, a pass
+                    // not yet complete, or a restored identity that has heard
+                    // from nobody); one nothing wants any more is stopped.
                     {
                         let sup = crate::conductor::supervisor();
-                        let (primary_07, has_06, dead_06) =
-                            (sup.primary() == Some(crate::hc::Line::V07), sup.has(crate::hc::Line::V06), sup.alive(crate::hc::Line::V06) == Some(false));
-                        if dead_06 {
-                            log::warn!("[0.6] the 0.6 conductor exited - let go; attached again next round if still wanted");
-                            crate::conductor::supervisor().stop_line(crate::hc::Line::V06);
+                        let pending = flowsta_hc_lines::watch::decide(&flowsta_hc_lines::watch::LinesNow::of(sup), &crate::conductor::WATCH_POLICY);
+                        let (primary_07, has_06) = (sup.primary() == Some(crate::hc::Line::V07), sup.has(crate::hc::Line::V06));
+                        if pending != flowsta_hc_lines::watch::WatchAction::Nothing {
+                            if let Err(e) = ensure_conductor_alive(&devices_state, &devices_app).await {
+                                log::warn!("[devices] a stopped line was not recovered: {}", e);
+                            }
                         } else if primary_07 {
                             // Every round, so the 0.6 copies follow who is on 0.6,
                             // and a 0.6 line nothing wants any more stops now.
