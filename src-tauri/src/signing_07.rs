@@ -56,10 +56,31 @@ pub(crate) async fn signing_client(state: &Arc<AppState>, line: Line) -> Result<
         }
         Line::V07 => {
             let (admin_port, app_port) = crate::hc::line_ports(state, line)?;
-            let (ws, role) = crate::hc::connect_app_07(state, admin_port, app_port, &signing_app_id(line), "flowsta_signing").await?;
-            Ok((AppClient::V07(ws), role))
+            // Right after an unlock the 0.7 cells can still be starting, and
+            // their credentials are refused with CellNotRunning. Nothing is
+            // written yet, so wait for them as the 0.6 path does in
+            // `ensure_apps_enabled` (15 tries, 3 s apart).
+            let mut attempt = 1u32;
+            loop {
+                match crate::hc::connect_app_07(state, admin_port, app_port, &signing_app_id(line), "flowsta_signing").await {
+                    Ok((ws, role)) => return Ok((AppClient::V07(ws), role)),
+                    Err(e) if attempt < CELL_WAIT_TRIES && cell_still_starting(&e) => {
+                        log::info!("[0.7] the signing cell is not running yet (attempt {}/{}), waiting 3 s", attempt, CELL_WAIT_TRIES);
+                        attempt += 1;
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
         }
     }
+}
+
+const CELL_WAIT_TRIES: u32 = 15;
+
+/// Whether connecting failed because the cell has not started yet.
+fn cell_still_starting(connect_error: &str) -> bool {
+    flowsta_hc_lines::kind_of_message(connect_error) == crate::hc::ZomeErrorKind::CellNotRunning
 }
 
 fn mp<T: Serialize>(v: &T) -> Result<Vec<u8>, String> {
@@ -650,5 +671,20 @@ mod tests {
         assert_eq!(input.original_action_hash.get_raw_39(), &hash_39[..]);
         assert_eq!(input.original_timestamp, 1_000);
         assert_eq!(input.original_signed_action, Some(vec![9, 9, 9]));
+    }
+
+    /// The text a connect returns while the cell is starting after an
+    /// unlock (as logged, ids replaced): waited on. Other failures are not.
+    #[test]
+    fn a_cell_still_starting_is_waited_on_and_nothing_else() {
+        let starting = format!(
+            "{} (0.7): External API wire error: InternalError(\"Conductor returned an error while using a ConductorApi: CellNotRunning(CellId(DnaHash(uhC0kQ2cnpRBvBHwBvhhVqX7RCXlfYPpTEW8IhUahLq3zR5yRmUcD), AgentPubKey(uhCAkWgDBbkP1x4iQI1jhCYG6J2tBnZ3S9PIZNevxtb1ZoKsGM3X0)))\")",
+            crate::commands::AUTH_CREDS
+        );
+        assert!(cell_still_starting(&starting));
+        assert!(cell_still_starting("issue_app_auth_token failed (0.7): CellDisabled(...)"));
+        assert!(!cell_still_starting("Admin WS connect failed (0.7): Connection refused (os error 111)"));
+        assert!(!cell_still_starting("flowsta_signing_v1_5 is not installed on the 0.7 line"));
+        assert!(!cell_still_starting("auth creds (0.7): Unauthorized"));
     }
 }

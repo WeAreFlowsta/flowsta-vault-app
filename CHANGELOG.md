@@ -45,6 +45,9 @@ too.
 ### Fixed
 - A record Holochain returns in a form the Vault cannot read back is left
   out, instead of being kept with its details empty.
+- Signing in the first minute after unlocking waits for Holochain to
+  finish starting, instead of failing with "The signature was not
+  published".
 
 ### Security
 - Every Holochain program in the download is checked against its
