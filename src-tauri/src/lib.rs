@@ -17,6 +17,7 @@ mod identity_07;
 pub mod file_analyzer;
 mod ipc_server;
 mod key_derivation;
+mod kits;
 mod lair;
 mod mau;
 mod paths;
@@ -29,7 +30,6 @@ mod relocate;
 mod identities;
 mod instance_guard;
 mod relay_login;
-mod rendezvous_keeper;
 mod sealed;
 mod signing_07;
 mod vault;
@@ -45,47 +45,18 @@ use std::sync::Arc;
 /// inside `src-tauri/binaries/` first (matching how CI populates that
 /// directory) so devs don't need a `vault-`-prefixed binary on PATH.
 pub fn resolve_sidecar_bin(name: &str) -> PathBuf {
-    if cfg!(debug_assertions) {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let binaries = std::path::Path::new(manifest).join("binaries");
-        // Exact `name-<triple>` first: `vault-holochain-` is also a prefix of
-        // `vault-holochain-07-<triple>`, and the two lines must never swap.
-        if let Some(triple) = option_env!("VAULT_TARGET_TRIPLE") {
-            let exact = binaries.join(format!("{}-{}", name, triple));
-            if exact.exists() {
-                return exact;
-            }
-        }
-        let prefix = format!("{}-", name);
-        if let Ok(entries) = std::fs::read_dir(&binaries) {
-            for entry in entries.flatten() {
-                if let Some(s) = entry.file_name().to_str() {
-                    let rest = s.strip_prefix(&prefix);
-                    if let Some(rest) = rest {
-                        // Skip the other line's binary when ours has no suffix.
-                        if !name.ends_with("-07") && rest.starts_with("07-") {
-                            continue;
-                        }
-                        return entry.path();
-                    }
-                }
-            }
-        }
-        return PathBuf::from(name);
+    flowsta_hc_lines::resolve_sidecar(name, &sidecar_source()).unwrap_or_else(|_| PathBuf::from(name))
+}
+
+/// Where the Vault's sidecars are: the dev binaries folder in a debug
+/// build, else beside the executable.
+pub fn sidecar_source() -> flowsta_hc_lines::SidecarSource {
+    flowsta_hc_lines::SidecarSource {
+        dev_dir: cfg!(debug_assertions).then(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries")),
+        exe_dir: None,
+        kit_dirs: Vec::new(),
+        allow_path_lookup: true,
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = if cfg!(target_os = "windows") {
-                dir.join(format!("{}.exe", name))
-            } else {
-                dir.join(name)
-            };
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-    }
-    PathBuf::from(name)
 }
 use tauri::{
     image::Image,
@@ -139,8 +110,16 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// What the webview's platform fix did at startup; logged once the logger is up.
+static WEBVIEW_FIX: std::sync::OnceLock<flowsta_hc_lines::webview::Outcome> = std::sync::OnceLock::new();
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, before anything starts a thread: on Linux with the NVIDIA driver
+    // loaded, WebKitGTK 2.52 segfaults on a page change when NVIDIA's EGL
+    // draws the window. The fix sets two environment variables for the
+    // webview only (the sidecars never inherit them).
+    let _ = WEBVIEW_FIX.set(flowsta_hc_lines::webview::apply());
     let builder = tauri::Builder::default();
     // UI test harness (e2e/README.md): the embedded WebDriver server that
     // @wdio/tauri-service drives. Compiled in ONLY with the `e2e` feature -
@@ -204,6 +183,9 @@ pub fn run() {
                     .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
                     .build(),
             )?;
+            if let Some(fix) = WEBVIEW_FIX.get() {
+                log::info!("[webview] Linux NVIDIA fix: {fix:?}");
+            }
 
             // Set up data directory for vault storage.
             // Debug builds honor FLOWSTA_VAULT_DATA_DIR so test instances
@@ -245,6 +227,7 @@ pub fn run() {
             // would make this launch take the next admin port and run a
             // SECOND conductor on the same agent key. Stop them first; a
             // staging Vault beside this one keeps its own.
+            process_ext::register_title_markers(&["vault-holochain", "vault-lair-keystore"]);
             let reaped = instance_guard::reap_orphaned_sidecars();
             if reaped > 0 {
                 log::warn!("[instance] {} orphaned sidecar(s) from an earlier launch stopped", reaped);
@@ -331,7 +314,7 @@ pub fn run() {
 
             // Catch SIGTERM / SIGINT (Ctrl+C, system shutdown, dpkg postinst kill,
             // `kill <pid>`) and route them through app.exit() so RunEvent::Exit
-            // fires and ConductorHandle::shutdown() kills the holochain conductor
+            // fires and conductor::stop_all_lines() stops the holochain conductor
             // and lair-keystore children cleanly.
             let signal_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -419,8 +402,12 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Keep this device listed on the rendezvous when the conductor's own registration stalls.
-            rendezvous_keeper::start(app.state::<Arc<AppState>>().inner().clone());
+            // Keep this device listed on the rendezvous when the conductor's own
+            // registration stalls: flowsta-hc-lines' keeper, one per line, run
+            // by the supervisor (on Tauri's runtime: setup is not inside it).
+            tauri::async_runtime::spawn(async {
+                crate::conductor::supervisor().start_keeper([crate::conductor::rendezvous_servers(), crate::conductor::rendezvous_servers_07()]);
+            });
 
             // Keep the tray's first line and tooltip saying the state.
             {
@@ -621,14 +608,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
+            // Only the macOS arms below read it.
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            let _ = &app_handle;
             match event {
                 tauri::RunEvent::Exit => {
-                    let state: Arc<AppState> = app_handle.state::<Arc<AppState>>().inner().clone();
-                    if let Ok(mut lock) = state.conductor_handle.lock() {
-                        if let Some(handle) = lock.take() {
-                            handle.shutdown();
-                        }
-                    };
+                    crate::conductor::stop_all_lines();
                 }
                 // Triggered on macOS / iOS when the OS opens files with our
                 // app via Apple Events (Services menu, Open With, drag onto

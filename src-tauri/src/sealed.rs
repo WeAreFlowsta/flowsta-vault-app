@@ -122,32 +122,28 @@ pub struct StoredVersion {
     pub payload: SealedPayload,
 }
 
-/// Reduce every stored version to the newest per logical id. Returns the
-/// winners (deletions included) and the versions they supersede. The order
-/// between two versions is the same on every device: newer time first, then
-/// a deletion over a live version, then the larger action hash.
-pub fn latest_versions(versions: Vec<StoredVersion>) -> (Vec<StoredVersion>, Vec<StoredVersion>) {
-    use std::collections::HashMap;
-    let mut winners: HashMap<String, StoredVersion> = HashMap::new();
-    let mut superseded = Vec::new();
-    for version in versions {
-        let id = version.payload.logical_id();
-        match winners.get(&id) {
-            None => {
-                winners.insert(id, version);
-            }
-            Some(current) => {
-                let rank = |v: &StoredVersion| (v.payload.version_time(), v.payload.deleted, v.action_hash.clone());
-                if rank(&version) > rank(current) {
-                    let old = winners.insert(id, version).expect("present");
-                    superseded.push(old);
-                } else if version.action_hash != current.action_hash {
-                    superseded.push(version);
-                }
-            }
-        }
+impl flowsta_hc_lines::Versioned for StoredVersion {
+    fn logical_id(&self) -> String {
+        self.payload.logical_id()
     }
-    (winners.into_values().collect(), superseded)
+    fn version_time(&self) -> u64 {
+        self.payload.version_time()
+    }
+    fn created_at(&self) -> u64 {
+        self.payload.created_at
+    }
+    fn deleted(&self) -> bool {
+        self.payload.deleted
+    }
+    fn action_hash(&self) -> &[u8] {
+        &self.action_hash
+    }
+}
+
+/// Reduce every stored version to the newest per logical id (winners, and
+/// the versions they supersede). The rule lives in `flowsta-hc-lines`.
+pub fn latest_versions(versions: Vec<StoredVersion>) -> (Vec<StoredVersion>, Vec<StoredVersion>) {
+    flowsta_hc_lines::latest_versions(versions)
 }
 
 /// Encrypt a payload with the per-user data key. Returns (cipher, nonce);
@@ -279,35 +275,74 @@ pub(crate) async fn connect_sealed_app_ws(
 /// credential authorize, and the FIRST call to a freshly-installed cell
 /// compiles the WASM module, which can outrun a response timeout. A
 /// ModuleBuild failure (bad wasm) is permanent - no retry.
+/// A failed private-data call: its text (what callers return) and, when the
+/// call itself failed rather than the connect before it, its kind.
+#[derive(Debug)]
+struct SealedCallError {
+    text: String,
+    kind: Option<crate::hc::ZomeErrorKind>,
+}
+
+impl From<SealedCallError> for String {
+    fn from(e: SealedCallError) -> String {
+        e.text
+    }
+}
+
 async fn sealed_zome_call(
     state: &Arc<AppState>,
     line: Line,
     zome_fn: &str,
     input: Vec<u8>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, SealedCallError> {
+    use crate::hc::ZomeErrorKind as K;
+    // A failed call has a kind. A failed connect is the text of the admin
+    // calls behind it, whose kind the library reads from that text until the
+    // admin client's errors are typed too.
+    enum Failed {
+        Connect(String),
+        Call(crate::hc::ZomeCallError),
+    }
     let mut last_err = String::new();
+    let mut last_kind = None;
     for attempt in 1..=3u32 {
         let result = async {
-            let (client, role_name) = connect_sealed_client(state, line).await?;
-            client.call_zome(&role_name, "private_data", zome_fn, input.clone()).await
+            let (client, role_name) = connect_sealed_client(state, line).await.map_err(Failed::Connect)?;
+            client.call(&role_name, "private_data", zome_fn, input.clone()).await.map_err(Failed::Call)
         }
         .await;
         match result {
             Ok(r) => return Ok(r),
-            Err(e) => {
-                last_err = e;
+            Err(f) => {
+                let (unauthorized, transient) = match &f {
+                    // A wasm that did not compile is permanent; everything
+                    // else here usually passes on a retry.
+                    Failed::Call(e) => (
+                        e.kind == K::Unauthorized,
+                        matches!(e.kind, K::Unauthorized | K::CellNotRunning | K::Timeout | K::ChainHeadMoved | K::Internal),
+                    ),
+                    Failed::Connect(t) => {
+                        let kind = flowsta_hc_lines::kind_of_message(t);
+                        (
+                            kind == K::Unauthorized,
+                            t.contains(crate::commands::AUTH_CREDS)
+                                || matches!(kind, K::Unauthorized | K::CellNotRunning | K::Timeout | K::ChainHeadMoved | K::Internal),
+                        )
+                    }
+                };
+                last_kind = match &f {
+                    Failed::Call(e) => Some(e.kind),
+                    Failed::Connect(_) => None,
+                };
+                last_err = match f {
+                    Failed::Connect(t) => t,
+                    Failed::Call(e) => e.to_string(),
+                };
                 // Cached credentials can go stale if the chain was reset -
                 // drop them so the retry re-authorizes.
-                if last_err.contains("nauthorized") {
+                if unauthorized {
                     crate::commands::invalidate_cell_credentials(state);
                 }
-                let permanent = last_err.contains("ModuleBuild");
-                let transient = !permanent
-                    && ["auth creds", "CellDisabled", "response timeout",
-                        "channel dropped", "chain head has moved", "InternalError",
-                        "nauthorized"]
-                        .iter()
-                        .any(|m| last_err.contains(m));
                 log::warn!("{} attempt {}/3 failed: {}", zome_fn, attempt, last_err);
                 if !transient || attempt == 3 {
                     break;
@@ -316,7 +351,7 @@ async fn sealed_zome_call(
             }
         }
     }
-    Err(last_err)
+    Err(SealedCallError { text: last_err, kind: last_kind })
 }
 
 /// The private cell's app client on one line: the 0.6 one through
@@ -414,11 +449,15 @@ fn decode_listed(line: Line, bytes: &[u8]) -> Result<Vec<RecordView>, String> {
     }
     match line {
         Line::V06 => rmp_serde::from_slice::<Vec<Listed06>>(bytes)
-            .map(|l| l.iter().map(|x| crate::hc::view_06(&x.record)).collect())
-            .map_err(|e| format!("Records decode failed: {}", e)),
+            .map_err(|e| format!("Records decode failed: {}", e))?
+            .iter()
+            .map(|x| crate::hc::view_06(&x.record))
+            .collect(),
         Line::V07 => rmp_serde::from_slice::<Vec<Listed07>>(bytes)
-            .map(|l| l.iter().map(|x| crate::hc::view_07(&x.record)).collect())
-            .map_err(|e| format!("Records decode failed: {}", e)),
+            .map_err(|e| format!("Records decode failed: {}", e))?
+            .iter()
+            .map(|x| crate::hc::view_07(&x.record))
+            .collect(),
     }
 }
 
@@ -457,11 +496,21 @@ fn decode_listed_refs(
     match line {
         Line::V06 => {
             let l: Refs06 = rmp_serde::from_slice(bytes).map_err(|e| format!("Records decode failed: {}", e))?;
-            Ok((l.refs.into_iter().map(|r| (r.target, r.record.as_ref().map(crate::hc::view_06), r.left)).collect(), l.more))
+            let refs = l
+                .refs
+                .into_iter()
+                .map(|r| Ok((r.target, r.record.as_ref().map(crate::hc::view_06).transpose()?, r.left)))
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok((refs, l.more))
         }
         Line::V07 => {
             let l: Refs07 = rmp_serde::from_slice(bytes).map_err(|e| format!("Records decode failed: {}", e))?;
-            Ok((l.refs.into_iter().map(|r| (r.target, r.record.as_ref().map(crate::hc::view_07), r.left)).collect(), l.more))
+            let refs = l
+                .refs
+                .into_iter()
+                .map(|r| Ok((r.target, r.record.as_ref().map(crate::hc::view_07).transpose()?, r.left)))
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok((refs, l.more))
         }
     }
 }
@@ -479,8 +528,8 @@ struct ListRefsWire<'a> {
 
 /// The cell still runs the original coordinator (the hot-swap at start did
 /// not go through): the caller falls back to the functions it has.
-fn is_missing_function(err: &str) -> bool {
-    err.contains("zome function that doesn't exist")
+fn is_missing_function(err: &SealedCallError) -> bool {
+    err.kind == Some(crate::hc::ZomeErrorKind::MissingFunction)
 }
 
 /// The base every device of this identity links records from: the
@@ -577,19 +626,21 @@ pub(crate) static WRITE_WITHOUT_DEVICE: std::sync::atomic::AtomicBool = std::syn
 /// Seal one version and write it at the shared base of the identity's
 /// active line; `supersedes` retires that earlier version in the same call.
 ///
-/// While a moved identity's 0.6 line runs beside its 0.7 primary (a sibling
-/// still on 1.6.1), the same version is written to the 0.6 cell too, so
-/// that sibling holds it: a record written only on 0.7 had no second holder
-/// until the household updated, and a reset of this device lost it (the
-/// beta9 mixed leg). The mirror is best effort and idempotent - the carry
-/// (0.6 → 0.7, by logical id and version time) sees it as present.
+/// While a moved identity's 0.6 line runs beside its 0.7 primary for a
+/// sibling still on 1.6.1 (or a restored identity listening for one), the
+/// same version is written to the 0.6 cell too, so that sibling holds it: a
+/// record written only on 0.7 had no second holder until the household
+/// updated, and a reset of this device lost it (the beta9 mixed leg). The
+/// mirror is best effort and idempotent - the carry (0.6 → 0.7, by logical
+/// id and version time) sees it as present. When the 0.6 line runs with
+/// nobody on it (`move_07::mirror_to_06_now`), nothing is mirrored.
 pub(crate) async fn sealed_store_spec(
     state: &Arc<AppState>,
     spec: StoreSpec,
     supersedes: Option<holochain_types::prelude::ActionHash>,
 ) -> Result<String, String> {
     let active = crate::hc::active_line(state);
-    let mirror = (active == Line::V07 && crate::hc::line_ports(state, Line::V06).is_ok()).then(|| spec.clone());
+    let mirror = (active == Line::V07 && crate::move_07::mirror_to_06_now(state)).then(|| spec.clone());
     let stored = sealed_store_spec_on(state, active, spec, supersedes).await?;
     if let Some(spec) = mirror {
         if let Err(e) = mirror_to_06(state, spec).await {
@@ -698,7 +749,7 @@ pub(crate) async fn sealed_store_spec_as(
             };
             sealed_zome_call(state, line, fn_name, input.map_err(|e| e.to_string())?).await?
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
 
     forget_recent_versions();
@@ -901,6 +952,7 @@ static RECORDS_FROM_CELL: std::sync::atomic::AtomicUsize = std::sync::atomic::At
 const GETS_PER_CALL: u32 = 100;
 
 pub(crate) fn held_records_path(root: &std::path::Path, line: Line) -> std::path::PathBuf {
+    use crate::hc::LineFiles;
     root.join(format!("sealed-records{}.bin", line.file_suffix()))
 }
 
@@ -942,7 +994,9 @@ fn load_held_file(path: &std::path::Path, data_key: &[u8; 32]) -> Vec<RecordView
     match rmp_serde::from_slice::<Vec<holochain_types::prelude::Record>>(&plain) {
         Ok(records) => {
             log::info!("[records] kept records in the pre-1.7.0 shape: {} read", records.len());
-            records.iter().map(crate::hc::view_06).collect()
+            // A record whose action does not encode is left out and read
+            // again from the cell, never kept with an empty signature.
+            records.iter().filter_map(|r| crate::hc::view_06(r).ok()).collect()
         }
         Err(_) => Vec::new(),
     }
@@ -987,7 +1041,7 @@ async fn read_records(
         let (refs, more) = match sealed_zome_call(state, line, "list_sealed_at", input).await {
             Ok(result) => decode_listed_refs(line, &result)?,
             Err(e) if is_missing_function(&e) => return read_records_one_by_one(state, line, base).await,
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         };
         let mut held = held_slot(line).lock().unwrap();
         let held = held.as_mut().filter(|h| h.root == root).ok_or("identity changed during the read")?;
@@ -1117,7 +1171,7 @@ async fn read_records_one_by_one(
             .await?;
             crate::hc::records(line, &result).map_err(|e| format!("Records decode failed: {}", e))
         }
-        Err(e) => Err(e),
+        Err(e) => Err(e.into()),
     }
 }
 

@@ -7,8 +7,9 @@
 //! Version constants define what ships with this app build. The DNA updater
 //! can override these with newer versions downloaded from the API.
 
-use holochain_client::{AdminWebsocket, AllowedOrigins, AppStatusFilter, InstallAppPayload};
-use holochain_types::app::AppBundleSource;
+use holochain_client::{AdminWebsocket, AppStatusFilter};
+use flowsta_hc_lines::kit::{KitBinary, KitDescriptor, KitFile};
+use flowsta_hc_lines::{AdminClient, CoordinatorZome, InstallRequest, Line, ReadyWait, Recovery};
 use holochain_types::prelude::AgentPubKey;
 use std::path::Path;
 use crate::process_ext::SidecarChild;
@@ -36,32 +37,36 @@ const BUNDLED_PRIVATE_V2_1_HAPP_FILE: &str = "flowsta_private_v2_1_happ.happ";
 /// Bundle revision of the v2.1 cell (see `BUNDLED_PRIVATE_V2_REVISION`).
 pub const BUNDLED_PRIVATE_V2_1_REVISION: u32 = 1;
 
-/// Everything a Vault needs to run an identity's 0.6 line, described once:
-/// the two sidecars and the files they load. Bundled with every 1.7.x
-/// Vault; a later Vault that stops bundling the kit fetches these by name
-/// from the release assets and checks them against these hashes before
-/// starting anything (the marker's `line_06_needed` says whether to).
-pub struct Kit06 {
-    pub lair_binary: &'static str,
-    pub lair_version: &'static str,
-    pub conductor_binary: &'static str,
-    pub conductor_version: &'static str,
-    /// (file in `resources/`, sha256)
-    pub files: &'static [(&'static str, &'static str)],
-}
-
-pub const KIT_06: Kit06 = Kit06 {
-    lair_binary: "vault-lair-keystore",
-    lair_version: "0.6.3",
-    conductor_binary: "vault-holochain",
-    conductor_version: "0.6.1",
+/// What a Vault needs to run each line, described once (flowsta-hc-lines
+/// `kit`): the two sidecars and the files the line loads. The kit cache
+/// keeps a compressed copy of each in `<device root>/kits/` (`kits.rs`), so
+/// a later Vault that stops bundling 0.6 runs it from there, checked against
+/// the hashes that Vault compiles in. `accepted` stays empty while a release
+/// bundles the binaries: their post-signing hashes come out of this
+/// release's build and go into the next one.
+pub const KIT_06: KitDescriptor = KitDescriptor {
+    line: Line::V06,
+    conductor: KitBinary { sidecar: "vault-holochain", version: "0.6.1", accepted: &[] },
+    lair: KitBinary { sidecar: "vault-lair-keystore", version: "0.6.3", accepted: &[] },
     files: &[
-        ("flowsta_private_v1_11_happ.happ", "1f28c2e06ec91a7117b7ee2e26b9c93ca940220b4e9d6d696c0ab8712ca39c01"),
-        ("flowsta_private_v2_0_happ.happ", "1b969f6b96d9bd7bfcde4e1974d56b7a12708838693130358182ad86bcbe0668"),
-        ("flowsta_identity_v1_4_happ.happ", "09d3f3ea3a92c023fc5112734dc540bd7baeba8c069b0686afe3819b3b62fc64"),
-        ("flowsta_signing_v1_4_happ.happ", "163b94d071c57b48bb6436e125afb4948cbd4d9cc24ee7ab374b96d77341a0e3"),
-        ("signing_coordinator_v1_4.wasm", "6fbcc44d870ad0cc89fa260d9d49544cf580113dd7df04fc22cdd06268cfbb12"),
-        ("private_v2_coordinator.wasm", "125880705a57b14d241b5476e1c1642cfd12acba3857dc4ee15bc9b59cd801b5"),
+        KitFile { name: BUNDLED_PRIVATE_HAPP_FILE, sha256: "1f28c2e06ec91a7117b7ee2e26b9c93ca940220b4e9d6d696c0ab8712ca39c01" },
+        KitFile { name: BUNDLED_PRIVATE_V2_HAPP_FILE, sha256: "1b969f6b96d9bd7bfcde4e1974d56b7a12708838693130358182ad86bcbe0668" },
+        KitFile { name: BUNDLED_IDENTITY_HAPP_FILE, sha256: "09d3f3ea3a92c023fc5112734dc540bd7baeba8c069b0686afe3819b3b62fc64" },
+        KitFile { name: BUNDLED_SIGNING_HAPP_FILE, sha256: "163b94d071c57b48bb6436e125afb4948cbd4d9cc24ee7ab374b96d77341a0e3" },
+        KitFile { name: SIGNING_COORDINATOR_WASM, sha256: "6fbcc44d870ad0cc89fa260d9d49544cf580113dd7df04fc22cdd06268cfbb12" },
+        KitFile { name: PRIVATE_V2_COORDINATOR_WASM, sha256: "125880705a57b14d241b5476e1c1642cfd12acba3857dc4ee15bc9b59cd801b5" },
+    ],
+};
+
+pub const KIT_07: KitDescriptor = KitDescriptor {
+    line: Line::V07,
+    conductor: KitBinary { sidecar: "vault-holochain-07", version: "0.7.1", accepted: &[] },
+    lair: KitBinary { sidecar: "vault-lair-keystore-07", version: "0.7.1", accepted: &[] },
+    files: &[
+        KitFile { name: BUNDLED_IDENTITY_V1_5_HAPP_FILE, sha256: "abd9d2c6a7d54705fadfe4d4968b53381b821967d676d8e0a347ae5057f159fa" },
+        KitFile { name: BUNDLED_SIGNING_V1_5_HAPP_FILE, sha256: "0703e4dc066f7dee97abcae9e408bbd5dcd4e220ab03a1de58f1bd324abdf61a" },
+        KitFile { name: BUNDLED_PRIVATE_V2_1_HAPP_FILE, sha256: "7bf21c2449a2bc6c3770975607d2bed3df889cc2755703f76ebb666063386df8" },
+        KitFile { name: SIGNING_COORDINATOR_WASM_07, sha256: "d7e980a342d20cd987194c9cc3b0245beb2950a2f0ab302f54ffa04a692fb577" },
     ],
 };
 
@@ -170,62 +175,24 @@ pub async fn ensure_signing_coordinators(
     resource_dir: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> Result<(), String> {
-    use holochain_types::prelude::{
-        CoordinatorBundle, CoordinatorManifest, CoordinatorSource, UpdateCoordinatorsPayload,
-        ZomeDependency, ZomeManifest,
-    };
-
     // Remove the retired gate marker so nothing ever reads it as truth again.
     let _ = std::fs::remove_file(data_dir.join("signing-coordinator-rev"));
 
     let wasm = std::fs::read(resource_dir.join(SIGNING_COORDINATOR_WASM))
         .map_err(|e| format!("read {}: {}", SIGNING_COORDINATOR_WASM, e))?;
-
-    let admin_ws = AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("Admin WS: {}", e))?;
-
-    let apps = admin_ws
-        .list_apps(None)
+    let admin = AdminClient::connect(Line::V06, admin_port, &crate::conductor::node_origin())
         .await
-        .map_err(|e| format!("list_apps: {}", e))?;
+        .map_err(|e| format!("Admin WS: {}", e))?;
+    let apps = admin.list_apps().await.map_err(|e| format!("list_apps: {}", e))?;
     let signing_app_id = make_app_id("signing", BUNDLED_SIGNING_VERSION);
-    let Some(app) = apps.iter().find(|a| a.installed_app_id == signing_app_id) else {
+    let Some(app) = apps.iter().find(|a| a.app_id == signing_app_id) else {
         // No signing cell yet (nothing to swap) - the next start after the
         // install applies it.
         return Ok(());
     };
-    let cell_id = app
-        .cell_info
-        .values()
-        .flat_map(|cells| cells.iter())
-        .find_map(|c| match c {
-            holochain_client::CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-            _ => None,
-        })
-        .ok_or("No provisioned signing cell")?;
-
-    let zome = ZomeManifest {
-        name: "signing".into(),
-        hash: None,
-        path: "signing_coordinator.wasm".into(),
-        dependencies: Some(vec![ZomeDependency {
-            name: "signing_integrity".into(),
-        }]),
-    };
-    let resource_id = zome.resource_id();
-    let manifest = CoordinatorManifest { zomes: vec![zome] };
-    let bundle = mr_bundle::Bundle::new(manifest, [(resource_id, wasm.into())])
-        .map_err(|e| format!("coordinator bundle: {}", e))?;
-
-    admin_ws
-        .update_coordinators(UpdateCoordinatorsPayload {
-            cell_id,
-            source: CoordinatorSource::Bundle(Box::new(CoordinatorBundle::from(bundle))),
-        })
+    let cell = app.first_cell().ok_or("No provisioned signing cell")?;
+    admin
+        .update_coordinators(cell, CoordinatorZome { name: "signing", wasm })
         .await
         .map_err(|e| format!("update_coordinators: {}", e))?;
 
@@ -256,58 +223,20 @@ pub async fn ensure_private_v2_coordinators(
     admin_port: u16,
     resource_dir: &std::path::Path,
 ) -> Result<(), String> {
-    use holochain_types::prelude::{
-        CoordinatorBundle, CoordinatorManifest, CoordinatorSource, UpdateCoordinatorsPayload,
-        ZomeDependency, ZomeManifest,
-    };
-
     let wasm = std::fs::read(resource_dir.join(PRIVATE_V2_COORDINATOR_WASM))
         .map_err(|e| format!("read {}: {}", PRIVATE_V2_COORDINATOR_WASM, e))?;
-
-    let admin_ws = AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("Admin WS: {}", e))?;
-
-    let apps = admin_ws
-        .list_apps(None)
+    let admin = AdminClient::connect(Line::V06, admin_port, &crate::conductor::node_origin())
         .await
-        .map_err(|e| format!("list_apps: {}", e))?;
+        .map_err(|e| format!("Admin WS: {}", e))?;
+    let apps = admin.list_apps().await.map_err(|e| format!("list_apps: {}", e))?;
     let app_id = private_v2_app_id();
-    let Some(app) = apps.iter().find(|a| a.installed_app_id == app_id) else {
+    let Some(app) = apps.iter().find(|a| a.app_id == app_id) else {
         // No private v2 cell on this install (nothing to swap).
         return Ok(());
     };
-    let cell_id = app
-        .cell_info
-        .values()
-        .flat_map(|cells| cells.iter())
-        .find_map(|c| match c {
-            holochain_client::CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-            _ => None,
-        })
-        .ok_or("No provisioned private v2 cell")?;
-
-    let zome = ZomeManifest {
-        name: "private_data".into(),
-        hash: None,
-        path: "private_data_coordinator.wasm".into(),
-        dependencies: Some(vec![ZomeDependency {
-            name: "private_data_integrity".into(),
-        }]),
-    };
-    let resource_id = zome.resource_id();
-    let manifest = CoordinatorManifest { zomes: vec![zome] };
-    let bundle = mr_bundle::Bundle::new(manifest, [(resource_id, wasm.into())])
-        .map_err(|e| format!("coordinator bundle: {}", e))?;
-
-    admin_ws
-        .update_coordinators(UpdateCoordinatorsPayload {
-            cell_id,
-            source: CoordinatorSource::Bundle(Box::new(CoordinatorBundle::from(bundle))),
-        })
+    let cell = app.first_cell().ok_or("No provisioned private v2 cell")?;
+    admin
+        .update_coordinators(cell, CoordinatorZome { name: "private_data", wasm })
         .await
         .map_err(|e| format!("update_coordinators: {}", e))?;
 
@@ -324,15 +253,23 @@ mod kit_tests {
     use super::*;
 
     #[test]
-    fn the_0_6_kit_names_every_0_6_file_the_code_loads_and_their_hashes_match() {
+    fn each_kit_names_every_file_its_line_loads_and_their_hashes_match() {
         use sha2::{Digest, Sha256};
         let resources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
-        for name in [BUNDLED_PRIVATE_HAPP_FILE, BUNDLED_PRIVATE_V2_HAPP_FILE, BUNDLED_IDENTITY_HAPP_FILE, BUNDLED_SIGNING_HAPP_FILE, SIGNING_COORDINATOR_WASM, PRIVATE_V2_COORDINATOR_WASM] {
-            assert!(KIT_06.files.iter().any(|(f, _)| *f == name), "{} is loaded by the 0.6 line but not in KIT_06", name);
-        }
-        for (file, sha) in KIT_06.files {
-            let bytes = std::fs::read(resources.join(file)).unwrap_or_else(|e| panic!("{}: {}", file, e));
-            assert_eq!(hex::encode(Sha256::digest(&bytes)), *sha, "{} changed under the kit", file);
+        let loads_06 = [BUNDLED_PRIVATE_HAPP_FILE, BUNDLED_PRIVATE_V2_HAPP_FILE, BUNDLED_IDENTITY_HAPP_FILE, BUNDLED_SIGNING_HAPP_FILE, SIGNING_COORDINATOR_WASM, PRIVATE_V2_COORDINATOR_WASM];
+        let loads_07 = [BUNDLED_IDENTITY_V1_5_HAPP_FILE, BUNDLED_SIGNING_V1_5_HAPP_FILE, BUNDLED_PRIVATE_V2_1_HAPP_FILE, SIGNING_COORDINATOR_WASM_07];
+        for (kit, loads) in [(&KIT_06, &loads_06[..]), (&KIT_07, &loads_07[..])] {
+            for name in loads {
+                assert!(kit.files.iter().any(|f| f.name == *name), "{} is loaded by the {} line but not in its kit", name, kit.line);
+            }
+            for file in kit.files {
+                let bytes = std::fs::read(resources.join(file.name)).unwrap_or_else(|e| panic!("{}: {}", file.name, e));
+                assert_eq!(hex::encode(Sha256::digest(&bytes)), file.sha256, "{} changed under the {} kit", file.name, kit.line);
+            }
+            for bin in [kit.conductor, kit.lair] {
+                let dev = format!("{}-{}{}", bin.sidecar, flowsta_hc_lines::TARGET_TRIPLE, if cfg!(windows) { ".exe" } else { "" });
+                assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries").join(&dev).exists(), "{} is not a sidecar the Vault bundles", dev);
+            }
         }
     }
 }
@@ -380,240 +317,11 @@ mod coordinator_bundle_tests {
     }
 }
 
-/// Reconnect to the admin WebSocket. Used during recovery from a WS reset.
-async fn reconnect_admin(admin_port: u16) -> Result<AdminWebsocket, String> {
-    AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("admin WS reconnect failed: {}", e))
-}
-
-/// Install an app, surviving a WebSocket reset mid-call.
-///
-/// `install_app` for the identity hApp (~3.9 MB) on a clean conductor blocks
-/// long enough on first-time WASM compilation that the conductor's WS server
-/// resets the long-running admin request before responding (Windows error
-/// 10054 / `Websocket closed: ConnectionClosed`). The conductor itself
-/// stays alive and the WASM is cached server-side, so a retry on a fresh
-/// WebSocket completes quickly.
-///
-/// `make_payload` is called once per attempt because `InstallAppPayload`
-/// isn't `Clone` and we need a fresh value for each retry.
-async fn install_app_resilient<F>(
-    admin_ws: &mut AdminWebsocket,
-    admin_port: u16,
-    conductor_child: &mut SidecarChild,
-    app_id: &str,
-    mut make_payload: F,
-) -> Result<(), String>
-where
-    F: FnMut() -> InstallAppPayload,
-{
-    if admin_ws.install_app(make_payload()).await.is_ok() {
-        return Ok(());
-    }
-
-    log::warn!(
-        "[install] {} initial install_app failed - reconnecting and polling for status",
-        app_id,
-    );
-
-    let started = std::time::Instant::now();
-    // 30 s is plenty for a healthy conductor's slow WASM compile.
-    // If the conductor has actually died (its WS server stops accepting
-    // connections - Windows error 10061) burning more time here is futile;
-    // the outer `start_holochain` retry will restart the conductor entirely.
-    let deadline = started + std::time::Duration::from_secs(30);
-    let mut attempts: u32 = 0;
-
-    while std::time::Instant::now() < deadline {
-        attempts += 1;
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-        // Bail fast if the conductor process exited - no amount of WS
-        // reconnecting will recover from that. The outer start_holochain
-        // wrapper will spawn a fresh conductor that warm-starts against
-        // the on-disk state populated so far.
-        if let Ok(Some(status)) = conductor_child.try_wait() {
-            return Err(format!(
-                "install_app({}) bailing: conductor process exited (status {}) after {}ms",
-                app_id,
-                status,
-                started.elapsed().as_millis(),
-            ));
-        }
-
-        match reconnect_admin(admin_port).await {
-            Ok(ws) => *admin_ws = ws,
-            Err(e) => {
-                log::warn!("[install] {} reconnect attempt {} failed: {}", app_id, attempts, e);
-                continue;
-            }
-        }
-
-        // Did the install actually complete server-side despite the WS error?
-        match admin_ws.list_apps(None).await {
-            Ok(apps) if apps.iter().any(|a| a.installed_app_id == app_id) => {
-                log::info!(
-                    "[install] {} confirmed registered after {}ms ({} attempts)",
-                    app_id,
-                    started.elapsed().as_millis(),
-                    attempts,
-                );
-                return Ok(());
-            }
-            Ok(_) => {
-                // Not yet registered - try again on the fresh connection.
-                // The first attempt's WASM compile is cached server-side
-                // even when the response was lost, so this retry is fast.
-                match admin_ws.install_app(make_payload()).await {
-                    Ok(_) => {
-                        log::info!(
-                            "[install] {} retry succeeded after {}ms ({} attempts)",
-                            app_id,
-                            started.elapsed().as_millis(),
-                            attempts,
-                        );
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[install] {} retry attempt {} failed: {} - continuing to poll",
-                            app_id, attempts, e,
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!(
-                    "[install] {} list_apps attempt {} failed: {} - continuing to poll",
-                    app_id, attempts, e,
-                );
-            }
-        }
-    }
-
-    Err(format!(
-        "install_app({}) gave up after {}s ({} attempts)",
-        app_id,
-        started.elapsed().as_secs(),
-        attempts,
-    ))
-}
-
-/// Enable an app, surviving a WebSocket reset mid-call.
-///
-/// On a fresh install, the conductor's first `enable_app` of a sizeable hApp
-/// (identity DNA, ~3.9 MB) blocks long enough on WASM compilation that the
-/// conductor's WS server forcibly closes the long-running admin request
-/// (Windows error 10054 / `Websocket closed: ConnectionClosed`). The
-/// conductor process itself stays alive - only the WebSocket dies - and
-/// the work usually does complete server-side.
-///
-/// This helper:
-/// 1. Tries `enable_app` once on the existing connection.
-/// 2. On error, reconnects the admin WS, polls `list_apps(Enabled)` until
-///    the target app shows Enabled, and retries `enable_app` against the
-///    fresh connection on each iteration. Total budget 120 s.
-/// 3. Treats already-Enabled (after the first call) as success - the
-///    server-side enable completed even though the response was lost.
-///
-/// `admin_ws` is replaced with a fresh connection on recovery so subsequent
-/// calls in the install sequence don't try to use a dead socket.
-async fn enable_app_resilient(
-    admin_ws: &mut AdminWebsocket,
-    admin_port: u16,
-    conductor_child: &mut SidecarChild,
-    app_id: &str,
-) -> Result<(), String> {
-    if admin_ws.enable_app(app_id.to_string()).await.is_ok() {
-        return Ok(());
-    }
-
-    log::warn!(
-        "[enable] {} initial enable_app failed - reconnecting and polling for status",
-        app_id,
-    );
-
-    let started = std::time::Instant::now();
-    // 30 s is plenty for a healthy conductor's slow WASM compile.
-    // If the conductor has actually died (its WS server stops accepting
-    // connections - Windows error 10061) burning more time here is futile;
-    // the outer `start_holochain` retry will restart the conductor entirely.
-    let deadline = started + std::time::Duration::from_secs(30);
-    let mut attempts: u32 = 0;
-
-    while std::time::Instant::now() < deadline {
-        attempts += 1;
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-        // Bail fast if the conductor process exited - no amount of WS
-        // reconnecting will recover from that. The outer start_holochain
-        // wrapper will spawn a fresh conductor that warm-starts against
-        // the on-disk state populated so far.
-        if let Ok(Some(status)) = conductor_child.try_wait() {
-            return Err(format!(
-                "enable_app({}) bailing: conductor process exited (status {}) after {}ms",
-                app_id,
-                status,
-                started.elapsed().as_millis(),
-            ));
-        }
-
-        match reconnect_admin(admin_port).await {
-            Ok(ws) => *admin_ws = ws,
-            Err(e) => {
-                log::warn!("[enable] {} reconnect attempt {} failed: {}", app_id, attempts, e);
-                continue;
-            }
-        }
-
-        match admin_ws.list_apps(Some(AppStatusFilter::Enabled)).await {
-            Ok(enabled) if enabled.iter().any(|a| a.installed_app_id == app_id) => {
-                log::info!(
-                    "[enable] {} confirmed Enabled after {}ms ({} attempts)",
-                    app_id,
-                    started.elapsed().as_millis(),
-                    attempts,
-                );
-                return Ok(());
-            }
-            Ok(_) => {
-                match admin_ws.enable_app(app_id.to_string()).await {
-                    Ok(_) => {
-                        log::info!(
-                            "[enable] {} retry succeeded after {}ms ({} attempts)",
-                            app_id,
-                            started.elapsed().as_millis(),
-                            attempts,
-                        );
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[enable] {} retry attempt {} failed: {} - continuing to poll",
-                            app_id, attempts, e,
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!(
-                    "[enable] {} list_apps attempt {} failed: {} - continuing to poll",
-                    app_id, attempts, e,
-                );
-            }
-        }
-    }
-
-    Err(format!(
-        "enable_app({}) gave up after {}s ({} attempts)",
-        app_id,
-        started.elapsed().as_secs(),
-        attempts,
-    ))
+/// The 0.6 admin websocket behind `admin`, for the calls the library's
+/// client does not wrap (read again after each resilient call, which may
+/// have reconnected).
+fn ws06(admin: &AdminClient) -> &AdminWebsocket {
+    admin.as_v06().expect("a 0.6 admin client")
 }
 
 /// Install Flowsta DNAs into the conductor if not already present.
@@ -661,19 +369,17 @@ pub async fn install_dnas(
     };
 
     // 1. Connect to admin WebSocket.
-    //    Mutable: enable_app_resilient may swap in a fresh connection if
+    //    Mutable: the resilient install and enable may swap in a fresh connection if
     //    the conductor's WS server resets a long-running admin call.
-    let mut admin_ws = AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
+    let origin = crate::conductor::node_origin();
+    let mut admin = AdminClient::connect(Line::V06, admin_port, &origin)
+        .await
+        .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
 
     // 2. Check which apps are already installed and verify agent key matches.
     //    If an app was installed with a different key (e.g. from generate_agent_pub_key),
     //    uninstall it so it gets reinstalled with the correct deterministic key.
-    let existing_apps = admin_ws
+    let existing_apps = ws06(&admin)
         .list_apps(None)
         .await
         .map_err(|e| format!("Failed to list apps: {}", e))?;
@@ -699,7 +405,7 @@ pub async fn install_dnas(
                 private_installed = true;
             } else {
                 log::warn!("Private app installed with wrong agent key, reinstalling...");
-                admin_ws
+                ws06(&admin)
                     .uninstall_app(private_app_id.clone(), false)
                     .await
                     .map_err(|e| format!("Failed to uninstall private app: {}", e))?;
@@ -710,7 +416,7 @@ pub async fn install_dnas(
                 identity_installed = true;
             } else {
                 log::warn!("Identity app installed with wrong agent key, reinstalling...");
-                admin_ws
+                ws06(&admin)
                     .uninstall_app(identity_app_id.clone(), false)
                     .await
                     .map_err(|e| format!("Failed to uninstall identity app: {}", e))?;
@@ -721,7 +427,7 @@ pub async fn install_dnas(
                 signing_installed = true;
             } else {
                 log::warn!("Signing app installed with wrong agent key, reinstalling...");
-                admin_ws
+                ws06(&admin)
                     .uninstall_app(signing_app_id.clone(), false)
                     .await
                     .map_err(|e| format!("Failed to uninstall signing app: {}", e))?;
@@ -747,7 +453,7 @@ pub async fn install_dnas(
                 app.installed_app_id,
                 private_v2_app_id,
             );
-            admin_ws
+            ws06(&admin)
                 .uninstall_app(app.installed_app_id.clone(), false)
                 .await
                 .map_err(|e| format!("Failed to uninstall stale private v2 app: {}", e))?;
@@ -763,7 +469,7 @@ pub async fn install_dnas(
     //      retry but the cell would never get enabled - DNA verification
     //      then fails with `private=true, identity=false`.
     //
-    //      Uses enable_app_resilient so a long compile that resets the WS
+    //      Uses the resilient enable so a long compile that resets the WS
     //      again is also handled here.
     for app in &existing_apps {
         let is_target = app.installed_app_id == private_app_id
@@ -783,7 +489,7 @@ pub async fn install_dnas(
             app.installed_app_id,
             app.status,
         );
-        enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &app.installed_app_id)
+        admin.enable_resilient(&app.installed_app_id, Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child })
             .await
             .map_err(|e| format!("Failed to enable existing {}: {}", app.installed_app_id, e))?;
     }
@@ -815,19 +521,9 @@ pub async fn install_dnas(
             private_version, happ_size, happ_path,
         );
         let install_start = std::time::Instant::now();
-        install_app_resilient(
-            &mut admin_ws,
-            admin_port,
-            conductor_child,
-            &private_app_id,
-            || InstallAppPayload {
-                source: AppBundleSource::Path(happ_path.clone()),
-                agent_key: Some(agent_key.clone()),
-                installed_app_id: Some(private_app_id.clone()),
-                network_seed: None,
-                roles_settings: None,
-                ignore_genesis_failure: false,
-            },
+        admin.install_resilient(
+            &InstallRequest { app_id: &private_app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: None },
+            Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child },
         )
         .await
         .map_err(|e| format!("Failed to install private DNA: {}", e))?;
@@ -837,7 +533,7 @@ pub async fn install_dnas(
         );
 
         let enable_start = std::time::Instant::now();
-        enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &private_app_id)
+        admin.enable_resilient(&private_app_id, Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child })
             .await
             .map_err(|e| format!("Failed to enable private DNA: {}", e))?;
 
@@ -864,19 +560,9 @@ pub async fn install_dnas(
             identity_version, happ_size, happ_path,
         );
         let install_start = std::time::Instant::now();
-        install_app_resilient(
-            &mut admin_ws,
-            admin_port,
-            conductor_child,
-            &identity_app_id,
-            || InstallAppPayload {
-                source: AppBundleSource::Path(happ_path.clone()),
-                agent_key: Some(agent_key.clone()),
-                installed_app_id: Some(identity_app_id.clone()),
-                network_seed: None,
-                roles_settings: None,
-                ignore_genesis_failure: false,
-            },
+        admin.install_resilient(
+            &InstallRequest { app_id: &identity_app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: None },
+            Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child },
         )
         .await
         .map_err(|e| format!("Failed to install identity DNA: {}", e))?;
@@ -886,7 +572,7 @@ pub async fn install_dnas(
         );
 
         let enable_start = std::time::Instant::now();
-        enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &identity_app_id)
+        admin.enable_resilient(&identity_app_id, Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child })
             .await
             .map_err(|e| format!("Failed to enable identity DNA: {}", e))?;
 
@@ -914,20 +600,10 @@ pub async fn install_dnas(
                 signing_version, happ_size, happ_path,
             );
             let install_start = std::time::Instant::now();
-            install_app_resilient(
-                &mut admin_ws,
-                admin_port,
-                conductor_child,
-                &signing_app_id,
-                || InstallAppPayload {
-                    source: AppBundleSource::Path(happ_path.clone()),
-                    agent_key: Some(agent_key.clone()),
-                    installed_app_id: Some(signing_app_id.clone()),
-                    network_seed: None,
-                    roles_settings: None,
-                    ignore_genesis_failure: false,
-                },
-            )
+            admin.install_resilient(
+            &InstallRequest { app_id: &signing_app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: None },
+            Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child },
+        )
             .await
             .map_err(|e| format!("Failed to install signing DNA: {}", e))?;
             log::info!(
@@ -936,7 +612,7 @@ pub async fn install_dnas(
             );
 
             let enable_start = std::time::Instant::now();
-            enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &signing_app_id)
+            admin.enable_resilient(&signing_app_id, Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child })
                 .await
                 .map_err(|e| format!("Failed to enable signing DNA: {}", e))?;
 
@@ -950,7 +626,7 @@ pub async fn install_dnas(
     }
 
     // 6. Verify apps are enabled.
-    let enabled_apps = admin_ws
+    let enabled_apps = ws06(&admin)
         .list_apps(Some(AppStatusFilter::Enabled))
         .await
         .map_err(|e| format!("Failed to verify installed apps: {}", e))?;
@@ -1003,24 +679,14 @@ pub async fn install_dnas(
                 );
                 let install_start = std::time::Instant::now();
                 let seed_owned = seed.to_string();
-                install_app_resilient(
-                    &mut admin_ws,
-                    admin_port,
-                    conductor_child,
-                    &private_v2_app_id,
-                    || InstallAppPayload {
-                        source: AppBundleSource::Path(happ_path.clone()),
-                        agent_key: Some(agent_key.clone()),
-                        installed_app_id: Some(private_v2_app_id.clone()),
-                        network_seed: Some(seed_owned.clone()),
-                        roles_settings: None,
-                        ignore_genesis_failure: false,
-                    },
-                )
+                admin.install_resilient(
+            &InstallRequest { app_id: &private_v2_app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: Some(seed_owned.as_str()) },
+            Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child },
+        )
                 .await
                 .map_err(|e| format!("Failed to install private v2 DNA: {}", e))?;
 
-                enable_app_resilient(&mut admin_ws, admin_port, conductor_child, &private_v2_app_id)
+                admin.enable_resilient(&private_v2_app_id, Recovery { admin_port, origin: &origin, conductor: &mut *conductor_child })
                     .await
                     .map_err(|e| format!("Failed to enable private v2 DNA: {}", e))?;
                 log::info!(
@@ -1045,20 +711,12 @@ pub async fn install_dnas(
 /// Uses port 0 (auto-assign) and returns the OS-assigned port.
 /// Called once during conductor startup after DNA installation.
 pub async fn setup_app_interface(admin_port: u16) -> Result<u16, String> {
-    let admin_ws = AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
-
-    let app_port = admin_ws
-        .attach_app_interface(
-            0,
-            None,
-            AllowedOrigins::Origins([crate::conductor::node_origin()].into_iter().collect()),
-            None,
-        )
+    let origin = crate::conductor::node_origin();
+    let admin = AdminClient::connect(Line::V06, admin_port, &origin)
+        .await
+        .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
+    let app_port = admin
+        .attach_app_interface(&origin)
         .await
         .map_err(|e| format!("Failed to attach app interface: {}", e))?;
 
@@ -1082,7 +740,7 @@ pub async fn ensure_apps_enabled(
     admin_ws: &AdminWebsocket,
     state: &std::sync::Arc<crate::commands::AppState>,
 ) {
-    use holochain_client::{AuthorizeSigningCredentialsPayload, CellInfo};
+    use holochain_client::CellInfo;
 
     let apps = match admin_ws.list_apps(None).await {
         Ok(a) => a,
@@ -1133,44 +791,23 @@ pub async fn ensure_apps_enabled(
             // cells ready 3 s later - the next round then proceeded with
             // every signing-DNA auth_creds returning CellDisabled, blanking
             // the result and overwriting the cache with 0 sigs).
-            const MAX_ATTEMPTS: u32 = 15;
-            for attempt in 1..=MAX_ATTEMPTS {
-                match admin_ws.authorize_signing_credentials(AuthorizeSigningCredentialsPayload {
-                    cell_id: cell_id.clone(),
-                    functions: None,
-                }).await {
-                    Ok(creds) => {
-                        // The probe's grant becomes THE session grant for
-                        // this cell - store it so no caller re-authorizes.
-                        state.cell_credentials.lock().unwrap().insert(
-                            cell_id.clone(),
-                            crate::commands::CachedCellCredentials::from_signing(&creds),
-                        );
-                        if attempt > 1 {
-                            log::info!("ensure_apps_enabled: cells ready after {}s wait", (attempt - 1) * 3);
-                        } else {
-                            log::info!("ensure_apps_enabled: cells ready");
-                        }
-                        return;
-                    }
-                    Err(e) => {
-                        let err_str = format!("{}", e);
-                        if (err_str.contains("CellDisabled") || err_str.contains("CellNotRunning")) && attempt < MAX_ATTEMPTS {
-                            log::info!(
-                                "ensure_apps_enabled: cells not ready yet (attempt {}/{}), waiting 3s...",
-                                attempt, MAX_ATTEMPTS,
-                            );
-                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                            // Re-enable all apps before retrying
-                            for app in &apps {
-                                let _ = admin_ws.enable_app(app.installed_app_id.clone()).await;
-                            }
-                        } else {
-                            log::warn!("ensure_apps_enabled: cell readiness check failed: {}", e);
-                            return;
-                        }
+            let reenable: Vec<String> = apps.iter().map(|a| a.installed_app_id.clone()).collect();
+            let wait = ReadyWait { attempts: 15, gap: std::time::Duration::from_secs(3), reenable: &reenable, label: "ensure_apps_enabled:" };
+            match flowsta_hc_lines::admin::wait_cell_ready_06(admin_ws, &cell_id, &wait).await {
+                Ok((creds, attempt)) => {
+                    // The probe's grant becomes THE session grant for
+                    // this cell - store it so no caller re-authorizes.
+                    state.cell_credentials.lock().unwrap().insert(
+                        cell_id.clone(),
+                        crate::commands::CachedCellCredentials::from_signing(&creds),
+                    );
+                    if attempt > 1 {
+                        log::info!("ensure_apps_enabled: cells ready after {}s wait", (attempt - 1) * 3);
+                    } else {
+                        log::info!("ensure_apps_enabled: cells ready");
                     }
                 }
+                Err(e) => log::warn!("ensure_apps_enabled: cell readiness check failed: {}", e),
             }
         }
     }
@@ -1188,29 +825,21 @@ pub async fn install_dnas_07(
     agent_key_raw32: &[u8],
     private_v2_seed: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    use holochain_client_07::{AdminWebsocket, InstallAppPayload};
-    use holochain_types_07::app::AppBundleSource;
     use holochain_types_07::prelude::AgentPubKey;
 
-    let admin_ws = AdminWebsocket::connect(
-        format!("localhost:{}", admin_port),
-        Some(crate::conductor::node_origin()),
-    )
-    .await
-    .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
-    let existing = admin_ws
-        .list_apps(None)
+    let admin = AdminClient::connect(Line::V07, admin_port, &crate::conductor::node_origin())
         .await
-        .map_err(|e| format!("Failed to list apps (0.7): {}", e))?;
+        .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
+    let existing = admin.list_apps().await.map_err(|e| format!("Failed to list apps (0.7): {}", e))?;
     let agent_key = AgentPubKey::from_raw_32(agent_key_raw32.to_vec());
     let mut installed = Vec::new();
     for (app_id, file) in [
         (make_app_id("identity", BUNDLED_IDENTITY_VERSION_07), BUNDLED_IDENTITY_V1_5_HAPP_FILE),
         (make_app_id("signing", BUNDLED_SIGNING_VERSION_07), BUNDLED_SIGNING_V1_5_HAPP_FILE),
     ] {
-        if existing.iter().any(|a| a.installed_app_id == app_id) {
-            admin_ws
-                .enable_app(app_id.clone())
+        if existing.iter().any(|a| a.app_id == app_id) {
+            admin
+                .enable(&app_id)
                 .await
                 .map_err(|e| format!("Failed to re-enable {} (0.7): {}", app_id, e))?;
             log::info!("[0.7] {} present and enabled", app_id);
@@ -1222,21 +851,12 @@ pub async fn install_dnas_07(
             return Err(format!("{} not found at {:?}", file, happ_path));
         }
         log::info!("[0.7] installing {} from {:?}", app_id, happ_path);
-        let payload = InstallAppPayload {
-            source: AppBundleSource::Path(happ_path),
-            agent_key: Some(agent_key.clone()),
-            installed_app_id: Some(app_id.clone()),
-            network_seed: None,
-            roles_settings: None,
-            ignore_genesis_failure: false,
-            restore_from_dht: false,
-        };
-        admin_ws
-            .install_app(payload)
+        admin
+            .install(&InstallRequest { app_id: &app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: None })
             .await
             .map_err(|e| format!("Failed to install {} (0.7): {}", app_id, e))?;
-        admin_ws
-            .enable_app(app_id.clone())
+        admin
+            .enable(&app_id)
             .await
             .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
         log::info!("[0.7] {} installed and enabled", app_id);
@@ -1247,15 +867,15 @@ pub async fn install_dnas_07(
     // it from the 0.6 cell and compares counts before any write goes to it.
     if let Some(seed) = private_v2_seed {
         let app_id = private_v2_app_id_07();
-        if let Some(app) = existing.iter().find(|a| a.installed_app_id == app_id) {
-            if app.agent_pub_key != agent_key {
+        if let Some(app) = existing.iter().find(|a| a.app_id == app_id) {
+            if app.agent_key.as_slice() != agent_key.get_raw_39() {
                 return Err(format!(
                     "The 0.7 private data cell on this device belongs to a different conductor key ({}). Nothing was changed.",
-                    app.agent_pub_key
+                    AgentPubKey::from_raw_39(app.agent_key.clone())
                 ));
             }
-            admin_ws
-                .enable_app(app_id.clone())
+            admin
+                .enable(&app_id)
                 .await
                 .map_err(|e| format!("Failed to re-enable {} (0.7): {}", app_id, e))?;
             log::info!("[0.7] {} present and enabled", app_id);
@@ -1266,21 +886,12 @@ pub async fn install_dnas_07(
                 return Err(format!("{} not found at {:?}", BUNDLED_PRIVATE_V2_1_HAPP_FILE, happ_path));
             }
             log::info!("[0.7] installing {} from {:?} with the identity's network seed", app_id, happ_path);
-            let payload = InstallAppPayload {
-                source: AppBundleSource::Path(happ_path),
-                agent_key: Some(agent_key.clone()),
-                installed_app_id: Some(app_id.clone()),
-                network_seed: Some(seed.to_string()),
-                roles_settings: None,
-                ignore_genesis_failure: false,
-                restore_from_dht: false,
-            };
-            admin_ws
-                .install_app(payload)
+            admin
+                .install(&InstallRequest { app_id: &app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: Some(seed) })
                 .await
                 .map_err(|e| format!("Failed to install {} (0.7): {}", app_id, e))?;
-            admin_ws
-                .enable_app(app_id.clone())
+            admin
+                .enable(&app_id)
                 .await
                 .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
             log::info!("[0.7] {} installed and enabled", app_id);
@@ -1295,39 +906,19 @@ pub async fn install_dnas_07(
 /// bundle carries rev 1 and is never rebuilt; the admin call is cheap and
 /// idempotent, so it is applied unconditionally and never gated by a marker).
 pub async fn ensure_signing_coordinators_07(admin_port: u16, resource_dir: &Path) -> Result<(), String> {
-    use holochain_client_07::{AdminWebsocket, CellInfo};
-    use holochain_types_07::prelude::{CoordinatorBundle, CoordinatorManifest, CoordinatorSource, UpdateCoordinatorsPayload, ZomeDependency, ZomeManifest};
-
     let wasm = std::fs::read(resource_dir.join(SIGNING_COORDINATOR_WASM_07))
         .map_err(|e| format!("read {}: {}", SIGNING_COORDINATOR_WASM_07, e))?;
-    let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+    let admin = AdminClient::connect(Line::V07, admin_port, &crate::conductor::node_origin())
         .await
         .map_err(|e| format!("Admin WS (0.7): {}", e))?;
-    let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps (0.7): {}", e))?;
+    let apps = admin.list_apps().await.map_err(|e| format!("list_apps (0.7): {}", e))?;
     let signing_app_id = make_app_id("signing", BUNDLED_SIGNING_VERSION_07);
-    let Some(app) = apps.iter().find(|a| a.installed_app_id == signing_app_id) else {
+    let Some(app) = apps.iter().find(|a| a.app_id == signing_app_id) else {
         return Ok(());
     };
-    let cell_id = app
-        .cell_info
-        .values()
-        .flat_map(|cells| cells.iter())
-        .find_map(|c| match c {
-            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-            _ => None,
-        })
-        .ok_or("No provisioned signing cell (0.7)")?;
-    let zome = ZomeManifest {
-        name: "signing".into(),
-        hash: None,
-        path: "signing_coordinator.wasm".into(),
-        dependencies: Some(vec![ZomeDependency { name: "signing_integrity".into() }]),
-    };
-    let resource_id = zome.resource_id();
-    let manifest = CoordinatorManifest { zomes: vec![zome] };
-    let bundle = mr_bundle_07::Bundle::new(manifest, [(resource_id, wasm.into())]).map_err(|e| format!("coordinator bundle (0.7): {}", e))?;
-    admin_ws
-        .update_coordinators(UpdateCoordinatorsPayload { cell_id, source: CoordinatorSource::Bundle(Box::new(CoordinatorBundle::from(bundle))) })
+    let cell = app.first_cell().ok_or("No provisioned signing cell (0.7)")?;
+    admin
+        .update_coordinators(cell, CoordinatorZome { name: "signing", wasm })
         .await
         .map_err(|e| format!("update_coordinators (0.7): {}", e))?;
     log::info!("[0.7] signing coordinator ensured at rev {} on {}", SIGNING_COORDINATOR_REV_07, signing_app_id);
@@ -1337,17 +928,12 @@ pub async fn ensure_signing_coordinators_07(admin_port: u16, resource_dir: &Path
 /// Attach the 0.7 conductor's app interface (the twin of
 /// `setup_app_interface`): a free port, this start's origin only.
 pub async fn setup_app_interface_07(admin_port: u16) -> Result<u16, String> {
-    use holochain_client_07::{AdminWebsocket, AllowedOrigins};
-    let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+    let origin = crate::conductor::node_origin();
+    let admin = AdminClient::connect(Line::V07, admin_port, &origin)
         .await
         .map_err(|e| format!("Failed to connect to the 0.7 admin WebSocket: {}", e))?;
-    let app_port = admin_ws
-        .attach_app_interface(
-            0,
-            None,
-            AllowedOrigins::Origins([crate::conductor::node_origin()].into_iter().collect()),
-            None,
-        )
+    let app_port = admin
+        .attach_app_interface(&origin)
         .await
         .map_err(|e| format!("Failed to attach the 0.7 app interface: {}", e))?;
     log::info!("[0.7] app interface attached on port {}", app_port);
@@ -1362,7 +948,7 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<u16, String> {
 /// skipped on both boxes. One cap grant on the signing cell, retried every
 /// 3 s for up to 45 s, cached so no caller authorizes again this session.
 pub async fn ensure_cells_ready_07(admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>) {
-    use holochain_client_07::{AdminWebsocket, AuthorizeSigningCredentialsPayload, CellInfo};
+    use holochain_client_07::{AdminWebsocket, CellInfo};
     let admin_ws = match AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin())).await {
         Ok(a) => a,
         Err(e) => {
@@ -1396,35 +982,20 @@ pub async fn ensure_cells_ready_07(admin_port: u16, state: &std::sync::Arc<crate
     if state.cell_credentials_07.lock().unwrap().contains_key(&cell_id) {
         return;
     }
-    const MAX_ATTEMPTS: u32 = 15;
-    for attempt in 1..=MAX_ATTEMPTS {
-        match admin_ws
-            .authorize_signing_credentials(AuthorizeSigningCredentialsPayload { cell_id: cell_id.clone(), functions: None })
-            .await
-        {
-            Ok(creds) => {
-                state
-                    .cell_credentials_07
-                    .lock()
-                    .unwrap()
-                    .insert(cell_id.clone(), crate::commands::CachedCellCredentials07::from_signing(&creds));
-                if attempt > 1 {
-                    log::info!("[0.7] cells ready after {} s", (attempt - 1) * 3);
-                } else {
-                    log::info!("[0.7] cells ready");
-                }
-                return;
-            }
-            Err(e) => {
-                let text = format!("{}", e);
-                if (text.contains("CellNotRunning") || text.contains("CellDisabled")) && attempt < MAX_ATTEMPTS {
-                    log::info!("[0.7] cells not ready yet (attempt {}/{}), waiting 3 s", attempt, MAX_ATTEMPTS);
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                } else {
-                    log::warn!("[0.7] cell readiness check failed: {}", e);
-                    return;
-                }
+    let wait = ReadyWait { attempts: 15, gap: std::time::Duration::from_secs(3), reenable: &[], label: "[0.7]" };
+    match flowsta_hc_lines::admin::wait_cell_ready_07(&admin_ws, &cell_id, &wait).await {
+        Ok((creds, attempt)) => {
+            state
+                .cell_credentials_07
+                .lock()
+                .unwrap()
+                .insert(cell_id.clone(), crate::commands::CachedCellCredentials07::from_signing(&creds));
+            if attempt > 1 {
+                log::info!("[0.7] cells ready after {} s", (attempt - 1) * 3);
+            } else {
+                log::info!("[0.7] cells ready");
             }
         }
+        Err(e) => log::warn!("[0.7] cell readiness check failed: {}", e),
     }
 }

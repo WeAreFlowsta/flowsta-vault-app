@@ -32,8 +32,8 @@
  *       scripts/matrix-bulk-move.sh
  *   node scripts/bridge-matrix.mjs --phase=webera    # 1.7.0: a migrated identity restored on a FRESH instance,
  *       its web-era signatures and amendments counted from the 0.7 read alone (phrase file, see webEraLeg)
- *   node scripts/bridge-matrix.mjs --phase=move-before|move-after|move-retired
- *       1.7.0: the move through the app - driven by scripts/matrix-move.sh (1.6.1 build, then 1.7.0 twice)
+ *   node scripts/bridge-matrix.mjs --phase=move-before|move-after|move-retired|move-update
+ *       1.7.0: the move through the app - driven by scripts/matrix-move.sh (1.6.1 build, then this build three times)
  *   node scripts/bridge-matrix.mjs                   # all legs
  *
  * Env:
@@ -1954,13 +1954,27 @@ async function webEraLeg() {
   } else {
     record(`Overview counts noted (set VAULT_MATRIX_WEBERA_EXPECT="${counts.current},${counts.amendments}" to pin them)`, true, JSON.stringify(counts));
   }
+  // The listen window (matrix-webera.sh gives the app a short one): restored,
+  // the only device, nobody heard - once the window closes and a pass has
+  // carried everything, the devices round stops the 0.6 line.
+  if (process.env.VAULT_TEST_ALONE_WINDOW) {
+    const t1 = Date.now();
+    let linesNow = await linesOf(port);
+    while (Date.now() - t1 < 420_000 && linesNow['holochain-0.6'] !== 'off') { await new Promise((r) => setTimeout(r, 5000)); linesNow = await linesOf(port); }
+    record(`alone window (${process.env.VAULT_TEST_ALONE_WINDOW} s,rounds): the 0.6 line stops in-session once it closes (nobody heard)`, linesNow['holochain-0.6'] === 'off' && linesNow['holochain-0.7'] === 'serving', `${Math.round((Date.now() - t1) / 1000)} s; ${JSON.stringify(linesNow)}`);
+    const m = (await devOf(port)).move?.marker || {};
+    record('alone window: the marker says restored, no 0.6 line needed', m.restored === true && m.line_06_needed === false, JSON.stringify(m));
+  }
 }
 
 /** The move, through the app: `move-before` runs on a 1.6.1 (0.6-only) instance -
  *  create, sign, amend - and writes VAULT_MATRIX_MOVE_STATE; `move-after` runs on
  *  the SAME data folder opened by 1.7.0 - unlock, both lines, the move, the
  *  carried records and the fold; `move-retired` on the next launch - 0.6 gone,
- *  the list unchanged. scripts/matrix-move.sh drives the three launches. */
+ *  the list unchanged; `move-update` with the marker put back in 1.7.0's shape
+ *  - the 0.6 line starts once and stops in-session after a complete pass (the
+ *  session's primary is 0.7; the move's own session keeps 0.6 as its primary).
+ *  scripts/matrix-move.sh drives the four launches. */
 async function moveLeg(stage) {
   console.log(`\n── Move leg (${stage})`);
   const port = Number(process.env.VAULT_MATRIX_PORT || 0);
@@ -2039,6 +2053,27 @@ async function moveLeg(stage) {
     let sigs = []; for (let i = 0; i < 40; i++) { sigs = await sigsOn(); if (sigs.length === 2) break; await sleep(3000); }
     const counts = foldCounts(sigs);
     record('move-retired: the same two carried records, 1 signature + 1 amendment, from the 0.7 read alone', sigs.length === 2 && counts.current === 1 && counts.amendments === 1 && (saved.carried || []).every((h) => sigs.some((x) => x.action_hash === h)), JSON.stringify(counts));
+    return;
+  }
+  if (stage === 'move-update') {
+    // A marker in 1.7.0's shape (matrix-move.sh rewrote it): nothing says a
+    // pass carried everything, so the 0.6 line starts once beside the 0.7
+    // primary, and the devices round after a complete pass stops it.
+    const t1 = Date.now();
+    let linesNow = await linesOf(port);
+    let sawServing = linesNow['holochain-0.6'] === 'serving';
+    while (Date.now() - t1 < 360_000 && !(sawServing && linesNow['holochain-0.6'] === 'off')) {
+      await sleep(5000);
+      linesNow = await linesOf(port);
+      sawServing ||= linesNow['holochain-0.6'] === 'serving';
+    }
+    record('move-update: the 0.6 line starts once for a 1.7.0 marker (nothing recorded as carried)', sawServing, JSON.stringify(linesNow));
+    record('move-update: the 0.6 line stops in-session once a pass has carried everything (no device on it)', sawServing && linesNow['holochain-0.6'] === 'off' && linesNow['holochain-0.7'] === 'serving', `${Math.round((Date.now() - t1) / 1000)} s; ${JSON.stringify(linesNow)}`);
+    const dev = await devOf(port);
+    record('move-update: marker says no 0.6 line needed', dev.move?.moved === true && dev.move?.marker?.line_06_needed === false, JSON.stringify(dev.move?.marker || null));
+    let sigs = []; for (let i = 0; i < 40; i++) { sigs = await sigsOn(); if (sigs.length === 2) break; await sleep(3000); }
+    const counts = foldCounts(sigs);
+    record('move-update: the same two carried records, 1 signature + 1 amendment, on 0.7 alone', sigs.length === 2 && counts.current === 1 && counts.amendments === 1 && (saved.carried || []).every((h) => sigs.some((x) => x.action_hash === h)), JSON.stringify(counts));
     return;
   }
   record(`unknown move stage ${stage}`, false);

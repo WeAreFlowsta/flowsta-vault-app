@@ -322,16 +322,7 @@ pub fn decrypt_vault(encrypted: &EncryptedVault, password: &str) -> Result<Vault
 /// Vault reads back at launch goes through here - a truncated vault.enc or
 /// linked-apps.json is a lost identity or a lost consent list.
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut tmp_name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    tmp_name.push(".tmp");
-    let tmp = path.with_file_name(tmp_name);
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)
+    flowsta_hc_lines::files::write_atomic(path, bytes)
 }
 
 /// Move a file that failed to parse aside as `<name>.corrupt-<ts>` so the

@@ -890,6 +890,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aebf35691d1bfb0ac386a69bac2fde4dd276fb618cf8bf4f5318fe285e821bb2"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -1962,11 +1964,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "flowsta-hc-lines"
+version = "0.1.0"
+source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=8ebd27b261f63caf2a62cec9ae42b758d6b8066d#8ebd27b261f63caf2a62cec9ae42b758d6b8066d"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "hex",
+ "holochain_client 0.8.1",
+ "holochain_client 0.9.1",
+ "holochain_conductor_api 0.6.1",
+ "holochain_conductor_api 0.7.1",
+ "holochain_types 0.6.1",
+ "holochain_types 0.7.1",
+ "lair_keystore_api 0.6.3",
+ "lair_keystore_api 0.7.1",
+ "libc",
+ "log",
+ "mr_bundle 0.6.1",
+ "mr_bundle 0.7.1",
+ "percent-encoding",
+ "reqwest 0.12.28",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2",
+ "sysinfo 0.33.1",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+ "windows-sys 0.59.0",
+ "zstd",
+]
+
+[[package]]
 name = "flowsta-vault"
 version = "1.7.0"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "async-trait",
  "axum 0.7.9",
  "base64 0.22.1",
  "bip39",
@@ -1974,6 +2013,7 @@ dependencies = [
  "bs58",
  "ed25519-dalek",
  "flate2",
+ "flowsta-hc-lines",
  "futures",
  "hex",
  "hmac",
@@ -3939,6 +3979,16 @@ name = "jni-sys"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eaf4bc02d17cbdd7ff4c7438cafcdf7fb9a4613313ad11b4f8fefe7d3fa0130"
+
+[[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.1",
+ "libc",
+]
 
 [[package]]
 name = "js-sys"
@@ -10080,6 +10130,34 @@ dependencies = [
  "crc32fast",
  "log",
  "simd-adler32",
+]
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]

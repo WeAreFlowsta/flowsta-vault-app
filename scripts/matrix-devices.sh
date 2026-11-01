@@ -9,6 +9,10 @@
 set -u
 cd "$(dirname "$0")/.."
 LOGS="${1:-/tmp/vault-matrix-$$}"; mkdir -p "$LOGS"; set -- "$LOGS"
+# The test conductors log their network side (arc changes, peer discovery,
+# publish targets), so a slow or failed run keeps its evidence. A RUST_LOG
+# already set wins.
+export RUST_LOG="${RUST_LOG:-warn,kitsune2=info,kitsune2_gossip=info,kitsune2_core=info,kitsune2_dht=info,holochain_p2p=info}"
 echo "== build $(date -u +%H:%M:%S)"
 [ -n "${SKIP_BUILD:-}" ] || scripts/build-test-binary.sh > "$1/matrix-build.log" 2>&1 || { echo "BUILD FAILED"; tail -20 "$1/matrix-build.log"; exit 1; }
 rm -rf "$HOME/.local/share/flowsta-vault-md-c" "$HOME/.local/share/flowsta-vault-md-d"
@@ -26,6 +30,12 @@ VAULT_MATRIX_MIXED="${LEGACY_A_BIN:+1}" VAULT_MATRIX_PORT=$A VAULT_MATRIX_RESTOR
 rc=$?
 echo "== leg rc=$rc $(date -u +%H:%M:%S)"
 grep -E 'RESULT|✗' "$1/matrix-devices.log" | head -20
+# Mixed household: B (0.7 primary) keeps a 0.6 line for A on 1.6.1. Kill
+# that 0.6 conductor: let go, then attached again the next round.
+if [ -n "${LEGACY_A_BIN:-}" ]; then
+  echo "== kill B's 0.6 conductor $(date -u +%H:%M:%S)"
+  scripts/matrix-kill-07.sh "$B" md-d 06 > "$1/kill-06.log" 2>&1; krc=$?; cat "$1/kill-06.log"; [ $krc -eq 0 ] || rc=1
+fi
 # Test instances: the 1.7.0 build under target/debug and, on a mixed run, the
 # 1.6.1 build in LEGACY_A_BIN - plus the conductors and key stores they left.
 killtests() {
@@ -34,4 +44,14 @@ killtests() {
   for pid in $(pgrep -f "flowsta-vault-md-[cd]/"); do [ "$pid" != "$$" ] && kill -9 $pid 2>/dev/null; done
 }
 killtests; sleep 3; killtests
+# Keep both instances' logs with the run: the next run starts by deleting
+# the instance folders.
+for s in md-c md-d; do
+  d="$HOME/.local/share/flowsta-vault-$s"; mkdir -p "$1/$s"
+  cp "$d/xdg/com.flowsta.vault/logs/Flowsta Vault.log" "$1/$s/app.log" 2>/dev/null
+  for f in "$d"/identities/*/conductor*/holochain-stderr.log; do
+    [ -f "$f" ] && cp "$f" "$1/$s/$(basename "$(dirname "$f")")-holochain-stderr.log"
+  done
+done
+echo "== logs kept in $1 (md-c, md-d)"
 exit $rc

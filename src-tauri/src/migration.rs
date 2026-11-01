@@ -759,9 +759,7 @@ async fn restart_conductor_for_upgrade(
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
-    if let Some(handle) = state.conductor_handle.lock().unwrap().take() {
-        handle.shutdown();
-    }
+    crate::conductor::stop_all_lines();
     crate::commands::ensure_conductor_alive(state, app_handle).await
 }
 

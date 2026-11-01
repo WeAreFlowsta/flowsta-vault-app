@@ -77,7 +77,7 @@ pub fn relocate_if_legacy(state: &AppState, agent_pub_key: &str) -> Outcome {
     if current_root != device_root {
         return Outcome::AlreadyPartitioned;
     }
-    if state.conductor_handle.lock().unwrap().is_some() {
+    if crate::conductor::supervisor().session().is_some() {
         return stay("conductor is running");
     }
     let Some(pk) = paths::partition_key(agent_pub_key) else {

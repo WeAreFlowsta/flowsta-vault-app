@@ -63,7 +63,7 @@ pub(crate) async fn publish_enrollment_key(state: &Arc<AppState>, identity_seed:
     struct EnrollmentKeyEntry {
         enrollment_key: Vec<u8>,
     }
-    let listed = tokio::time::timeout(WAIT, client.call_zome(&role, "devices", "get_enrollment_keys", rmp_serde::to_vec_named(&identity).map_err(|e| e.to_string())?)).await;
+    let listed = tokio::time::timeout(WAIT, client.call(&role, "devices", "get_enrollment_keys", rmp_serde::to_vec_named(&identity).map_err(|e| e.to_string())?)).await;
     if let Ok(Ok(bytes)) = listed {
         let known = crate::hc::records(Line::V07, &bytes)?
             .iter()
@@ -90,7 +90,7 @@ pub(crate) async fn publish_enrollment_key(state: &Arc<AppState>, identity_seed:
         previous: None,
         identity_signature: sign_with_device_seed(identity_seed, statement.as_bytes()).to_vec(),
     };
-    client.call_zome(&role, "devices", "register_enrollment_key", rmp_serde::to_vec_named(&input).map_err(|e| e.to_string())?).await?;
+    client.call(&role, "devices", "register_enrollment_key", rmp_serde::to_vec_named(&input).map_err(|e| e.to_string())?).await?;
     let _ = std::fs::write(&marker, b"");
     log::info!("[identity 1.5] this identity's enrollment key is published");
     Ok(true)
@@ -119,7 +119,7 @@ pub(crate) async fn publish_removal(state: &Arc<AppState>, identity_seed: &[u8; 
         signature: sign_with_device_seed(identity_seed, statement.as_bytes()).to_vec(),
     };
     let (client, role) = identity_client(state).await?;
-    client.call_zome(&role, "devices", "remove_device", rmp_serde::to_vec_named(&input).map_err(|e| e.to_string())?).await?;
+    client.call(&role, "devices", "remove_device", rmp_serde::to_vec_named(&input).map_err(|e| e.to_string())?).await?;
     log::info!("[identity 1.5] a device removal is published");
     Ok(())
 }
@@ -129,7 +129,7 @@ pub(crate) async fn publish_removal(state: &Arc<AppState>, identity_seed: &[u8; 
 pub(crate) async fn removed_on_07(state: &Arc<AppState>, device_key_32: &[u8; 32]) -> Option<bool> {
     let (client, role) = identity_client(state).await.ok()?;
     let payload = rmp_serde::to_vec_named(&device_key_32.to_vec()).ok()?;
-    let bytes = tokio::time::timeout(WAIT, client.call_zome(&role, "devices", "get_removal_for_device", payload)).await.ok()?.ok()?;
+    let bytes = tokio::time::timeout(WAIT, client.call(&role, "devices", "get_removal_for_device", payload)).await.ok()?.ok()?;
     crate::hc::record_opt(Line::V07, &bytes).ok().map(|r| r.is_some())
 }
 

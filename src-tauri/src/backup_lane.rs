@@ -249,7 +249,7 @@ impl Lane {
 
     async fn call_on(&self, line: Line, function: &str, payload: Vec<u8>) -> Result<Vec<u8>, String> {
         let end = self.end(line);
-        end.client.call_zome(&end.role, "private_data", function, payload).await
+        Ok(end.client.call(&end.role, "private_data", function, payload).await?)
     }
 
     /// Whether every conductor this lane is open on still answers.
