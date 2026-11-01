@@ -237,7 +237,9 @@ pub(crate) fn siblings_of<'a>(devices: impl IntoIterator<Item = &'a crate::devic
 /// The facts flowsta-hc-lines decides the 0.6 line from. A marker the
 /// library reads but this version cannot (no Vault fields) counts as
 /// unreadable, so the 0.6 line stays wanted, as before; the web-era carry
-/// is the one kind that can be owed.
+/// is the one kind that can be owed. The 0.6 line holds data when its
+/// conductor folder is there (a restored identity that never attached it
+/// has none, so it has nothing to carry).
 pub(crate) fn line_facts(root: &Path, own_install_id: Option<&str>, siblings: flowsta_hc_lines::policy::Siblings) -> flowsta_hc_lines::policy::Facts {
     use flowsta_hc_lines::marker::{Marker as LineMarker, MarkerRead};
     let typed = marker(root);
@@ -251,7 +253,7 @@ pub(crate) fn line_facts(root: &Path, own_install_id: Option<&str>, siblings: fl
     };
     flowsta_hc_lines::policy::Facts {
         marker: read,
-        old_line_data_present: true,
+        old_line_data_present: crate::paths::conductor_dir(root).exists(),
         own_device_id: own_install_id.map(str::to_string),
         siblings,
         owed,
@@ -401,6 +403,7 @@ async fn pass(state: &Arc<AppState>, root: &Path, reason: &str) -> lines_pass::P
     outcome
 }
 
+#[async_trait::async_trait]
 impl PassApp for AppState {
     fn line_up(&self, line: Line) -> bool {
         crate::hc::line_ports(self, line).is_ok()
@@ -408,28 +411,41 @@ impl PassApp for AppState {
     fn blocked(&self) -> Option<String> {
         self.vault_config.lock().unwrap().is_none().then(|| "the Vault is locked".to_string())
     }
+    /// The other devices from the device records this device holds. An
+    /// identity without a private cell has none (device records live there).
+    async fn siblings(state: &Arc<AppState>, _root: &Path) -> Option<flowsta_hc_lines::policy::Siblings> {
+        if !has_private_cell(state) {
+            return Some(flowsta_hc_lines::policy::Siblings::Heard(Vec::new()));
+        }
+        let me = crate::paths::install_id(&state.data_dir).unwrap_or_default();
+        let records = crate::sealed::sealed_list_inner(state).await.ok()?;
+        Some(flowsta_hc_lines::policy::Siblings::Heard(siblings_of(&crate::devices::devices_in(&records), Some(&me))))
+    }
 }
 
-/// The private records move as one unit. The private step needs a private
-/// cell on both lines, which exists only for a device-hosted identity that
-/// holds its private-network seed and data key. An identity from before
-/// 1.6.0 whose owner never re-entered the phrase has neither, on either
-/// line, and a custodial-linked vault's records cross with the account:
-/// nothing private to move; the signatures still are.
+/// A private cell on both lines exists only for a device-hosted identity
+/// that holds its private-network seed and data key.
+fn has_private_cell(state: &AppState) -> bool {
+    state
+        .vault_config
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.hosting_model.as_deref() == Some("device-hosted") && c.private_network_seed.is_some() && c.data_key.is_some())
+        .unwrap_or(false)
+}
+
+/// The private records move as one unit, when the identity has a private
+/// cell (`has_private_cell`). An identity from before 1.6.0 whose owner
+/// never re-entered the phrase has none, on either line, and a
+/// custodial-linked vault's records cross with the account: nothing private
+/// to move; the signatures still are.
 struct PrivateUnit;
 
 #[async_trait::async_trait]
 impl CopyUnits<AppState> for PrivateUnit {
     async fn units(&self, cx: &PassCx<'_, AppState>) -> Result<Vec<CopyUnit>, HookError> {
-        let has_private_cell = cx
-            .app
-            .vault_config
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|c| c.hosting_model.as_deref() == Some("device-hosted") && c.private_network_seed.is_some() && c.data_key.is_some())
-            .unwrap_or(false);
-        Ok(if has_private_cell { vec![CopyUnit { id: "private".into() }] } else { vec![] })
+        Ok(if has_private_cell(cx.app) { vec![CopyUnit { id: "private".into() }] } else { vec![] })
     }
 }
 
@@ -1081,8 +1097,6 @@ mod tests {
         let out = run_pass(state, "test").await;
         println!("first pass in {:?}: {:#?}", started.elapsed(), out);
         assert_eq!(out.error, None);
-        assert_eq!((out.web_era_06, out.web_era_carried), (2, 2), "the web key's two records carried by this device");
-        assert!(out.web_era_complete);
         assert_eq!(out.private_06, 43);
         assert_eq!(out.private_written, 43);
         assert!(out.private_complete);
@@ -1093,6 +1107,19 @@ mod tests {
         assert!(out.signing_complete);
         assert!(out.flipped);
         assert!(moved(&root));
+        // The web key's records are a network read on 0.6: a cold
+        // conductor's first ones can take minutes, and the web era does not
+        // hold up the flip. The devices round passes again each minute; so
+        // does this.
+        let mut web = out.clone();
+        let web_started = std::time::Instant::now();
+        while !web.web_era_complete {
+            assert!(web_started.elapsed().as_secs() < 300, "the web key's records were not carried within 300 s: {:?}", web);
+            println!("  the web-era carry not done yet ({} of {}), passing again", web.web_era_carried, web.web_era_06);
+            web = run_pass(state, "devices round").await;
+            assert_eq!(web.error, None);
+        }
+        assert_eq!((web.web_era_06, web.web_era_carried), (2, 2), "the web key's two records carried by this device");
         let m = marker(&root).unwrap();
         assert_eq!((m.private_records, m.signatures, m.revocations, m.thumbnails), (43, 3, 1, 1));
         assert!(m.web_era_carried && m.web_era_signatures == 2, "the marker records the web-era carry");
@@ -1191,6 +1218,23 @@ mod tests {
         let (c06b, r06b) = crate::signing_07::signing_client(state, Line::V06).await.unwrap();
         assert_eq!(crate::signing_07::own_records_06(&c06b, &r06b).await.unwrap().len(), 3, "nothing new on the 0.6 signing cell");
 
+        // ── Nothing left to carry: the passes since the flip were complete
+        // with no other device on 0.6, so the marker says so ──
+        let carried_all = || match flowsta_hc_lines::marker::Marker::load(&root, &MARKER_SPEC) {
+            flowsta_hc_lines::marker::MarkerRead::Present(m) => m.carried_all_ms,
+            _ => None,
+        };
+        assert!(carried_all().is_some(), "recorded by a complete pass");
+        // As a 1.7.0 marker reads (no such field), with the 0.6 line's data
+        // on disk: the 0.6 line is kept until a pass carries everything.
+        flowsta_hc_lines::marker::update_marker(&root, &MARKER_SPEC, |m| m.carried_all_ms = None).unwrap();
+        std::fs::create_dir_all(crate::paths::conductor_dir(&root)).unwrap();
+        let decide = || {
+            use flowsta_hc_lines::policy::{old_line_wanted, RetirementPolicy, Siblings};
+            old_line_wanted(&line_facts(&root, None, Siblings::Heard(Vec::new())), &RetirementPolicy::NEVER_ALONE, &MARKER_SPEC)
+        };
+        assert_eq!(decide(), flowsta_hc_lines::policy::Decision::Wanted(flowsta_hc_lines::policy::Why::NotCarried));
+
         // ── A device that has not updated writes on 0.6: the next pass carries it ──
         crate::sealed::sealed_store_spec_as(
             state,
@@ -1209,6 +1253,39 @@ mod tests {
         let held = crate::sealed::sealed_held_on(state, Line::V07).await.unwrap();
         assert!(held.values().any(|v| v.payload.created_at == 6_000 && v.payload.device.as_deref() == Some("device-b")));
         assert_eq!(held.len(), 45);
+        assert!(carried_all().is_some(), "carried, so recorded again");
+        assert_eq!(decide(), flowsta_hc_lines::policy::Decision::NotWanted(flowsta_hc_lines::policy::Why::NothingLeft));
+
+        // ── A device record naming 0.6 clears it; that device removed, the next pass records it again ──
+        let old_device = |removed_at: Option<u64>| crate::devices::DeviceRecord {
+            install_id: "old-1-6-1-device".into(),
+            conductor_key: crate::key_derivation::base64_standard_encode(&crate::key_derivation::construct_agent_pub_key_bytes(&[41u8; 32])),
+            name: "Old laptop".into(),
+            platform: "linux".into(),
+            vault_version: "1.6.1".into(),
+            generation: "holochain-0.6".into(),
+            added_at: 1_000,
+            seen_at: 2_000,
+            latest_change: 0,
+            removed_at,
+            removed_by: None,
+            setting_up: false,
+        };
+        for (removed_at, version) in [(None, 2_000), (Some(3_000), 3_000)] {
+            crate::sealed::sealed_store_spec_as(
+                state,
+                Line::V07,
+                StoreSpec { entry_type: crate::devices::DEVICE_ENTRY_TYPE.into(), body: serde_json::to_value(&old_device(removed_at)).unwrap(), refs: vec![], created_at: 1_000, id: Some(crate::devices::device_logical_id("old-1-6-1-device")), updated_at: Some(version), deleted: false },
+                None,
+                Some("old-1-6-1-device".into()),
+            )
+            .await
+            .unwrap();
+            crate::sealed::forget_recent_versions();
+            let pass = run_pass(state, "devices round").await;
+            assert_eq!(pass.error, None);
+            assert_eq!(carried_all().is_some(), removed_at.is_some(), "a device on 0.6 clears it; once removed, recorded again");
+        }
         println!("the move: first pass {:?}, {} s total", out.took_ms, started.elapsed().as_secs());
     }
 
@@ -1496,12 +1573,22 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fv-move-born-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let key = [40u8; 32];
-        // No marker: an identity from before 1.7.0 that has not moved - 0.6 is its primary.
+        // No marker: an identity from before 1.7.0 that has not moved, its
+        // 0.6 conductor folder there - 0.6 is its primary.
+        std::fs::create_dir_all(crate::paths::conductor_dir(&dir)).unwrap();
         assert!(crate::conductor::line_06_wanted(&dir, Some(&key), None));
+        // Moved (a 1.7.0 marker): kept until a pass has carried everything,
+        // then not.
+        write_marker(&dir, &Marker { v: 1, moved_at_ms: 1, vault_version: "1.7.0".into(), private_records: 0, signatures: 0, revocations: 0, thumbnails: 0, born: false, web_era_carried: true, web_era_signatures: 0, restored: false, line_06_needed: Some(false) }, true).unwrap();
+        assert!(crate::conductor::line_06_wanted(&dir, Some(&key), None), "nothing says the 0.6 line was carried");
+        flowsta_hc_lines::marker::update_marker(&dir, &MARKER_SPEC, |m| m.carried_all_ms = Some(2)).unwrap();
+        assert!(!crate::conductor::line_06_wanted(&dir, Some(&key), None));
         // Born: never.
         mark_born(&dir).unwrap();
         assert!(born_on_07(&dir) && moved(&dir));
         assert!(!crate::conductor::line_06_wanted(&dir, Some(&key), None));
+        // Restored identities below never attached 0.6: no 0.6 folder.
+        std::fs::remove_dir_all(crate::paths::conductor_dir(&dir)).unwrap();
         // Restored from a web account: the web-era carry is owed → wanted.
         mark_restored(&dir, true).unwrap();
         assert!(marker(&dir).unwrap().restored && !marker(&dir).unwrap().web_era_carried);
