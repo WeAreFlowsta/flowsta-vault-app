@@ -161,7 +161,12 @@ pub fn mark_restored(root: &Path, web_key_present: bool) -> Result<(), String> {
         restored: true,
         line_06_needed: None,
     };
-    write_marker(root, &marker, true)
+    write_marker(root, &marker, true)?;
+    // Its listen window starts now (`retirement`).
+    flowsta_hc_lines::marker::update_marker(root, &MARKER_SPEC, |m| {
+        m.listening_since_ms = Some(now_ms());
+        m.reachable_rounds = 0;
+    })
 }
 
 /// The identity's web key became known after its marker was written (an
@@ -197,9 +202,10 @@ pub fn record_line_06_decision(root: &Path, wanted: bool) {
 /// is wanted now for an identity that runs on 0.7 without it: a device
 /// record that names 0.6, the web-era carry still owed, or a restored
 /// identity that has heard from no other device yet (its others may all be
-/// on 1.6.1). `None` = no marker or born: not this function's call.
+/// on 1.6.1) while its listen window is open (`retirement`). `None` = no
+/// marker or born: not this function's call.
 pub async fn line_06_wanted_now(state: &Arc<AppState>) -> Option<bool> {
-    use flowsta_hc_lines::policy::{old_line_wanted, RetirementPolicy, Siblings};
+    use flowsta_hc_lines::policy::{old_line_wanted, Decision, Siblings, Why};
     let root = state.identity_root();
     let m = marker(&root)?;
     if m.born {
@@ -218,10 +224,40 @@ pub async fn line_06_wanted_now(state: &Arc<AppState>) -> Option<bool> {
         Err(_) => return None,
     };
     let facts = line_facts(&root, Some(&me), siblings);
-    // Vault 1.7.0's policy: a restored identity listens for its other
-    // devices for as long as it runs.
-    Some(old_line_wanted(&facts, &RetirementPolicy::NEVER_ALONE, &MARKER_SPEC).wanted())
+    let policy = retirement();
+    let decision = old_line_wanted(&facts, &policy, &MARKER_SPEC);
+    // Listening: this round's reachable 0.6 rounds count toward the window.
+    if decision == Decision::Wanted(Why::Listening) {
+        let rounds = crate::conductor::supervisor().reachable_rounds(Line::V06);
+        if let Err(e) = LISTEN.note(&root, &MARKER_SPEC, rounds, policy.alone_rounds, now_ms()) {
+            log::debug!("[move] the listen window was not updated: {}", e);
+        }
+    }
+    Some(decision.wanted())
 }
+
+/// The listen window (decided 10-30): a restored identity that hears from
+/// no other device keeps its 0.6 line for 14 days AND 30 rounds in which a
+/// 0.6 rendezvous answered, then calls itself alone (Vault 1.7.0 listened
+/// forever). A debug build takes `VAULT_TEST_ALONE_WINDOW=<secs>,<rounds>`
+/// (the harness's short window); a release build never reads it.
+pub(crate) fn retirement() -> flowsta_hc_lines::policy::RetirementPolicy {
+    #[cfg(debug_assertions)]
+    if let Some(p) = test_alone_window(std::env::var("VAULT_TEST_ALONE_WINDOW").ok().as_deref()) {
+        return p;
+    }
+    flowsta_hc_lines::policy::RetirementPolicy { alone_after: Some(std::time::Duration::from_secs(14 * 24 * 60 * 60)), alone_rounds: 30 }
+}
+
+#[cfg(debug_assertions)]
+fn test_alone_window(v: Option<&str>) -> Option<flowsta_hc_lines::policy::RetirementPolicy> {
+    let (secs, rounds) = v?.split_once(',')?;
+    Some(flowsta_hc_lines::policy::RetirementPolicy { alone_after: Some(std::time::Duration::from_secs(secs.trim().parse().ok()?)), alone_rounds: rounds.trim().parse().ok()? })
+}
+
+/// The reachable rounds a listening identity has spent alone, counted into
+/// its marker each devices round.
+static LISTEN: flowsta_hc_lines::marker::ListenTally = flowsta_hc_lines::marker::ListenTally::new();
 
 /// Stop the 0.6 line in-session once nothing wants it (the devices round
 /// decided so): between passes, cleanly, the decision kept in the marker.
@@ -245,14 +281,14 @@ pub(crate) fn remember_siblings(root: &Path, siblings: &flowsta_hc_lines::policy
 /// not yet complete), it gets no copies. Before this session has read the
 /// device records: whenever the 0.6 line runs, as before.
 pub(crate) fn mirror_to_06_now(state: &AppState) -> bool {
-    use flowsta_hc_lines::policy::{write_targets, RetirementPolicy};
+    use flowsta_hc_lines::policy::write_targets;
     let root = state.identity_root();
     let running = crate::hc::line_ports(state, Line::V06).is_ok();
     let heard = HEARD.lock().unwrap().as_ref().filter(|(r, _)| r == &root).map(|(_, s)| s.clone());
     let Some(siblings) = heard else { return running };
     let me = crate::paths::install_id(&state.data_dir);
     let facts = line_facts(&root, me.as_deref(), siblings);
-    write_targets(&facts, &RetirementPolicy::NEVER_ALONE, running, &MARKER_SPEC).mirror == Some(Line::V06)
+    write_targets(&facts, &retirement(), running, &MARKER_SPEC).mirror == Some(Line::V06)
 }
 
 /// The other devices the 0.6 decision weighs: unremoved, not this one, each
@@ -292,7 +328,6 @@ pub(crate) fn line_facts(root: &Path, own_install_id: Option<&str>, siblings: fl
         own_device_id: own_install_id.map(str::to_string),
         siblings,
         owed,
-        reachable_rounds: 0,
         now_ms: now_ms(),
     }
 }
@@ -1648,6 +1683,40 @@ mod tests {
         assert!(!crate::conductor::line_06_wanted(&dir, Some(&key), None));
         record_line_06_decision(&dir, false);
         assert_eq!(marker(&dir).unwrap().line_06_needed, Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_restored_identity_listens_until_its_window_closes() {
+        use flowsta_hc_lines::policy::{old_line_wanted, Decision, RetirementPolicy, Siblings, Why};
+        if std::env::var("VAULT_TEST_ALONE_WINDOW").is_err() {
+            let p = retirement();
+            assert_eq!((p.alone_after, p.alone_rounds), (Some(std::time::Duration::from_secs(14 * 24 * 60 * 60)), 30), "14 days and 30 reachable rounds");
+        }
+        let short = test_alone_window(Some("120, 2")).unwrap();
+        assert_eq!((short.alone_after, short.alone_rounds), (Some(std::time::Duration::from_secs(120)), 2));
+        assert!(test_alone_window(Some("soon")).is_none() && test_alone_window(None).is_none());
+
+        let dir = std::env::temp_dir().join(format!("fv-move-alone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let window = || match flowsta_hc_lines::marker::Marker::load(&dir, &MARKER_SPEC) {
+            flowsta_hc_lines::marker::MarkerRead::Present(m) => (m.listening_since_ms, m.reachable_rounds),
+            other => panic!("{other:?}"),
+        };
+        mark_restored(&dir, false).unwrap();
+        assert!(matches!(window(), (Some(_), 0)), "a restore starts its window");
+        let p = RetirementPolicy { alone_after: Some(std::time::Duration::ZERO), alone_rounds: 2 };
+        let decide = || old_line_wanted(&line_facts(&dir, None, Siblings::NoneHeardYet), &p, &MARKER_SPEC);
+        assert_eq!(decide(), Decision::Wanted(Why::Listening), "no reachable round yet");
+        let tally = flowsta_hc_lines::marker::ListenTally::new();
+        for rounds in [10, 11, 12] {
+            tally.note(&dir, &MARKER_SPEC, rounds, p.alone_rounds, now_ms()).unwrap();
+        }
+        assert_eq!(window().1, 2);
+        assert_eq!(decide(), Decision::NotWanted(Why::Alone));
+        // Restored under 1.7.0 (no start): listening until a round starts the window.
+        flowsta_hc_lines::marker::update_marker(&dir, &MARKER_SPEC, |m| m.listening_since_ms = None).unwrap();
+        assert_eq!(decide(), Decision::Wanted(Why::Listening));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1954,6 +1954,17 @@ async function webEraLeg() {
   } else {
     record(`Overview counts noted (set VAULT_MATRIX_WEBERA_EXPECT="${counts.current},${counts.amendments}" to pin them)`, true, JSON.stringify(counts));
   }
+  // The listen window (matrix-webera.sh gives the app a short one): restored,
+  // the only device, nobody heard - once the window closes and a pass has
+  // carried everything, the devices round stops the 0.6 line.
+  if (process.env.VAULT_TEST_ALONE_WINDOW) {
+    const t1 = Date.now();
+    let linesNow = await linesOf(port);
+    while (Date.now() - t1 < 420_000 && linesNow['holochain-0.6'] !== 'off') { await new Promise((r) => setTimeout(r, 5000)); linesNow = await linesOf(port); }
+    record(`alone window (${process.env.VAULT_TEST_ALONE_WINDOW} s,rounds): the 0.6 line stops in-session once it closes (nobody heard)`, linesNow['holochain-0.6'] === 'off' && linesNow['holochain-0.7'] === 'serving', `${Math.round((Date.now() - t1) / 1000)} s; ${JSON.stringify(linesNow)}`);
+    const m = (await devOf(port)).move?.marker || {};
+    record('alone window: the marker says restored, no 0.6 line needed', m.restored === true && m.line_06_needed === false, JSON.stringify(m));
+  }
 }
 
 /** The move, through the app: `move-before` runs on a 1.6.1 (0.6-only) instance -

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # The web-era leg: a fresh test instance, bridge-matrix --phase=webera (a migrated
 # web account restored, or a web account brought over, its signatures counted
-# from the 0.7 read). Usage: scripts/matrix-webera.sh [log dir]. Needs the
+# from the 0.7 read), then the listen window: a short one for this instance
+# (VAULT_TEST_ALONE_WINDOW=<secs>,<rounds>, read by a debug build only; empty
+# = the release window), so the restored device, hearing nobody, stops its 0.6
+# line in-session. Usage: scripts/matrix-webera.sh [log dir]. Needs the
 # installed Vault CLOSED and the phrase at ~/.config/flowsta/staging-webera-phrase.
 set -u
+export VAULT_TEST_ALONE_WINDOW="${VAULT_TEST_ALONE_WINDOW-120,2}"
 cd "$(dirname "$0")/.."
 LOGS="${1:-/tmp/vault-matrix-webera-$$}"; mkdir -p "$LOGS"
 rm -rf "$HOME/.local/share/flowsta-vault-hc-w"

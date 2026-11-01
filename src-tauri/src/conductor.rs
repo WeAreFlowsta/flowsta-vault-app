@@ -55,7 +55,7 @@ pub fn stop_all_lines() -> bool {
 ///   after its first round (`move_07::line_06_wanted_now`).
 /// Never from the network; the decision is written into the marker.
 pub fn line_06_wanted(data_dir: &Path, data_key: Option<&[u8; 32]>, own_install_id: Option<&str>) -> bool {
-    use flowsta_hc_lines::policy::{old_line_wanted, RetirementPolicy, Siblings};
+    use flowsta_hc_lines::policy::{old_line_wanted, Siblings};
     // From this device's own files: the device records it holds count as
     // heard (even none), so a restored identity that holds none decides
     // after its first round instead.
@@ -63,7 +63,7 @@ pub fn line_06_wanted(data_dir: &Path, data_key: Option<&[u8; 32]>, own_install_
     let siblings = Siblings::Heard(crate::move_07::siblings_of(&held, own_install_id));
     crate::move_07::remember_siblings(data_dir, &siblings);
     let facts = crate::move_07::line_facts(data_dir, own_install_id, siblings);
-    old_line_wanted(&facts, &RetirementPolicy::NEVER_ALONE, &crate::move_07::MARKER_SPEC).wanted()
+    old_line_wanted(&facts, &crate::move_07::retirement(), &crate::move_07::MARKER_SPEC).wanted()
 }
 
 /// Conductor status reported to the frontend.
