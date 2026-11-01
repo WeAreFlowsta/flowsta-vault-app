@@ -3,7 +3,8 @@
 # identity and signs (move-before), the 1.7.0 build opens the same folder and
 # moves it (move-after), opens it once more with the 0.6 line retired
 # (move-retired), then once more with the marker put back in 1.7.0's shape:
-# 0.6 starts once and stops in-session (move-update). Usage: LEGACY_BIN=<dir with a 1.6.1 flowsta-vault + sidecars>
+# 0.6 starts once and stops in-session (move-update), and once more for the
+# watchdog's limit (crash loop). Usage: LEGACY_BIN=<dir with a 1.6.1 flowsta-vault + sidecars>
 # scripts/matrix-move.sh [log dir]. Needs the installed Vault CLOSED and the
 # 1.7.0 test binary built (scripts/build-test-binary.sh).
 set -u
@@ -61,5 +62,9 @@ if node -e 'const m = JSON.parse(require("fs").readFileSync(process.argv[1], "ut
 else
   echo "   ✗ FAIL move-update: the marker after the stop: $(tr -d '\n' < "$MARKER")"; rc_all=$((rc_all+1))
 fi
+echo "== crash loop: four kills, the fourth held until the window passes $(date -u +%H:%M:%S)"
+P=$(VAULT_TEST_WATCH_LIMIT=3,150 launch "" instance-1.7.0-d)
+scripts/matrix-crash-loop.sh "$P" "$SUFFIX" 3 150 > "$LOGS/crash-loop.log" 2>&1; rc=$?; rc_all=$((rc_all+rc)); cat "$LOGS/crash-loop.log"
+stop_instance
 echo "== done rc=$rc_all $(date -u +%H:%M:%S); logs in $LOGS and $DIR/xdg/com.flowsta.vault/logs/"
 exit $rc_all

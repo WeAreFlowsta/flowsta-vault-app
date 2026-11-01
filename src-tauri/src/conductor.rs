@@ -39,8 +39,31 @@ pub fn supervisor() -> &'static Arc<Supervisor> {
 /// How a line that stopped is recovered: a dead primary restarts the
 /// session, a dead 0.7 line beside a 0.6 primary is attached again, a dead
 /// 0.6 line beside a 0.7 primary is let go (attached again next round if
-/// still wanted). No limit on recoveries yet, as in 1.7.0.
-pub(crate) const WATCH_POLICY: flowsta_hc_lines::watch::WatchPolicy = flowsta_hc_lines::watch::WatchPolicy { current: crate::hc::Line::V07, limit: None };
+/// still wanted). At most 3 recoveries in 10 minutes, then held until the
+/// oldest is 10 minutes old: a conductor that stops again at every start
+/// would otherwise restart all day (1.7.0 had no limit).
+const WATCH_POLICY: flowsta_hc_lines::watch::WatchPolicy =
+    flowsta_hc_lines::watch::WatchPolicy { current: crate::hc::Line::V07, limit: Some((3, std::time::Duration::from_secs(600))) };
+
+/// `WATCH_POLICY`, or in a debug build the limit
+/// `VAULT_TEST_WATCH_LIMIT=<recoveries>,<secs>` sets (the harness's short
+/// window); a release build never reads it.
+pub(crate) fn watch_policy() -> flowsta_hc_lines::watch::WatchPolicy {
+    #[cfg(debug_assertions)]
+    if let Some(limit) = test_watch_limit(std::env::var("VAULT_TEST_WATCH_LIMIT").ok().as_deref()) {
+        return flowsta_hc_lines::watch::WatchPolicy { limit: Some(limit), ..WATCH_POLICY };
+    }
+    WATCH_POLICY
+}
+
+#[cfg(debug_assertions)]
+fn test_watch_limit(v: Option<&str>) -> Option<(u32, std::time::Duration)> {
+    let (most, secs) = v?.split_once(',')?;
+    Some((most.trim().parse().ok()?, std::time::Duration::from_secs(secs.trim().parse().ok()?)))
+}
+
+/// What the sidebar says while the watchdog holds.
+pub(crate) const HOLD_MESSAGE: &str = "Holochain keeps stopping. The Vault tries again in a few minutes. Restarting the Vault may also help.";
 
 /// The recoveries handed out so far (what the policy's limit counts).
 pub(crate) static WATCHDOG: flowsta_hc_lines::watch::Watchdog = flowsta_hc_lines::watch::Watchdog::new();
@@ -759,6 +782,20 @@ impl LineHooks for VaultLines {
             Line::V07 => log::info!("[0.7] the 0.7 line came up after its 0.6 line had stopped - stopped it again"),
             Line::V06 => log::info!("[0.6] the 0.6 line came up after its 0.7 line had stopped - stopped it again"),
         }
+    }
+}
+
+#[cfg(test)]
+mod watch_policy_tests {
+    use super::*;
+
+    #[test]
+    fn recoveries_are_held_after_three_in_ten_minutes() {
+        if std::env::var("VAULT_TEST_WATCH_LIMIT").is_err() {
+            assert_eq!(watch_policy().limit, Some((3, std::time::Duration::from_secs(600))));
+        }
+        assert_eq!(test_watch_limit(Some("3, 120")), Some((3, std::time::Duration::from_secs(120))));
+        assert!(test_watch_limit(Some("often")).is_none() && test_watch_limit(None).is_none());
     }
 }
 

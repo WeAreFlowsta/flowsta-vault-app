@@ -1606,6 +1606,9 @@ pub fn cells_ready(state: State<'_, Arc<AppState>>) -> bool {
 /// Concurrent callers are serialised by `conductor_restart_lock`: the
 /// first to arrive does the restart, others wait and then observe the
 /// recovered handle on a re-check.
+///
+/// Recoveries are limited (`conductor::watch_policy`): past the limit it
+/// returns `WATCHDOG_HELD` and the sidebar says so until the window passes.
 pub(crate) async fn ensure_conductor_alive(
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
@@ -1617,7 +1620,7 @@ pub(crate) async fn ensure_conductor_alive(
     // Decide inside the lock: if a previous holder of the lock already
     // recovered, there is nothing to do.
     use flowsta_hc_lines::watch::WatchAction;
-    let reattach = match crate::conductor::WATCHDOG.action(crate::conductor::supervisor(), &crate::conductor::WATCH_POLICY) {
+    let reattach = match crate::conductor::WATCHDOG.action(crate::conductor::supervisor(), &crate::conductor::watch_policy()) {
         WatchAction::Nothing => {
             log::info!("[watchdog] conductor is alive (recovered by an earlier caller)");
             return Ok(());
@@ -1627,12 +1630,24 @@ pub(crate) async fn ensure_conductor_alive(
             crate::conductor::supervisor().stop_line(line);
             return Ok(());
         }
+        // Said once, when the hold begins: every caller until the oldest
+        // recovery leaves the window finds it held again.
         WatchAction::Hold => {
-            let message = "The conductor keeps stopping. Restart the Vault, or send a report.".to_string();
-            let status = ConductorStatus::Error { message: message.clone() };
-            *state.conductor_status.lock().unwrap() = status.clone();
-            let _ = app_handle.emit("conductor-status", status);
-            return Err(format!("[watchdog] not restarted: {}", message));
+            let begins = {
+                let mut status = state.conductor_status.lock().unwrap();
+                let held = matches!(&*status, ConductorStatus::Error { message } if message == crate::conductor::HOLD_MESSAGE);
+                if !held {
+                    *status = ConductorStatus::Error { message: crate::conductor::HOLD_MESSAGE.into() };
+                }
+                !held
+            };
+            if begins {
+                if let Some((most, within)) = crate::conductor::watch_policy().limit {
+                    log::warn!("[watchdog] {} recoveries within {} s - held until the oldest is {} s old", most, within.as_secs(), within.as_secs());
+                }
+                let _ = app_handle.emit("conductor-status", ConductorStatus::Error { message: crate::conductor::HOLD_MESSAGE.into() });
+            }
+            return Err(WATCHDOG_HELD.into());
         }
         WatchAction::RestartSession => {
             if crate::conductor::supervisor().session().is_some() {
@@ -1667,6 +1682,19 @@ pub(crate) async fn ensure_conductor_alive(
         let resource_dir = resolve_resource_dir(app_handle, &state.data_dir);
         crate::conductor::attach_line_from_state(state.clone(), line, resource_dir, passphrase, &format!("the {} conductor exited", line))
             .map_err(|e| format!("[watchdog] the {} line not restarted: {}", line, e))?;
+        // The primary ran all along: a hold the sidebar showed is over.
+        let ready = ConductorStatus::Ready { admin_port: crate::conductor::supervisor().primary_admin_port() };
+        let cleared = {
+            let mut status = state.conductor_status.lock().unwrap();
+            let held = matches!(&*status, ConductorStatus::Error { message } if message == crate::conductor::HOLD_MESSAGE);
+            if held {
+                *status = ready.clone();
+            }
+            held
+        };
+        if cleared {
+            let _ = app_handle.emit("conductor-status", ready);
+        }
         return Ok(());
     }
 
@@ -1735,6 +1763,18 @@ pub(crate) async fn ensure_conductor_alive(
     // The devices round runs whoever started the conductor.
     spawn_after_ready(state.clone(), app_handle.clone());
     Ok(())
+}
+
+/// What `ensure_conductor_alive` returns while recoveries are held.
+pub(crate) const WATCHDOG_HELD: &str = "[watchdog] held: Holochain keeps stopping";
+
+/// The watchdog's recovery from the devices round: a hold was logged when
+/// it began, so the rounds during it stay quiet.
+async fn recover_from_round(state: &Arc<AppState>, app_handle: &tauri::AppHandle) {
+    match ensure_conductor_alive(state, app_handle).await {
+        Err(e) if e != WATCHDOG_HELD => log::warn!("[devices] a stopped line was not recovered: {}", e),
+        _ => {}
+    }
 }
 
 /// Resolve the directory holding the bundled .happ files. Tauri's
@@ -1845,12 +1885,10 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                     // from nobody); one nothing wants any more is stopped.
                     {
                         let sup = crate::conductor::supervisor();
-                        let pending = flowsta_hc_lines::watch::decide(&flowsta_hc_lines::watch::LinesNow::of(sup), &crate::conductor::WATCH_POLICY);
+                        let pending = flowsta_hc_lines::watch::decide(&flowsta_hc_lines::watch::LinesNow::of(sup), &crate::conductor::watch_policy());
                         let (primary_07, has_06) = (sup.primary() == Some(crate::hc::Line::V07), sup.has(crate::hc::Line::V06));
                         if pending != flowsta_hc_lines::watch::WatchAction::Nothing {
-                            if let Err(e) = ensure_conductor_alive(&devices_state, &devices_app).await {
-                                log::warn!("[devices] a stopped line was not recovered: {}", e);
-                            }
+                            recover_from_round(&devices_state, &devices_app).await;
                         } else if primary_07 {
                             // Every round, so the 0.6 copies follow who is on 0.6,
                             // and a 0.6 line nothing wants any more stops now.
@@ -1885,10 +1923,9 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                 // killed seconds after its start, before the first round).
                 DevicesRound::NotReady => {
                     let sup = crate::conductor::supervisor();
-                    if sup.session().is_some() && (!sup.primary_alive() || sup.alive(crate::hc::Line::V07) == Some(false)) {
-                        if let Err(e) = ensure_conductor_alive(&devices_state, &devices_app).await {
-                            log::warn!("[devices] the conductor was not brought back: {}", e);
-                        }
+                    let pending = flowsta_hc_lines::watch::decide(&flowsta_hc_lines::watch::LinesNow::of(sup), &crate::conductor::watch_policy());
+                    if sup.session().is_some() && pending != flowsta_hc_lines::watch::WatchAction::Nothing {
+                        recover_from_round(&devices_state, &devices_app).await;
                     }
                     DEVICES_ROUND_RETRY
                 }
