@@ -6202,18 +6202,14 @@ mod owner_guard_tests {
             let svc = app.into_make_service_with_connect_info::<crate::peer_owner::Peer>();
             axum::serve(listener, svc).await.unwrap();
         });
-        let client = reqwest::Client::new();
-        for _ in 0..3 {
-            // Several requests on one kept-alive connection: looked up once.
-            let r = client
-                .get(format!("http://127.0.0.1:{port}/status"))
-                .header("origin", "https://login.flowsta.com")
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(r.status(), 200);
-            assert!(r.headers().contains_key("access-control-allow-origin"));
-            assert_eq!(r.text().await.unwrap(), "ok");
-        }
+        // From another process, as in the field. Three requests in one curl
+        // run share one kept-alive connection: looked up once.
+        let url = format!("http://127.0.0.1:{port}/status");
+        let args = ["-D".to_string(), "-".to_string(), "-H".to_string(), "origin: https://login.flowsta.com".to_string(), url.clone(), url.clone(), url];
+        let out = tokio::task::spawn_blocking(move || crate::peer_owner::tests::client_process(&args).output().expect("curl")).await.unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
+        assert_eq!(text.matches("http/1.1 200").count(), 3, "{text}");
+        assert_eq!(text.matches("access-control-allow-origin").count(), 3, "{text}");
+        assert_eq!(text.matches("\r\n\r\nok").count(), 3, "{text}");
     }
 }

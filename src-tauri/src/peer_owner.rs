@@ -322,7 +322,7 @@ pub(crate) fn lsof_client_uid(text: &str, peer_port: u16, our_pid: u32) -> Optio
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -339,19 +339,29 @@ mod tests {
         assert_eq!(proc_net_client_uid(text, 27777, 52341), Some(1000));
     }
 
-    /// A real loopback connection from this process is this account's.
+    /// A client in another process of this account, as in the field (a
+    /// browser, an app): curl holds the connection open while it waits for
+    /// an answer. A client inside the Vault's own process would not do: the
+    /// macOS lookup skips the Vault's own sockets.
+    pub(crate) fn client_process(args: &[String]) -> std::process::Command {
+        let mut cmd = std::process::Command::new("curl");
+        cmd.args(["-s", "-m", "10"]).args(args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        cmd
+    }
+
+    /// A real loopback connection from another process of this account is
+    /// this account's.
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn a_real_connection_from_this_account_is_mine() {
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let server_port = server.local_addr().unwrap().port();
-        let client = std::net::TcpStream::connect(("127.0.0.1", server_port)).unwrap();
-        let (_accepted, remote) = server.accept().unwrap();
-        assert_eq!(remote.port(), client.local_addr().unwrap().port());
+        let mut client = client_process(&[format!("http://127.0.0.1:{server_port}/")]).stdout(std::process::Stdio::null()).spawn().expect("curl");
+        let (accepted, remote) = server.accept().unwrap();
         assert_eq!(lookup(remote, server_port), Verdict::Mine);
-        // A port nobody holds is not ours to answer.
-        drop(client);
-        drop(_accepted);
+        drop(accepted);
+        let _ = client.kill();
+        let _ = client.wait();
     }
 
     #[test]

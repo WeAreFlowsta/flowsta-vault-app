@@ -19,9 +19,6 @@ jobs:
       matrix:
         platform: [ubuntu-latest, macos-latest, windows-2022]
     runs-on: ${{ matrix.platform }}
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -46,7 +43,10 @@ jobs:
       # sidecars and never load the front end, so placeholders are enough
       # here; the release workflow fetches the real Holochain binaries. This
       # workflow had been red since August for exactly this reason.
+      # bash on Windows too, for this step only: Git Bash's perl cannot
+      # configure the vendored OpenSSL, so cargo runs in the default shell.
       - name: Placeholder sidecars and front-end dist for the build script
+        shell: bash
         run: |
           mkdir -p src-tauri/binaries dist
           triple=$(cd src-tauri && rustc -vV | sed -n 's/^host: //p')
