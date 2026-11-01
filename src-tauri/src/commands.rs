@@ -1836,8 +1836,9 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                     }
                     // The 0.6 line beside a 0.7 primary: a dead one is let
                     // go; a wanted one is attached (a device record naming
-                    // 0.6, the web-era carry owed, or a restored identity
-                    // that has heard from nobody).
+                    // 0.6, the web-era carry owed, a pass not yet complete,
+                    // or a restored identity that has heard from nobody); one
+                    // nothing wants any more is stopped.
                     {
                         let sup = crate::conductor::supervisor();
                         let (primary_07, has_06, dead_06) =
@@ -1846,9 +1847,13 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                             log::warn!("[0.6] the 0.6 conductor exited - let go; attached again next round if still wanted");
                             crate::conductor::supervisor().stop_line(crate::hc::Line::V06);
                         } else if primary_07 {
-                            // Every round, so the 0.6 copies follow who is on 0.6.
-                            let wanted = crate::move_07::line_06_wanted_now(&devices_state).await == Some(true);
-                            if wanted && !has_06 {
+                            // Every round, so the 0.6 copies follow who is on 0.6,
+                            // and a 0.6 line nothing wants any more stops now.
+                            let wanted = crate::move_07::line_06_wanted_now(&devices_state).await;
+                            if wanted == Some(false) && has_06 && crate::move_07::retire_06_now(&devices_state).await {
+                                log::info!("[0.6] stopped: nothing of this identity is left on the 0.6 line and no device reads it there");
+                            }
+                            if wanted == Some(true) && !has_06 {
                                 let passphrase = devices_state.unlock_passphrase.lock().unwrap().as_mut().and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok());
                                 if let Some(passphrase) = passphrase {
                                     let resource_dir = resolve_resource_dir(&devices_app, &devices_state.data_dir);

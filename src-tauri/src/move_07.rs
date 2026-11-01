@@ -223,6 +223,13 @@ pub async fn line_06_wanted_now(state: &Arc<AppState>) -> Option<bool> {
     Some(old_line_wanted(&facts, &RetirementPolicy::NEVER_ALONE, &MARKER_SPEC).wanted())
 }
 
+/// Stop the 0.6 line in-session once nothing wants it (the devices round
+/// decided so): between passes, cleanly, the decision kept in the marker.
+/// Returns whether it stopped it.
+pub async fn retire_06_now(state: &Arc<AppState>) -> bool {
+    PASSES.retire_previous(state, &state.identity_root(), crate::conductor::supervisor()).await
+}
+
 /// The other devices as the last start or devices round read them, for
 /// the identity they were read for: what a write asks, so that no write
 /// reads the device records.

@@ -2027,6 +2027,11 @@ async function moveLeg(stage) {
     record('move-after: the originals they name are the 0.6 hashes', new Set(sigs.map((x) => x.original_action_hash)).size === 2 && sigs.some((x) => x.original_action_hash === saved.aHash) && sigs.some((x) => x.original_action_hash === saved.bHash), '');
     record('move-after: the amendment folds onto the carried original (supersedes re-pointed) - 1 signature + 1 amendment', counts.current === 1 && counts.amendments === 1 && counts.dangling.length === 0, JSON.stringify(counts));
     record('move-after: activity says the Vault synced to the new network', (dev.activity || []).includes('records_moved'), JSON.stringify(dev.activity || []));
+    // No other device and a complete pass: the next devices round stops the 0.6 line.
+    const t1 = Date.now();
+    let linesNow = await linesOf(port);
+    while (Date.now() - t1 < 300_000 && linesNow['holochain-0.6'] !== 'off') { await sleep(5000); linesNow = await linesOf(port); }
+    record('move-after: the 0.6 line stops in-session once a pass has carried everything (no device on it)', linesNow['holochain-0.6'] === 'off', `${Math.round((Date.now() - t1) / 1000)} s; ${JSON.stringify(linesNow)}`);
     fs.writeFileSync(stateFile, JSON.stringify({ ...saved, carried: sigs.map((x) => x.action_hash) }, null, 2));
     return;
   }
