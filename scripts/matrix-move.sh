@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The move, through the app, on one data folder: a 1.6.1 build creates an
 # identity and signs (move-before), the 1.7.0 build opens the same folder and
-# moves it (move-after), and opens it once more with the 0.6 line retired
-# (move-retired). Usage: LEGACY_BIN=<dir with a 1.6.1 flowsta-vault + sidecars>
+# moves it (move-after), opens it once more with the 0.6 line retired
+# (move-retired), then once more with the marker put back in 1.7.0's shape:
+# 0.6 starts once and stops in-session (move-update). Usage: LEGACY_BIN=<dir with a 1.6.1 flowsta-vault + sidecars>
 # scripts/matrix-move.sh [log dir]. Needs the installed Vault CLOSED and the
 # 1.7.0 test binary built (scripts/build-test-binary.sh).
 set -u
@@ -44,5 +45,21 @@ grep -E 'RESULT|✗' "$LOGS/move-retired.log"
 echo "== kill the 0.7 conductor under the moved identity $(date -u +%H:%M:%S)"
 scripts/matrix-kill-07.sh "$P" "$SUFFIX" > "$LOGS/kill-07.log" 2>&1; rc=$?; rc_all=$((rc_all+rc)); cat "$LOGS/kill-07.log"
 stop_instance
+echo "== move-update: the marker in 1.7.0's shape, opened by this build $(date -u +%H:%M:%S)"
+MARKER=$(ls "$DIR"/identities/*/moved-07 2>/dev/null | head -1)
+[ -n "$MARKER" ] || { echo "no marker under $DIR"; exit 1; }
+node -e '
+const fs = require("fs"); const f = process.argv[1]; const m = JSON.parse(fs.readFileSync(f, "utf8"));
+const v170 = ["v", "moved_at_ms", "vault_version", "private_records", "signatures", "revocations", "thumbnails", "born", "web_era_carried", "web_era_signatures", "restored", "line_06_needed"];
+fs.writeFileSync(f, JSON.stringify(Object.fromEntries(v170.filter((k) => k in m).map((k) => [k, m[k]])), null, 2));' "$MARKER"
+P=$(launch "" instance-1.7.0-c)
+VAULT_MATRIX_PORT=$P node scripts/bridge-matrix.mjs --phase=move-update > "$LOGS/move-update.log" 2>&1; rc=$?; rc_all=$((rc_all+rc))
+grep -E 'RESULT|✗' "$LOGS/move-update.log"
+stop_instance
+if node -e 'const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.exit(Number.isInteger(m.carried_all_ms) && m.line_06_needed === false ? 0 : 1)' "$MARKER"; then
+  echo "   ✓ move-update: the marker records the complete pass (carried_all_ms) and no 0.6 line needed"
+else
+  echo "   ✗ FAIL move-update: the marker after the stop: $(tr -d '\n' < "$MARKER")"; rc_all=$((rc_all+1))
+fi
 echo "== done rc=$rc_all $(date -u +%H:%M:%S); logs in $LOGS and $DIR/xdg/com.flowsta.vault/logs/"
 exit $rc_all
