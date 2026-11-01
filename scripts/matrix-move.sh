@@ -4,7 +4,8 @@
 # moves it (move-after), opens it once more with the 0.6 line retired
 # (move-retired), then once more with the marker put back in 1.7.0's shape:
 # 0.6 starts once and stops in-session (move-update), and once more for the
-# watchdog's limit (crash loop). Usage: LEGACY_BIN=<dir with a 1.6.1 flowsta-vault + sidecars>
+# watchdog's limit (crash loop). Each 1.7.0-build launch checks the kit
+# cache (scripts/matrix-kits.sh). Usage: LEGACY_BIN=<dir with a 1.6.1 flowsta-vault + sidecars>
 # scripts/matrix-move.sh [log dir]. Needs the installed Vault CLOSED and the
 # 1.7.0 test binary built (scripts/build-test-binary.sh).
 set -u
@@ -38,11 +39,14 @@ grep -E 'RESULT|✗' "$LOGS/move-before.log"; stop_instance
 echo "== move-after on 1.7.0 $(date -u +%H:%M:%S)"
 P=$(launch "" instance-1.7.0-a)
 VAULT_MATRIX_PORT=$P node scripts/bridge-matrix.mjs --phase=move-after > "$LOGS/move-after.log" 2>&1; rc=$?; rc_all=$((rc_all+rc))
-grep -E 'RESULT|✗' "$LOGS/move-after.log"; stop_instance
+grep -E 'RESULT|✗' "$LOGS/move-after.log"
+kits() { scripts/matrix-kits.sh "$P" "$@" > "$LOGS/kits.log" 2>&1; rc=$?; rc_all=$((rc_all+rc)); cat "$LOGS/kits.log"; }
+kits both restore; stop_instance
 echo "== move-retired on 1.7.0 $(date -u +%H:%M:%S)"
 P=$(launch "" instance-1.7.0-b)
 VAULT_MATRIX_PORT=$P node scripts/bridge-matrix.mjs --phase=move-retired > "$LOGS/move-retired.log" 2>&1; rc=$?; rc_all=$((rc_all+rc))
 grep -E 'RESULT|✗' "$LOGS/move-retired.log"
+kits current
 echo "== kill the 0.7 conductor under the moved identity $(date -u +%H:%M:%S)"
 scripts/matrix-kill-07.sh "$P" "$SUFFIX" > "$LOGS/kill-07.log" 2>&1; rc=$?; rc_all=$((rc_all+rc)); cat "$LOGS/kill-07.log"
 stop_instance
@@ -56,6 +60,7 @@ fs.writeFileSync(f, JSON.stringify(Object.fromEntries(v170.filter((k) => k in m)
 P=$(launch "" instance-1.7.0-c)
 VAULT_MATRIX_PORT=$P node scripts/bridge-matrix.mjs --phase=move-update > "$LOGS/move-update.log" 2>&1; rc=$?; rc_all=$((rc_all+rc))
 grep -E 'RESULT|✗' "$LOGS/move-update.log"
+kits both
 stop_instance
 if node -e 'const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.exit(Number.isInteger(m.carried_all_ms) && m.line_06_needed === false ? 0 : 1)' "$MARKER"; then
   echo "   ✓ move-update: the marker records the complete pass (carried_all_ms) and no 0.6 line needed"
@@ -65,6 +70,8 @@ fi
 echo "== crash loop: four kills, the fourth held until the window passes $(date -u +%H:%M:%S)"
 P=$(VAULT_TEST_WATCH_LIMIT=3,150 launch "" instance-1.7.0-d)
 scripts/matrix-crash-loop.sh "$P" "$SUFFIX" 3 150 > "$LOGS/crash-loop.log" 2>&1; rc=$?; rc_all=$((rc_all+rc)); cat "$LOGS/crash-loop.log"
+# After the crash loop: its unlock starts the conductor, which sets the kits aside.
+kits current restore
 stop_instance
 echo "== done rc=$rc_all $(date -u +%H:%M:%S); logs in $LOGS and $DIR/xdg/com.flowsta.vault/logs/"
 exit $rc_all

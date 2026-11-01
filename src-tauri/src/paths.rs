@@ -65,6 +65,10 @@ pub const SETTINGS_FILE: &str = "settings.json";
 pub const INSTALL_ID_FILE: &str = "install-id";
 #[allow(dead_code)] // used by the autostart setup, which is compiled only where Tauri autostart is enabled
 pub const AUTOSTART_MARKER: &str = "autostart-initialized";
+/// The kit cache (`kits.rs`): each Holochain line's conductor, key store
+/// and bundles, compressed, one folder per line. Device-level: one kit
+/// serves every identity on the device, and a relocation leaves it.
+pub const KITS_DIR: &str = "kits";
 
 /// Every identity-scoped single file (not the directories). This is the
 /// list a relocation moves and a full erase removes - one list, so the two
@@ -241,6 +245,7 @@ pub fn device_name_path(device_root: &Path) -> PathBuf { device_root.join("devic
 /// The port this install's IPC server bound and the id it minted, written
 /// at bind so a second launch of the same install finds the first.
 pub fn ipc_port_path(device_root: &Path) -> PathBuf { device_root.join("ipc-port") }
+pub fn kits_dir(device_root: &Path) -> PathBuf { device_root.join(KITS_DIR) }
 
 /// One minting at a time. On a fresh install the first callers arrive
 /// together (the registration, the devices round, the backup lane) and

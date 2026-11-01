@@ -8,6 +8,7 @@
 //! can override these with newer versions downloaded from the API.
 
 use holochain_client::{AdminWebsocket, AppStatusFilter};
+use flowsta_hc_lines::kit::{KitBinary, KitDescriptor, KitFile};
 use flowsta_hc_lines::{AdminClient, CoordinatorZome, InstallRequest, Line, ReadyWait, Recovery};
 use holochain_types::prelude::AgentPubKey;
 use std::path::Path;
@@ -36,32 +37,36 @@ const BUNDLED_PRIVATE_V2_1_HAPP_FILE: &str = "flowsta_private_v2_1_happ.happ";
 /// Bundle revision of the v2.1 cell (see `BUNDLED_PRIVATE_V2_REVISION`).
 pub const BUNDLED_PRIVATE_V2_1_REVISION: u32 = 1;
 
-/// Everything a Vault needs to run an identity's 0.6 line, described once:
-/// the two sidecars and the files they load. Bundled with every 1.7.x
-/// Vault; a later Vault that stops bundling the kit fetches these by name
-/// from the release assets and checks them against these hashes before
-/// starting anything (the marker's `line_06_needed` says whether to).
-pub struct Kit06 {
-    pub lair_binary: &'static str,
-    pub lair_version: &'static str,
-    pub conductor_binary: &'static str,
-    pub conductor_version: &'static str,
-    /// (file in `resources/`, sha256)
-    pub files: &'static [(&'static str, &'static str)],
-}
-
-pub const KIT_06: Kit06 = Kit06 {
-    lair_binary: "vault-lair-keystore",
-    lair_version: "0.6.3",
-    conductor_binary: "vault-holochain",
-    conductor_version: "0.6.1",
+/// What a Vault needs to run each line, described once (flowsta-hc-lines
+/// `kit`): the two sidecars and the files the line loads. The kit cache
+/// keeps a compressed copy of each in `<device root>/kits/` (`kits.rs`), so
+/// a later Vault that stops bundling 0.6 runs it from there, checked against
+/// the hashes that Vault compiles in. `accepted` stays empty while a release
+/// bundles the binaries: their post-signing hashes come out of this
+/// release's build and go into the next one.
+pub const KIT_06: KitDescriptor = KitDescriptor {
+    line: Line::V06,
+    conductor: KitBinary { sidecar: "vault-holochain", version: "0.6.1", accepted: &[] },
+    lair: KitBinary { sidecar: "vault-lair-keystore", version: "0.6.3", accepted: &[] },
     files: &[
-        ("flowsta_private_v1_11_happ.happ", "1f28c2e06ec91a7117b7ee2e26b9c93ca940220b4e9d6d696c0ab8712ca39c01"),
-        ("flowsta_private_v2_0_happ.happ", "1b969f6b96d9bd7bfcde4e1974d56b7a12708838693130358182ad86bcbe0668"),
-        ("flowsta_identity_v1_4_happ.happ", "09d3f3ea3a92c023fc5112734dc540bd7baeba8c069b0686afe3819b3b62fc64"),
-        ("flowsta_signing_v1_4_happ.happ", "163b94d071c57b48bb6436e125afb4948cbd4d9cc24ee7ab374b96d77341a0e3"),
-        ("signing_coordinator_v1_4.wasm", "6fbcc44d870ad0cc89fa260d9d49544cf580113dd7df04fc22cdd06268cfbb12"),
-        ("private_v2_coordinator.wasm", "125880705a57b14d241b5476e1c1642cfd12acba3857dc4ee15bc9b59cd801b5"),
+        KitFile { name: BUNDLED_PRIVATE_HAPP_FILE, sha256: "1f28c2e06ec91a7117b7ee2e26b9c93ca940220b4e9d6d696c0ab8712ca39c01" },
+        KitFile { name: BUNDLED_PRIVATE_V2_HAPP_FILE, sha256: "1b969f6b96d9bd7bfcde4e1974d56b7a12708838693130358182ad86bcbe0668" },
+        KitFile { name: BUNDLED_IDENTITY_HAPP_FILE, sha256: "09d3f3ea3a92c023fc5112734dc540bd7baeba8c069b0686afe3819b3b62fc64" },
+        KitFile { name: BUNDLED_SIGNING_HAPP_FILE, sha256: "163b94d071c57b48bb6436e125afb4948cbd4d9cc24ee7ab374b96d77341a0e3" },
+        KitFile { name: SIGNING_COORDINATOR_WASM, sha256: "6fbcc44d870ad0cc89fa260d9d49544cf580113dd7df04fc22cdd06268cfbb12" },
+        KitFile { name: PRIVATE_V2_COORDINATOR_WASM, sha256: "125880705a57b14d241b5476e1c1642cfd12acba3857dc4ee15bc9b59cd801b5" },
+    ],
+};
+
+pub const KIT_07: KitDescriptor = KitDescriptor {
+    line: Line::V07,
+    conductor: KitBinary { sidecar: "vault-holochain-07", version: "0.7.1", accepted: &[] },
+    lair: KitBinary { sidecar: "vault-lair-keystore-07", version: "0.7.1", accepted: &[] },
+    files: &[
+        KitFile { name: BUNDLED_IDENTITY_V1_5_HAPP_FILE, sha256: "abd9d2c6a7d54705fadfe4d4968b53381b821967d676d8e0a347ae5057f159fa" },
+        KitFile { name: BUNDLED_SIGNING_V1_5_HAPP_FILE, sha256: "0703e4dc066f7dee97abcae9e408bbd5dcd4e220ab03a1de58f1bd324abdf61a" },
+        KitFile { name: BUNDLED_PRIVATE_V2_1_HAPP_FILE, sha256: "7bf21c2449a2bc6c3770975607d2bed3df889cc2755703f76ebb666063386df8" },
+        KitFile { name: SIGNING_COORDINATOR_WASM_07, sha256: "d7e980a342d20cd987194c9cc3b0245beb2950a2f0ab302f54ffa04a692fb577" },
     ],
 };
 
@@ -248,15 +253,23 @@ mod kit_tests {
     use super::*;
 
     #[test]
-    fn the_0_6_kit_names_every_0_6_file_the_code_loads_and_their_hashes_match() {
+    fn each_kit_names_every_file_its_line_loads_and_their_hashes_match() {
         use sha2::{Digest, Sha256};
         let resources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
-        for name in [BUNDLED_PRIVATE_HAPP_FILE, BUNDLED_PRIVATE_V2_HAPP_FILE, BUNDLED_IDENTITY_HAPP_FILE, BUNDLED_SIGNING_HAPP_FILE, SIGNING_COORDINATOR_WASM, PRIVATE_V2_COORDINATOR_WASM] {
-            assert!(KIT_06.files.iter().any(|(f, _)| *f == name), "{} is loaded by the 0.6 line but not in KIT_06", name);
-        }
-        for (file, sha) in KIT_06.files {
-            let bytes = std::fs::read(resources.join(file)).unwrap_or_else(|e| panic!("{}: {}", file, e));
-            assert_eq!(hex::encode(Sha256::digest(&bytes)), *sha, "{} changed under the kit", file);
+        let loads_06 = [BUNDLED_PRIVATE_HAPP_FILE, BUNDLED_PRIVATE_V2_HAPP_FILE, BUNDLED_IDENTITY_HAPP_FILE, BUNDLED_SIGNING_HAPP_FILE, SIGNING_COORDINATOR_WASM, PRIVATE_V2_COORDINATOR_WASM];
+        let loads_07 = [BUNDLED_IDENTITY_V1_5_HAPP_FILE, BUNDLED_SIGNING_V1_5_HAPP_FILE, BUNDLED_PRIVATE_V2_1_HAPP_FILE, SIGNING_COORDINATOR_WASM_07];
+        for (kit, loads) in [(&KIT_06, &loads_06[..]), (&KIT_07, &loads_07[..])] {
+            for name in loads {
+                assert!(kit.files.iter().any(|f| f.name == *name), "{} is loaded by the {} line but not in its kit", name, kit.line);
+            }
+            for file in kit.files {
+                let bytes = std::fs::read(resources.join(file.name)).unwrap_or_else(|e| panic!("{}: {}", file.name, e));
+                assert_eq!(hex::encode(Sha256::digest(&bytes)), file.sha256, "{} changed under the {} kit", file.name, kit.line);
+            }
+            for bin in [kit.conductor, kit.lair] {
+                let dev = format!("{}-{}{}", bin.sidecar, flowsta_hc_lines::TARGET_TRIPLE, if cfg!(windows) { ".exe" } else { "" });
+                assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries").join(&dev).exists(), "{} is not a sidecar the Vault bundles", dev);
+            }
         }
     }
 }

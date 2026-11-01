@@ -17,6 +17,7 @@ mod identity_07;
 pub mod file_analyzer;
 mod ipc_server;
 mod key_derivation;
+mod kits;
 mod lair;
 mod mau;
 mod paths;
@@ -44,12 +45,18 @@ use std::sync::Arc;
 /// inside `src-tauri/binaries/` first (matching how CI populates that
 /// directory) so devs don't need a `vault-`-prefixed binary on PATH.
 pub fn resolve_sidecar_bin(name: &str) -> PathBuf {
-    let source = flowsta_hc_lines::SidecarSource {
+    flowsta_hc_lines::resolve_sidecar(name, &sidecar_source()).unwrap_or_else(|_| PathBuf::from(name))
+}
+
+/// Where the Vault's sidecars are: the dev binaries folder in a debug
+/// build, else beside the executable.
+pub fn sidecar_source() -> flowsta_hc_lines::SidecarSource {
+    flowsta_hc_lines::SidecarSource {
         dev_dir: cfg!(debug_assertions).then(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries")),
         exe_dir: None,
+        kit_dirs: Vec::new(),
         allow_path_lookup: true,
-    };
-    flowsta_hc_lines::resolve_sidecar(name, &source).unwrap_or_else(|_| PathBuf::from(name))
+    }
 }
 use tauri::{
     image::Image,

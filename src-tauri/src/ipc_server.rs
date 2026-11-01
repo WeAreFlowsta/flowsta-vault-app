@@ -4515,7 +4515,7 @@ async fn dev_status_handler(
     };
     Ok(axum::response::IntoResponse::into_response(Json(
         serde_json::json!({
-            "harness": true, "conductor": conductor, "cells_ready": cells_ready, "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity, "activity_last": activity_last,
+            "harness": true, "conductor": conductor, "cells_ready": cells_ready, "kits": crate::kits::status(&state.app_state.data_dir), "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity, "activity_last": activity_last,
             "setup": setup,
             // Phase 2 partitioning: where this identity's files live.
             "layout": if state.app_state.identity_root() == state.app_state.data_dir { "legacy" } else { "partitioned" },
@@ -4794,6 +4794,12 @@ async fn dev_devices_handler(
             *app.linked_web_agent_key.lock().unwrap() = Some(text("key"));
             Ok(serde_json::json!({ "set": true }))
         }
+        // A line's cached kit, restored and run (the kit cache's check).
+        #[cfg(debug_assertions)]
+        "kit-restore" => match flowsta_hc_lines::Line::from_generation(&text("line")) {
+            Some(line) => crate::kits::restore_for_test(&app.data_dir, line),
+            None => Err("line: holochain-0.6 or holochain-0.7".to_string()),
+        },
         // What a command does when it finds the conductor down.
         "watchdog" => Ok(serde_json::json!({
             "watchdog": crate::commands::ensure_conductor_alive(app, &state.app_handle).await.err(),

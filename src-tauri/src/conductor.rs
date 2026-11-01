@@ -379,8 +379,8 @@ async fn start_vault_line(
     on_step: impl FnMut(StartStep) + Send,
 ) -> Result<LineProcess, String> {
     let (lair_name, conductor_name, lair_dir, conductor_dir, admin_ports) = match line {
-        Line::V06 => ("vault-lair-keystore", "vault-holochain", crate::paths::lair_dir(data_dir), crate::paths::conductor_dir(data_dir), ADMIN_WS_PORTS),
-        Line::V07 => ("vault-lair-keystore-07", "vault-holochain-07", crate::paths::lair_dir_07(data_dir), crate::paths::conductor_dir_07(data_dir), ADMIN_WS_PORTS_07),
+        Line::V06 => (dna::KIT_06.lair.sidecar, dna::KIT_06.conductor.sidecar, crate::paths::lair_dir(data_dir), crate::paths::conductor_dir(data_dir), ADMIN_WS_PORTS),
+        Line::V07 => (dna::KIT_07.lair.sidecar, dna::KIT_07.conductor.sidecar, crate::paths::lair_dir_07(data_dir), crate::paths::conductor_dir_07(data_dir), ADMIN_WS_PORTS_07),
     };
     let lair_bin = crate::resolve_sidecar_bin(lair_name);
     let conductor_bin = crate::resolve_sidecar_bin(conductor_name);
@@ -529,6 +529,13 @@ struct VaultLines {
 }
 
 impl VaultLines {
+    /// Once a run, with the primary up so it never slows a start.
+    fn set_kits_aside(&self) {
+        if let Some(state) = &self.state {
+            crate::kits::refresh_once(state.data_dir.clone(), self.resource_dir.clone());
+        }
+    }
+
     fn emit(&self, role: Role, status: ConductorStatus) {
         if role == Role::Primary {
             if let Some(app) = &self.app {
@@ -749,9 +756,11 @@ impl LineHooks for VaultLines {
         match (role, line) {
             (Role::Primary, Line::V06) => {
                 self.emit(role, ConductorStatus::Ready { admin_port });
+                self.set_kits_aside();
             }
             (Role::Primary, Line::V07) => {
                 self.emit(role, ConductorStatus::Ready { admin_port });
+                self.set_kits_aside();
                 log::info!("Holochain 0.7 conductor ready (admin: {}, app: {}) - this identity's primary line", admin_port, app_port);
             }
             (Role::Secondary, Line::V07) => {
