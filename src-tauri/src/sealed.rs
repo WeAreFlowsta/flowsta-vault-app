@@ -626,19 +626,21 @@ pub(crate) static WRITE_WITHOUT_DEVICE: std::sync::atomic::AtomicBool = std::syn
 /// Seal one version and write it at the shared base of the identity's
 /// active line; `supersedes` retires that earlier version in the same call.
 ///
-/// While a moved identity's 0.6 line runs beside its 0.7 primary (a sibling
-/// still on 1.6.1), the same version is written to the 0.6 cell too, so
-/// that sibling holds it: a record written only on 0.7 had no second holder
-/// until the household updated, and a reset of this device lost it (the
-/// beta9 mixed leg). The mirror is best effort and idempotent - the carry
-/// (0.6 → 0.7, by logical id and version time) sees it as present.
+/// While a moved identity's 0.6 line runs beside its 0.7 primary for a
+/// sibling still on 1.6.1 (or a restored identity listening for one), the
+/// same version is written to the 0.6 cell too, so that sibling holds it: a
+/// record written only on 0.7 had no second holder until the household
+/// updated, and a reset of this device lost it (the beta9 mixed leg). The
+/// mirror is best effort and idempotent - the carry (0.6 → 0.7, by logical
+/// id and version time) sees it as present. When the 0.6 line runs with
+/// nobody on it (`move_07::mirror_to_06_now`), nothing is mirrored.
 pub(crate) async fn sealed_store_spec(
     state: &Arc<AppState>,
     spec: StoreSpec,
     supersedes: Option<holochain_types::prelude::ActionHash>,
 ) -> Result<String, String> {
     let active = crate::hc::active_line(state);
-    let mirror = (active == Line::V07 && crate::hc::line_ports(state, Line::V06).is_ok()).then(|| spec.clone());
+    let mirror = (active == Line::V07 && crate::move_07::mirror_to_06_now(state)).then(|| spec.clone());
     let stored = sealed_store_spec_on(state, active, spec, supersedes).await?;
     if let Some(spec) = mirror {
         if let Err(e) = mirror_to_06(state, spec).await {

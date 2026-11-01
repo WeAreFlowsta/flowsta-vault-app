@@ -61,6 +61,7 @@ pub fn line_06_wanted(data_dir: &Path, data_key: Option<&[u8; 32]>, own_install_
     // after its first round instead.
     let held = data_key.map(|key| crate::sealed::held_devices_on_07(data_dir, key)).unwrap_or_default();
     let siblings = Siblings::Heard(crate::move_07::siblings_of(&held, own_install_id));
+    crate::move_07::remember_siblings(data_dir, &siblings);
     let facts = crate::move_07::line_facts(data_dir, own_install_id, siblings);
     old_line_wanted(&facts, &RetirementPolicy::NEVER_ALONE, &crate::move_07::MARKER_SPEC).wanted()
 }

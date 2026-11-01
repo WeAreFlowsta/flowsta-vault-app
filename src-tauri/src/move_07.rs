@@ -25,7 +25,7 @@ use flowsta_hc_lines::pass::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// What `moved-07` holds: when the identity's writes went to 0.7 and what
 /// had been carried by then.
@@ -206,18 +206,46 @@ pub async fn line_06_wanted_now(state: &Arc<AppState>) -> Option<bool> {
         return None;
     }
     let me = crate::paths::install_id(&state.data_dir).unwrap_or_default();
-    // An owed carry decides it without reading the records.
-    let siblings = if !m.web_era_carried {
-        Siblings::Heard(Vec::new())
-    } else {
-        let records = crate::sealed::sealed_list_inner(state).await.ok()?;
-        let others = siblings_of(&crate::devices::devices_in(&records), Some(&me));
-        if others.is_empty() { Siblings::NoneHeardYet } else { Siblings::Heard(others) }
+    let siblings = match crate::sealed::sealed_list_inner(state).await {
+        Ok(records) => {
+            let others = siblings_of(&crate::devices::devices_in(&records), Some(&me));
+            let siblings = if others.is_empty() { Siblings::NoneHeardYet } else { Siblings::Heard(others) };
+            remember_siblings(&root, &siblings);
+            siblings
+        }
+        // An owed carry decides it without the records.
+        Err(_) if !m.web_era_carried => Siblings::Heard(Vec::new()),
+        Err(_) => return None,
     };
     let facts = line_facts(&root, Some(&me), siblings);
     // Vault 1.7.0's policy: a restored identity listens for its other
     // devices for as long as it runs.
     Some(old_line_wanted(&facts, &RetirementPolicy::NEVER_ALONE, &MARKER_SPEC).wanted())
+}
+
+/// The other devices as the last start or devices round read them, for
+/// the identity they were read for: what a write asks, so that no write
+/// reads the device records.
+static HEARD: Mutex<Option<(PathBuf, flowsta_hc_lines::policy::Siblings)>> = Mutex::new(None);
+
+pub(crate) fn remember_siblings(root: &Path, siblings: &flowsta_hc_lines::policy::Siblings) {
+    *HEARD.lock().unwrap() = Some((root.to_path_buf(), siblings.clone()));
+}
+
+/// Whether a write on 0.7 goes to the running 0.6 line too: only while
+/// another device is on 0.6 or a restored identity is still listening for
+/// one (`write_targets`). Running for anything else (a carry owed, a pass
+/// not yet complete), it gets no copies. Before this session has read the
+/// device records: whenever the 0.6 line runs, as before.
+pub(crate) fn mirror_to_06_now(state: &AppState) -> bool {
+    use flowsta_hc_lines::policy::{write_targets, RetirementPolicy};
+    let root = state.identity_root();
+    let running = crate::hc::line_ports(state, Line::V06).is_ok();
+    let heard = HEARD.lock().unwrap().as_ref().filter(|(r, _)| r == &root).map(|(_, s)| s.clone());
+    let Some(siblings) = heard else { return running };
+    let me = crate::paths::install_id(&state.data_dir);
+    let facts = line_facts(&root, me.as_deref(), siblings);
+    write_targets(&facts, &RetirementPolicy::NEVER_ALONE, running, &MARKER_SPEC).mirror == Some(Line::V06)
 }
 
 /// The other devices the 0.6 decision weighs: unremoved, not this one, each
@@ -1286,6 +1314,21 @@ mod tests {
             assert_eq!(pass.error, None);
             assert_eq!(carried_all().is_some(), removed_at.is_some(), "a device on 0.6 clears it; once removed, recorded again");
         }
+
+        // ── The 0.6 copies follow who is on 0.6 (the 0.6 line still runs) ──
+        use flowsta_hc_lines::policy::{Sibling, Siblings};
+        crate::sealed::forget_recent_versions();
+        let before = latest_versions(crate::sealed::sealed_versions_on(state, Line::V06).await.unwrap()).0.len();
+        remember_siblings(&root, &Siblings::Heard(Vec::new()));
+        assert!(!mirror_to_06_now(state));
+        crate::sealed::sealed_store_inner(state, "login_activity".into(), serde_json::json!({ "nobody on 0.6": true }), vec![], 7_000).await.unwrap();
+        crate::sealed::forget_recent_versions();
+        assert_eq!(latest_versions(crate::sealed::sealed_versions_on(state, Line::V06).await.unwrap()).0.len(), before, "nobody reads the 0.6 line: no copy");
+        remember_siblings(&root, &Siblings::Heard(vec![Sibling { device_id: "laptop".into(), generation: "holochain-0.6".into(), removed: false }]));
+        assert!(mirror_to_06_now(state));
+        crate::sealed::sealed_store_inner(state, "login_activity".into(), serde_json::json!({ "a device on 0.6": true }), vec![], 8_000).await.unwrap();
+        crate::sealed::forget_recent_versions();
+        assert_eq!(latest_versions(crate::sealed::sealed_versions_on(state, Line::V06).await.unwrap()).0.len(), before + 1, "a device on 0.6 gets the copy");
         println!("the move: first pass {:?}, {} s total", out.took_ms, started.elapsed().as_secs());
     }
 
