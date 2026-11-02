@@ -62,6 +62,39 @@ fn test_watch_limit(v: Option<&str>) -> Option<(u32, std::time::Duration)> {
     Some((most.trim().parse().ok()?, std::time::Duration::from_secs(secs.trim().parse().ok()?)))
 }
 
+/// When a conductor is restarted for its memory (Holochain 0.7.1 keeps the
+/// machine code of every module it reloads, holochain#6064): above 1 GB,
+/// after 20 minutes running (its first calls compile what it uses), at most
+/// once in 6 hours. A new identity's 0.7 conductor sits at ~1.2 GB after its
+/// install restart and ~0.4-0.6 GB after one restart once in use (11-03).
+const MEMORY_POLICY: flowsta_hc_lines::watch::MemoryPolicy = flowsta_hc_lines::watch::MemoryPolicy {
+    over_bytes: 1 << 30,
+    min_uptime: std::time::Duration::from_secs(20 * 60),
+    min_gap: std::time::Duration::from_secs(6 * 60 * 60),
+};
+
+/// `MEMORY_POLICY`, or in a debug build
+/// `VAULT_TEST_MEMORY_RESTART=<MB>,<uptime secs>,<gap secs>` (the harness);
+/// a release build never reads it.
+pub(crate) fn memory_policy() -> flowsta_hc_lines::watch::MemoryPolicy {
+    #[cfg(debug_assertions)]
+    if let Some(p) = test_memory_policy(std::env::var("VAULT_TEST_MEMORY_RESTART").ok().as_deref()) {
+        return p;
+    }
+    MEMORY_POLICY
+}
+
+#[cfg(debug_assertions)]
+fn test_memory_policy(v: Option<&str>) -> Option<flowsta_hc_lines::watch::MemoryPolicy> {
+    let mut parts = v?.split(',').map(|x| x.trim().parse::<u64>().ok());
+    let (mb, uptime, gap) = (parts.next()??, parts.next()??, parts.next()??);
+    Some(flowsta_hc_lines::watch::MemoryPolicy {
+        over_bytes: mb << 20,
+        min_uptime: std::time::Duration::from_secs(uptime),
+        min_gap: std::time::Duration::from_secs(gap),
+    })
+}
+
 /// What the sidebar says while the watchdog holds.
 pub(crate) const HOLD_MESSAGE: &str = "Holochain keeps stopping. The Vault tries again in a few minutes. Restarting the Vault may also help.";
 
