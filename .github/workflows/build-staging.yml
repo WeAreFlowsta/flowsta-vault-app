@@ -219,6 +219,13 @@ jobs:
         with:
           args: --target ${{ matrix.target }} --config '{"identifier":"com.flowsta.vault.staging","productName":"Flowsta Vault (Staging)"}'
 
+      # The sidecars' SHA-256 after signing, as the release workflow
+      # publishes them (scripts/kit-hashes.mjs): run here too, so every
+      # platform's package layout is checked before a release depends on it.
+      - name: Sidecar hashes after signing
+        shell: bash
+        run: node scripts/kit-hashes.mjs "${{ matrix.target }}" "src-tauri/target/${{ matrix.target }}/release/bundle" "kit-hashes-${{ matrix.target }}.json"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:
@@ -229,5 +236,6 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            kit-hashes-${{ matrix.target }}.json
           if-no-files-found: ignore
           retention-days: 7
