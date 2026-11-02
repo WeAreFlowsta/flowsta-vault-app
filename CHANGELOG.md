@@ -39,10 +39,10 @@ too.
   closing them.
 - Retries after a Holochain error depend on the kind of error, not its
   wording, so they hold across Holochain versions.
-- On Linux, the fix for NVIDIA graphics is applied before anything else
-  at startup.
 
 ### Fixed
+- On Linux computers with NVIDIA graphics, the Vault no longer crashes
+  when you move between pages.
 - A record Holochain returns in a form the Vault cannot read back is left
   out, instead of being kept with its details empty.
 - Signing in the first minute after unlocking waits for Holochain to

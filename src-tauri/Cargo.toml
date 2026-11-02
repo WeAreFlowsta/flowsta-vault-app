@@ -92,7 +92,7 @@ mr_bundle = "=0.6.1"
 mr_bundle_07 = { package = "mr_bundle", version = "=0.7.1" }
 # The two-line machinery, extracted into a library other apps share.
 async-trait = "0.1"
-flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "8ebd27b261f63caf2a62cec9ae42b758d6b8066d" }
+flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "082e710429dae608879d710d20a8a90ced95b585" }
 
 # Save dialog
 tauri-plugin-dialog = "2"
