@@ -1877,6 +1877,7 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
     let round = DEVICES_ROUND.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
         let mut pass: u32 = 0;
+        let mut unanswered_rounds: u32 = 0;
         // For holding a wanted 0.6 line back while this device's records
         // arrive on 0.7: since when, and how many the last look counted.
         let unlocked_at = std::time::Instant::now();
@@ -1899,8 +1900,15 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                         let sup = crate::conductor::supervisor();
                         let pending = flowsta_hc_lines::watch::decide(&flowsta_hc_lines::watch::LinesNow::of(sup), &crate::conductor::watch_policy());
                         let (primary_07, has_06) = (sup.primary() == Some(crate::hc::Line::V07), sup.has(crate::hc::Line::V06));
+                        unanswered_rounds = 0;
                         if pending != flowsta_hc_lines::watch::WatchAction::Nothing {
                             recover_from_round(&devices_state, &devices_app).await;
+                        } else if let Some((line, bytes)) = memory_restart_due_now(&devices_state) {
+                            // Holochain 0.7.1 keeps every reloaded module's
+                            // machine code until a restart (holochain#6064).
+                            log::info!("[memory] the {} conductor holds {} MB: restarting the lines at a quiet moment to give it back", line, bytes >> 20);
+                            *LAST_MEMORY_RESTART.lock().unwrap() = Some(std::time::Instant::now());
+                            restart_primary(&devices_state, &devices_app).await;
                         } else if primary_07 {
                             // Every round, so the 0.6 copies follow who is on 0.6,
                             // and a 0.6 line nothing wants any more stops now.
@@ -1946,11 +1954,21 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                 // primary down every round ends here, so a dead process is
                 // brought back from here too (found when the 0.7 primary was
                 // killed seconds after its start, before the first round).
-                DevicesRound::NotReady => {
+                // A conductor whose process runs but which has stopped
+                // answering (a graceful shutdown that hung with its sockets
+                // closed, 11-03; a machine out of memory) is restarted after
+                // a few rounds: the exit check alone never sees it.
+                DevicesRound::NotReady { unanswered } => {
                     let sup = crate::conductor::supervisor();
                     let pending = flowsta_hc_lines::watch::decide(&flowsta_hc_lines::watch::LinesNow::of(sup), &crate::conductor::watch_policy());
+                    let primary_runs = sup.primary().and_then(|p| sup.alive(p)) == Some(true);
+                    unanswered_rounds = if unanswered && primary_runs { unanswered_rounds + 1 } else { 0 };
                     if sup.session().is_some() && pending != flowsta_hc_lines::watch::WatchAction::Nothing {
                         recover_from_round(&devices_state, &devices_app).await;
+                    } else if unanswered_rounds >= UNANSWERED_ROUNDS_LIMIT {
+                        log::warn!("[watchdog] the primary conductor runs but has not answered for {} rounds - restarting it", unanswered_rounds);
+                        unanswered_rounds = 0;
+                        restart_primary(&devices_state, &devices_app).await;
                     }
                     DEVICES_ROUND_RETRY
                 }
@@ -2008,16 +2026,59 @@ fn note_backups_waiting(waiting: usize, fetched: usize) {
 
 enum DevicesRound {
     Done,
-    /// The identity's records could not be read yet.
-    NotReady,
+    /// The identity's records could not be read yet; `unanswered`: the
+    /// conductor itself refused or timed out (not a cell still starting).
+    NotReady { unanswered: bool },
     StoodDown,
+}
+
+/// A read that failed because the conductor did not answer at all: its
+/// sockets refused the connection, or a call timed out. Cells still starting
+/// (`CellNotRunning`) answer, so they are not this.
+fn conductor_unanswered(error: &str) -> bool {
+    !error.contains("CellNotRunning") && (error.contains("Connection refused") || error.contains("Timeout") || error.contains("timed out"))
+}
+
+/// When the last restart for memory was, this run of the Vault.
+static LAST_MEMORY_RESTART: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Rounds in a row in which the primary's conductor ran but did not answer.
+const UNANSWERED_ROUNDS_LIMIT: u32 = 3;
+
+/// Nothing asked of the Vault by an app or site in the last two minutes:
+/// a moment to restart a conductor without anyone waiting on it.
+fn vault_quiet(state: &AppState) -> bool {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    state.connected_sites.lock().unwrap().values().all(|s| now - s.last_request > 120)
+}
+
+/// A line whose conductor is due a restart for its memory, and what it holds.
+fn memory_restart_due_now(state: &AppState) -> Option<(crate::hc::Line, u64)> {
+    let sup = crate::conductor::supervisor();
+    let policy = crate::conductor::memory_policy();
+    let last = LAST_MEMORY_RESTART.lock().unwrap().map(|t| t.elapsed());
+    let quiet = vault_quiet(state);
+    [crate::hc::Line::V07, crate::hc::Line::V06].into_iter().find_map(|line| {
+        let m = flowsta_hc_lines::watch::conductor_memory(sup.conductor_pid(line)?)?;
+        flowsta_hc_lines::watch::memory_restart_due(&m, last, quiet, &policy).then_some((line, m.resident_bytes))
+    })
+}
+
+/// Stop the primary line and let the watchdog start the session again (the
+/// same recovery as a conductor that exited): for memory, or for a
+/// conductor that runs but no longer answers.
+async fn restart_primary(state: &Arc<AppState>, app: &tauri::AppHandle) {
+    if let Some(primary) = crate::conductor::supervisor().primary() {
+        let _ = tokio::task::spawn_blocking(move || crate::conductor::supervisor().stop_line(primary)).await;
+    }
+    recover_from_round(state, app).await;
 }
 
 /// One full round now (the dev harness; the page's own refresh).
 pub(crate) async fn run_devices_round(state: &Arc<AppState>, app: &tauri::AppHandle) -> &'static str {
     match devices_round(state, app, true).await {
         DevicesRound::Done => "done",
-        DevicesRound::NotReady => "not_ready",
+        DevicesRound::NotReady { .. } => "not_ready",
         DevicesRound::StoodDown => "stood_down",
     }
 }
@@ -2053,7 +2114,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             Ok(removed) => removed,
             Err(e) => {
                 log::info!("Devices not checked yet: {}", e.chars().take(120).collect::<String>());
-                return DevicesRound::NotReady;
+                return DevicesRound::NotReady { unanswered: conductor_unanswered(&e) };
             }
         };
         if removed {
@@ -9362,5 +9423,21 @@ mod profile_record_tests {
     fn nothing_known_writes_no_record() {
         assert!(profile_record_body(None, None, None, 7).is_none());
         assert!(profile_record_body(Some(""), Some("  "), None, 7).is_none());
+    }
+}
+
+#[cfg(test)]
+mod unanswered_tests {
+    use super::conductor_unanswered;
+
+    /// The texts a round logged (11-02/11-03): a conductor that refused or
+    /// timed out counts; a cell still starting does not.
+    #[test]
+    fn only_a_conductor_that_does_not_answer_counts() {
+        assert!(conductor_unanswered("Admin WS connect failed (0.7): Websocket error: IO error: Connection refused (os error 111)"));
+        assert!(conductor_unanswered("list_apps failed (0.7): Websocket error: Timeout"));
+        assert!(conductor_unanswered("get_all_sealed_at timed out after 60 s"));
+        assert!(!conductor_unanswered("auth creds (0.7): External API wire error: InternalError(\"Conductor returned an error while using a ConductorApi: CellNotRunning(CellId(...))\")"));
+        assert!(!conductor_unanswered("Encrypted private DNA not installed (flowsta_private_v2_0_r2)"));
     }
 }
