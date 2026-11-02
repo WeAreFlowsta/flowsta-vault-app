@@ -440,6 +440,11 @@ export default component$(() => {
   const pendingReleaseSign = useSignal<ReleaseManifestSign | null>(null);
   // Transient notice when a remembered app authenticated without a dialog.
   const autoApprovedNotice = useSignal<string | null>(null);
+  // The Vault's own update: downloaded and checked, waiting for a restart;
+  // and, once after an update, what this copy was updated from.
+  const updateReady = useSignal<{ version: string; notes_url: string; changes_line: boolean } | null>(null);
+  const updatedFrom = useSignal<{ version: string; to: string; notes_url: string } | null>(null);
+  const updateBusy = useSignal(false);
 
   // Relay login - approve a sign-in happening on another device.
   // The approval screen is ALWAYS shown (no remember option): cross-device
@@ -996,6 +1001,15 @@ export default component$(() => {
     }>("raw-sign-request", (event) => {
       pendingRawSign.value = event.payload;
     });
+    invoke<{ ready: { version: string; notes_url: string; changes_line: boolean } | null; updated: { version: string; to: string; notes_url: string } | null }>("update_status")
+      .then((st) => {
+        updateReady.value = st.ready;
+        updatedFrom.value = st.updated;
+      })
+      .catch(() => {});
+    const unlistenUpdate = listen<{ version: string; notes_url: string; changes_line: boolean }>("update-ready", (event) => {
+      updateReady.value = event.payload;
+    });
     const unlistenManifest = listen<NonNullable<typeof pendingManifestSign.value> | ReleaseManifestSign>(
       "manifest-sign-request",
       (event) => {
@@ -1017,6 +1031,7 @@ export default component$(() => {
     cleanup(() => {
       unlistenSign.then((u) => u());
       unlistenManifest.then((u) => u());
+      unlistenUpdate.then((u) => u());
       unlistenAuto.then((u) => u());
     });
   });
@@ -1521,8 +1536,28 @@ export default component$(() => {
             </div>
           </div>
 
-          {/* Right: identity chip → dropdown (identity lives HERE, not
-              duplicated on Overview) */}
+          {/* Right: a downloaded update's restart, then the identity chip →
+              dropdown (identity lives HERE, not duplicated on Overview) */}
+          <div class="flex items-center gap-3">
+          {updateReady.value && (
+            <button
+              type="button"
+              disabled={updateBusy.value}
+              title={`Flowsta Vault ${updateReady.value.version} is downloaded and checked`}
+              class="rounded-full bg-amber-500 px-3 py-1 text-sm font-medium text-gray-900 transition-colors hover:bg-amber-400 disabled:opacity-60"
+              onClick$={async () => {
+                updateBusy.value = true;
+                try {
+                  await invoke("restart_to_update");
+                } catch (e) {
+                  console.error("Update did not install:", e);
+                  updateBusy.value = false;
+                }
+              }}
+            >
+              Restart to update
+            </button>
+          )}
           {displayName && (
             <div class="relative">
               <button
@@ -1681,6 +1716,7 @@ export default component$(() => {
               )}
             </div>
           )}
+          </div>
         </div>
       </header>
 
@@ -2023,6 +2059,29 @@ export default component$(() => {
               </GlassButton>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Once after an update: what changed */}
+      {updatedFrom.value && !autoApprovedNotice.value && (
+        <div class="fixed bottom-6 left-6 z-50 flex items-center gap-3 rounded-lg border border-sky-500/40 bg-sky-500/15 px-4 py-3 shadow-xl">
+          <p class="text-sm text-sky-200">Updated to Flowsta Vault {updatedFrom.value.to}</p>
+          {updatedFrom.value.notes_url && (
+            <button type="button" class="text-sm font-medium text-sky-300 underline hover:text-sky-200" onClick$={() => open(updatedFrom.value!.notes_url)}>
+              What changed
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label="Dismiss"
+            class="text-sky-300 hover:text-white"
+            onClick$={async () => {
+              updatedFrom.value = null;
+              await invoke("dismiss_updated").catch(() => {});
+            }}
+          >
+            ×
+          </button>
         </div>
       )}
 

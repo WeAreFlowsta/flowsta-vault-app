@@ -69,6 +69,9 @@ pub const AUTOSTART_MARKER: &str = "autostart-initialized";
 /// and bundles, compressed, one folder per line. Device-level: one kit
 /// serves every identity on the device, and a relocation leaves it.
 pub const KITS_DIR: &str = "kits";
+/// The updater's choices and state (`updater.rs`): automatic or not, the
+/// channel, the newest manifest sequence accepted, the rollout ticket.
+pub const UPDATES_FILE: &str = "updates.json";
 
 /// Every identity-scoped single file (not the directories). This is the
 /// list a relocation moves and a full erase removes - one list, so the two
@@ -238,6 +241,7 @@ pub fn bump_identity_epoch(device_root: &Path) -> u64 {
     next
 }
 pub fn settings_path(device_root: &Path) -> PathBuf { device_root.join(SETTINGS_FILE) }
+pub fn updates_path(device_root: &Path) -> PathBuf { device_root.join(UPDATES_FILE) }
 pub fn install_id_path(device_root: &Path) -> PathBuf { device_root.join(INSTALL_ID_FILE) }
 /// The name the person gave this device (Settings → Devices); absent, the
 /// computer's hostname names it.
