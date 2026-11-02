@@ -32,6 +32,7 @@ mod instance_guard;
 mod relay_login;
 mod sealed;
 mod signing_07;
+mod updater;
 mod vault;
 
 use commands::AppState;
@@ -130,6 +131,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // ⚠️ ORDER MATTERS: single-instance MUST be registered before deep-link
         // on Linux/Windows - deep-link forwards flowsta:// URLs through the
         // single-instance callback. Registering deep-link first wedges startup.
@@ -239,6 +241,9 @@ pub fn run() {
 
             // Share state with Tauri commands
             app.manage(app_state.clone());
+
+            // Its own updates: on start and every few hours, unless turned off.
+            updater::spawn(app.handle().clone(), app_state.data_dir.clone());
 
             // If we were launched from a file-explorer "Sign with Flowsta
             // Vault" action, the OS passed the file path(s) as positional
@@ -604,6 +609,10 @@ pub fn run() {
             commands::export_single_backup_to_file,
             commands::delete_single_backup,
             commands::write_json_file,
+            updater::update_status,
+            updater::set_update_prefs,
+            updater::dismiss_updated,
+            updater::restart_to_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -614,6 +623,11 @@ pub fn run() {
             match event {
                 tauri::RunEvent::Exit => {
                     crate::conductor::stop_all_lines();
+                    // A downloaded, checked update installs now where that
+                    // needs no one (Windows, macOS).
+                    if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                        updater::install_on_quit(&state.data_dir);
+                    }
                 }
                 // Triggered on macOS / iOS when the OS opens files with our
                 // app via Apple Events (Services menu, Open With, drag onto
