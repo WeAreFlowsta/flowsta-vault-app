@@ -373,6 +373,10 @@ pub struct AppState {
     /// each commit a cap grant (three startup probes racing = three chain
     /// writes = "chain head has moved" under a user's first sign).
     pub credentials_fill_lock: tokio::sync::Mutex<()>,
+    /// Probes of the 0.7 cells still asking (`dna::ensure_cells_ready_07`),
+    /// and the newest one's number: an older probe stops at its next try.
+    pub cell_probes_07: std::sync::atomic::AtomicUsize,
+    pub cell_probe_gen_07: std::sync::atomic::AtomicU64,
 }
 
 /// Owned copy of a cell's signing credentials (holochain_client's
@@ -599,6 +603,8 @@ impl AppState {
             cell_credentials_07: Mutex::new(HashMap::new()),
             credentials_fill_lock: tokio::sync::Mutex::new(()),
             commit_serial: tokio::sync::Mutex::new(()),
+            cell_probes_07: std::sync::atomic::AtomicUsize::new(0),
+            cell_probe_gen_07: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1871,6 +1877,10 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
     let round = DEVICES_ROUND.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
         let mut pass: u32 = 0;
+        // For holding a wanted 0.6 line back while this device's records
+        // arrive on 0.7: since when, and how many the last look counted.
+        let unlocked_at = std::time::Instant::now();
+        let mut held_last: Option<usize> = None;
         loop {
             let full = pass % FULL_EVERY_PASSES == 0;
             let wait = match devices_round(&devices_state, &devices_app, full).await {
@@ -1882,7 +1892,9 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                     // line beside a 0.7 primary: a wanted one is attached (a
                     // device record naming 0.6, the web-era carry owed, a pass
                     // not yet complete, or a restored identity that has heard
-                    // from nobody); one nothing wants any more is stopped.
+                    // from nobody), once this device's records have arrived
+                    // on 0.7 (at most 5 minutes after the unlock); one
+                    // nothing wants any more is stopped.
                     {
                         let sup = crate::conductor::supervisor();
                         let pending = flowsta_hc_lines::watch::decide(&flowsta_hc_lines::watch::LinesNow::of(sup), &crate::conductor::watch_policy());
@@ -1897,7 +1909,20 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                                 log::info!("[0.6] stopped: nothing of this identity is left on the 0.6 line and no device reads it there");
                             }
                             if wanted == Some(true) && !has_06 {
-                                let passphrase = devices_state.unlock_passphrase.lock().unwrap().as_mut().and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok());
+                                let held_now = crate::sealed::sealed_list_inner(&devices_state).await.map(|r| r.len()).unwrap_or(0);
+                                let heard = crate::move_07::heard_another_device(&devices_state.identity_root());
+                                let hold = crate::move_07::hold_06_for_arrival(heard, held_now, held_last, unlocked_at.elapsed());
+                                held_last = Some(held_now);
+                                let passphrase = if hold {
+                                    log::info!(
+                                        "[0.6] wanted; held back while this device's records arrive on 0.7 ({} so far, {})",
+                                        held_now,
+                                        if heard { "another device heard" } else { "no other device heard yet" }
+                                    );
+                                    None
+                                } else {
+                                    devices_state.unlock_passphrase.lock().unwrap().as_mut().and_then(|arr| String::from_utf8(arr.lock().to_vec()).ok())
+                                };
                                 if let Some(passphrase) = passphrase {
                                     let resource_dir = resolve_resource_dir(&devices_app, &devices_state.data_dir);
                                     if let Err(e) = crate::conductor::attach_line_from_state(devices_state.clone(), crate::hc::Line::V06, resource_dir, passphrase, "a device still on 0.6, or nothing heard yet") {

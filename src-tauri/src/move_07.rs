@@ -275,6 +275,27 @@ pub(crate) fn remember_siblings(root: &Path, siblings: &flowsta_hc_lines::policy
     *HEARD.lock().unwrap() = Some((root.to_path_buf(), siblings.clone()));
 }
 
+/// Whether the last start or devices round heard from another device of
+/// this identity.
+pub(crate) fn heard_another_device(root: &Path) -> bool {
+    use flowsta_hc_lines::policy::Siblings;
+    matches!(HEARD.lock().unwrap().as_ref(), Some((r, Siblings::Heard(others))) if r == root && !others.is_empty())
+}
+
+/// How long after an unlock a wanted 0.6 line waits for this device's
+/// records to arrive on 0.7 (decided 11-02).
+pub(crate) const ARRIVAL_HOLD: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Whether the devices round holds a wanted 0.6 line back: in the first
+/// minutes of an unlock, while this device has heard from no other device
+/// or its records are still arriving (more than the last round saw). A 0.6
+/// start during that arrival starved the rounds that bring the records: a
+/// device re-added by phrase waited ~4 and ~8 minutes in the runs whose 0.6
+/// line started first, ~90 s in the one whose records came first.
+pub(crate) fn hold_06_for_arrival(heard_another: bool, held_now: usize, held_last: Option<usize>, since_unlock: std::time::Duration) -> bool {
+    since_unlock < ARRIVAL_HOLD && (!heard_another || held_last.map_or(true, |last| held_now > last))
+}
+
 /// Whether a write on 0.7 goes to the running 0.6 line too: only while
 /// another device is on 0.6 or a restored identity is still listening for
 /// one (`write_targets`). Running for anything else (a carry owed, a pass
@@ -751,6 +772,23 @@ pub(crate) fn missing_on_07<'a>(
 mod tests {
     use super::*;
     use crate::sealed::{latest_versions, SealedPayload, SEALED_PAYLOAD_V2};
+
+    /// The 0.6 line waits while a device's records arrive, at most 5 minutes.
+    #[test]
+    fn a_wanted_06_line_waits_for_the_records_to_land() {
+        let s = std::time::Duration::from_secs;
+        // Nobody heard yet (a re-added device's first rounds): held back.
+        assert!(hold_06_for_arrival(false, 0, None, s(30)));
+        assert!(hold_06_for_arrival(false, 1, Some(1), s(150)));
+        // Heard, and the records still coming in: held back one more round.
+        assert!(hold_06_for_arrival(true, 0, None, s(30)));
+        assert!(hold_06_for_arrival(true, 23, Some(4), s(90)));
+        // Heard, and nothing new since the last round: attached.
+        assert!(!hold_06_for_arrival(true, 23, Some(23), s(150)));
+        // Five minutes on, whatever has arrived (a household all on 1.6.1).
+        assert!(!hold_06_for_arrival(false, 1, Some(1), s(300)));
+        assert!(!hold_06_for_arrival(true, 30, Some(12), s(301)));
+    }
 
     fn version(id: &str, time: u64, hash: u8) -> StoredVersion {
         StoredVersion {

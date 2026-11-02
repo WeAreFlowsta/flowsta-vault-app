@@ -945,14 +945,77 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<u16, String> {
     Ok(app_port)
 }
 
+/// How long a start holds the Vault for the 0.7 cells before it opens.
+const CELLS_START_WAIT_07: std::time::Duration = std::time::Duration::from_secs(45);
+/// How long the probe keeps asking after that. A cold conductor's cells
+/// took ~75 s on 11-02 (a staging Vault, past the old 45 s): every
+/// sealed read and the first devices round then failed with
+/// `CellNotRunning` for half a minute.
+const CELLS_COLD_WAIT_07: std::time::Duration = std::time::Duration::from_secs(300);
+const CELLS_PROBE_GAP_07: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A 0.7 probe still asking, counted in `AppState::cell_probes_07` (one per
+/// conductor start; two only while a restart's old one ends).
+struct CellProbe07(std::sync::Arc<crate::commands::AppState>);
+
+impl CellProbe07 {
+    fn begin(state: &std::sync::Arc<crate::commands::AppState>) -> Self {
+        state.cell_probes_07.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        CellProbe07(state.clone())
+    }
+}
+
+impl Drop for CellProbe07 {
+    fn drop(&mut self) {
+        self.0.cell_probes_07.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Wait until the 0.7 line's cells answer (the twin of the readiness probe
 /// in `ensure_apps_enabled`): a freshly started conductor lists its apps as
-/// enabled while the cells are still coming up, and the first reads of a
-/// 0.7-only start hit `CellNotRunning` for about ten seconds - in the beta6
-/// gate the sealed reads failed three times and the first devices round was
-/// skipped on both boxes. One cap grant on the signing cell, retried every
-/// 3 s for up to 45 s, cached so no caller authorizes again this session.
+/// enabled while the cells are still coming up. One cap grant on the
+/// signing cell, cached so no caller authorizes again this session. The
+/// start waits up to 45 s; past that the Vault opens and the probe keeps
+/// asking for up to 5 minutes, and every 0.7 connect waits for it
+/// (`wait_for_cells_07`) instead of failing after its own few tries.
 pub async fn ensure_cells_ready_07(admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>) {
+    let probe = CellProbe07::begin(state);
+    // Not the supervisor's session: a primary's setup runs before its
+    // session is numbered.
+    let generation = state.cell_probe_gen_07.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let state = state.clone();
+    let asking = tokio::spawn(async move {
+        probe_cells_07(admin_port, &state, generation).await;
+        drop(probe);
+    });
+    if tokio::time::timeout(CELLS_START_WAIT_07, asking).await.is_err() {
+        log::info!(
+            "[0.7] cells still starting after {} s: the Vault opens, and its 0.7 reads wait for them (up to {} min)",
+            CELLS_START_WAIT_07.as_secs(),
+            CELLS_COLD_WAIT_07.as_secs() / 60
+        );
+    }
+}
+
+/// While a probe is still asking and no 0.7 cell has answered this session,
+/// wait (checked each second). Returns at once once one has, or when no
+/// probe runs (a read then fails or passes on its own, as before).
+pub async fn wait_for_cells_07(state: &crate::commands::AppState) {
+    let started = std::time::Instant::now();
+    let mut waited = false;
+    while state.cell_probes_07.load(std::sync::atomic::Ordering::SeqCst) > 0
+        && state.cell_credentials_07.lock().unwrap().is_empty()
+        && started.elapsed() < CELLS_START_WAIT_07 + CELLS_COLD_WAIT_07
+    {
+        waited = true;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    if waited && started.elapsed().as_secs() >= 5 {
+        log::info!("[0.7] a read waited {} s for the cells", started.elapsed().as_secs());
+    }
+}
+
+async fn probe_cells_07(admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>, generation: u64) {
     use holochain_client_07::{AdminWebsocket, CellInfo};
     let admin_ws = match AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin())).await {
         Ok(a) => a,
@@ -981,26 +1044,112 @@ pub async fn ensure_cells_ready_07(admin_port: u16, state: &std::sync::Arc<crate
     else {
         return;
     };
-    // Single-flight with every other 0.7 credential fill, and a cache hit
-    // means the cells were verified earlier this session.
-    let _fill = state.credentials_fill_lock.lock().await;
-    if state.cell_credentials_07.lock().unwrap().contains_key(&cell_id) {
-        return;
-    }
-    let wait = ReadyWait { attempts: 15, gap: std::time::Duration::from_secs(3), reenable: &[], label: "[0.7]" };
-    match flowsta_hc_lines::admin::wait_cell_ready_07(&admin_ws, &cell_id, &wait).await {
-        Ok((creds, attempt)) => {
-            state
-                .cell_credentials_07
-                .lock()
-                .unwrap()
-                .insert(cell_id.clone(), crate::commands::CachedCellCredentials07::from_signing(&creds));
-            if attempt > 1 {
-                log::info!("[0.7] cells ready after {} s", (attempt - 1) * 3);
-            } else {
-                log::info!("[0.7] cells ready");
+    // One try at a time, each single-flighted with every other 0.7
+    // credential fill (the lock is not held across the gap, so the 0.6
+    // line's fills are not held up), and a cache hit means a caller's
+    // grant got there first.
+    let started = std::time::Instant::now();
+    let once = ReadyWait { attempts: 1, gap: CELLS_PROBE_GAP_07, reenable: &[], label: "[0.7]" };
+    loop {
+        {
+            let _fill = state.credentials_fill_lock.lock().await;
+            if state.cell_credentials_07.lock().unwrap().contains_key(&cell_id) {
+                return;
+            }
+            match flowsta_hc_lines::admin::wait_cell_ready_07(&admin_ws, &cell_id, &once).await {
+                Ok((creds, _)) => {
+                    state
+                        .cell_credentials_07
+                        .lock()
+                        .unwrap()
+                        .insert(cell_id.clone(), crate::commands::CachedCellCredentials07::from_signing(&creds));
+                    match started.elapsed().as_secs() {
+                        0 => log::info!("[0.7] cells ready"),
+                        s => log::info!("[0.7] cells ready after {} s", s),
+                    }
+                    return;
+                }
+                Err(e) if e.kind == flowsta_hc_lines::ZomeErrorKind::CellNotRunning => {}
+                Err(e) => {
+                    log::warn!("[0.7] cell readiness check failed: {}", e);
+                    return;
+                }
             }
         }
-        Err(e) => log::warn!("[0.7] cell readiness check failed: {}", e),
+        // A newer start asks for its own cells. (A stopped conductor ends
+        // this one at its next try: the socket is gone.)
+        if state.cell_probe_gen_07.load(std::sync::atomic::Ordering::SeqCst) != generation {
+            return;
+        }
+        let waited = started.elapsed();
+        if waited >= CELLS_START_WAIT_07 + CELLS_COLD_WAIT_07 {
+            log::warn!("[0.7] cells still not running after {} s; reads try on their own from here", waited.as_secs());
+            return;
+        }
+        if waited.as_secs() / 15 != (waited + CELLS_PROBE_GAP_07).as_secs() / 15 {
+            log::info!("[0.7] cells not ready yet ({} s)", waited.as_secs());
+        }
+        tokio::time::sleep(CELLS_PROBE_GAP_07).await;
+    }
+}
+
+#[cfg(test)]
+mod cell_wait_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn grant(state: &crate::commands::AppState) {
+        use holochain_types_07::prelude::{AgentPubKey, CapSecret, CellId, DnaHash};
+        let agent = AgentPubKey::from_raw_32([0x5au8, 0x1f, 0x93, 0x04, 0xc7, 0x2e, 0x88, 0x6b].repeat(4));
+        let cell = CellId::new(DnaHash::from_raw_32([0x3cu8, 0xd1, 0x07, 0xa9, 0x42, 0xee, 0x15, 0x70].repeat(4)), agent.clone());
+        state.cell_credentials_07.lock().unwrap().insert(
+            cell,
+            crate::commands::CachedCellCredentials07 {
+                signing_agent_key: agent,
+                keypair: ed25519_dalek::SigningKey::from_bytes(&[0x21u8; 32]),
+                cap_secret: CapSecret::from([0x6du8; 64]),
+            },
+        );
+    }
+
+    /// Reads wait while a probe asks and no cell has answered; no longer.
+    #[tokio::test]
+    async fn reads_wait_for_the_probe_only_while_it_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(crate::commands::AppState::new(dir.path().to_path_buf()));
+
+        // No probe asking: a read goes at once.
+        let t = Instant::now();
+        wait_for_cells_07(&state).await;
+        assert!(t.elapsed() < Duration::from_millis(500));
+
+        // A probe asking: the read waits until a cell has answered.
+        let probe = CellProbe07::begin(&state);
+        let filler = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            grant(&filler);
+        });
+        let t = Instant::now();
+        wait_for_cells_07(&state).await;
+        assert!((Duration::from_secs(2)..Duration::from_secs(4)).contains(&t.elapsed()), "{:?}", t.elapsed());
+
+        // Answered this session: no wait, probe or not.
+        let t = Instant::now();
+        wait_for_cells_07(&state).await;
+        assert!(t.elapsed() < Duration::from_millis(500));
+
+        // A new start empties the cache; a probe that gives up lets its
+        // waiters go and try on their own.
+        state.cell_credentials_07.lock().unwrap().clear();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            drop(probe);
+        });
+        let t = Instant::now();
+        wait_for_cells_07(&state).await;
+        assert!((Duration::from_secs(1)..Duration::from_secs(3)).contains(&t.elapsed()), "{:?}", t.elapsed());
+        assert_eq!(state.cell_probes_07.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

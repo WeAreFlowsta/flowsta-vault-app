@@ -109,6 +109,9 @@ pub async fn connect_app_07(
 ) -> Result<(holochain_client_07::AppWebsocket, String), String> {
     use holochain_client_07::{AdminWebsocket, AppWebsocket, CellInfo, ClientAgentSigner, IssueAppAuthenticationTokenPayload};
 
+    // Right after a start the cells can still be coming up: every 0.7 read
+    // and write waits here for the one readiness probe.
+    crate::dna::wait_for_cells_07(state).await;
     let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
         .await
         .map_err(|e| format!("Admin WS connect failed (0.7): {}", e))?;
