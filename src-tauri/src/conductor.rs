@@ -271,6 +271,10 @@ pub(crate) fn rendezvous_servers_07() -> Vec<(String, Option<String>)> {
 /// fleet; community nodes run the same binary, so the probe is
 /// universal.
 async fn bootstrap_alive(url: &str) -> bool {
+    #[cfg(debug_assertions)]
+    if test_offline_now() {
+        return false;
+    }
     let health = format!("{}/health", url.trim_end_matches('/'));
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(2500))
@@ -280,6 +284,51 @@ async fn bootstrap_alive(url: &str) -> bool {
         Err(_) => return false,
     };
     matches!(client.get(&health).send().await, Ok(r) if r.status().is_success())
+}
+
+/// A debug build takes `VAULT_TEST_OFFLINE_UNTIL=<unix seconds>`: every
+/// rendezvous probe fails until then (the harness's "offline, then back").
+/// A release build never reads it.
+#[cfg(debug_assertions)]
+fn test_offline_now() -> bool {
+    std::env::var("VAULT_TEST_OFFLINE_UNTIL")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .is_some_and(|until| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() < until).unwrap_or(false))
+}
+
+/// Whether this session's lines started with no rendezvous answering, and so
+/// without its auth. Holochain 0.6.1 and 0.7.1 authenticate with the relay
+/// while they start, and a conductor that cannot (no network) refuses to
+/// start at all ("Authenticate Failed", exit 101; found 11-03 with the Vault
+/// in a network namespace with loopback only). Started without the auth, the
+/// conductor runs and everything local works; the health watch restarts the
+/// lines with it once the rendezvous answers again.
+static STARTED_OFFLINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn started_offline() -> bool {
+    STARTED_OFFLINE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The network entry as a start uses it: without its auth while it does not
+/// answer.
+async fn answering_or_offline(target: BootstrapTarget, line: Line) -> BootstrapTarget {
+    if target.auth_material.is_none() || bootstrap_alive(&target.bootstrap_url).await {
+        return target;
+    }
+    log::warn!("[{}] no rendezvous answers ({}): starting without its auth, offline - the lines restart with it once it answers", line, target.bootstrap_url);
+    STARTED_OFFLINE.store(true, std::sync::atomic::Ordering::SeqCst);
+    BootstrapTarget { auth_material: None, ..target }
+}
+
+/// Whether the primary line's rendezvous answers now (the health watch's
+/// check for a session that started offline).
+pub(crate) async fn primary_rendezvous_answers() -> bool {
+    let target = match supervisor().primary() {
+        Some(Line::V07) => BootstrapTarget::primary_07(),
+        _ => BootstrapTarget::primary(),
+    };
+    bootstrap_alive(&target.bootstrap_url).await
 }
 
 /// Pick the network entry for this conductor session. With no fallbacks
@@ -467,6 +516,8 @@ pub async fn start_holochain(
     conductor_tag: String,
 ) -> Result<u64, String> {
     let state = app_handle.state::<Arc<AppState>>().inner().clone();
+    // Each line's start says again whether it started offline.
+    STARTED_OFFLINE.store(false, std::sync::atomic::Ordering::SeqCst);
     // A fresh conductor session gets fresh cap grants - drop any cached
     // credentials so the readiness probe re-verifies (and re-fills) them.
     let (data_key, private_v2_seed) = {
@@ -743,7 +794,7 @@ impl LineHooks for VaultLines {
             Line::V06 => {
                 // The network entry for this session: Flowsta's, or the first
                 // live fallback while it is dark (see `resolve_bootstrap_target`).
-                let target = resolve_bootstrap_target().await;
+                let target = answering_or_offline(resolve_bootstrap_target().await, Line::V06).await;
                 remember_conductor_rendezvous(&target.bootstrap_url);
                 // One origin per Vault start, shared by both conductors: the
                 // primary start makes it; a 0.6 line attached beside a running
@@ -762,7 +813,7 @@ impl LineHooks for VaultLines {
             Line::V07 => {
                 supervisor().set_state(Line::V07, LineState::Starting);
                 self.say(role, "Starting the key store...");
-                let target = BootstrapTarget::primary_07();
+                let target = answering_or_offline(BootstrapTarget::primary_07(), Line::V07).await;
                 if primary {
                     remember_conductor_rendezvous(&target.bootstrap_url);
                     fresh_node_origin();

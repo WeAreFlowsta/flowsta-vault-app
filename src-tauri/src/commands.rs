@@ -2046,6 +2046,14 @@ fn spawn_health_watch(state: Arc<AppState>, app: tauri::AppHandle) {
             if HEALTH_WATCH.load(std::sync::atomic::Ordering::SeqCst) != generation || state.vault_config.lock().unwrap().is_none() {
                 break;
             }
+            // A session that started offline (no rendezvous answering, so
+            // without its auth): restarted with it once the rendezvous answers.
+            if crate::conductor::started_offline() && state.conductor_restart_lock.try_lock().is_ok() && crate::conductor::primary_rendezvous_answers().await {
+                log::info!("[network] the rendezvous answers again: restarting the lines with its auth");
+                misses = 0;
+                restart_primary(&state, &app).await;
+                continue;
+            }
             let sup = crate::conductor::supervisor();
             let Some(primary) = sup.primary() else {
                 misses = 0;
