@@ -324,13 +324,21 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          # The updater's own signature on each updater file (the public key
+          # is in tauri.conf.json). Only release builds make updater files
+          # (tauri.updater.conf.json below); staging and local builds don't.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           ESIGNER_USERNAME: ${{ secrets.ESIGNER_USERNAME }}
           ESIGNER_PASSWORD: ${{ secrets.ESIGNER_PASSWORD }}
           ESIGNER_CREDENTIAL_ID: ${{ secrets.ESIGNER_CREDENTIAL_ID }}
           ESIGNER_TOTP_SECRET: ${{ secrets.ESIGNER_TOTP_SECRET }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --target ${{ matrix.target }}${{ steps.tauri_args.outputs.extra }}
+          # The version file is written after the renames (publish-release),
+          # so its links are the final names.
+          includeUpdaterJson: false
+          args: --target ${{ matrix.target }} --config src-tauri/tauri.updater.conf.json${{ steps.tauri_args.outputs.extra }}
 
       # The four sidecars' SHA-256 as they ship (after code signing; macOS
       # signs them at bundle time, so they differ from the upstream pins),
@@ -410,6 +418,10 @@ jobs:
               '_x64.app.tar.gz': `_${version}-macOS-Intel.app.tar.gz`,
               '_aarch64.app.tar.gz.sig': `_${version}-macOS-Apple-Silicon.app.tar.gz.sig`,
               '_x64.app.tar.gz.sig': `_${version}-macOS-Intel.app.tar.gz.sig`,
+              '_x64-setup.exe.sig': '-Windows-Setup.exe.sig',
+              '_x64_en-US.msi.sig': '-Windows.msi.sig',
+              '_amd64.deb.sig': '-Linux.deb.sig',
+              '-1.x86_64.rpm.sig': '-Linux.rpm.sig',
             };
 
             for (const asset of assets) {
@@ -427,6 +439,52 @@ jobs:
                 }
               }
             }
+
+      # The updater's version file (Tauri's latest.json), written after the
+      # renames so its links are the final download names: each platform's
+      # updater file and the content of its .sig. Two keys per platform: the
+      # updater looks for <os>-<arch>-<installer> first, then <os>-<arch>.
+      # The Vault reads it only after the release manifest (signed by Team
+      # Flowsta, scripts/release-manifest.mjs) names the same version.
+      - name: Updater version file
+        uses: actions/github-script@v8
+        env:
+          release_id: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const release_id = Number(process.env.release_id);
+            const version = context.ref.replace('refs/tags/vault-v', '');
+            const { data: assets } = await github.rest.repos.listReleaseAssets({ owner, repo, release_id, per_page: 100 });
+            const text = async (a) => Buffer.from((await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', { owner, repo, asset_id: a.id, headers: { accept: 'application/octet-stream' } })).data).toString('utf8').trim();
+            const files = [
+              ['-macOS-Apple-Silicon.app.tar.gz', ['darwin-aarch64-app', 'darwin-aarch64']],
+              ['-macOS-Intel.app.tar.gz', ['darwin-x86_64-app', 'darwin-x86_64']],
+              ['-Windows-Setup.exe', ['windows-x86_64-nsis', 'windows-x86_64']],
+              ['-Windows.msi', ['windows-x86_64-msi']],
+              ['-Linux.deb', ['linux-x86_64-deb', 'linux-x86_64']],
+              ['-Linux.rpm', ['linux-x86_64-rpm']],
+            ];
+            const platforms = {};
+            for (const [suffix, keys] of files) {
+              const file = assets.find((a) => a.name.endsWith(suffix));
+              const sig = assets.find((a) => a.name.endsWith(`${suffix}.sig`));
+              if (!file || !sig) { console.log(`no updater file for ${suffix}`); continue; }
+              const signature = await text(sig);
+              for (const k of keys) platforms[k] = { signature, url: file.browser_download_url };
+            }
+            if (Object.keys(platforms).length === 0) throw new Error('no updater files: is TAURI_SIGNING_PRIVATE_KEY set?');
+            const latest = {
+              version,
+              notes: `https://github.com/${owner}/${repo}/releases/tag/vault-v${version}`,
+              pub_date: new Date().toISOString(),
+              platforms,
+            };
+            for (const a of assets) {
+              if (a.name === 'latest.json') await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: a.id });
+            }
+            await github.rest.repos.uploadReleaseAsset({ owner, repo, release_id, name: 'latest.json', data: JSON.stringify(latest, null, 2) + '\n' });
+            console.log(`latest.json: ${version}, ${Object.keys(platforms).join(', ')}`);
 
       # Hash every published asset (after the renames above, so the names in
       # SHA256SUMS.txt match the final download filenames) and attach the
