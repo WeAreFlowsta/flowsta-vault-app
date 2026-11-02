@@ -824,12 +824,19 @@ pub async fn ensure_apps_enabled(
 /// agent key the 0.6 conductor runs as (the key lives in both lairs; the DNA
 /// hashes differ, so one key on two conductors is allowed). Idempotent: an
 /// installed app is re-enabled. Nothing is linked or carried here (B4).
+/// The 0.7 apps after [`install_dnas_07`]: every app id, and how many were
+/// installed this time (not found on the conductor).
+pub struct Apps07 {
+    pub ids: Vec<String>,
+    pub new: usize,
+}
+
 pub async fn install_dnas_07(
     admin_port: u16,
     resource_dir: &Path,
     agent_key_raw32: &[u8],
     private_v2_seed: Option<&str>,
-) -> Result<Vec<String>, String> {
+) -> Result<Apps07, String> {
     use holochain_types_07::prelude::AgentPubKey;
 
     let admin = AdminClient::connect(Line::V07, admin_port, &crate::conductor::node_origin())
@@ -838,6 +845,7 @@ pub async fn install_dnas_07(
     let existing = admin.list_apps().await.map_err(|e| format!("Failed to list apps (0.7): {}", e))?;
     let agent_key = AgentPubKey::from_raw_32(agent_key_raw32.to_vec());
     let mut installed = Vec::new();
+    let mut new = 0;
     for (app_id, file) in [
         (make_app_id("identity", BUNDLED_IDENTITY_VERSION_07), BUNDLED_IDENTITY_V1_5_HAPP_FILE),
         (make_app_id("signing", BUNDLED_SIGNING_VERSION_07), BUNDLED_SIGNING_V1_5_HAPP_FILE),
@@ -865,6 +873,7 @@ pub async fn install_dnas_07(
             .await
             .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
         log::info!("[0.7] {} installed and enabled", app_id);
+        new += 1;
         installed.push(app_id);
     }
     // The private cell, with the identity's own network seed (device-hosted
@@ -900,10 +909,11 @@ pub async fn install_dnas_07(
                 .await
                 .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
             log::info!("[0.7] {} installed and enabled", app_id);
+            new += 1;
             installed.push(app_id);
         }
     }
-    Ok(installed)
+    Ok(Apps07 { ids: installed, new })
 }
 
 /// Hot-swap the signing v1.5 cell's coordinator to the bundled revision on
