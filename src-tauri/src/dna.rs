@@ -324,6 +324,13 @@ fn ws06(admin: &AdminClient) -> &AdminWebsocket {
     admin.as_v06().expect("a 0.6 admin client")
 }
 
+/// The error for a cell installed under another agent key: the install stops
+/// and the cell is left as it is (never uninstalled).
+fn wrong_key(app_id: &str, found: &holochain_types::prelude::AgentPubKey) -> String {
+    log::warn!("{} is installed under a different agent key ({}); stopping, nothing changed", app_id, found);
+    format!("{} on this device belongs to a different conductor key ({}). Nothing was changed.", app_id, found)
+}
+
 /// Install Flowsta DNAs into the conductor if not already present.
 ///
 /// Accepts dynamic versions (from VaultConfig or defaults). Checks for existing
@@ -377,8 +384,9 @@ pub async fn install_dnas(
         .map_err(|e| format!("Failed to connect to admin WebSocket: {}", e))?;
 
     // 2. Check which apps are already installed and verify agent key matches.
-    //    If an app was installed with a different key (e.g. from generate_agent_pub_key),
-    //    uninstall it so it gets reinstalled with the correct deterministic key.
+    //    An app under a different key (e.g. from generate_agent_pub_key) stops
+    //    the install with the cell left exactly as it is: never uninstall a
+    //    cell that can hold data. No current path installs under another key.
     let existing_apps = ws06(&admin)
         .list_apps(None)
         .await
@@ -404,33 +412,21 @@ pub async fn install_dnas(
             if key_matches {
                 private_installed = true;
             } else {
-                log::warn!("Private app installed with wrong agent key, reinstalling...");
-                ws06(&admin)
-                    .uninstall_app(private_app_id.clone(), false)
-                    .await
-                    .map_err(|e| format!("Failed to uninstall private app: {}", e))?;
+                return Err(wrong_key(private_app_id.as_str(), &app.agent_pub_key));
             }
         }
         if app.installed_app_id == identity_app_id {
             if key_matches {
                 identity_installed = true;
             } else {
-                log::warn!("Identity app installed with wrong agent key, reinstalling...");
-                ws06(&admin)
-                    .uninstall_app(identity_app_id.clone(), false)
-                    .await
-                    .map_err(|e| format!("Failed to uninstall identity app: {}", e))?;
+                return Err(wrong_key(identity_app_id.as_str(), &app.agent_pub_key));
             }
         }
         if app.installed_app_id == signing_app_id {
             if key_matches {
                 signing_installed = true;
             } else {
-                log::warn!("Signing app installed with wrong agent key, reinstalling...");
-                ws06(&admin)
-                    .uninstall_app(signing_app_id.clone(), false)
-                    .await
-                    .map_err(|e| format!("Failed to uninstall signing app: {}", e))?;
+                return Err(wrong_key(signing_app_id.as_str(), &app.agent_pub_key));
             }
         }
         if app.installed_app_id == private_v2_app_id {
@@ -447,16 +443,17 @@ pub async fn install_dnas(
             }
         } else if app.installed_app_id.starts_with(&private_v2_stale_prefix) {
             // A v2 cell from an older bundle revision (different DNA hash
-            // under the same version) - replace it with the current bundle.
+            // under the same version): install the current bundle beside it
+            // and disable this one, kept with whatever it holds (unlock leaves
+            // an app disabled this way alone).
             log::warn!(
-                "Stale private v2 bundle revision installed ({}), replacing with {}",
+                "Stale private v2 bundle revision installed ({}), disabling it (kept) beside {}",
                 app.installed_app_id,
                 private_v2_app_id,
             );
-            ws06(&admin)
-                .uninstall_app(app.installed_app_id.clone(), false)
-                .await
-                .map_err(|e| format!("Failed to uninstall stale private v2 app: {}", e))?;
+            if let Err(e) = ws06(&admin).disable_app(app.installed_app_id.clone()).await {
+                log::warn!("Failed to disable {} (it stays enabled): {}", app.installed_app_id, e);
+            }
         }
     }
 
@@ -479,7 +476,7 @@ pub async fn install_dnas(
         if !is_target {
             continue;
         }
-        // Wrong-key apps were just uninstalled in the loop above.
+        // A wrong-key app has already stopped the install in the loop above.
         if app.agent_pub_key != agent_key {
             continue;
         }
