@@ -7,6 +7,7 @@
 //! - GET  /status           → { unlocked, agent_pub_key, did, version }
 //! - POST /sign             → signs bytes or actions with the device Ed25519 key
 //! - POST /sign-node-manifest → signs a Flowsta node manifest (the dialog names what is signed)
+//! - POST /sign-release-manifest → signs an app's release manifest (the dialog names every file)
 //! - POST /authenticate     → identity proof via challenge-response with user approval
 //! - POST /link-identity    → agent-linking signature for third-party Holochain apps (with approval)
 //! - POST /sign-document    → Sign It: sign a file hash and commit to signing DNA (with approval)
@@ -5701,7 +5702,17 @@ async fn sign_node_manifest_handler(
     let (statement, summary) = node_manifest_statement(&req.manifest).map_err(|e| {
         (StatusCode::BAD_REQUEST, Json(IpcError { error: "bad_manifest".into(), description: Some(e) }))
     })?;
+    approve_and_sign_manifest(&state, origin, statement, summary).await
+}
 
+/// The dialog and the signature, shared by both manifest routes: the
+/// statement was derived by the Vault from the manifest itself.
+async fn approve_and_sign_manifest(
+    state: &Arc<IpcState>,
+    origin: Option<String>,
+    statement: String,
+    summary: serde_json::Value,
+) -> Result<Json<SignNodeManifestResponse>, (StatusCode, Json<IpcError>)> {
     let (seed_arr, agent_pub_key, did) = {
         let config_guard = state.app_state.vault_config.lock().unwrap();
         let config = config_guard.as_ref().ok_or_else(|| {
@@ -5715,7 +5726,8 @@ async fn sign_node_manifest_handler(
         (seed_arr, config.agent_pub_key.clone(), config.did.clone())
     };
 
-    // Always a dialog: a manifest tells every node on a channel what to run.
+    // Always a dialog: a manifest tells every node, or every install of an
+    // app, on a channel what to run.
     let app_name = origin_to_client_id(&state.app_state, origin.as_deref())
         .and_then(|cid| {
             let apps = state.app_state.linked_third_party_apps.lock().unwrap();
@@ -5748,7 +5760,7 @@ async fn sign_node_manifest_handler(
     let approved = match waited {
         Ok(Ok(result)) => {
             if result {
-                recheck_expected_identity(&state)?;
+                recheck_expected_identity(state)?;
             }
             result
         }
@@ -5775,6 +5787,225 @@ async fn sign_node_manifest_handler(
         statement,
         agent_pub_key,
     }))
+}
+
+// ── POST /sign-release-manifest ─────────────────────────────────────────
+//
+// An app's release manifest: the version every install on a channel
+// updates to, with the size and SHA-256 of every file. Signed the same way
+// as a node manifest (the Vault derives the statement from the body, shows
+// every file, signs on approval); the app checks it before installing
+// anything. Third-party developers sign their own apps' manifests with
+// their own identity through this route.
+
+#[derive(Deserialize)]
+struct SignReleaseManifestRequest {
+    /// The manifest; a `signature` member, if present, is ignored.
+    manifest: serde_json::Value,
+}
+
+const RELEASE_PLATFORMS: [&str; 4] = ["darwin-aarch64", "darwin-x86_64", "windows-x86_64", "linux-x86_64"];
+const RELEASE_KINDS: [&str; 6] = ["app-tarball", "nsis", "msi", "deb", "rpm", "dmg"];
+
+/// The first number in `v` that is not an integer, by its path: the hash
+/// must come out the same in every language, and floats print differently.
+fn first_non_integer(v: &serde_json::Value, path: &str) -> Option<String> {
+    match v {
+        serde_json::Value::Number(n) if !(n.is_i64() || n.is_u64()) => Some(path.to_string()),
+        serde_json::Value::Object(map) => map.iter().find_map(|(k, x)| first_non_integer(x, &format!("{}.{}", path, k))),
+        serde_json::Value::Array(items) => items.iter().enumerate().find_map(|(i, x)| first_non_integer(x, &format!("{}[{}]", path, i))),
+        _ => None,
+    }
+}
+
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+/// A version as releases name them: digits, letters, dots, dashes, plus.
+fn is_version(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.chars().next().is_some_and(|c| c.is_ascii_digit()) && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
+/// The statement for a release manifest, plus the summary the dialog shows.
+pub(crate) fn release_manifest_statement(manifest: &serde_json::Value) -> Result<(String, serde_json::Value), String> {
+    let obj = manifest.as_object().ok_or("manifest must be an object")?;
+    let mut body = obj.clone();
+    body.remove("signature");
+    if body.get("v").and_then(|v| v.as_u64()) != Some(1) {
+        return Err("manifest.v must be 1".into());
+    }
+    if let Some(path) = first_non_integer(&serde_json::Value::Object(body.clone()), "manifest") {
+        return Err(format!("{} is not a whole number (a release manifest carries integers only)", path));
+    }
+    let text = |key: &str| body.get(key).and_then(|v| v.as_str());
+    let app = text("app").ok_or("manifest.app missing")?;
+    if app.len() > 128
+        || !app.contains('.')
+        || app.starts_with('.')
+        || app.ends_with('.')
+        || !app.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
+    {
+        return Err("manifest.app is not an app id (like com.example.app)".into());
+    }
+    let channel = text("channel").ok_or("manifest.channel missing")?;
+    if !channel.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        || channel.len() > 32
+        || !channel.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err("manifest.channel is not a channel name".into());
+    }
+    let sequence = body.get("sequence").and_then(|s| s.as_u64()).filter(|s| *s >= 1).ok_or("manifest.sequence must be a positive integer")?;
+    let version = text("version").filter(|v| is_version(v)).ok_or("manifest.version missing or not a version")?;
+    let from_version = match body.get("from_version") {
+        None => None,
+        Some(v) => Some(v.as_str().filter(|v| is_version(v)).ok_or("manifest.from_version is not a version")?),
+    };
+    let holochain = body.get("holochain").and_then(|h| h.as_object()).ok_or("manifest.holochain missing")?;
+    let lines: Vec<&str> = holochain
+        .get("lines")
+        .and_then(|l| l.as_array())
+        .map(|l| l.iter().filter_map(|x| x.as_str()).collect())
+        .filter(|l: &Vec<&str>| !l.is_empty())
+        .ok_or("manifest.holochain.lines missing")?;
+    let changes_line = match holochain.get("changes_line") {
+        None => false,
+        Some(v) => v.as_bool().ok_or("manifest.holochain.changes_line must be true or false")?,
+    };
+    let percent = match body.get("rollout") {
+        None => 100,
+        Some(r) => r.get("percent").and_then(|p| p.as_u64()).filter(|p| *p <= 100).ok_or("manifest.rollout.percent must be 0 to 100")?,
+    };
+    let files = body.get("files").and_then(|f| f.as_array()).filter(|f| !f.is_empty()).ok_or("manifest.files missing")?;
+    let mut file_rows = Vec::new();
+    for (i, f) in files.iter().enumerate() {
+        let field = |k: &str| f.get(k).and_then(|v| v.as_str());
+        let platform = field("platform").filter(|p| RELEASE_PLATFORMS.contains(p)).ok_or(format!("manifest.files[{}].platform is not one of {}", i, RELEASE_PLATFORMS.join(", ")))?;
+        let kind = field("kind").filter(|k| RELEASE_KINDS.contains(k)).ok_or(format!("manifest.files[{}].kind is not one of {}", i, RELEASE_KINDS.join(", ")))?;
+        let name = field("name").filter(|n| !n.is_empty() && !n.contains('/') && !n.contains('\\')).ok_or(format!("manifest.files[{}].name missing", i))?;
+        field("url").filter(|u| u.starts_with("https://")).ok_or(format!("manifest.files[{}].url must be https", i))?;
+        let size = f.get("size").and_then(|v| v.as_u64()).filter(|n| *n > 0).ok_or(format!("manifest.files[{}].size must be a positive integer", i))?;
+        let sha256 = field("sha256").filter(|h| is_sha256_hex(h)).ok_or(format!("manifest.files[{}].sha256 must be 64 lowercase hex", i))?;
+        file_rows.push(serde_json::json!({ "platform": platform, "kind": kind, "name": name, "size": size, "sha256": &sha256[..12] }));
+    }
+    let mut kit_rows = Vec::new();
+    for (i, k) in body.get("kit").and_then(|k| k.as_array()).map(|k| k.as_slice()).unwrap_or(&[]).iter().enumerate() {
+        let field = |key: &str| k.get(key).and_then(|v| v.as_str()).filter(|v| !v.is_empty());
+        let (Some(line), Some(target), Some(sidecar)) = (field("line"), field("target"), field("sidecar")) else {
+            return Err(format!("manifest.kit[{}] needs line, target and sidecar", i));
+        };
+        let sha256 = field("sha256").filter(|h| is_sha256_hex(h)).ok_or(format!("manifest.kit[{}].sha256 must be 64 lowercase hex", i))?;
+        kit_rows.push(serde_json::json!({ "line": line, "target": target, "sidecar": sidecar, "sha256": &sha256[..12] }));
+    }
+    let mut canon = String::new();
+    canonical_json(&serde_json::Value::Object(body.clone()), &mut canon);
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(canon.as_bytes()));
+    let statement = format!("flowsta-release-manifest:v1:{}:{}:{}:{}", app, channel, sequence, hash);
+    let summary = serde_json::json!({
+        "kind": "release",
+        "app": app,
+        "channel": channel,
+        "sequence": sequence,
+        "issued_at": text("issued_at").unwrap_or(""),
+        "version": version,
+        "from_version": from_version,
+        "notes_url": text("notes_url").unwrap_or(""),
+        "lines": lines,
+        "changes_line": changes_line,
+        "rollout_percent": percent,
+        "files": file_rows,
+        "kit": kit_rows,
+        "statement": statement,
+    });
+    Ok((statement, summary))
+}
+
+async fn sign_release_manifest_handler(
+    State(state): State<Arc<IpcState>>,
+    headers: HeaderMap,
+    Json(req): Json<SignReleaseManifestRequest>,
+) -> Result<Json<SignNodeManifestResponse>, (StatusCode, Json<IpcError>)> {
+    let origin = extract_origin(&headers);
+    track_request(&state.app_state, origin.as_deref(), "sign-release-manifest");
+
+    // Linked apps only, as for /sign: the release tool links once.
+    if origin_to_client_id(&state.app_state, origin.as_deref()).is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "not_linked".into(),
+                description: Some("This origin is not a linked app. Call /link-identity and obtain user approval first.".into()),
+            }),
+        ));
+    }
+
+    let (statement, summary) = release_manifest_statement(&req.manifest).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(IpcError { error: "bad_manifest".into(), description: Some(e) }))
+    })?;
+    approve_and_sign_manifest(&state, origin, statement, summary).await
+}
+
+#[cfg(test)]
+mod release_manifest_tests {
+    use super::*;
+
+    fn fixture() -> serde_json::Value {
+        serde_json::json!({
+            "v": 1, "app": "com.solar.yourowai", "channel": "stable", "sequence": 12,
+            "issued_at": "2026-11-20T03:00:00Z", "version": "0.9.2",
+            "notes_url": "https://github.com/WeAreFlowsta/your-own-ai/releases/tag/v0.9.2",
+            "holochain": { "lines": ["holochain-0.7"], "changes_line": false },
+            "rollout": { "percent": 100 }, "from_version": "0.9.1",
+            "files": [
+                { "platform": "darwin-aarch64", "kind": "app-tarball", "name": "Your.Own.AI_aarch64.app.tar.gz", "url": "https://example.com/a.tar.gz", "size": 123456, "sha256": "a".repeat(64) },
+                { "platform": "windows-x86_64", "kind": "nsis", "name": "Your.Own.AI_0.9.2_x64-setup.exe", "url": "https://example.com/b.exe", "size": 654321, "sha256": "b".repeat(64) }
+            ],
+            "kit": [{ "line": "holochain-0.7", "target": "x86_64-pc-windows-msvc", "sidecar": "yourowai-holochain-07", "sha256": "c".repeat(64) }],
+            "signature": { "signer": "x", "sig": "y", "statement": "z" }
+        })
+    }
+
+    /// The node agent's canonical.mjs over the same body (signature left
+    /// out) gave this hash (2026-11-02); the update check must match it.
+    #[test]
+    fn statement_names_the_app_channel_sequence_and_body_hash() {
+        let (statement, summary) = release_manifest_statement(&fixture()).unwrap();
+        assert_eq!(statement, "flowsta-release-manifest:v1:com.solar.yourowai:stable:12:58363d398fa0463cbcb947af90a91756c1b0f59d66b476560b9a08a1c08794e8");
+        assert_eq!(summary["kind"], "release");
+        assert_eq!(summary["files"][1]["sha256"], "bbbbbbbbbbbb");
+        assert_eq!(summary["kit"][0]["sidecar"], "yourowai-holochain-07");
+        assert_eq!(summary["rollout_percent"], 100);
+        // The signature member never changes what is signed.
+        let mut other = fixture();
+        other["signature"] = serde_json::json!({ "signer": "someone else" });
+        assert_eq!(release_manifest_statement(&other).unwrap().0, statement);
+    }
+
+    #[test]
+    fn a_manifest_that_could_hash_differently_or_mislead_is_refused() {
+        let refused = |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut m = fixture();
+            edit(&mut m);
+            release_manifest_statement(&m).unwrap_err()
+        };
+        assert!(refused(&|m| m["rollout"]["percent"] = serde_json::json!(12.5)).contains("manifest.rollout.percent is not a whole number"));
+        assert!(refused(&|m| m["files"][0]["size"] = serde_json::json!(1.0)).contains("manifest.files[0].size"));
+        assert!(refused(&|m| m["v"] = serde_json::json!(2)).contains("manifest.v"));
+        assert!(refused(&|m| m["app"] = serde_json::json!("Your Own AI")).contains("manifest.app"));
+        assert!(refused(&|m| m["channel"] = serde_json::json!("Stable")).contains("manifest.channel"));
+        assert!(refused(&|m| m["sequence"] = serde_json::json!(0)).contains("manifest.sequence"));
+        assert!(refused(&|m| m["version"] = serde_json::json!("latest")).contains("manifest.version"));
+        assert!(refused(&|m| m["files"] = serde_json::json!([])).contains("manifest.files missing"));
+        assert!(refused(&|m| m["files"][0]["platform"] = serde_json::json!("linux-arm")).contains("platform"));
+        assert!(refused(&|m| m["files"][1]["kind"] = serde_json::json!("exe")).contains("kind"));
+        assert!(refused(&|m| m["files"][0]["url"] = serde_json::json!("http://example.com/a")).contains("https"));
+        assert!(refused(&|m| m["files"][0]["sha256"] = serde_json::json!("A".repeat(64))).contains("sha256"));
+        assert!(refused(&|m| m["files"][0]["name"] = serde_json::json!("../a.tar.gz")).contains("name"));
+        assert!(refused(&|m| m["kit"][0]["sha256"] = serde_json::json!("short")).contains("manifest.kit[0].sha256"));
+        assert!(refused(&|m| m["rollout"]["percent"] = serde_json::json!(101)).contains("0 to 100"));
+        assert!(refused(&|m| m["holochain"]["lines"] = serde_json::json!([])).contains("lines"));
+    }
 }
 
 #[cfg(test)]
@@ -5980,6 +6211,7 @@ pub async fn start_ipc_server(
         .route("/show", post(show_handler))
         .route("/sign", post(sign_handler))
         .route("/sign-node-manifest", post(sign_node_manifest_handler))
+        .route("/sign-release-manifest", post(sign_release_manifest_handler))
         .route("/authenticate", post(authenticate_handler))
         .route("/link-identity", post(link_identity_handler))
         .route("/sign-document", post(sign_document_handler))
