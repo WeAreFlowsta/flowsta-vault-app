@@ -98,6 +98,8 @@ flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", r
 tauri-plugin-dialog = "2"
 # A system notification when a device is added to the identity.
 tauri-plugin-notification = "2"
+tauri-plugin-updater = "~2.12.0"
+flowsta-update-check = { git = "https://github.com/WeAreFlowsta/flowsta-update-check", rev = "1e892e20aa577a3ece65945b3d8f0fd4b95532f6" }
 
 # Image analysis (Sign It file integrity checks — LSB steganography detection)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
