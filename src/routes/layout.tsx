@@ -24,6 +24,29 @@ try {
 
 type AppScreen = "loading" | "setup" | "unlock" | "dashboard";
 
+/** A /sign-release-manifest request: what every install of an app on a channel updates to. */
+interface ReleaseManifestSign {
+  id: string;
+  app_name: string;
+  origin: string | null;
+  summary: {
+    kind: "release";
+    app: string;
+    channel: string;
+    sequence: number;
+    issued_at: string;
+    version: string;
+    from_version: string | null;
+    notes_url: string;
+    lines: string[];
+    changes_line: boolean;
+    rollout_percent: number;
+    files: { platform: string; kind: string; name: string; size: number; sha256: string }[];
+    kit: { line: string; target: string; sidecar: string; sha256: string }[];
+    statement: string;
+  };
+}
+
 declare const __API_URL__: string;
 declare const __APP_VERSION__: string;
 declare const __WEB_URL__: string;
@@ -414,6 +437,7 @@ export default component$(() => {
       statement: string;
     };
   } | null>(null);
+  const pendingReleaseSign = useSignal<ReleaseManifestSign | null>(null);
   // Transient notice when a remembered app authenticated without a dialog.
   const autoApprovedNotice = useSignal<string | null>(null);
 
@@ -972,10 +996,15 @@ export default component$(() => {
     }>("raw-sign-request", (event) => {
       pendingRawSign.value = event.payload;
     });
-    const unlistenManifest = listen<NonNullable<typeof pendingManifestSign.value>>(
+    const unlistenManifest = listen<NonNullable<typeof pendingManifestSign.value> | ReleaseManifestSign>(
       "manifest-sign-request",
       (event) => {
-        pendingManifestSign.value = event.payload;
+        const p = event.payload;
+        if ("kind" in p.summary && p.summary.kind === "release") {
+          pendingReleaseSign.value = p as ReleaseManifestSign;
+        } else {
+          pendingManifestSign.value = p as NonNullable<typeof pendingManifestSign.value>;
+        }
       },
     );
     const unlistenAuto = listen<{ app_name: string; origin: string | null }>(
@@ -1294,6 +1323,7 @@ export default component$(() => {
       console.error("Failed to respond to manifest signing request:", e);
     } finally {
       pendingManifestSign.value = null;
+      pendingReleaseSign.value = null;
     }
   });
 
@@ -1901,6 +1931,88 @@ export default component$(() => {
             </div>
             <p class="mb-4 text-xs text-amber-200/90">
               Approve only if the channel, sequence and digests match what the release tool just printed. Every node on this channel will act on it.
+            </p>
+            <div class="flex gap-3">
+              <GlassButton variant="secondary" class="flex-1" onClick$={() => handleManifestSignResponse(false)}>
+                Deny
+              </GlassButton>
+              <GlassButton class="flex-1" onClick$={() => handleManifestSignResponse(true)}>
+                Sign and publish
+              </GlassButton>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Release manifest signing: the version and every file, then sign */}
+      {pendingReleaseSign.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" data-testid="release-manifest-dialog">
+          <div class="w-full max-w-lg rounded-2xl border border-gray-700 bg-gray-800 p-6 shadow-2xl">
+            <div class="mb-4 flex items-start gap-3">
+              <div class="rounded-full bg-amber-500/20 p-2">
+                <svg class="h-5 w-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width={2}>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+              </div>
+              <div>
+                <h3 class="text-base font-semibold text-white">Publish a release</h3>
+                <p class="text-xs text-gray-400">
+                  {pendingReleaseSign.value.app_name} asks you to sign what every install of{" "}
+                  <span class="font-mono text-gray-200">{pendingReleaseSign.value.summary.app}</span> on the{" "}
+                  <span class="font-medium text-gray-200">{pendingReleaseSign.value.summary.channel}</span> channel updates to
+                </p>
+              </div>
+            </div>
+            <div class="mb-4 max-h-[50vh] space-y-3 overflow-y-auto rounded-lg border border-gray-700 bg-gray-900 p-3 text-sm">
+              <div class="flex justify-between">
+                <span class="text-xs text-gray-500">Version</span>
+                <span class="font-mono text-gray-200">
+                  {pendingReleaseSign.value.summary.version}
+                  {pendingReleaseSign.value.summary.from_version ? ` (from ${pendingReleaseSign.value.summary.from_version} or later)` : ""}
+                </span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-xs text-gray-500">Channel · sequence</span>
+                <span class="font-mono text-gray-200">
+                  {pendingReleaseSign.value.summary.channel} #{pendingReleaseSign.value.summary.sequence}
+                </span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-xs text-gray-500">Holochain</span>
+                <span class="text-gray-200">{pendingReleaseSign.value.summary.lines.join(", ")}</span>
+              </div>
+              {pendingReleaseSign.value.summary.changes_line && (
+                <p class="text-xs text-amber-200">This release moves people's data to another Holochain line; its first start says so.</p>
+              )}
+              <div class="flex justify-between">
+                <span class="text-xs text-gray-500">Rollout</span>
+                <span class="text-gray-200">{pendingReleaseSign.value.summary.rollout_percent}% of installs</span>
+              </div>
+              <div>
+                <span class="text-xs text-gray-500">Files</span>
+                {pendingReleaseSign.value.summary.files.map((f) => (
+                  <div key={f.platform + f.kind + f.name} class="mt-1 rounded-md border border-gray-700/70 p-2">
+                    <p class="break-all text-xs text-gray-200">{f.name}</p>
+                    <p class="text-xs text-gray-400">
+                      {f.platform} · {f.kind} · {(f.size / 1048576).toFixed(1)} MB · <span class="font-mono">{f.sha256}</span>
+                    </p>
+                  </div>
+                ))}
+              </div>
+              {pendingReleaseSign.value.summary.kit.length > 0 && (
+                <div>
+                  <span class="text-xs text-gray-500">Holochain programs it carries</span>
+                  {pendingReleaseSign.value.summary.kit.map((k) => (
+                    <p key={k.line + k.target + k.sidecar} class="text-xs text-gray-400">
+                      {k.sidecar} · {k.target} · <span class="font-mono">{k.sha256}</span>
+                    </p>
+                  ))}
+                </div>
+              )}
+              <p class="break-all font-mono text-[10px] text-gray-500">{pendingReleaseSign.value.summary.statement}</p>
+            </div>
+            <p class="mb-4 text-xs text-amber-200/90">
+              Approve only if the app, version, channel and file hashes match what the release tool just printed. Every install on this channel will update to it.
             </p>
             <div class="flex gap-3">
               <GlassButton variant="secondary" class="flex-1" onClick$={() => handleManifestSignResponse(false)}>
