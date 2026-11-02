@@ -1966,7 +1966,7 @@ dependencies = [
 [[package]]
 name = "flowsta-hc-lines"
 version = "0.1.0"
-source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=b5e7614eebf047fb9fc72607b732695340b8e02e#b5e7614eebf047fb9fc72607b732695340b8e02e"
+source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=d8a4b021f8585cdacf7a78dcd1a3dd497cb6d532#d8a4b021f8585cdacf7a78dcd1a3dd497cb6d532"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4804,7 +4804,7 @@ version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff32365de1b6743cb203b710788263c44a03de03802daf96092f2da4fe6ba4d7"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
