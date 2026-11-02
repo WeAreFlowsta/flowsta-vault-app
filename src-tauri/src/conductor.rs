@@ -11,7 +11,7 @@ use crate::hc::Line;
 use std::sync::Arc;
 use flowsta_hc_lines::conductor::NetworkTuning;
 use flowsta_hc_lines::rendezvous::Rendezvous;
-use flowsta_hc_lines::supervisor::{self, KeySource, LineHooks, LineProcess, LineStart, LineState, Role, StartStep, Supervisor, Timeouts};
+use flowsta_hc_lines::supervisor::{self, KeySource, LineHooks, LineProcess, LineStart, LineState, Role, Setup, StartStep, Supervisor, Timeouts};
 
 /// Candidate admin WebSocket ports for the conductor.
 /// Tries each in order - allows staging and production vaults to coexist.
@@ -668,28 +668,37 @@ impl VaultLines {
     /// The 0.7 line: the same key as the seed derives (refused otherwise),
     /// identity 1.5 + signing 1.5 (+ private v2.1), the signing coordinator
     /// hot-swap, the app interface. As the primary it waits for its cells
-    /// before the Vault says Ready.
-    async fn setup_07(&self, role: Role, process: &mut LineProcess) -> Result<u16, String> {
+    /// before the Vault says Ready. A start that installed an app asks for
+    /// one restart first: Holochain 0.7.1 keeps the memory of an install
+    /// until its conductor restarts (~2 GB against 419 MB after one restart,
+    /// a new identity's three apps, 11-03).
+    async fn setup_07(&self, role: Role, process: &mut LineProcess) -> Result<Setup, String> {
         let pub_key = process.agents[0];
         if pub_key != self.expected_pub_key {
             return Err("the 0.7 key store derived a different key from the same seed".to_string());
         }
         let admin_port = process.admin_port;
-        match dna::install_dnas_07(admin_port, &self.resource_dir, &pub_key[..], self.private_v2_seed.as_deref()).await {
-            Ok(apps) => log::info!("[0.7] apps: {}", apps.join(", ")),
+        let apps = match dna::install_dnas_07(admin_port, &self.resource_dir, &pub_key[..], self.private_v2_seed.as_deref()).await {
+            Ok(apps) => apps,
             Err(e) => return Err(format!("0.7 DNA installation failed: {}", e)),
-        }
+        };
+        log::info!("[0.7] apps: {}", apps.ids.join(", "));
         // Non-fatal, like the 0.6 line's: retried at the next start.
         if let Err(e) = dna::ensure_signing_coordinators_07(admin_port, &self.resource_dir).await {
             log::warn!("[0.7] signing coordinator hot-swap failed (non-fatal): {}", e);
         }
         let app_port = dna::setup_app_interface_07(admin_port).await.map_err(|e| format!("0.7 app interface setup failed: {}", e))?;
+        if apps.new > 0 {
+            // The cells are waited for after the restart.
+            log::info!("[0.7] {} app(s) installed: the line restarts once to give back the memory the install kept", apps.new);
+            return Ok(Setup { app_port, restart: true });
+        }
         if role == Role::Primary {
             if let Some(state) = &self.state {
                 crate::dna::ensure_cells_ready_07(admin_port, state).await;
             }
         }
-        Ok(app_port)
+        Ok(app_port.into())
     }
 }
 
@@ -731,9 +740,9 @@ impl LineHooks for VaultLines {
         }
     }
 
-    async fn setup(&self, line: Line, role: Role, process: &mut LineProcess) -> Result<u16, String> {
+    async fn setup(&self, line: Line, role: Role, process: &mut LineProcess) -> Result<Setup, String> {
         match line {
-            Line::V06 => self.setup_06(role, process).await,
+            Line::V06 => self.setup_06(role, process).await.map(Setup::from),
             Line::V07 => self.setup_07(role, process).await,
         }
     }
@@ -1004,12 +1013,15 @@ mod live_line_tests {
         };
         let mut p06 = hooks.start(Line::V06, Role::Secondary).await.expect("the 0.6 line");
         assert_eq!(p06.agents[0], key);
-        let app06 = hooks.setup(Line::V06, Role::Secondary, &mut p06).await.expect("the 0.6 DNAs");
+        let app06 = hooks.setup(Line::V06, Role::Secondary, &mut p06).await.expect("the 0.6 DNAs").app_port;
         assert!(p06.conductor_alive());
         assert!(tokio::net::TcpStream::connect(("127.0.0.1", app06)).await.is_ok(), "0.6 app interface");
 
         let mut p07 = hooks.start(Line::V07, Role::Secondary).await.expect("the 0.7 line");
-        let app07 = hooks.setup(Line::V07, Role::Secondary, &mut p07).await.expect("the 0.7 DNAs");
+        let setup07 = hooks.setup(Line::V07, Role::Secondary, &mut p07).await.expect("the 0.7 DNAs");
+        // A fresh install asks the supervisor for one restart.
+        assert!(setup07.restart, "a first install asks for a restart");
+        let app07 = setup07.app_port;
         assert!(p07.conductor_alive());
         assert!(tokio::net::TcpStream::connect(("127.0.0.1", app07)).await.is_ok(), "0.7 app interface");
         let config = std::fs::read_to_string(crate::paths::conductor_dir_07(&dir).join("conductor-config.yaml")).unwrap();
