@@ -448,12 +448,23 @@ pub async fn start_holochain(
         let own_install_id = crate::paths::install_id(&state.data_dir);
         let wanted_06 = line_06_wanted(&data_dir, data_key.as_ref(), own_install_id.as_deref());
         crate::move_07::record_line_06_decision(&data_dir, wanted_06);
-        if wanted_06 {
+        // A device whose records have not arrived on 0.7 yet (reset, then
+        // restored or re-added by phrase) gets its 0.6 line from the devices
+        // round once they have (`move_07::hold_06_for_arrival`).
+        let arriving = wanted_06
+            && private_v2_seed.is_some()
+            && data_key.as_ref().is_some_and(|key| crate::sealed::held_devices_on_07(&data_dir, key).is_empty());
+        if arriving {
+            log::info!(
+                "[0.6] wanted, but this device's records have not arrived on 0.7 yet - the devices round attaches it once they have (at most {} min)",
+                crate::move_07::ARRIVAL_HOLD.as_secs() / 60
+            );
+        } else if wanted_06 {
             log::info!("[0.6] this identity still has something on the 0.6 line - attaching it");
         } else {
             log::info!("[0.6] not started: nothing of this identity is on the 0.6 line");
         }
-        (Line::V07, wanted_06.then_some(Line::V06))
+        (Line::V07, (wanted_06 && !arriving).then_some(Line::V06))
     } else {
         (Line::V06, Some(Line::V07))
     };
