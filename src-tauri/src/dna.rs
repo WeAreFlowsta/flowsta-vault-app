@@ -751,6 +751,14 @@ pub async fn ensure_apps_enabled(
     };
 
     for app in &apps {
+        // An app disabled on purpose stays disabled: the DNA updater keeps the
+        // version it replaced that way (never uninstalled, still readable).
+        if matches!(
+            app.status,
+            holochain_types::app::AppStatus::Disabled(holochain_types::app::DisabledAppReason::User)
+        ) {
+            continue;
+        }
         match admin_ws.enable_app(app.installed_app_id.clone()).await {
             Ok(_) => {}
             Err(e) => log::warn!(

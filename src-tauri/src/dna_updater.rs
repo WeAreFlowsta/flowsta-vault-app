@@ -5,7 +5,8 @@
 //!   1. Up to date - no action needed.
 //!   2. Coordinator-only update - hot-swap via `admin.updateCoordinators()`.
 //!   3. Full DNA upgrade (new integrity/seed) - download new .happ, install,
-//!      uninstall old (except signing DNA - kept for signature history),
+//!      disable the old one (never uninstall: its data stays readable; the
+//!      signing DNA's old version stays enabled for signature history),
 //!      update VaultConfig.
 //!
 //! Future: when the vault starts writing data to DNAs (cross-device sync),
@@ -392,14 +393,24 @@ async fn download_happ_bundle(
 /// Returns Ok(true) if the DNA was actually updated (new cell installed),
 /// or Ok(false) if the DNA hash was unchanged (CellAlreadyExists - no-op).
 ///
+/// Disable the version an update replaced. A failure is logged, not fatal:
+/// the old app then stays enabled beside the new one, which loses nothing.
+async fn disable_old(admin_ws: &AdminWebsocket, old_app_id: &str) {
+    log::info!("Disabling old {} (kept, never uninstalled)...", old_app_id);
+    if let Err(e) = admin_ws.disable_app(old_app_id.to_string()).await {
+        log::warn!("Failed to disable {} (non-fatal, it stays enabled): {}", old_app_id, e);
+    }
+}
+
 /// For now (vault doesn't author data on DNAs), this is a simple swap:
 ///   1. Download new .happ bundle
 ///   2. Install new DNA (new app ID)
 ///   3. Enable new DNA
-///   4. Uninstall old DNA
+///   4. Disable the old DNA (signing: keep it enabled)
 ///
-/// Future: when vault writes data to DNAs, this will include
-/// export → install → import → verify → uninstall old.
+/// Never uninstall: a disabled app keeps its cell and data, so the earlier
+/// version can be read again and nothing is lost if the new one misbehaves.
+/// `dna::ensure_apps_enabled` leaves an app disabled this way alone.
 async fn update_single_dna(
     admin_port: u16,
     download_dir: &Path,
@@ -470,13 +481,9 @@ async fn update_single_dna(
                     old_app_id
                 );
             } else {
-                log::info!("Uninstalling old {}...", old_app_id);
-                if let Err(e) = admin_ws.uninstall_app(old_app_id.clone(), false).await {
-                    log::warn!("Failed to uninstall {} (non-fatal): {}", old_app_id, e);
-                }
-
+                disable_old(&admin_ws, &old_app_id).await;
                 log::info!(
-                    "{} DNA updated: {} → {} (old {} uninstalled)",
+                    "{} DNA updated: {} → {} (old {} disabled, kept)",
                     dna_type,
                     current_version,
                     new_version,
@@ -489,7 +496,7 @@ async fn update_single_dna(
             let failure = flowsta_hc_lines::client::install_failure_06(&e);
             if failure == InstallFailure::AppAlreadyInstalled {
                 // App was installed by a previous attempt that failed before completing.
-                // Just enable it and uninstall the old one.
+                // Just enable it and disable the old one.
                 log::info!(
                     "AppAlreadyInstalled - {} already registered, enabling and cleaning up",
                     new_app_id
@@ -508,13 +515,9 @@ async fn update_single_dna(
                         old_app_id
                     );
                 } else {
-                    log::info!("Uninstalling old {}...", old_app_id);
-                    if let Err(e) = admin_ws.uninstall_app(old_app_id.clone(), false).await {
-                        log::warn!("Failed to uninstall {} (non-fatal): {}", old_app_id, e);
-                    }
-
+                    disable_old(&admin_ws, &old_app_id).await;
                     log::info!(
-                        "{} DNA updated (recovered): {} → {} (old {} uninstalled)",
+                        "{} DNA updated (recovered): {} → {} (old {} disabled, kept)",
                         dna_type,
                         current_version,
                         new_version,
@@ -524,7 +527,7 @@ async fn update_single_dna(
             } else if failure == InstallFailure::CellAlreadyExists {
                 // Same DNA hash - the new bundle has the same integrity zomes + network seed.
                 // The cell is already running correctly under the old app ID.
-                // No install/uninstall possible; Holochain won't allow a duplicate cell.
+                // No install possible; Holochain won't allow a duplicate cell.
                 // Return false so the caller does NOT update VaultConfig version
                 // (keeping app ID consistent with what's registered in the conductor).
                 log::info!(
