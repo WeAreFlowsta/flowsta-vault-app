@@ -186,6 +186,21 @@ jobs:
           mkdir -p ~/private_keys
           echo -n "$APPLE_API_KEY_PATH" | base64 --decode -o ~/private_keys/AuthKey_${APPLE_API_KEY}.p8
 
+      # Windows Installer (MSI) versions are numbers only: a pre-release
+      # version (1.8.0-beta1) builds the NSIS installer alone, as the release
+      # workflow does.
+      - name: Compute Tauri bundle args
+        id: tauri_args
+        shell: bash
+        run: |
+          EXTRA=""
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [[ "$RUNNER_OS" == "Windows" ]] && [[ "$VERSION" == *-* ]]; then
+            EXTRA=" --bundles nsis"
+            echo "Pre-release version ($VERSION): NSIS only on Windows"
+          fi
+          echo "extra=$EXTRA" >> "$GITHUB_OUTPUT"
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@action-v0.6.2
         env:
@@ -217,7 +232,7 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         with:
-          args: --target ${{ matrix.target }} --config '{"identifier":"com.flowsta.vault.staging","productName":"Flowsta Vault (Staging)"}'
+          args: --target ${{ matrix.target }} --config '{"identifier":"com.flowsta.vault.staging","productName":"Flowsta Vault (Staging)"}'${{ steps.tauri_args.outputs.extra }}
 
       # The sidecars' SHA-256 after signing, as the release workflow
       # publishes them (scripts/kit-hashes.mjs): run here too, so every
