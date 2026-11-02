@@ -5,6 +5,53 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0-beta2] - 2026-11-03
+
+The second beta of 1.8.0. The Vault now keeps itself up to date, starts
+with no network, and keeps Holochain's memory in check.
+
+### Highlights
+- **The Vault keeps itself up to date.** A new version downloads in the
+  background and installs when you restart the Vault or quit it; "Restart
+  to update" appears at the top of the window when one is ready. Before
+  anything installs, the Vault checks that Flowsta signed that exact
+  release. Settings → Updates turns it off. This beta is installed by
+  hand; the next one arrives on its own.
+- **The Vault starts with no network.** Offline, Holochain now starts and
+  everything on your computer works, and the Vault connects once the
+  network is back. Before, Holochain could not start at all without a
+  network connection.
+- **Less memory.** Holochain 0.7.1 holds on to memory it has used until it
+  restarts. The Vault now restarts it once after setting up an identity
+  (about 2 GB down to about 1.2 GB), and again at a quiet moment whenever
+  it passes 1 GB, at most every six hours.
+
+### Changed
+- Your records right after the Vault starts wait for Holochain to be
+  ready, instead of showing as not loaded for up to a minute on a slow
+  start.
+- A device added again with your recovery phrase starts the previous
+  Holochain version only once its records have arrived, which brings them
+  in faster. Beside a device still on 1.6.1 this takes up to five minutes
+  longer.
+- If Holochain stops answering while it is still running, the Vault
+  restarts it after three minutes.
+- On macOS and Linux, quitting the Vault now asks Holochain to shut down
+  the way it expects. Before, it was ended at once (the 1.8.0-beta1 notes
+  said otherwise). Windows still ends it at once.
+
+### Added
+- "Publish a release": the Vault can sign the list of a release's files
+  for Flowsta's release tool, after showing you every one.
+
+### Security
+- Each release records the fingerprints of its Holochain programs as
+  they ship, after code signing, so a later release can check the copies
+  it restores.
+- An update is checked twice before it installs: the updater's own
+  signature on the file, and Flowsta's signed list naming the version and
+  every file's fingerprint.
+
 ## [1.8.0-beta1] - 2026-11-02
 
 The first beta of 1.8.0. Most of it is under the hood: the parts of the
