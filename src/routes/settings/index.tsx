@@ -239,8 +239,8 @@ export default component$(() => {
     }
   });
 
-  // The Vault's own updates: automatic (default) or off, stable or beta.
-  const updates = useSignal<{ auto: boolean; channel: string; version: string; notice: string | null; can_update: boolean } | null>(null);
+  // The Vault's own updates: automatic (default) or off.
+  const updates = useSignal<{ auto: boolean; version: string; notice: string | null; can_update: boolean } | null>(null);
   const updatesBusy = useSignal(false);
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(async () => {
@@ -250,10 +250,10 @@ export default component$(() => {
       console.error("Failed to read update settings:", err);
     }
   });
-  const setUpdates = $(async (auto: boolean, channel: string) => {
+  const setUpdates = $(async (auto: boolean) => {
     updatesBusy.value = true;
     try {
-      updates.value = await invoke("set_update_prefs", { auto, channel });
+      updates.value = await invoke("set_update_prefs", { auto });
     } catch (err) {
       console.error("Failed to change update settings:", err);
     } finally {
@@ -639,10 +639,7 @@ export default component$(() => {
                   <p class="text-sm text-gray-400">
                     Keep Flowsta Vault up to date automatically. A new version
                     downloads in the background and installs when you restart
-                    the Vault or quit it. Before anything installs, the Vault
-                    checks that Flowsta signed that exact release. Checking is
-                    a plain download of two public files from GitHub, with
-                    nothing about you or your identity in the request.
+                    the Vault or quit it.
                   </p>
                   <p class="mt-2 text-xs text-gray-500">This is version {updates.value.version}.</p>
                   {!updates.value.can_update && !updates.value.notice && (
@@ -657,7 +654,7 @@ export default component$(() => {
                   role="switch"
                   aria-checked={updates.value.auto}
                   disabled={updatesBusy.value}
-                  onClick$={() => setUpdates(!updates.value!.auto, updates.value!.channel)}
+                  onClick$={() => setUpdates(!updates.value!.auto)}
                   class={{
                     "relative mt-1 inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full p-0 transition-colors": true,
                     "bg-amber-500": updates.value.auto,
@@ -674,35 +671,6 @@ export default component$(() => {
                   />
                 </button>
               </div>
-              {updates.value.auto && (
-                <div class="mt-4 flex items-start justify-between gap-4 border-t border-gray-700/60 pt-4">
-                  <div>
-                    <p class="text-sm font-medium text-gray-200">Get beta versions</p>
-                    <p class="text-sm text-gray-400">New versions before they are released to everyone. They have had less testing.</p>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={updates.value.channel === "beta"}
-                    disabled={updatesBusy.value}
-                    onClick$={() => setUpdates(true, updates.value!.channel === "beta" ? "stable" : "beta")}
-                    class={{
-                      "relative mt-1 inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full p-0 transition-colors": true,
-                      "bg-amber-500": updates.value.channel === "beta",
-                      "bg-gray-600": updates.value.channel !== "beta",
-                      "opacity-60": updatesBusy.value,
-                    }}
-                  >
-                    <span
-                      class={{
-                        "inline-block h-4 w-4 transform rounded-full bg-white transition-transform": true,
-                        "translate-x-6": updates.value.channel === "beta",
-                        "translate-x-1": updates.value.channel !== "beta",
-                      }}
-                    />
-                  </button>
-                </div>
-              )}
             </div>
           )}
 

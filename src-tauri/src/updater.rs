@@ -9,7 +9,7 @@
 //! then checked against it. Both checks are local. The requests are plain
 //! GETs of two public files and carry nothing about this install.
 
-use flowsta_update_check::{check, check_file, Installed, Refused, Trust};
+use flowsta_update_check::{check, check_file, compare_versions, Installed, Refused, Release, Trust};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,6 +25,18 @@ const SIGNERS: &[&str] = &["did:flowsta:uhCAkWuA-Ehm9EVzcsPE2Wo_vpc9ImljHN8NMMEX
 const RELEASES: &str = "https://github.com/WeAreFlowsta/flowsta-vault-app/releases";
 const FIRST_CHECK_AFTER: Duration = Duration::from_secs(90);
 const CHECK_EVERY: Duration = Duration::from_secs(4 * 60 * 60);
+
+/// The channels this copy follows, decided by what was installed, not by a
+/// setting: a beta (a pre-release version, installed by hand) follows the
+/// betas and takes the stable release when it comes; a stable copy sees
+/// stable releases only.
+fn channels_for(version: &str) -> &'static [&'static str] {
+    if version.contains('-') {
+        &["beta", "stable"]
+    } else {
+        &["stable"]
+    }
+}
 
 /// Where a channel's two files live: stable, the latest release's assets;
 /// beta, one fixed pre-release whose two files each beta replaces.
@@ -69,7 +81,7 @@ fn kind() -> Option<&'static str> {
     }
 }
 
-/// What the updater keeps on disk: the person's choices, the newest
+/// What the updater keeps on disk: the person's choice, the newest
 /// manifest sequence accepted per channel (no replay of an older one), the
 /// rollout ticket (a number made once, never sent), and the version this
 /// copy was updated from (said once after the restart).
@@ -77,8 +89,6 @@ fn kind() -> Option<&'static str> {
 struct Saved {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auto: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    channel: Option<String>,
     #[serde(default)]
     last_sequence: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,12 +107,6 @@ pub struct UpdatedFrom {
 impl Saved {
     fn auto(&self) -> bool {
         self.auto.unwrap_or(true)
-    }
-    fn channel(&self) -> &str {
-        match self.channel.as_deref() {
-            Some("beta") => "beta",
-            _ => "stable",
-        }
     }
 }
 
@@ -152,6 +156,7 @@ static NOTICE: Mutex<Option<String>> = Mutex::new(None);
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct UpdateStatus {
     pub auto: bool,
+    /// The channel this copy follows first (beta for a beta install).
     pub channel: String,
     pub version: String,
     /// A downloaded, checked update waiting for a restart.
@@ -170,7 +175,28 @@ pub struct ReadyInfo {
     pub changes_line: bool,
 }
 
-/// Check once: the manifest, then (only if it passes) the download.
+/// A channel's release manifest; None when there is none yet, or offline.
+async fn fetch_manifest(client: &reqwest::Client, channel: &str) -> Option<Vec<u8>> {
+    match client.get(manifest_url(channel)).send().await {
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(b) => Some(b.to_vec()),
+            Err(e) => {
+                log::info!("[update] the {} manifest was not read: {}", channel, e);
+                None
+            }
+        },
+        Ok(r) => {
+            log::debug!("[update] no {} manifest ({})", channel, r.status());
+            None
+        }
+        Err(e) => {
+            log::debug!("[update] the {} manifest was not fetched: {}", channel, e);
+            None
+        }
+    }
+}
+
+/// Check once: the manifests, then (only if one passes) the download.
 async fn check_once(app: &tauri::AppHandle, data_dir: &Path) {
     let mut saved = load(data_dir);
     if !saved.auto() || READY.lock().unwrap().is_some() {
@@ -179,7 +205,6 @@ async fn check_once(app: &tauri::AppHandle, data_dir: &Path) {
     let (Some(platform), Some(kind)) = (platform(), kind()) else {
         return;
     };
-    let channel = saved.channel().to_string();
     let client = match reqwest::Client::builder().timeout(Duration::from_secs(30)).build() {
         Ok(c) => c,
         Err(e) => {
@@ -187,38 +212,32 @@ async fn check_once(app: &tauri::AppHandle, data_dir: &Path) {
             return;
         }
     };
-    let manifest = match client.get(manifest_url(&channel)).send().await {
-        Ok(r) if r.status().is_success() => match r.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                log::info!("[update] the {} manifest was not read: {}", channel, e);
-                return;
-            }
-        },
-        // No manifest published on this channel yet, or offline: nothing to do.
-        Ok(r) => {
-            log::debug!("[update] no {} manifest ({})", channel, r.status());
-            return;
-        }
-        Err(e) => {
-            log::debug!("[update] the {} manifest was not fetched: {}", channel, e);
-            return;
-        }
-    };
     let rollout_ticket = ticket(data_dir, &mut saved);
-    let installed = Installed { version: env!("CARGO_PKG_VERSION"), last_sequence: saved.last_sequence.get(&channel).copied(), rollout_ticket };
-    let release = match check(&manifest, &Trust { app: APP_ID, channel: &channel, signers: SIGNERS }, &installed) {
-        Ok(r) => r,
-        Err(Refused::NotNewer { .. }) | Err(Refused::Replayed { .. }) | Err(Refused::NotYet { .. }) => return,
-        Err(Refused::InstallFirst(first)) => {
-            *NOTICE.lock().unwrap() = Some(format!("A newer Flowsta Vault is out, and it updates from {first} or later. Install {first} from flowsta.com first; this copy then updates itself again."));
-            return;
+    let version = env!("CARGO_PKG_VERSION");
+    // The newest release any of this copy's channels offers.
+    let mut best: Option<(&str, Release)> = None;
+    for &channel in channels_for(version) {
+        let Some(manifest) = fetch_manifest(&client, channel).await else {
+            continue;
+        };
+        let installed = Installed { version, last_sequence: saved.last_sequence.get(channel).copied(), rollout_ticket };
+        match check(&manifest, &Trust { app: APP_ID, channel, signers: SIGNERS }, &installed) {
+            Ok(r) => {
+                if best.as_ref().map_or(true, |(_, b)| compare_versions(&r.version, &b.version) == std::cmp::Ordering::Greater) {
+                    best = Some((channel, r));
+                }
+            }
+            Err(Refused::NotNewer { .. }) | Err(Refused::Replayed { .. }) | Err(Refused::NotYet { .. }) => {}
+            Err(Refused::InstallFirst(first)) => {
+                *NOTICE.lock().unwrap() = Some(format!("A newer Flowsta Vault is out, and it updates from {first} or later. Install {first} from flowsta.com first; this copy then updates itself again."));
+            }
+            Err(e) => log::warn!("[update] the {} manifest was refused: {}", channel, e),
         }
-        Err(e) => {
-            log::warn!("[update] the {} manifest was refused: {}", channel, e);
-            return;
-        }
+    }
+    let Some((channel, release)) = best else {
+        return;
     };
+    let channel = channel.to_string();
     let Some(file) = release.file(platform, kind).cloned() else {
         log::info!("[update] {} {} has no {} for {}", APP_ID, release.version, kind, platform);
         return;
@@ -326,7 +345,7 @@ fn status_of(data_dir: &Path) -> UpdateStatus {
     let updated = saved.updated_from.clone().filter(|u| u.to == env!("CARGO_PKG_VERSION"));
     UpdateStatus {
         auto: saved.auto(),
-        channel: saved.channel().into(),
+        channel: channels_for(env!("CARGO_PKG_VERSION"))[0].into(),
         version: env!("CARGO_PKG_VERSION").into(),
         ready: READY.lock().unwrap().as_ref().map(|r| ReadyInfo { version: r.version.clone(), notes_url: r.notes_url.clone(), changes_line: r.changes_line }),
         notice: NOTICE.lock().unwrap().clone(),
@@ -340,13 +359,12 @@ pub fn update_status(app: tauri::AppHandle) -> UpdateStatus {
     status_of(&app.state::<std::sync::Arc<crate::commands::AppState>>().data_dir)
 }
 
-/// The person's choices: automatic updates on or off, stable or beta.
+/// The person's choice: automatic updates on or off.
 #[tauri::command]
-pub fn set_update_prefs(app: tauri::AppHandle, auto: bool, channel: String) -> UpdateStatus {
+pub fn set_update_prefs(app: tauri::AppHandle, auto: bool) -> UpdateStatus {
     let data_dir = app.state::<std::sync::Arc<crate::commands::AppState>>().data_dir.clone();
     let mut saved = load(&data_dir);
     saved.auto = Some(auto);
-    saved.channel = Some(if channel == "beta" { "beta".into() } else { "stable".into() });
     save(&data_dir, &saved);
     if !auto {
         // Off stops the check itself; a download already waiting is dropped.
@@ -386,20 +404,22 @@ mod tests {
     }
 
     #[test]
-    fn the_saved_choices_default_to_automatic_and_stable() {
+    fn a_beta_install_follows_betas_and_the_stable_release_a_stable_one_stable_only() {
+        assert_eq!(channels_for("1.8.0-beta2"), &["beta", "stable"]);
+        assert_eq!(channels_for("1.8.0"), &["stable"]);
+    }
+
+    #[test]
+    fn the_saved_choice_defaults_to_automatic() {
         let dir = tempfile::tempdir().unwrap();
         let mut saved = load(dir.path());
         assert!(saved.auto());
-        assert_eq!(saved.channel(), "stable");
         // The ticket is made once and kept.
         let t = ticket(dir.path(), &mut saved);
         assert!(t < 100);
         assert_eq!(load(dir.path()).rollout_ticket, Some(t));
         let mut again = load(dir.path());
         assert_eq!(ticket(dir.path(), &mut again), t);
-        // An unknown channel reads as stable.
-        saved.channel = Some("nightly".into());
-        assert_eq!(saved.channel(), "stable");
     }
 
     #[test]
