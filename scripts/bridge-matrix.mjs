@@ -1437,11 +1437,14 @@ async function devicesLeg() {
     const linesB = await linesOf(b);
     const devB = await devOf(b);
     if (mixed) {
-      // B joined on 0.7 (restored there); its first devices round sees a
-      // sibling on 0.6 (or nobody yet) and attaches the 0.6 line: ~a minute
-      // for the round, ~20 s for the 0.6 start, then the carry each round.
-      const both = await until(async () => (await linesOf(b))['holochain-0.6'] === 'serving' && (await linesOf(b))['holochain-0.7'] === 'serving', 300);
+      // B joined on 0.7 (restored there) and hears nobody there (A is on
+      // 1.6.1): its devices rounds hold the wanted 0.6 line for up to 5
+      // minutes after the unlock while its records might still arrive on
+      // 0.7, then attach it (~6 min: the hold, the next round, ~20 s for the
+      // 0.6 start), then the carry each round. The attach writes the marker.
+      const both = await until(async () => (await linesOf(b))['holochain-0.6'] === 'serving' && (await linesOf(b))['holochain-0.7'] === 'serving', 480);
       record('mixed: B (1.7.0) attaches the 0.6 line and serves BOTH beside a 1.6.1 sibling', both, JSON.stringify(await linesOf(b)));
+      await until(async () => (await devOf(b)).move?.marker?.line_06_needed === true, 30);
       const mB = (await devOf(b)).move || {};
       record('mixed: B runs on 0.7 (restored there) and its marker says the 0.6 line is needed', mB.moved === true && mB.marker?.line_06_needed === true, JSON.stringify(mB.marker || null));
       record("mixed: a carry pass ran on B (A's records reach 0.7 through B's 0.6 line)", await until(async () => ((await devOf(b)).move?.last_pass?.private_06 || 0) > 0, 240), JSON.stringify((await devOf(b)).move?.last_pass || null).slice(0, 200));
