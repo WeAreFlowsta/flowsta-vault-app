@@ -1395,7 +1395,10 @@ async function devicesLeg() {
   // After A's first round: a 1.6.1 A writes its own identicon in that round
   // when its list has not seen this record yet, and the newer version wins
   // (mixed leg, 10-27). Written now, this is the newest and has no device.
-  record('A: holds a picture record written before devices were named', !!(await op(a, { op: 'old-picture', picture: oldPicture })).action_hash);
+  // Both carry whole seconds: in the round's second they tie, and the hash
+  // decides (gate 11-03), so the next second.
+  await sleep(1100);
+  record('A: holds a picture record written before devices were named',!!(await op(a, { op: 'old-picture', picture: oldPicture })).action_hash);
 
   // 2. B joins with a code. A cancelled code is refused at once.
   const cancelled = (await op(b, { op: 'pair-begin', password: pwB })).code;
@@ -1965,7 +1968,11 @@ async function webEraLeg() {
     let linesNow = await linesOf(port);
     while (Date.now() - t1 < 420_000 && linesNow['holochain-0.6'] !== 'off') { await new Promise((r) => setTimeout(r, 5000)); linesNow = await linesOf(port); }
     record(`alone window (${process.env.VAULT_TEST_ALONE_WINDOW} s,rounds): the 0.6 line stops in-session once it closes (nobody heard)`, linesNow['holochain-0.6'] === 'off' && linesNow['holochain-0.7'] === 'serving', `${Math.round((Date.now() - t1) / 1000)} s; ${JSON.stringify(linesNow)}`);
-    const m = (await devOf(port)).move?.marker || {};
+    // The line reads off as its stop begins; the marker records the
+    // retirement once the stop is done (up to its 5 s grace, gate 11-03).
+    let m = {};
+    const t2 = Date.now();
+    while (Date.now() - t2 < 30_000) { m = (await devOf(port)).move?.marker || {}; if (m.line_06_needed === false) break; await new Promise((r) => setTimeout(r, 1000)); }
     record('alone window: the marker says restored, no 0.6 line needed', m.restored === true && m.line_06_needed === false, JSON.stringify(m));
   }
 }
