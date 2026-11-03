@@ -1619,14 +1619,37 @@ pub(crate) async fn ensure_conductor_alive(
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
+    recover_conductor(state, app_handle, false).await
+}
+
+/// The start after a stop the Vault made itself: a password change, an
+/// upgrade, a restart for memory, for a conductor that stopped answering, or
+/// with the network's auth. Not a crash, so the limit neither counts nor
+/// holds it: held after the stop, it left a working Vault with no conductor
+/// for ten minutes (the fourth password change in a minute, gate 11-03).
+/// Each of these is paced by its own rule, at most once a minute.
+pub(crate) async fn start_after_own_stop(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    recover_conductor(state, app_handle, true).await
+}
+
+async fn recover_conductor(
+    state: &Arc<AppState>,
+    app_handle: &tauri::AppHandle,
+    own_stop: bool,
+) -> Result<(), String> {
     // Serialise restart attempts so two failed commands don't both try
     // to bring the conductor up.
     let _guard = state.conductor_restart_lock.lock().await;
 
     // Decide inside the lock: if a previous holder of the lock already
     // recovered, there is nothing to do.
-    use flowsta_hc_lines::watch::WatchAction;
-    let reattach = match crate::conductor::WATCHDOG.action(crate::conductor::supervisor(), &crate::conductor::watch_policy()) {
+    use flowsta_hc_lines::watch::{LinesNow, WatchAction};
+    let (sup, policy) = (crate::conductor::supervisor(), crate::conductor::watch_policy());
+    let action = if own_stop { flowsta_hc_lines::watch::decide(&LinesNow::of(sup), &policy) } else { crate::conductor::WATCHDOG.action(sup, &policy) };
+    let reattach = match action {
         WatchAction::Nothing => {
             log::info!("[watchdog] conductor is alive (recovered by an earlier caller)");
             return Ok(());
@@ -2104,14 +2127,16 @@ fn memory_restart_due_now(state: &AppState) -> Option<(crate::hc::Line, u64)> {
     })
 }
 
-/// Stop the primary line and let the watchdog start the session again (the
-/// same recovery as a conductor that exited): for memory, or for a
-/// conductor that runs but no longer answers.
+/// Stop the primary line and start the session again (the same start as a
+/// conductor that exited, outside the watchdog's limit): for memory, for a
+/// conductor that runs but no longer answers, or with the network's auth.
 async fn restart_primary(state: &Arc<AppState>, app: &tauri::AppHandle) {
     if let Some(primary) = crate::conductor::supervisor().primary() {
         let _ = tokio::task::spawn_blocking(move || crate::conductor::supervisor().stop_line(primary)).await;
     }
-    recover_from_round(state, app).await;
+    if let Err(e) = start_after_own_stop(state, app).await {
+        log::warn!("[devices] the lines were not started again: {}", e);
+    }
 }
 
 /// One full round now (the dev harness; the page's own refresh).
@@ -3768,7 +3793,7 @@ pub(crate) async fn change_vault_password_inner(
             Ok(()) => Some(backup),
             Err(e) => {
                 drop(restart_guard);
-                let _ = ensure_conductor_alive(state, &app_handle).await;
+                let _ = start_after_own_stop(state, &app_handle).await;
                 return Err(format!("Could not set the key store aside: {}", e));
             }
         }
@@ -3782,7 +3807,7 @@ pub(crate) async fn change_vault_password_inner(
             Err(e) => {
                 restore_lair_dir(&lair_dir, &lair_backup);
                 drop(restart_guard);
-                let _ = ensure_conductor_alive(state, &app_handle).await;
+                let _ = start_after_own_stop(state, &app_handle).await;
                 return Err(format!("Could not set the 0.7 key store aside: {}", e));
             }
         }
@@ -3804,7 +3829,7 @@ pub(crate) async fn change_vault_password_inner(
             restore_lair_dir(&lair_dir, &lair_backup);
             restore_lair_dir(&lair_dir_07, &lair_backup_07);
             drop(restart_guard);
-            let _ = ensure_conductor_alive(state, &app_handle).await;
+            let _ = start_after_own_stop(state, &app_handle).await;
             return Err(format!("Could not re-protect the conductor database: {}", e));
         }
     } else {
@@ -3831,7 +3856,7 @@ pub(crate) async fn change_vault_password_inner(
             restore_lair_dir(&lair_dir, &lair_backup);
             restore_lair_dir(&lair_dir_07, &lair_backup_07);
             drop(restart_guard);
-            let _ = ensure_conductor_alive(state, &app_handle).await;
+            let _ = start_after_own_stop(state, &app_handle).await;
             return Err(format!("Could not re-protect the 0.7 conductor database: {}", e));
         }
     }
@@ -3862,7 +3887,7 @@ pub(crate) async fn change_vault_password_inner(
         restore_lair_dir(&lair_dir, &lair_backup);
         restore_lair_dir(&lair_dir_07, &lair_backup_07);
         drop(restart_guard);
-        let _ = ensure_conductor_alive(state, &app_handle).await;
+        let _ = start_after_own_stop(state, &app_handle).await;
         return Err(format!("Save failed: {}", e));
     }
 
@@ -3877,7 +3902,7 @@ pub(crate) async fn change_vault_password_inner(
     // returns only once the conductor is back up - or, if it is not, once
     // everything has been rolled back to the current password.
     drop(restart_guard);
-    match ensure_conductor_alive(state, &app_handle).await {
+    match start_after_own_stop(state, &app_handle).await {
         Ok(()) => {
             for backup in [lair_backup, lair_backup_07].into_iter().flatten() {
                 if let Err(e) = remove_dir_with_retry(&backup) {
@@ -3940,7 +3965,7 @@ pub(crate) async fn change_vault_password_inner(
             drop(guard);
             match restored {
                 Ok(()) => {
-                    let _ = ensure_conductor_alive(state, &app_handle).await;
+                    let _ = start_after_own_stop(state, &app_handle).await;
                     Err(format!(
                         "The new password could not be applied ({}). Your vault still uses your current password.",
                         e

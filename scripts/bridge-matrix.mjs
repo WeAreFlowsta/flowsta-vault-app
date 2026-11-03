@@ -2079,7 +2079,11 @@ async function moveLeg(stage) {
     }
     record('move-update: the 0.6 line starts once for a 1.7.0 marker (nothing recorded as carried)', sawServing, JSON.stringify(linesNow));
     record('move-update: the 0.6 line stops in-session once a pass has carried everything (no device on it)', sawServing && linesNow['holochain-0.6'] === 'off' && linesNow['holochain-0.7'] === 'serving', `${Math.round((Date.now() - t1) / 1000)} s; ${JSON.stringify(linesNow)}`);
-    const dev = await devOf(port);
+    // The marker records the retirement once the stop is done (up to its
+    // 5 s grace), after the line already reads off (gate 11-03).
+    let dev = {};
+    const t2 = Date.now();
+    while (Date.now() - t2 < 30_000) { dev = await devOf(port); if (dev.move?.marker?.line_06_needed === false) break; await sleep(1000); }
     record('move-update: marker says no 0.6 line needed', dev.move?.moved === true && dev.move?.marker?.line_06_needed === false, JSON.stringify(dev.move?.marker || null));
     let sigs = []; for (let i = 0; i < 40; i++) { sigs = await sigsOn(); if (sigs.length === 2) break; await sleep(3000); }
     const counts = foldCounts(sigs);
