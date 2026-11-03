@@ -44,6 +44,14 @@ with no network, and keeps Holochain's memory in check.
 - "Publish a release": the Vault can sign the list of a release's files
   for Flowsta's release tool, after showing you every one.
 
+### Fixed
+- Changing your password several times within a few minutes no longer
+  leaves Holochain stopped. Restarts the Vault makes itself (after a
+  password change, an upgrade, for memory, or when the network comes
+  back) no longer count as Holochain stopping on its own. In 1.8.0-beta1
+  the fourth change within ten minutes was undone, and Holochain stayed
+  stopped for up to ten minutes.
+
 ### Security
 - Each release records the fingerprints of its Holochain programs as
   they ship, after code signing, so a later release can check the copies
