@@ -373,8 +373,11 @@ pub struct AppState {
     /// each commit a cap grant (three startup probes racing = three chain
     /// writes = "chain head has moved" under a user's first sign).
     pub credentials_fill_lock: tokio::sync::Mutex<()>,
-    /// Probes of the 0.7 cells still asking (`dna::ensure_cells_ready_07`),
-    /// and the newest one's number: an older probe stops at its next try.
+    /// Each line's probes of its cells still asking (`dna::ensure_cells_ready_06`
+    /// and `_07`), and the newest one's number: an older probe stops at its
+    /// next try.
+    pub cell_probes_06: std::sync::atomic::AtomicUsize,
+    pub cell_probe_gen_06: std::sync::atomic::AtomicU64,
     pub cell_probes_07: std::sync::atomic::AtomicUsize,
     pub cell_probe_gen_07: std::sync::atomic::AtomicU64,
 }
@@ -441,6 +444,9 @@ pub(crate) async fn cell_credentials_cached_07(
             return Ok(c.to_signing());
         }
     }
+    // Right after a start the cell can still be coming up: wait for the
+    // line's probe to reach it (its grant then lands in the cache).
+    crate::dna::wait_for_cell(state, crate::hc::Line::V07, || state.cell_credentials_07.lock().unwrap().contains_key(cell_id)).await;
     let _fill = state.credentials_fill_lock.lock().await;
     {
         let cache = state.cell_credentials_07.lock().unwrap();
@@ -482,6 +488,8 @@ pub(crate) async fn cell_credentials_cached(
             return Ok(c.to_signing());
         }
     }
+    // As on the 0.7 line: wait for the probe to reach a cell still coming up.
+    crate::dna::wait_for_cell(state, crate::hc::Line::V06, || state.cell_credentials.lock().unwrap().contains_key(cell_id)).await;
     // Single-flight the fill: whoever wins the lock authorizes once; the
     // others find the cache populated on the re-check.
     let _fill = state.credentials_fill_lock.lock().await;
@@ -603,6 +611,8 @@ impl AppState {
             cell_credentials_07: Mutex::new(HashMap::new()),
             credentials_fill_lock: tokio::sync::Mutex::new(()),
             commit_serial: tokio::sync::Mutex::new(()),
+            cell_probes_06: std::sync::atomic::AtomicUsize::new(0),
+            cell_probe_gen_06: std::sync::atomic::AtomicU64::new(0),
             cell_probes_07: std::sync::atomic::AtomicUsize::new(0),
             cell_probe_gen_07: std::sync::atomic::AtomicU64::new(0),
         }
@@ -1935,9 +1945,11 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                         } else if primary_07 {
                             // Every round, so the 0.6 copies follow who is on 0.6,
                             // and a 0.6 line nothing wants any more stops now.
-                            let wanted = crate::move_07::line_06_wanted_now(&devices_state).await;
+                            let decision = crate::move_07::line_06_decision_now(&devices_state).await;
+                            let wanted = decision.as_ref().map(|d| d.wanted());
+                            let why = decision.as_ref().map(crate::move_07::why_06).unwrap_or_default();
                             if wanted == Some(false) && has_06 && crate::move_07::retire_06_now(&devices_state).await {
-                                log::info!("[0.6] stopped: nothing of this identity is left on the 0.6 line and no device reads it there");
+                                log::info!("[0.6] stopped: {}", why);
                             }
                             if wanted == Some(true) && !has_06 {
                                 let held_now = crate::sealed::sealed_list_inner(&devices_state).await.map(|r| r.len()).unwrap_or(0);
@@ -1956,7 +1968,7 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                                 };
                                 if let Some(passphrase) = passphrase {
                                     let resource_dir = resolve_resource_dir(&devices_app, &devices_state.data_dir);
-                                    if let Err(e) = crate::conductor::attach_line_from_state(devices_state.clone(), crate::hc::Line::V06, resource_dir, passphrase, "a device still on 0.6, or nothing heard yet") {
+                                    if let Err(e) = crate::conductor::attach_line_from_state(devices_state.clone(), crate::hc::Line::V06, resource_dir, passphrase, &why) {
                                         log::warn!("[0.6] not attached: {}", e);
                                     }
                                 }
@@ -6180,6 +6192,8 @@ async fn fetch_revocation_for_action(
     // response time (~ms) and well below the cold-DHT wall. Defaults
     // (not-revoked, no thumbnail) on a timeout fill in on the next
     // refresh once the DHT has gossiped them.
+    // Counted in flight on the 0.6 line, so a retirement waits for it.
+    let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
     let call = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.into()),
         "signing".into(),
@@ -6233,6 +6247,7 @@ async fn fetch_thumbnail_for_action(
     use holochain_types::prelude::{Entry, ExternIO, Record};
 
     let payload = rmp_serde::to_vec_named(action_hash).ok()?;
+    let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
     let call = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.into()),
         "signing".into(),
@@ -6420,6 +6435,7 @@ async fn query_own_sigs_for_version(
     let payload_mp = rmp_serde::to_vec_named(&())
         .map_err(|e| format!("msgpack ({}): {}", signing_app.installed_app_id, e))?;
 
+    let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
     let result = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.clone().into()),
         "signing".into(),
@@ -6555,6 +6571,7 @@ async fn fetch_linked_agent_keys(
     // landed the link record, we pick up any extras; otherwise we
     // skip the wait and rely on the cached seed.
     let mut dht_settled = false;
+    let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
     let dht_call = identity_ws.call_zome(
         ZomeCallTarget::RoleName(identity_role.into()),
         "agent_linking".into(),
@@ -6788,6 +6805,7 @@ async fn query_linked_sigs_for_version(
     for linked_key in linked_keys {
         let payload = rmp_serde::to_vec_named(linked_key)
             .map_err(|e| format!("encode linked key: {}", e))?;
+        let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
         let result = app_ws.call_zome(
             ZomeCallTarget::RoleName(role_name.clone().into()),
             "signing".into(),
@@ -7433,6 +7451,7 @@ async fn revoke_signature_attempt(
     let payload_mp = rmp_serde::to_vec_named(&payload)
         .map_err(|e| format!("MessagePack: {}", e))?;
 
+    let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
     let result = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.into()),
         "signing".into(),
@@ -7549,6 +7568,7 @@ pub(crate) async fn set_thumbnail_inner(
     let mut last_err = String::new();
     for attempt in 1..=3u32 {
         let started = std::time::Instant::now();
+        let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
         match app_ws
             .call_zome(
                 ZomeCallTarget::RoleName(role_name.clone().into()),
@@ -7718,6 +7738,7 @@ pub(crate) async fn commit_signature_to_dht(
     let mut result = None;
     let mut last_err = String::new();
     for attempt in 1..=3u32 {
+        let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
         match app_ws
             .call_zome(
                 ZomeCallTarget::RoleName(role_name.clone().into()),
