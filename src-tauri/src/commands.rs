@@ -1917,7 +1917,13 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
         let unlocked_at = std::time::Instant::now();
         let mut held_last: Option<usize> = None;
         loop {
-            let full = pass % FULL_EVERY_PASSES == 0;
+            // Only a full round finishes a joined device's setup, so while it
+            // is being set up the first ten rounds are all full: a profile
+            // that lands a minute after the first round no longer waits five
+            // minutes for the next. One whose setup cannot finish yet (a
+            // sibling offline) then goes back to the usual pace.
+            let setting_up = pass < 2 * FULL_EVERY_PASSES && crate::devices::setting_up_here(&devices_state);
+            let full = pass % FULL_EVERY_PASSES == 0 || setting_up;
             let wait = match devices_round(&devices_state, &devices_app, full).await {
                 DevicesRound::StoodDown => break,
                 DevicesRound::Done => {
