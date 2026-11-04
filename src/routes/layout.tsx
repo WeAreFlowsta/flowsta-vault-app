@@ -1551,8 +1551,8 @@ export default component$(() => {
               disabled={updateStage.value !== null && updateStage.value !== "failed"}
               title={
                 updateReady.value.asks_password
-                  ? `Installs Flowsta Vault ${updateReady.value.version} and restarts. Your computer asks for your password first.`
-                  : `Installs Flowsta Vault ${updateReady.value.version} and restarts.`
+                  ? `Installs Flowsta Vault ${updateReady.value.version}, then closes and opens the Vault again. Your computer asks for your password first.`
+                  : `Installs Flowsta Vault ${updateReady.value.version}, then closes and opens the Vault again.`
               }
               class="flex items-center gap-2 rounded-full bg-amber-500 px-3 py-1 text-sm font-medium text-gray-900 transition-colors hover:bg-amber-400 disabled:cursor-default disabled:bg-amber-500/80"
               onClick$={async () => {
@@ -1570,7 +1570,7 @@ export default component$(() => {
                 <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-gray-900 border-t-transparent" />
               )}
               {updateStage.value === "restarting"
-                ? "Restarting…"
+                ? "Reopening…"
                 : updateStage.value !== null && updateStage.value !== "failed"
                   ? "Installing…"
                   : "Restart to update"}
@@ -2264,16 +2264,16 @@ export default component$(() => {
             {updateStage.value === "password" ? (
               <>
                 <p class="text-sm text-gray-100">Installing Flowsta Vault {updateReady.value.version}</p>
-                <p class="mt-0.5 text-xs text-gray-400">Your computer asks for your password to install it. The Vault then restarts.</p>
+                <p class="mt-0.5 text-xs text-gray-400">Your computer asks for your password to install it. Then the Vault closes and opens again.</p>
               </>
             ) : updateStage.value === "installing" ? (
               <>
                 <p class="text-sm text-gray-100">Installing Flowsta Vault {updateReady.value.version}</p>
-                <p class="mt-0.5 text-xs text-gray-400">The Vault restarts when it is done.</p>
+                <p class="mt-0.5 text-xs text-gray-400">Then the Vault closes and opens again.</p>
               </>
             ) : updateStage.value === "restarting" ? (
               <>
-                <p class="text-sm text-gray-100">Installed. The Vault is restarting.</p>
+                <p class="text-sm text-gray-100">Installed. The Vault is closing and opening again.</p>
                 <p class="mt-0.5 text-xs text-gray-400">Unlock it again when it opens.</p>
               </>
             ) : (
