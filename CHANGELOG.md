@@ -33,6 +33,17 @@ fixes what the second beta's logs showed on Windows and macOS.
   running afterward, so the Vault ends it after five seconds. The log now
   says so, instead of a warning that it did not stop.
 
+### Fixed
+- Locking the Vault, erasing it, or removing an identity while Holochain
+  is still starting stops that start, and an erase or removal waits for
+  it to stop before removing your files.
+- A device you add finishes setting up about a minute after the other
+  devices' profile arrives, instead of up to five minutes later.
+- When two Vaults on one computer (another account's, or a test copy
+  beside yours) start Holochain at the same moment, each connects to its
+  own. Before, one of them could run without the newer Holochain version
+  until it restarted.
+
 ## [1.8.0-beta2] - 2026-11-03
 
 The second beta of 1.8.0. The Vault now keeps itself up to date, starts
