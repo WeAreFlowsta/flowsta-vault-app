@@ -442,9 +442,11 @@ export default component$(() => {
   const autoApprovedNotice = useSignal<string | null>(null);
   // The Vault's own update: downloaded and checked, waiting for a restart;
   // and, once after an update, what this copy was updated from.
-  const updateReady = useSignal<{ version: string; notes_url: string; changes_line: boolean } | null>(null);
+  const updateReady = useSignal<{ version: string; notes_url: string; changes_line: boolean; asks_password: boolean } | null>(null);
   const updatedFrom = useSignal<{ version: string; to: string; notes_url: string } | null>(null);
-  const updateBusy = useSignal(false);
+  // "Restart to update" under way: the step it is at (set on the click,
+  // then from `update-stage`), or "failed" when the install did not happen.
+  const updateStage = useSignal<"password" | "installing" | "restarting" | "failed" | null>(null);
 
   // Relay login - approve a sign-in happening on another device.
   // The approval screen is ALWAYS shown (no remember option): cross-device
@@ -1001,14 +1003,17 @@ export default component$(() => {
     }>("raw-sign-request", (event) => {
       pendingRawSign.value = event.payload;
     });
-    invoke<{ ready: { version: string; notes_url: string; changes_line: boolean } | null; updated: { version: string; to: string; notes_url: string } | null }>("update_status")
+    invoke<{ ready: { version: string; notes_url: string; changes_line: boolean; asks_password: boolean } | null; updated: { version: string; to: string; notes_url: string } | null }>("update_status")
       .then((st) => {
         updateReady.value = st.ready;
         updatedFrom.value = st.updated;
       })
       .catch(() => {});
-    const unlistenUpdate = listen<{ version: string; notes_url: string; changes_line: boolean }>("update-ready", (event) => {
+    const unlistenUpdate = listen<{ version: string; notes_url: string; changes_line: boolean; asks_password: boolean }>("update-ready", (event) => {
       updateReady.value = event.payload;
+    });
+    const unlistenUpdateStage = listen<"password" | "installing" | "restarting">("update-stage", (event) => {
+      updateStage.value = event.payload;
     });
     const unlistenManifest = listen<NonNullable<typeof pendingManifestSign.value> | ReleaseManifestSign>(
       "manifest-sign-request",
@@ -1032,6 +1037,7 @@ export default component$(() => {
       unlistenSign.then((u) => u());
       unlistenManifest.then((u) => u());
       unlistenUpdate.then((u) => u());
+      unlistenUpdateStage.then((u) => u());
       unlistenAuto.then((u) => u());
     });
   });
@@ -1542,20 +1548,32 @@ export default component$(() => {
           {updateReady.value && (
             <button
               type="button"
-              disabled={updateBusy.value}
-              title={`Flowsta Vault ${updateReady.value.version} is downloaded and checked`}
-              class="rounded-full bg-amber-500 px-3 py-1 text-sm font-medium text-gray-900 transition-colors hover:bg-amber-400 disabled:opacity-60"
+              disabled={updateStage.value !== null && updateStage.value !== "failed"}
+              title={
+                updateReady.value.asks_password
+                  ? `Installs Flowsta Vault ${updateReady.value.version} and restarts. Your computer asks for your password first.`
+                  : `Installs Flowsta Vault ${updateReady.value.version} and restarts.`
+              }
+              class="flex items-center gap-2 rounded-full bg-amber-500 px-3 py-1 text-sm font-medium text-gray-900 transition-colors hover:bg-amber-400 disabled:cursor-default disabled:bg-amber-500/80"
               onClick$={async () => {
-                updateBusy.value = true;
+                // Said at once, before the password prompt or the lines' stop.
+                updateStage.value = updateReady.value!.asks_password ? "password" : "installing";
                 try {
                   await invoke("restart_to_update");
                 } catch (e) {
                   console.error("Update did not install:", e);
-                  updateBusy.value = false;
+                  updateStage.value = "failed";
                 }
               }}
             >
-              Restart to update
+              {updateStage.value !== null && updateStage.value !== "failed" && (
+                <span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-gray-900 border-t-transparent" />
+              )}
+              {updateStage.value === "restarting"
+                ? "Restarting…"
+                : updateStage.value !== null && updateStage.value !== "failed"
+                  ? "Installing…"
+                  : "Restart to update"}
             </button>
           )}
           {displayName && (
@@ -2062,38 +2080,6 @@ export default component$(() => {
         </div>
       )}
 
-      {/* Once after an update: what changed */}
-      {updatedFrom.value && !autoApprovedNotice.value && (
-        <div class="fixed bottom-6 left-6 z-50 flex items-center gap-3 rounded-lg border border-sky-500/40 bg-sky-500/15 px-4 py-3 shadow-xl">
-          <p class="text-sm text-sky-200">Updated to Flowsta Vault {updatedFrom.value.to}</p>
-          {updatedFrom.value.notes_url && (
-            <button type="button" class="text-sm font-medium text-sky-300 underline hover:text-sky-200" onClick$={() => open(updatedFrom.value!.notes_url)}>
-              What changed
-            </button>
-          )}
-          <button
-            type="button"
-            aria-label="Dismiss"
-            class="text-sky-300 hover:text-white"
-            onClick$={async () => {
-              updatedFrom.value = null;
-              await invoke("dismiss_updated").catch(() => {});
-            }}
-          >
-            ×
-          </button>
-        </div>
-      )}
-
-      {/* Auto-approved authentication notice */}
-      {autoApprovedNotice.value && (
-        <div class="fixed bottom-6 left-6 z-50 rounded-lg border border-sky-500/40 bg-sky-500/15 px-4 py-3 shadow-xl">
-          <p class="text-sm text-sky-200">
-            {autoApprovedNotice.value} signed in with your identity (remembered app).
-          </p>
-        </div>
-      )}
-
       {/* Relay login: enter-code modal */}
       {relayCodeModal.value && !pendingRelayClaim.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" data-testid="relay-code-modal">
@@ -2235,9 +2221,88 @@ export default component$(() => {
         </div>
       )}
 
+      {/* The Vault's messages, one stack at the bottom right (clear of the
+          sidebar), each on a solid panel so nothing behind shows through.
+          Dialogs (z-50) cover it. */}
+      <div class="pointer-events-none fixed bottom-6 right-6 z-40 flex w-80 flex-col gap-3">
+      {/* Once after an update: what changed */}
+      {updatedFrom.value && (
+        <div class="pointer-events-auto flex items-start gap-3 rounded-lg border border-sky-500/40 bg-sky-950 px-4 py-3 shadow-xl">
+          <div class="min-w-0 flex-1">
+            <p class="text-sm text-sky-200">Updated to Flowsta Vault {updatedFrom.value.to}</p>
+            {updatedFrom.value.notes_url && (
+              <button type="button" class="mt-0.5 text-sm font-medium text-sky-300 underline hover:text-sky-200" onClick$={() => open(updatedFrom.value!.notes_url)}>
+                What changed
+              </button>
+            )}
+          </div>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            class="shrink-0 text-sky-300 hover:text-white"
+            onClick$={async () => {
+              updatedFrom.value = null;
+              await invoke("dismiss_updated").catch(() => {});
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* "Restart to update" under way: what happens next */}
+      {updateReady.value && updateStage.value && (
+        <div
+          class={`pointer-events-auto flex items-start gap-2.5 rounded-lg border px-4 py-3 shadow-xl ${
+            updateStage.value === "failed" ? "border-red-500/40 bg-red-950" : "border-amber-500/40 bg-gray-800"
+          }`}
+        >
+          {updateStage.value !== "failed" && (
+            <div class="mt-0.5 h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
+          )}
+          <div class="min-w-0 flex-1">
+            {updateStage.value === "password" ? (
+              <>
+                <p class="text-sm text-gray-100">Installing Flowsta Vault {updateReady.value.version}</p>
+                <p class="mt-0.5 text-xs text-gray-400">Your computer asks for your password to install it. The Vault then restarts.</p>
+              </>
+            ) : updateStage.value === "installing" ? (
+              <>
+                <p class="text-sm text-gray-100">Installing Flowsta Vault {updateReady.value.version}</p>
+                <p class="mt-0.5 text-xs text-gray-400">The Vault restarts when it is done.</p>
+              </>
+            ) : updateStage.value === "restarting" ? (
+              <>
+                <p class="text-sm text-gray-100">Installed. The Vault is restarting.</p>
+                <p class="mt-0.5 text-xs text-gray-400">Unlock it again when it opens.</p>
+              </>
+            ) : (
+              <>
+                <p class="text-sm text-red-200">Flowsta Vault {updateReady.value.version} was not installed</p>
+                <p class="mt-0.5 text-xs text-gray-400">Nothing changed. Press Restart to update to try again.</p>
+              </>
+            )}
+          </div>
+          {updateStage.value === "failed" && (
+            <button type="button" aria-label="Dismiss" class="shrink-0 text-gray-400 hover:text-white" onClick$={() => (updateStage.value = null)}>
+              ×
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Auto-approved authentication notice */}
+      {autoApprovedNotice.value && (
+        <div class="pointer-events-auto rounded-lg border border-sky-500/40 bg-sky-950 px-4 py-3 shadow-xl">
+          <p class="text-sm text-sky-200">
+            {autoApprovedNotice.value} signed in with your identity (remembered app).
+          </p>
+        </div>
+      )}
+
       {/* Relay login: success flash */}
       {relayApprovedFlash.value && (
-        <div class="fixed bottom-6 right-6 z-50 rounded-lg border border-green-500/40 bg-green-500/15 px-4 py-3 shadow-xl">
+        <div class="pointer-events-auto rounded-lg border border-green-500/40 bg-green-950 px-4 py-3 shadow-xl">
           <p class="text-sm text-green-200">
             Approved - your other device is now signed in.
           </p>
@@ -2247,14 +2312,14 @@ export default component$(() => {
       {/* Bridge-operation activity: what the Vault is doing / just did */}
       {opActivity.value && (
         <div
-          class={`fixed bottom-6 right-6 z-40 w-80 rounded-lg border px-4 py-3 shadow-xl ${
+          class={`pointer-events-auto rounded-lg border px-4 py-3 shadow-xl ${
             opActivity.value.stage === "ok"
-              ? "border-green-500/40 bg-green-500/15"
+              ? "border-green-500/40 bg-green-950"
               : opActivity.value.stage === "failed"
-                ? "border-red-500/40 bg-red-500/15"
+                ? "border-red-500/40 bg-red-950"
                 : opActivity.value.stage === "denied"
-                  ? "border-gray-500/40 bg-gray-800/90"
-                  : "border-sky-500/40 bg-sky-500/15"
+                  ? "border-gray-500/40 bg-gray-800"
+                  : "border-sky-500/40 bg-sky-950"
           }`}
         >
           <div class="flex items-start gap-2.5">
@@ -2334,6 +2399,7 @@ export default component$(() => {
           </div>
         </div>
       )}
+      </div>
 
       {/* Auth approval dialog overlay */}
       {pendingAuth.value && activeRequest.value === "auth" && (
