@@ -109,10 +109,8 @@ pub fn stop_all_lines() -> bool {
 
 /// Each lock, erase, identity removal and quit counts one. A start carries
 /// the count from when it was asked for and is wanted only while it holds
-/// (`LineHooks::wanted`): one still coming up when the Vault locked stops
-/// at its next step instead of bringing a conductor up for an identity that
-/// is locked or gone (an erase right after an unlock left the identity's
-/// key store rebuilt in its folder, 11-04).
+/// (`LineHooks::wanted`): one still coming up when the Vault locks stops at
+/// its next step, so a conductor runs only for an unlocked identity.
 static STARTS_ENDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The count a start asked for now carries.

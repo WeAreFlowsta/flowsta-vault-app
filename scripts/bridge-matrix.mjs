@@ -1286,7 +1286,7 @@ async function switcherLeg() {
   const unAgain = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: pwA } });
   record("A's password opens the remaining identity", unAgain.status === 200 && unAgain.data?.agent_pub_key === agentA, `${unAgain.status}`);
   // The lock comes while the unlock's conductor is still starting: that
-  // start must stop, not finish into the folder the erase removes.
+  // start stops, and the erase leaves nothing behind.
   const rootA = afterRm.identities?.[0]?.root;
   await vaultFetch(port, '/dev/lock', { method: 'POST' });
   const er = await vaultFetch(port, '/dev/erase-device', { method: 'POST' });
