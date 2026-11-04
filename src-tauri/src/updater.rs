@@ -173,7 +173,21 @@ pub struct ReadyInfo {
     pub version: String,
     pub notes_url: String,
     pub changes_line: bool,
+    /// Whether installing it asks for the computer's password (Linux).
+    pub asks_password: bool,
 }
+
+impl ReadyInfo {
+    fn of(r: &Ready) -> Self {
+        ReadyInfo { version: r.version.clone(), notes_url: r.notes_url.clone(), changes_line: r.changes_line, asks_password: INSTALLS_FIRST }
+    }
+}
+
+/// Linux installs a waiting update before the lines stop: its password
+/// prompt can be cancelled, and a cancel then leaves the Vault as it was.
+/// Windows cannot replace files in use, so there (and on macOS, where
+/// nothing asks) the lines stop first.
+const INSTALLS_FIRST: bool = cfg!(target_os = "linux");
 
 /// A channel's release manifest; None when there is none yet, or offline.
 async fn fetch_manifest(client: &reqwest::Client, channel: &str) -> Option<Vec<u8>> {
@@ -294,9 +308,8 @@ async fn check_once(app: &tauri::AppHandle, data_dir: &Path) -> Result<String, S
         .await
         .map_err(|e| format!("the download failed or its updater signature did not verify: {}", e))?;
     check_file(&file, &bytes).map_err(|e| format!("the download is not the file the manifest names: {}", e))?;
-    let said = format!("{} ready: installs at \"Restart to update\" or on quit", release.version);
-    let info = ReadyInfo { version: release.version.clone(), notes_url: release.notes_url.clone(), changes_line: release.changes_line };
-    *READY.lock().unwrap() = Some(Ready {
+    let said = format!("{} ready: installs at \"Restart to update\"{}", release.version, if INSTALLS_FIRST { "" } else { " or on quit" });
+    let ready = Ready {
         update,
         bytes,
         version: release.version,
@@ -304,7 +317,9 @@ async fn check_once(app: &tauri::AppHandle, data_dir: &Path) -> Result<String, S
         changes_line: release.changes_line,
         channel,
         sequence: release.sequence,
-    });
+    };
+    let info = ReadyInfo::of(&ready);
+    *READY.lock().unwrap() = Some(ready);
     let _ = app.emit("update-ready", info);
     Ok(said)
 }
@@ -323,23 +338,44 @@ pub fn spawn(app: tauri::AppHandle, data_dir: std::path::PathBuf) {
     });
 }
 
-/// Install the waiting update: the sequence and the "updated from" line are
-/// kept first, the lines stopped cleanly (Windows cannot replace files in
-/// use; a clean stop protects the databases), then the package installed.
-/// Returns whether one was installed.
-pub fn install_ready(data_dir: &Path) -> Result<bool, String> {
+/// Install the waiting update; returns whether one was installed. The
+/// sequence and the "updated from" line are kept first, and put back with
+/// the update if the install fails, so the same update is offered again.
+/// The lines stop cleanly (which protects the databases) before the install
+/// or, on Linux, after it (`INSTALLS_FIRST`). `stage` hears each step as it
+/// starts: "password" or "installing", then "restarting".
+pub fn install_ready(data_dir: &Path, stage: &dyn Fn(&str)) -> Result<bool, String> {
     let Some(ready) = READY.lock().unwrap().take() else {
         return Ok(false);
     };
-    let mut saved = load(data_dir);
+    let before = load(data_dir);
+    let mut saved = before.clone();
     saved.last_sequence.insert(ready.channel.clone(), ready.sequence);
     saved.updated_from = Some(UpdatedFrom { version: env!("CARGO_PKG_VERSION").into(), to: ready.version.clone(), notes_url: ready.notes_url.clone() });
     save(data_dir, &saved);
+    if INSTALLS_FIRST {
+        stage("password");
+    } else {
+        stage("installing");
+        stop_lines();
+    }
+    log::info!("[update] installing {}{}", ready.version, if ready.changes_line { " (it moves the data to another Holochain line on its first start)" } else { "" });
+    let installed = ready.update.install(&ready.bytes);
+    if let Err(e) = installed {
+        save(data_dir, &before);
+        *READY.lock().unwrap() = Some(ready);
+        return Err(format!("the update did not install: {e}"));
+    }
+    stage("restarting");
+    if INSTALLS_FIRST {
+        stop_lines();
+    }
+    Ok(true)
+}
+
+fn stop_lines() {
     crate::conductor::end_starts();
     crate::conductor::stop_all_lines();
-    log::info!("[update] installing {}{}", ready.version, if ready.changes_line { " (it moves the data to another Holochain line on its first start)" } else { "" });
-    ready.update.install(&ready.bytes).map_err(|e| format!("the update did not install: {e}"))?;
-    Ok(true)
 }
 
 /// On quit: install a waiting update where that needs no one (Windows,
@@ -349,7 +385,7 @@ pub fn install_on_quit(data_dir: &Path) {
     if cfg!(target_os = "linux") {
         return;
     }
-    if let Err(e) = install_ready(data_dir) {
+    if let Err(e) = install_ready(data_dir, &|_| {}) {
         log::warn!("[update] {}", e);
     }
 }
@@ -361,7 +397,7 @@ fn status_of(data_dir: &Path) -> UpdateStatus {
         auto: saved.auto(),
         channel: channels_for(env!("CARGO_PKG_VERSION"))[0].into(),
         version: env!("CARGO_PKG_VERSION").into(),
-        ready: READY.lock().unwrap().as_ref().map(|r| ReadyInfo { version: r.version.clone(), notes_url: r.notes_url.clone(), changes_line: r.changes_line }),
+        ready: READY.lock().unwrap().as_ref().map(ReadyInfo::of),
         notice: NOTICE.lock().unwrap().clone(),
         updated,
         can_update: platform().is_some() && matches!(kind(), Some(k) if k != "msi"),
@@ -397,13 +433,33 @@ pub fn dismiss_updated(app: tauri::AppHandle) {
     }
 }
 
+/// "Restart to update". The install runs off the main thread, so the window
+/// keeps drawing (and says each step, as `update-stage`) while the lines
+/// stop and the package installs.
 #[tauri::command]
-pub fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
     let data_dir = app.state::<std::sync::Arc<crate::commands::AppState>>().data_dir.clone();
-    if install_ready(&data_dir)? {
-        app.restart();
+    let emitter = app.clone();
+    let installed = tauri::async_runtime::spawn_blocking(move || {
+        install_ready(&data_dir, &|stage| {
+            let _ = emitter.emit("update-stage", stage);
+        })
+    })
+    .await
+    .map_err(|e| format!("the install did not run: {e}"))?;
+    match installed {
+        Ok(true) => app.restart(),
+        Ok(false) => Ok(()),
+        Err(e) => {
+            log::warn!("[update] {}", e);
+            if !INSTALLS_FIRST {
+                // The lines stopped before the install: a restart brings
+                // them back, and the update downloads again at its next check.
+                app.restart();
+            }
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
