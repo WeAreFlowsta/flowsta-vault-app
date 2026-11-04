@@ -1945,9 +1945,11 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                         } else if primary_07 {
                             // Every round, so the 0.6 copies follow who is on 0.6,
                             // and a 0.6 line nothing wants any more stops now.
-                            let wanted = crate::move_07::line_06_wanted_now(&devices_state).await;
+                            let decision = crate::move_07::line_06_decision_now(&devices_state).await;
+                            let wanted = decision.as_ref().map(|d| d.wanted());
+                            let why = decision.as_ref().map(crate::move_07::why_06).unwrap_or_default();
                             if wanted == Some(false) && has_06 && crate::move_07::retire_06_now(&devices_state).await {
-                                log::info!("[0.6] stopped: nothing of this identity is left on the 0.6 line and no device reads it there");
+                                log::info!("[0.6] stopped: {}", why);
                             }
                             if wanted == Some(true) && !has_06 {
                                 let held_now = crate::sealed::sealed_list_inner(&devices_state).await.map(|r| r.len()).unwrap_or(0);
@@ -1966,7 +1968,7 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                                 };
                                 if let Some(passphrase) = passphrase {
                                     let resource_dir = resolve_resource_dir(&devices_app, &devices_state.data_dir);
-                                    if let Err(e) = crate::conductor::attach_line_from_state(devices_state.clone(), crate::hc::Line::V06, resource_dir, passphrase, "a device still on 0.6, or nothing heard yet") {
+                                    if let Err(e) = crate::conductor::attach_line_from_state(devices_state.clone(), crate::hc::Line::V06, resource_dir, passphrase, &why) {
                                         log::warn!("[0.6] not attached: {}", e);
                                     }
                                 }

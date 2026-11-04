@@ -205,6 +205,11 @@ pub fn record_line_06_decision(root: &Path, wanted: bool) {
 /// on 1.6.1) while its listen window is open (`retirement`). `None` = no
 /// marker or born: not this function's call.
 pub async fn line_06_wanted_now(state: &Arc<AppState>) -> Option<bool> {
+    line_06_decision_now(state).await.map(|d| d.wanted())
+}
+
+/// [`line_06_wanted_now`] with its reason (`why_06` says it in words).
+pub async fn line_06_decision_now(state: &Arc<AppState>) -> Option<flowsta_hc_lines::policy::Decision> {
     use flowsta_hc_lines::policy::{old_line_wanted, Decision, Siblings, Why};
     let root = state.identity_root();
     let m = marker(&root)?;
@@ -233,7 +238,27 @@ pub async fn line_06_wanted_now(state: &Arc<AppState>) -> Option<bool> {
             log::debug!("[move] the listen window was not updated: {}", e);
         }
     }
-    Some(decision.wanted())
+    Some(decision)
+}
+
+/// Why the 0.6 line is or is not wanted, in the words the log uses when it
+/// attaches, skips or retires the line.
+pub fn why_06(decision: &flowsta_hc_lines::policy::Decision) -> String {
+    use flowsta_hc_lines::policy::{Decision, Why};
+    let (Decision::Wanted(why) | Decision::NotWanted(why)) = decision;
+    match why {
+        Why::NotMoved => "this identity's records have not moved to 0.7 yet".into(),
+        Why::Owed(kind) if kind == "web_era" => "the signatures of the web account this identity came from are not carried to 0.7 yet".into(),
+        Why::Owed(kind) => format!("{} is still to be carried to 0.7", kind),
+        Why::SiblingOnOld(device) => format!("another device of this identity ({}) is still on 0.6", device.chars().take(8).collect::<String>()),
+        Why::Listening => "restored, and no other device of this identity heard from yet".into(),
+        Why::NotCarried => "the one-time check that everything on 0.6 was carried to 0.7 has not run yet".into(),
+        Why::Born => "this identity was born on 0.7".into(),
+        Why::Alone => "restored, and no other device heard from while the listen window was open".into(),
+        Why::NeverShared => "this identity never had another device, and nothing is left on 0.6".into(),
+        Why::NothingLeft => "nothing of this identity is left on the 0.6 line and no device reads it there".into(),
+        Why::Fresh => "a new identity, nothing on 0.6".into(),
+    }
 }
 
 /// The listen window (decided 10-30): a restored identity that hears from
