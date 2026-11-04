@@ -5,6 +5,45 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0-beta3] - 2026-11-05
+
+The third beta of 1.8.0, and the first to arrive through the updater. It
+fixes what the second beta's logs showed on Windows and macOS.
+
+### Highlights
+- **The first beta that arrives by itself.** A Vault on 1.8.0-beta2
+  downloads this one in the background and installs it when you restart
+  the Vault or quit it.
+- **Your identity is ready when the Vault says so.** Right after an
+  unlock, your records, devices and backups wait for each part of your
+  identity in Holochain to finish starting, instead of failing for up to
+  a minute and catching up on the next round.
+
+### Changed
+- When the Vault stops the older Holochain version (0.6) because nothing
+  of your identity needs it any more, it first lets what it is reading
+  there finish.
+- The Vault keeps a copy of each Holochain version it ships, also once
+  your identities no longer need the older one, so a later Vault can
+  still run it.
+- The log says why the Vault starts or stops the older Holochain version,
+  and what each update check found.
+- On macOS and Linux the Vault asks Holochain to shut down, and Holochain
+  stops its work at once, but this Holochain version keeps its network
+  running afterward, so the Vault ends it after five seconds. The log now
+  says so, instead of a warning that it did not stop.
+
+### Fixed
+- Locking the Vault, erasing it, or removing an identity while Holochain
+  is still starting stops that start, and an erase or removal waits for
+  it to stop before removing your files.
+- A device you add finishes setting up about a minute after the other
+  devices' profile arrives, instead of up to five minutes later.
+- When two Vaults on one computer (another account's, or a test copy
+  beside yours) start Holochain at the same moment, each connects to its
+  own. Before, one of them could run without the newer Holochain version
+  until it restarted.
+
 ## [1.8.0-beta2] - 2026-11-03
 
 The second beta of 1.8.0. The Vault now keeps itself up to date, starts
