@@ -373,8 +373,11 @@ pub struct AppState {
     /// each commit a cap grant (three startup probes racing = three chain
     /// writes = "chain head has moved" under a user's first sign).
     pub credentials_fill_lock: tokio::sync::Mutex<()>,
-    /// Probes of the 0.7 cells still asking (`dna::ensure_cells_ready_07`),
-    /// and the newest one's number: an older probe stops at its next try.
+    /// Each line's probes of its cells still asking (`dna::ensure_cells_ready_06`
+    /// and `_07`), and the newest one's number: an older probe stops at its
+    /// next try.
+    pub cell_probes_06: std::sync::atomic::AtomicUsize,
+    pub cell_probe_gen_06: std::sync::atomic::AtomicU64,
     pub cell_probes_07: std::sync::atomic::AtomicUsize,
     pub cell_probe_gen_07: std::sync::atomic::AtomicU64,
 }
@@ -441,6 +444,9 @@ pub(crate) async fn cell_credentials_cached_07(
             return Ok(c.to_signing());
         }
     }
+    // Right after a start the cell can still be coming up: wait for the
+    // line's probe to reach it (its grant then lands in the cache).
+    crate::dna::wait_for_cell(state, crate::hc::Line::V07, || state.cell_credentials_07.lock().unwrap().contains_key(cell_id)).await;
     let _fill = state.credentials_fill_lock.lock().await;
     {
         let cache = state.cell_credentials_07.lock().unwrap();
@@ -482,6 +488,8 @@ pub(crate) async fn cell_credentials_cached(
             return Ok(c.to_signing());
         }
     }
+    // As on the 0.7 line: wait for the probe to reach a cell still coming up.
+    crate::dna::wait_for_cell(state, crate::hc::Line::V06, || state.cell_credentials.lock().unwrap().contains_key(cell_id)).await;
     // Single-flight the fill: whoever wins the lock authorizes once; the
     // others find the cache populated on the re-check.
     let _fill = state.credentials_fill_lock.lock().await;
@@ -603,6 +611,8 @@ impl AppState {
             cell_credentials_07: Mutex::new(HashMap::new()),
             credentials_fill_lock: tokio::sync::Mutex::new(()),
             commit_serial: tokio::sync::Mutex::new(()),
+            cell_probes_06: std::sync::atomic::AtomicUsize::new(0),
+            cell_probe_gen_06: std::sync::atomic::AtomicU64::new(0),
             cell_probes_07: std::sync::atomic::AtomicUsize::new(0),
             cell_probe_gen_07: std::sync::atomic::AtomicU64::new(0),
         }

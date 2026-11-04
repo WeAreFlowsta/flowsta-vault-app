@@ -745,18 +745,26 @@ impl VaultLines {
             Err(e) => fail_and_stop!(format!("App interface setup failed: {}", e)),
         };
 
+        // The cells, before the line joins: the start waits for the signing
+        // cell, and each call for its own (an attached line's ports are
+        // handed out only after this, so nothing reaches a cell still
+        // coming up).
+        if let Some(state) = &self.state {
+            crate::dna::ensure_cells_ready_06(admin_port, state).await;
+        }
+
         log::info!("Holochain conductor ready (admin: {}, app: {})", admin_port, app_port);
         Ok(app_port)
     }
 
     /// The 0.7 line: the same key as the seed derives (refused otherwise),
     /// identity 1.5 + signing 1.5 (+ private v2.1), the signing coordinator
-    /// hot-swap, the app interface. As the primary it waits for its cells
-    /// before the Vault says Ready. A start that installed an app asks for
-    /// one restart first: Holochain 0.7.1 keeps the memory of an install
-    /// until its conductor restarts (~2 GB against 419 MB after one restart,
-    /// a new identity's three apps, 11-03).
-    async fn setup_07(&self, role: Role, process: &mut LineProcess) -> Result<Setup, String> {
+    /// hot-swap, the app interface. It waits for its signing cell before
+    /// the line joins (the Vault says Ready after a primary's). A start that
+    /// installed an app asks for one restart first: Holochain 0.7.1 keeps
+    /// the memory of an install until its conductor restarts (~2 GB against
+    /// 419 MB after one restart, a new identity's three apps, 11-03).
+    async fn setup_07(&self, _role: Role, process: &mut LineProcess) -> Result<Setup, String> {
         let pub_key = process.agents[0];
         if pub_key != self.expected_pub_key {
             return Err("the 0.7 key store derived a different key from the same seed".to_string());
@@ -777,10 +785,9 @@ impl VaultLines {
             log::info!("[0.7] {} app(s) installed: the line restarts once to give back the memory the install kept", apps.new);
             return Ok(Setup { app_port, restart: true });
         }
-        if role == Role::Primary {
-            if let Some(state) = &self.state {
-                crate::dna::ensure_cells_ready_07(admin_port, state).await;
-            }
+        // Either role, before the line joins (see `setup_06`).
+        if let Some(state) = &self.state {
+            crate::dna::ensure_cells_ready_07(admin_port, state).await;
         }
         Ok(app_port.into())
     }
@@ -870,7 +877,6 @@ impl LineHooks for VaultLines {
             (Role::Secondary, Line::V07) => {
                 log::info!("Holochain 0.7 conductor ready (admin: {}, app: {})", admin_port, app_port);
                 if let Some(state) = &self.state {
-                    crate::dna::ensure_cells_ready_07(admin_port, state).await;
                     crate::move_07::schedule_pass(state.clone(), "the 0.7 line came up");
                 }
             }

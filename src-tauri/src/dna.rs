@@ -955,78 +955,259 @@ pub async fn setup_app_interface_07(admin_port: u16) -> Result<u16, String> {
     Ok(app_port)
 }
 
-/// How long a start holds the Vault for the 0.7 cells before it opens.
-const CELLS_START_WAIT_07: std::time::Duration = std::time::Duration::from_secs(45);
+/// How long a start holds the Vault for a line's signing cell before it
+/// opens (a sign-in needs that cell first).
+const CELLS_START_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 /// How long the probe keeps asking after that. A cold conductor's cells
 /// took ~75 s on 11-02 (a staging Vault, past the old 45 s): every
 /// sealed read and the first devices round then failed with
 /// `CellNotRunning` for half a minute.
-const CELLS_COLD_WAIT_07: std::time::Duration = std::time::Duration::from_secs(300);
-const CELLS_PROBE_GAP_07: std::time::Duration = std::time::Duration::from_secs(3);
+const CELLS_COLD_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+const CELLS_PROBE_GAP: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// A 0.7 probe still asking, counted in `AppState::cell_probes_07` (one per
-/// conductor start; two only while a restart's old one ends).
-struct CellProbe07(std::sync::Arc<crate::commands::AppState>);
-
-impl CellProbe07 {
-    fn begin(state: &std::sync::Arc<crate::commands::AppState>) -> Self {
-        state.cell_probes_07.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        CellProbe07(state.clone())
+fn probes(state: &crate::commands::AppState, line: Line) -> &std::sync::atomic::AtomicUsize {
+    match line {
+        Line::V06 => &state.cell_probes_06,
+        Line::V07 => &state.cell_probes_07,
     }
 }
 
-impl Drop for CellProbe07 {
+fn probe_gen(state: &crate::commands::AppState, line: Line) -> &std::sync::atomic::AtomicU64 {
+    match line {
+        Line::V06 => &state.cell_probe_gen_06,
+        Line::V07 => &state.cell_probe_gen_07,
+    }
+}
+
+/// A line's probe still asking, counted in `AppState::cell_probes_06/07`
+/// (one per conductor start; two only while a restart's old one ends).
+struct CellProbe(std::sync::Arc<crate::commands::AppState>, Line);
+
+impl CellProbe {
+    fn begin(state: &std::sync::Arc<crate::commands::AppState>, line: Line) -> Self {
+        probes(state, line).fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        CellProbe(state.clone(), line)
+    }
+}
+
+impl Drop for CellProbe {
     fn drop(&mut self) {
-        self.0.cell_probes_07.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        probes(&self.0, self.1).fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
-/// Wait until the 0.7 line's cells answer (the twin of the readiness probe
-/// in `ensure_apps_enabled`): a freshly started conductor lists its apps as
-/// enabled while the cells are still coming up. One cap grant on the
-/// signing cell, cached so no caller authorizes again this session. The
-/// start waits up to 45 s; past that the Vault opens and the probe keeps
-/// asking for up to 5 minutes, and every 0.7 connect waits for it
-/// (`wait_for_cells_07`) instead of failing after its own few tries.
-pub async fn ensure_cells_ready_07(admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>) {
-    let probe = CellProbe07::begin(state);
-    // Not the supervisor's session: a primary's setup runs before its
-    // session is numbered.
-    let generation = state.cell_probe_gen_07.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    let state = state.clone();
-    let asking = tokio::spawn(async move {
-        probe_cells_07(admin_port, &state, generation).await;
-        drop(probe);
-    });
-    if tokio::time::timeout(CELLS_START_WAIT_07, asking).await.is_err() {
-        log::info!(
-            "[0.7] cells still starting after {} s: the Vault opens, and its 0.7 reads wait for them (up to {} min)",
-            CELLS_START_WAIT_07.as_secs(),
-            CELLS_COLD_WAIT_07.as_secs() / 60
-        );
-    }
-}
-
-/// While a probe is still asking and no 0.7 cell has answered this session,
-/// wait (checked each second). Returns at once once one has, or when no
-/// probe runs (a read then fails or passes on its own, as before).
-pub async fn wait_for_cells_07(state: &crate::commands::AppState) {
+/// While `line`'s probe is still asking and the cell a caller needs has not
+/// answered this session (`answered`: its grant is cached), wait, checked
+/// each second. Returns at once once it has, or when no probe runs (a call
+/// then fails or passes on its own, as before).
+pub async fn wait_for_cell(state: &crate::commands::AppState, line: Line, answered: impl Fn() -> bool) {
     let started = std::time::Instant::now();
     let mut waited = false;
-    while state.cell_probes_07.load(std::sync::atomic::Ordering::SeqCst) > 0
-        && state.cell_credentials_07.lock().unwrap().is_empty()
-        && started.elapsed() < CELLS_START_WAIT_07 + CELLS_COLD_WAIT_07
+    while probes(state, line).load(std::sync::atomic::Ordering::SeqCst) > 0
+        && !answered()
+        && started.elapsed() < CELLS_START_WAIT + CELLS_COLD_WAIT
     {
         waited = true;
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     if waited && started.elapsed().as_secs() >= 5 {
-        log::info!("[0.7] a read waited {} s for the cells", started.elapsed().as_secs());
+        log::info!("[{}] a call waited {} s for its cell", line, started.elapsed().as_secs());
     }
 }
 
-async fn probe_cells_07(admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>, generation: u64) {
+/// Start `line`'s probe and wait for its signing cell: a freshly started
+/// conductor lists its apps as enabled while the cells are still coming up,
+/// and not all at once (a Mac's private cell answered 68 s after its
+/// signing cell, 11-04). The probe asks every cell of the line's apps, one
+/// cap grant each, cached so no caller authorizes again this session; each
+/// call waits for its own cell (`wait_for_cell`). The start waits up to
+/// 45 s for the signing cell; past that the Vault opens, and the probe
+/// keeps asking for up to 5 minutes.
+async fn ensure_cells_ready(line: Line, admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>) {
+    let probe = CellProbe::begin(state, line);
+    // Not the supervisor's session: a primary's setup runs before its
+    // session is numbered.
+    let generation = probe_gen(state, line).fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    // A new conductor: what was granted on the last one is asked again.
+    match line {
+        Line::V06 => state.cell_credentials.lock().unwrap().clear(),
+        Line::V07 => state.cell_credentials_07.lock().unwrap().clear(),
+    }
+    let (signing_ready, signing_answered) = tokio::sync::oneshot::channel();
+    let state = state.clone();
+    tokio::spawn(async move {
+        match line {
+            Line::V06 => probe_cells_06(admin_port, &state, generation, signing_ready).await,
+            Line::V07 => probe_cells_07(admin_port, &state, generation, signing_ready).await,
+        }
+        drop(probe);
+    });
+    // Ends when the signing cell answers, or the probe ends without it.
+    if tokio::time::timeout(CELLS_START_WAIT, signing_answered).await.is_err() {
+        log::info!(
+            "[{}] the signing cell still starting after {} s: the Vault opens, and each call waits for its cell (up to {} min)",
+            line,
+            CELLS_START_WAIT.as_secs(),
+            CELLS_COLD_WAIT.as_secs() / 60
+        );
+    }
+}
+
+pub async fn ensure_cells_ready_06(admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>) {
+    ensure_cells_ready(Line::V06, admin_port, state).await
+}
+
+pub async fn ensure_cells_ready_07(admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>) {
+    ensure_cells_ready(Line::V07, admin_port, state).await
+}
+
+/// One probe's bookkeeping: the cells still to answer (the signing cell
+/// first), and when each one did.
+struct Asking<C> {
+    line: Line,
+    pending: Vec<(String, C)>,
+    answered: Vec<(String, u64)>,
+    signing_app_id: String,
+    signing_ready: Option<tokio::sync::oneshot::Sender<()>>,
+    started: std::time::Instant,
+}
+
+impl<C> Asking<C> {
+    fn new(line: Line, mut pending: Vec<(String, C)>, signing_app_id: String, signing_ready: tokio::sync::oneshot::Sender<()>) -> Self {
+        pending.sort_by_key(|(id, _)| *id != signing_app_id);
+        let mut asking = Asking { line, pending, answered: Vec::new(), signing_app_id, signing_ready: Some(signing_ready), started: std::time::Instant::now() };
+        // No signing cell on this line: the start does not wait for one.
+        if !asking.pending.iter().any(|(id, _)| *id == asking.signing_app_id) {
+            asking.signing_ready = None;
+        }
+        asking
+    }
+
+    fn mark_answered(&mut self, i: usize) {
+        let (app_id, _) = self.pending.remove(i);
+        if app_id == self.signing_app_id {
+            if let Some(tx) = self.signing_ready.take() {
+                let _ = tx.send(());
+            }
+        }
+        self.answered.push((app_id, self.started.elapsed().as_secs()));
+    }
+
+    /// After a round: true when the probe is done (every cell answered, a
+    /// newer start asks for its own, or the wait is over), logging why.
+    fn done(&self, state: &crate::commands::AppState, generation: u64) -> bool {
+        let line = self.line;
+        if self.pending.is_empty() {
+            log::info!("[{}] cells ready{}", line, ready_summary(&self.answered));
+            return true;
+        }
+        // (A stopped conductor ends the probe at its next try: the socket is gone.)
+        if probe_gen(state, line).load(std::sync::atomic::Ordering::SeqCst) != generation {
+            return true;
+        }
+        let waited = self.started.elapsed();
+        if waited >= CELLS_START_WAIT + CELLS_COLD_WAIT {
+            log::warn!("[{}] {} still not running after {} s; calls try on their own from here", line, self.pending_names(), waited.as_secs());
+            return true;
+        }
+        if waited.as_secs() / 15 != (waited + CELLS_PROBE_GAP).as_secs() / 15 {
+            log::info!("[{}] cells not ready yet ({} s): {}", line, waited.as_secs(), self.pending_names());
+        }
+        false
+    }
+
+    fn pending_names(&self) -> String {
+        self.pending.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")
+    }
+}
+
+/// " after 68 s (flowsta_signing_v1_5 3 s, flowsta_private_v2_1_r1 68 s)",
+/// or one time when every cell answered together.
+fn ready_summary(answered: &[(String, u64)]) -> String {
+    let last = answered.iter().map(|(_, s)| *s).max().unwrap_or(0);
+    if answered.iter().all(|(_, s)| *s == last) {
+        return if last == 0 { String::new() } else { format!(" after {} s", last) };
+    }
+    let each: Vec<String> = answered.iter().map(|(id, s)| format!("{} {} s", id, s)).collect();
+    format!(" after {} s ({})", last, each.join(", "))
+}
+
+/// The 0.6 line's probe (`ensure_cells_ready`): every cell of every app it
+/// runs except one put aside on purpose, re-enabled between rounds as
+/// `ensure_apps_enabled` does.
+async fn probe_cells_06(admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>, generation: u64, signing_ready: tokio::sync::oneshot::Sender<()>) {
+    use holochain_client::{AdminWebsocket, CellInfo};
+    use holochain_types::app::{AppStatus, DisabledAppReason};
+    let admin_ws = match AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin())).await {
+        Ok(a) => a,
+        Err(e) => {
+            log::warn!("[0.6] readiness check: admin WS: {}", e);
+            return;
+        }
+    };
+    let apps = match admin_ws.list_apps(None).await {
+        Ok(a) => a,
+        Err(e) => {
+            log::warn!("[0.6] readiness check: list_apps: {}", e);
+            return;
+        }
+    };
+    let mut cells = Vec::new();
+    for app in apps.iter().filter(|a| !matches!(a.status, AppStatus::Disabled(DisabledAppReason::User))) {
+        for c in app.cell_info.values().flatten() {
+            if let CellInfo::Provisioned(p) = c {
+                cells.push((app.installed_app_id.clone(), p.cell_id.clone()));
+            }
+        }
+    }
+    let mut asking = Asking::new(Line::V06, cells, make_app_id("signing", BUNDLED_SIGNING_VERSION), signing_ready);
+    let once = ReadyWait { attempts: 1, gap: CELLS_PROBE_GAP, reenable: &[], label: "[0.6]" };
+    loop {
+        let mut i = 0;
+        while i < asking.pending.len() {
+            let (app_id, cell_id) = asking.pending[i].clone();
+            // One try at a time, single-flighted with every other credential
+            // fill (not held across the gap); a cache hit means a caller's
+            // grant got there first.
+            let ready = {
+                let _fill = state.credentials_fill_lock.lock().await;
+                if state.cell_credentials.lock().unwrap().contains_key(&cell_id) {
+                    true
+                } else {
+                    match flowsta_hc_lines::admin::wait_cell_ready_06(&admin_ws, &cell_id, &once).await {
+                        Ok((creds, _)) => {
+                            state.cell_credentials.lock().unwrap().insert(cell_id.clone(), crate::commands::CachedCellCredentials::from_signing(&creds));
+                            true
+                        }
+                        Err(e) if e.kind == flowsta_hc_lines::ZomeErrorKind::CellNotRunning => false,
+                        Err(e) => {
+                            log::warn!("[0.6] {}: readiness check failed: {}", app_id, e);
+                            return;
+                        }
+                    }
+                }
+            };
+            if ready {
+                asking.mark_answered(i);
+            } else {
+                i += 1;
+            }
+        }
+        if asking.done(state, generation) {
+            return;
+        }
+        tokio::time::sleep(CELLS_PROBE_GAP).await;
+        for (app_id, _) in &asking.pending {
+            let _ = admin_ws.enable_app(app_id.clone()).await;
+        }
+    }
+}
+
+/// The 0.7 line's probe (`ensure_cells_ready`): every cell of every app it
+/// runs except one put aside on purpose.
+async fn probe_cells_07(admin_port: u16, state: &std::sync::Arc<crate::commands::AppState>, generation: u64, signing_ready: tokio::sync::oneshot::Sender<()>) {
     use holochain_client_07::{AdminWebsocket, CellInfo};
+    use holochain_types_07::app::{AppStatus, DisabledAppReason};
     let admin_ws = match AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin())).await {
         Ok(a) => a,
         Err(e) => {
@@ -1041,65 +1222,49 @@ async fn probe_cells_07(admin_port: u16, state: &std::sync::Arc<crate::commands:
             return;
         }
     };
-    let signing_app_id = make_app_id("signing", BUNDLED_SIGNING_VERSION_07);
-    let Some(cell_id) = apps
-        .iter()
-        .find(|a| a.installed_app_id == signing_app_id)
-        .and_then(|app| {
-            app.cell_info.values().flat_map(|cells| cells.iter()).find_map(|c| match c {
-                CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-                _ => None,
-            })
-        })
-    else {
-        return;
-    };
-    // One try at a time, each single-flighted with every other 0.7
-    // credential fill (the lock is not held across the gap, so the 0.6
-    // line's fills are not held up), and a cache hit means a caller's
-    // grant got there first.
-    let started = std::time::Instant::now();
-    let once = ReadyWait { attempts: 1, gap: CELLS_PROBE_GAP_07, reenable: &[], label: "[0.7]" };
+    let mut cells = Vec::new();
+    for app in apps.iter().filter(|a| !matches!(a.status, AppStatus::Disabled(DisabledAppReason::User))) {
+        for c in app.cell_info.values().flatten() {
+            if let CellInfo::Provisioned(p) = c {
+                cells.push((app.installed_app_id.clone(), p.cell_id.clone()));
+            }
+        }
+    }
+    let mut asking = Asking::new(Line::V07, cells, make_app_id("signing", BUNDLED_SIGNING_VERSION_07), signing_ready);
+    let once = ReadyWait { attempts: 1, gap: CELLS_PROBE_GAP, reenable: &[], label: "[0.7]" };
     loop {
-        {
-            let _fill = state.credentials_fill_lock.lock().await;
-            if state.cell_credentials_07.lock().unwrap().contains_key(&cell_id) {
-                return;
-            }
-            match flowsta_hc_lines::admin::wait_cell_ready_07(&admin_ws, &cell_id, &once).await {
-                Ok((creds, _)) => {
-                    state
-                        .cell_credentials_07
-                        .lock()
-                        .unwrap()
-                        .insert(cell_id.clone(), crate::commands::CachedCellCredentials07::from_signing(&creds));
-                    match started.elapsed().as_secs() {
-                        0 => log::info!("[0.7] cells ready"),
-                        s => log::info!("[0.7] cells ready after {} s", s),
+        let mut i = 0;
+        while i < asking.pending.len() {
+            let (app_id, cell_id) = asking.pending[i].clone();
+            // As on the 0.6 line: one try at a time, single-flighted.
+            let ready = {
+                let _fill = state.credentials_fill_lock.lock().await;
+                if state.cell_credentials_07.lock().unwrap().contains_key(&cell_id) {
+                    true
+                } else {
+                    match flowsta_hc_lines::admin::wait_cell_ready_07(&admin_ws, &cell_id, &once).await {
+                        Ok((creds, _)) => {
+                            state.cell_credentials_07.lock().unwrap().insert(cell_id.clone(), crate::commands::CachedCellCredentials07::from_signing(&creds));
+                            true
+                        }
+                        Err(e) if e.kind == flowsta_hc_lines::ZomeErrorKind::CellNotRunning => false,
+                        Err(e) => {
+                            log::warn!("[0.7] {}: readiness check failed: {}", app_id, e);
+                            return;
+                        }
                     }
-                    return;
                 }
-                Err(e) if e.kind == flowsta_hc_lines::ZomeErrorKind::CellNotRunning => {}
-                Err(e) => {
-                    log::warn!("[0.7] cell readiness check failed: {}", e);
-                    return;
-                }
+            };
+            if ready {
+                asking.mark_answered(i);
+            } else {
+                i += 1;
             }
         }
-        // A newer start asks for its own cells. (A stopped conductor ends
-        // this one at its next try: the socket is gone.)
-        if state.cell_probe_gen_07.load(std::sync::atomic::Ordering::SeqCst) != generation {
+        if asking.done(state, generation) {
             return;
         }
-        let waited = started.elapsed();
-        if waited >= CELLS_START_WAIT_07 + CELLS_COLD_WAIT_07 {
-            log::warn!("[0.7] cells still not running after {} s; reads try on their own from here", waited.as_secs());
-            return;
-        }
-        if waited.as_secs() / 15 != (waited + CELLS_PROBE_GAP_07).as_secs() / 15 {
-            log::info!("[0.7] cells not ready yet ({} s)", waited.as_secs());
-        }
-        tokio::time::sleep(CELLS_PROBE_GAP_07).await;
+        tokio::time::sleep(CELLS_PROBE_GAP).await;
     }
 }
 
@@ -1123,43 +1288,65 @@ mod cell_wait_tests {
         );
     }
 
-    /// Reads wait while a probe asks and no cell has answered; no longer.
+    /// A call waits while its line's probe asks and its own cell has not
+    /// answered; no longer.
     #[tokio::test]
-    async fn reads_wait_for_the_probe_only_while_it_asks() {
+    async fn a_call_waits_for_its_own_cell_only_while_the_probe_asks() {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(crate::commands::AppState::new(dir.path().to_path_buf()));
+        fn answered(s: &crate::commands::AppState) -> bool {
+            !s.cell_credentials_07.lock().unwrap().is_empty()
+        }
 
-        // No probe asking: a read goes at once.
+        // No probe asking: a call goes at once.
         let t = Instant::now();
-        wait_for_cells_07(&state).await;
+        wait_for_cell(&state, Line::V07, || answered(&state)).await;
         assert!(t.elapsed() < Duration::from_millis(500));
 
-        // A probe asking: the read waits until a cell has answered.
-        let probe = CellProbe07::begin(&state);
+        // A probe asking: the call waits until its cell has answered.
+        let probe = CellProbe::begin(&state, Line::V07);
         let filler = state.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(2)).await;
             grant(&filler);
         });
         let t = Instant::now();
-        wait_for_cells_07(&state).await;
+        wait_for_cell(&state, Line::V07, || answered(&state)).await;
         assert!((Duration::from_secs(2)..Duration::from_secs(4)).contains(&t.elapsed()), "{:?}", t.elapsed());
 
         // Answered this session: no wait, probe or not.
         let t = Instant::now();
-        wait_for_cells_07(&state).await;
+        wait_for_cell(&state, Line::V07, || answered(&state)).await;
         assert!(t.elapsed() < Duration::from_millis(500));
 
-        // A new start empties the cache; a probe that gives up lets its
-        // waiters go and try on their own.
+        // The other line's probe does not hold a 0.7 call.
         state.cell_credentials_07.lock().unwrap().clear();
+        drop(probe);
+        let other = CellProbe::begin(&state, Line::V06);
+        let t = Instant::now();
+        wait_for_cell(&state, Line::V07, || answered(&state)).await;
+        assert!(t.elapsed() < Duration::from_millis(500));
+        drop(other);
+
+        // A probe that gives up lets its waiters go and try on their own.
+        let probe = CellProbe::begin(&state, Line::V07);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
             drop(probe);
         });
         let t = Instant::now();
-        wait_for_cells_07(&state).await;
+        wait_for_cell(&state, Line::V07, || answered(&state)).await;
         assert!((Duration::from_secs(1)..Duration::from_secs(3)).contains(&t.elapsed()), "{:?}", t.elapsed());
         assert_eq!(state.cell_probes_07.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn the_ready_line_names_the_late_cells() {
+        assert_eq!(ready_summary(&[("a".into(), 0), ("b".into(), 0)]), "");
+        assert_eq!(ready_summary(&[("a".into(), 6), ("b".into(), 6)]), " after 6 s");
+        assert_eq!(
+            ready_summary(&[("flowsta_signing_v1_5".into(), 3), ("flowsta_private_v2_1_r1".into(), 68)]),
+            " after 68 s (flowsta_signing_v1_5 3 s, flowsta_private_v2_1_r1 68 s)"
+        );
     }
 }
