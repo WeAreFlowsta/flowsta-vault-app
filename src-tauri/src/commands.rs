@@ -6192,6 +6192,8 @@ async fn fetch_revocation_for_action(
     // response time (~ms) and well below the cold-DHT wall. Defaults
     // (not-revoked, no thumbnail) on a timeout fill in on the next
     // refresh once the DHT has gossiped them.
+    // Counted in flight on the 0.6 line, so a retirement waits for it.
+    let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
     let call = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.into()),
         "signing".into(),
@@ -6245,6 +6247,7 @@ async fn fetch_thumbnail_for_action(
     use holochain_types::prelude::{Entry, ExternIO, Record};
 
     let payload = rmp_serde::to_vec_named(action_hash).ok()?;
+    let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
     let call = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.into()),
         "signing".into(),
@@ -6432,6 +6435,7 @@ async fn query_own_sigs_for_version(
     let payload_mp = rmp_serde::to_vec_named(&())
         .map_err(|e| format!("msgpack ({}): {}", signing_app.installed_app_id, e))?;
 
+    let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
     let result = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.clone().into()),
         "signing".into(),
@@ -6567,6 +6571,7 @@ async fn fetch_linked_agent_keys(
     // landed the link record, we pick up any extras; otherwise we
     // skip the wait and rely on the cached seed.
     let mut dht_settled = false;
+    let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
     let dht_call = identity_ws.call_zome(
         ZomeCallTarget::RoleName(identity_role.into()),
         "agent_linking".into(),
@@ -6800,6 +6805,7 @@ async fn query_linked_sigs_for_version(
     for linked_key in linked_keys {
         let payload = rmp_serde::to_vec_named(linked_key)
             .map_err(|e| format!("encode linked key: {}", e))?;
+        let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
         let result = app_ws.call_zome(
             ZomeCallTarget::RoleName(role_name.clone().into()),
             "signing".into(),
@@ -7445,6 +7451,7 @@ async fn revoke_signature_attempt(
     let payload_mp = rmp_serde::to_vec_named(&payload)
         .map_err(|e| format!("MessagePack: {}", e))?;
 
+    let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
     let result = app_ws.call_zome(
         ZomeCallTarget::RoleName(role_name.into()),
         "signing".into(),
@@ -7561,6 +7568,7 @@ pub(crate) async fn set_thumbnail_inner(
     let mut last_err = String::new();
     for attempt in 1..=3u32 {
         let started = std::time::Instant::now();
+        let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
         match app_ws
             .call_zome(
                 ZomeCallTarget::RoleName(role_name.clone().into()),
@@ -7730,6 +7738,7 @@ pub(crate) async fn commit_signature_to_dht(
     let mut result = None;
     let mut last_err = String::new();
     for attempt in 1..=3u32 {
+        let _calling = flowsta_hc_lines::calling(crate::hc::Line::V06);
         match app_ws
             .call_zome(
                 ZomeCallTarget::RoleName(role_name.clone().into()),
