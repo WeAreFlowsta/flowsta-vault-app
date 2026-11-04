@@ -120,6 +120,11 @@ pub fn stop_all_lines() -> bool {
 ///   after its first round (`move_07::line_06_wanted_now`).
 /// Never from the network; the decision is written into the marker.
 pub fn line_06_wanted(data_dir: &Path, data_key: Option<&[u8; 32]>, own_install_id: Option<&str>) -> bool {
+    line_06_decision(data_dir, data_key, own_install_id).wanted()
+}
+
+/// [`line_06_wanted`] with its reason (`move_07::why_06` says it in words).
+pub fn line_06_decision(data_dir: &Path, data_key: Option<&[u8; 32]>, own_install_id: Option<&str>) -> flowsta_hc_lines::policy::Decision {
     use flowsta_hc_lines::policy::{old_line_wanted, Siblings};
     // From this device's own files: the device records it holds count as
     // heard (even none), so a restored identity that holds none decides
@@ -128,7 +133,7 @@ pub fn line_06_wanted(data_dir: &Path, data_key: Option<&[u8; 32]>, own_install_
     let siblings = Siblings::Heard(crate::move_07::siblings_of(&held, own_install_id));
     crate::move_07::remember_siblings(data_dir, &siblings);
     let facts = crate::move_07::line_facts(data_dir, own_install_id, siblings);
-    old_line_wanted(&facts, &crate::move_07::retirement(), &crate::move_07::MARKER_SPEC).wanted()
+    old_line_wanted(&facts, &crate::move_07::retirement(), &crate::move_07::MARKER_SPEC)
 }
 
 /// Conductor status reported to the frontend.
@@ -530,7 +535,9 @@ pub async fn start_holochain(
     };
     let (primary, secondary) = if crate::move_07::moved(&data_dir) {
         let own_install_id = crate::paths::install_id(&state.data_dir);
-        let wanted_06 = line_06_wanted(&data_dir, data_key.as_ref(), own_install_id.as_deref());
+        let decision = line_06_decision(&data_dir, data_key.as_ref(), own_install_id.as_deref());
+        let wanted_06 = decision.wanted();
+        let why = crate::move_07::why_06(&decision);
         crate::move_07::record_line_06_decision(&data_dir, wanted_06);
         // A device whose records have not arrived on 0.7 yet (reset, then
         // restored or re-added by phrase) gets its 0.6 line from the devices
@@ -540,13 +547,14 @@ pub async fn start_holochain(
             && data_key.as_ref().is_some_and(|key| crate::sealed::held_devices_on_07(&data_dir, key).is_empty());
         if arriving {
             log::info!(
-                "[0.6] wanted, but this device's records have not arrived on 0.7 yet - the devices round attaches it once they have (at most {} min)",
+                "[0.6] wanted ({}), but this device's records have not arrived on 0.7 yet - the devices round attaches it once they have (at most {} min)",
+                why,
                 crate::move_07::ARRIVAL_HOLD.as_secs() / 60
             );
         } else if wanted_06 {
-            log::info!("[0.6] this identity still has something on the 0.6 line - attaching it");
+            log::info!("[0.6] attaching the 0.6 line: {}", why);
         } else {
-            log::info!("[0.6] not started: nothing of this identity is on the 0.6 line");
+            log::info!("[0.6] not started: {}", why);
         }
         (Line::V07, (wanted_06 && !arriving).then_some(Line::V06))
     } else {
@@ -745,18 +753,26 @@ impl VaultLines {
             Err(e) => fail_and_stop!(format!("App interface setup failed: {}", e)),
         };
 
+        // The cells, before the line joins: the start waits for the signing
+        // cell, and each call for its own (an attached line's ports are
+        // handed out only after this, so nothing reaches a cell still
+        // coming up).
+        if let Some(state) = &self.state {
+            crate::dna::ensure_cells_ready_06(admin_port, state).await;
+        }
+
         log::info!("Holochain conductor ready (admin: {}, app: {})", admin_port, app_port);
         Ok(app_port)
     }
 
     /// The 0.7 line: the same key as the seed derives (refused otherwise),
     /// identity 1.5 + signing 1.5 (+ private v2.1), the signing coordinator
-    /// hot-swap, the app interface. As the primary it waits for its cells
-    /// before the Vault says Ready. A start that installed an app asks for
-    /// one restart first: Holochain 0.7.1 keeps the memory of an install
-    /// until its conductor restarts (~2 GB against 419 MB after one restart,
-    /// a new identity's three apps, 11-03).
-    async fn setup_07(&self, role: Role, process: &mut LineProcess) -> Result<Setup, String> {
+    /// hot-swap, the app interface. It waits for its signing cell before
+    /// the line joins (the Vault says Ready after a primary's). A start that
+    /// installed an app asks for one restart first: Holochain 0.7.1 keeps
+    /// the memory of an install until its conductor restarts (~2 GB against
+    /// 419 MB after one restart, a new identity's three apps, 11-03).
+    async fn setup_07(&self, _role: Role, process: &mut LineProcess) -> Result<Setup, String> {
         let pub_key = process.agents[0];
         if pub_key != self.expected_pub_key {
             return Err("the 0.7 key store derived a different key from the same seed".to_string());
@@ -777,10 +793,9 @@ impl VaultLines {
             log::info!("[0.7] {} app(s) installed: the line restarts once to give back the memory the install kept", apps.new);
             return Ok(Setup { app_port, restart: true });
         }
-        if role == Role::Primary {
-            if let Some(state) = &self.state {
-                crate::dna::ensure_cells_ready_07(admin_port, state).await;
-            }
+        // Either role, before the line joins (see `setup_06`).
+        if let Some(state) = &self.state {
+            crate::dna::ensure_cells_ready_07(admin_port, state).await;
         }
         Ok(app_port.into())
     }
@@ -870,7 +885,6 @@ impl LineHooks for VaultLines {
             (Role::Secondary, Line::V07) => {
                 log::info!("Holochain 0.7 conductor ready (admin: {}, app: {})", admin_port, app_port);
                 if let Some(state) = &self.state {
-                    crate::dna::ensure_cells_ready_07(admin_port, state).await;
                     crate::move_07::schedule_pass(state.clone(), "the 0.7 line came up");
                 }
             }
