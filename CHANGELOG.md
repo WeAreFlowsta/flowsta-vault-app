@@ -5,7 +5,7 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.8.0-beta3] - 2026-11-04
+## [1.8.0-beta3] - 2026-11-05
 
 The third beta of 1.8.0, and the first to arrive through the updater. It
 fixes what the second beta's logs showed on Windows and macOS.
