@@ -767,6 +767,7 @@ pub(crate) fn stop_syncing_while_locked(state: &AppState) {
     if state.kept_conductor.lock().unwrap().take().is_none() {
         return;
     }
+    crate::conductor::end_starts();
     crate::conductor::stop_all_lines();
     *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
     *state.unlock_passphrase.lock().unwrap() = None;
@@ -1480,7 +1481,9 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
         *lane = None;
     }
 
-    // Shutdown conductor + lair if running
+    // Shutdown conductor + lair if running, and any start still coming up
+    // (it stops at its next step).
+    crate::conductor::end_starts();
     crate::conductor::stop_all_lines();
     *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
 
@@ -1650,6 +1653,8 @@ async fn recover_conductor(
     app_handle: &tauri::AppHandle,
     own_stop: bool,
 ) -> Result<(), String> {
+    // A lock while this waits below ends the start it would make.
+    let since = crate::conductor::starts_ended();
     // Serialise restart attempts so two failed commands don't both try
     // to bring the conductor up.
     let _guard = state.conductor_restart_lock.lock().await;
@@ -1778,10 +1783,14 @@ async fn recover_conductor(
         passphrase,
         conductor_seed,
         conductor_tag,
+        since,
     )
     .await
     {
         Ok(_session) => {}
+        Err(e) if e == flowsta_hc_lines::supervisor::NOT_WANTED => {
+            return Err("[watchdog] the Vault locked during the restart - stopped it".into());
+        }
         Err(e) => {
             // Say so in the sidebar - otherwise it sits on "Recovering
             // conductor..." forever with the real reason only in the log.
@@ -1917,7 +1926,13 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
         let unlocked_at = std::time::Instant::now();
         let mut held_last: Option<usize> = None;
         loop {
-            let full = pass % FULL_EVERY_PASSES == 0;
+            // Only a full round finishes a joined device's setup, so while it
+            // is being set up the first ten rounds are all full: a profile
+            // that lands a minute after the first round no longer waits five
+            // minutes for the next. One whose setup cannot finish yet (a
+            // sibling offline) then goes back to the usual pace.
+            let setting_up = pass < 2 * FULL_EVERY_PASSES && crate::devices::setting_up_here(&devices_state);
+            let full = pass % FULL_EVERY_PASSES == 0 || setting_up;
             let wait = match devices_round(&devices_state, &devices_app, full).await {
                 DevicesRound::StoodDown => break,
                 DevicesRound::Done => {
@@ -2450,12 +2465,18 @@ fn spawn_conductor_startup_inner(
             // resolve_resource_dir).
             // Bundled resources and the DNA download cache are device-level.
             let resource_dir = resolve_resource_dir(&app_handle, &state.data_dir);
+            // A lock or erase from here on ends this start.
+            let since = crate::conductor::starts_ended();
 
             tauri::async_runtime::spawn(async move {
                 let app_handle_ref = app_handle.clone();
                 // One start at a time: a command that finds the conductor
                 // down waits here instead of starting a second one.
                 let start_guard = state.conductor_restart_lock.lock().await;
+                if crate::conductor::starts_ended() != since {
+                    log::info!("The Vault locked before its conductor started - not starting it");
+                    return;
+                }
                 let running_port = crate::conductor::supervisor().primary_alive().then(|| crate::conductor::supervisor().primary_admin_port());
                 let started = match running_port {
                     // The watchdog got here first. What follows a start
@@ -2471,6 +2492,7 @@ fn spawn_conductor_startup_inner(
                         passphrase,
                         seed,
                         tag,
+                        since,
                     )
                     .await
                     {
@@ -2600,6 +2622,9 @@ fn spawn_conductor_startup_inner(
 
                         // Start periodic MAU sync (non-fatal if it fails)
                         crate::mau::spawn_mau_sync_task(state.clone());
+                    }
+                    Err(e) if e == flowsta_hc_lines::supervisor::NOT_WANTED => {
+                        log::info!("The Vault locked while its conductor was starting - stopped it");
                     }
                     Err(e) => {
                         log::error!("Conductor startup failed: {}", e);
@@ -2796,15 +2821,20 @@ async fn check_dna_updates(
 /// identities remain, one of them is selected so the Vault lands on the
 /// unlock picker; the last one leaves the device empty. Returns how many
 /// identities remain.
-#[tauri::command(async)]
-pub fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
-    remove_identity_inner(state.inner())
+///
+/// Blocking work (it may wait for a start still coming up): run off the
+/// async runtime's workers.
+#[tauri::command]
+pub async fn reset_vault(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || remove_identity_inner(&state)).await.map_err(|e| format!("Remove did not finish: {}", e))?
 }
 
 /// Erase every identity on this device.
-#[tauri::command(async)]
-pub fn erase_device(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    erase_device_inner(state.inner())
+#[tauri::command]
+pub async fn erase_device(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || erase_device_inner(&state)).await.map_err(|e| format!("Erase did not finish: {}", e))?
 }
 
 /// Stop the conductor and key store and forget the unlocked state before
@@ -2813,11 +2843,31 @@ pub fn erase_device(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 /// conductor files.
 fn shutdown_for_erase(state: &Arc<AppState>) {
     *state.kept_conductor.lock().unwrap() = None;
-    crate::conductor::stop_all_lines();
+    // A start still coming up (an unlock a moment ago) stops too, and is
+    // waited for: it writes into the folders removed next.
+    crate::conductor::stop_lines_and_starts();
     *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
     *state.vault_config.lock().unwrap() = None;
     // Nothing signed in by the identity being erased may outlive it.
     *state.grant_token_cache.lock().unwrap() = None;
+}
+
+/// `remove_dir_all`, tried again twice a moment apart. The identity's
+/// background work stops once its config is gone (`shutdown_for_erase`), but
+/// a write already under way can land while the folder is removed
+/// ("Directory not empty").
+fn remove_tree(path: &std::path::Path) -> std::io::Result<()> {
+    let mut tries = 0;
+    loop {
+        match std::fs::remove_dir_all(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound && tries < 2 => {
+                tries += 1;
+                log::info!("erase: {} not removed yet ({}) - trying again", path.display(), e);
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            done => return done,
+        }
+    }
 }
 
 /// Remove one identity's files: the whole partition when partitioned, every
@@ -2825,7 +2875,7 @@ fn shutdown_for_erase(state: &Arc<AppState>) {
 /// is attempted; the first failure is reported through `note`.
 fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, note: &mut dyn FnMut(&str, std::io::Result<()>)) {
     if root != device_root {
-        note("identity partition", std::fs::remove_dir_all(root));
+        note("identity partition", remove_tree(root));
         return;
     }
     for name in crate::paths::IDENTITY_STORE_FILES {
@@ -2842,13 +2892,13 @@ fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, 
         crate::paths::backups_dir(root),
         crate::paths::backup_copies_dir(root),
     ] {
-        note(&dir.display().to_string(), std::fs::remove_dir_all(&dir));
+        note(&dir.display().to_string(), remove_tree(&dir));
     }
     if let Ok(rd) = std::fs::read_dir(root) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if crate::paths::is_lair_leftover_name(&name) && e.path().is_dir() {
-                note(&name, std::fs::remove_dir_all(e.path()));
+                note(&name, remove_tree(&e.path()));
             } else if name.contains(".corrupt-") && e.path().is_file() {
                 note(&name, std::fs::remove_file(e.path()));
             }
@@ -2971,7 +3021,7 @@ pub(crate) fn erase_device_inner(state: &Arc<AppState>) -> Result<(), String> {
         // created for a setup that never finished).
         let current = state.identity_root();
         if current != device_root && current.is_dir() {
-            note("current partition", std::fs::remove_dir_all(&current));
+            note("current partition", remove_tree(&current));
         }
         let _ = std::fs::remove_dir(crate::paths::identities_dir(&device_root));
         note("active-identity marker", std::fs::remove_file(crate::paths::active_identity_path(&device_root)));

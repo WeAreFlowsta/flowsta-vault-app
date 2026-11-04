@@ -1285,6 +1285,9 @@ async function switcherLeg() {
     `${rm.status} remaining=${rm.data?.remaining} ids=${JSON.stringify((afterRm.identities || []).map((x) => [x.key, x.active]))} active=${stRm.active_identity === agentA}`);
   const unAgain = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: pwA } });
   record("A's password opens the remaining identity", unAgain.status === 200 && unAgain.data?.agent_pub_key === agentA, `${unAgain.status}`);
+  // The lock comes while the unlock's conductor is still starting: that
+  // start stops, and the erase leaves nothing behind.
+  const rootA = afterRm.identities?.[0]?.root;
   await vaultFetch(port, '/dev/lock', { method: 'POST' });
   const er = await vaultFetch(port, '/dev/erase-device', { method: 'POST' });
   const afterEr = await ids();
@@ -1292,6 +1295,12 @@ async function switcherLeg() {
   record('erase everything: no identities on the device, /status reports none',
     er.status === 200 && (afterEr.identities || []).length === 0 && stEr.initialized === false && !stEr.active_identity,
     `${er.status} ids=${(afterEr.identities || []).length} initialized=${stEr.initialized}`);
+  await new Promise((r) => setTimeout(r, 35_000));
+  const devEr = await devStatus();
+  const conductorEr = JSON.stringify(devEr.conductor);
+  record('35 s after the erase: no conductor came up, and A\'s folder is still gone',
+    devEr.conductor?.status === 'stopped' && !!rootA && !fs.existsSync(rootA),
+    `conductor=${conductorEr} folder=${rootA && fs.existsSync(rootA) ? 'back' : 'gone'}`);
 
   // 9. Reset -> restore B -> the email is checked against B, not the identity that was there before.
   if (!port2) { record('reset -> restore -> email leg skipped - set VAULT_MATRIX_RESTORE_PORT to a second FRESH instance', true); return; }
