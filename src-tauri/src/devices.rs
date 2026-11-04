@@ -308,7 +308,7 @@ fn own_record(state: &AppState, existing: Option<&DeviceRecord>, latest_change: 
 
 /// Joined an existing identity and has not yet finished its first complete
 /// round (the setup-done marker is not written).
-fn setting_up_here(state: &AppState) -> bool {
+pub(crate) fn setting_up_here(state: &AppState) -> bool {
     let joined = state.vault_config.lock().unwrap().as_ref().map(|c| c.joined_existing).unwrap_or(false);
     joined && !crate::paths::setup_done_path(&state.identity_root()).exists()
 }
