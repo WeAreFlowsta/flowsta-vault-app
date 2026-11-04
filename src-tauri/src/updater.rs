@@ -335,6 +335,7 @@ pub fn install_ready(data_dir: &Path) -> Result<bool, String> {
     saved.last_sequence.insert(ready.channel.clone(), ready.sequence);
     saved.updated_from = Some(UpdatedFrom { version: env!("CARGO_PKG_VERSION").into(), to: ready.version.clone(), notes_url: ready.notes_url.clone() });
     save(data_dir, &saved);
+    crate::conductor::end_starts();
     crate::conductor::stop_all_lines();
     log::info!("[update] installing {}{}", ready.version, if ready.changes_line { " (it moves the data to another Holochain line on its first start)" } else { "" });
     ready.update.install(&ready.bytes).map_err(|e| format!("the update did not install: {e}"))?;
