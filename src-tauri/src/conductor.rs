@@ -11,7 +11,7 @@ use crate::hc::Line;
 use std::sync::Arc;
 use flowsta_hc_lines::conductor::NetworkTuning;
 use flowsta_hc_lines::rendezvous::Rendezvous;
-use flowsta_hc_lines::supervisor::{self, KeySource, LineHooks, LineProcess, LineStart, LineState, Role, Setup, StartStep, Supervisor, Timeouts};
+use flowsta_hc_lines::supervisor::{self, KeySource, LineHooks, LineProcess, LineStart, LineState, Role, Setup, StartStep, Supervisor, Timeouts, NOT_WANTED};
 
 /// Candidate admin WebSocket ports for the conductor.
 /// Tries each in order - allows staging and production vaults to coexist.
@@ -105,6 +105,32 @@ pub(crate) static WATCHDOG: flowsta_hc_lines::watch::Watchdog = flowsta_hc_lines
 /// its grace before it is killed). Returns whether any session ran.
 pub fn stop_all_lines() -> bool {
     supervisor().stop()
+}
+
+/// Each lock, erase, identity removal and quit counts one. A start carries
+/// the count from when it was asked for and is wanted only while it holds
+/// (`LineHooks::wanted`): one still coming up when the Vault locks stops at
+/// its next step, so a conductor runs only for an unlocked identity.
+static STARTS_ENDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The count a start asked for now carries.
+pub fn starts_ended() -> u64 {
+    STARTS_ENDED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// No start asked for before now is wanted. Called before the lines stop.
+pub fn end_starts() {
+    STARTS_ENDED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// [`end_starts`], stop the lines, then wait for the starts still under way
+/// to stop what they started (blocking): before an identity's files go.
+pub fn stop_lines_and_starts() {
+    end_starts();
+    supervisor().stop();
+    if !supervisor().wait_for_starts(std::time::Duration::from_secs(90)) {
+        log::warn!("a conductor start was still under way after 90 s");
+    }
 }
 
 /// Whether this identity's 0.6 line should run, from local facts alone:
@@ -519,7 +545,15 @@ pub async fn start_holochain(
     // (`vault::conductor_lair_tag`).
     conductor_seed: [u8; 32],
     conductor_tag: String,
+    // `starts_ended()` when this start was asked for.
+    since: u64,
 ) -> Result<u64, String> {
+    // Counted from here: what follows writes into the identity's folder
+    // (the 0.6 decision), and an erase waits for that too.
+    let _under_way = supervisor().start_under_way();
+    if starts_ended() != since {
+        return Err(NOT_WANTED.into());
+    }
     let state = app_handle.state::<Arc<AppState>>().inner().clone();
     // Each line's start says again whether it started offline.
     STARTED_OFFLINE.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -570,6 +604,7 @@ pub async fn start_holochain(
         conductor_seed,
         conductor_tag,
         private_v2_seed,
+        since,
     });
     supervisor().start_lines(primary, secondary, hooks).await
 }
@@ -579,6 +614,7 @@ pub async fn start_holochain(
 /// the devices round when the 0.6 line is wanted again (a device record
 /// naming 0.6, or nothing heard yet on a restored identity).
 pub fn attach_line_from_state(state: Arc<AppState>, line: Line, resource_dir: PathBuf, passphrase: String, reason: &str) -> Result<(), String> {
+    let since = starts_ended();
     let (conductor_seed, conductor_tag, private_v2_seed) = {
         let cfg = state.vault_config.lock().unwrap();
         let cfg = cfg.as_ref().ok_or("vault config not available")?;
@@ -591,6 +627,10 @@ pub fn attach_line_from_state(state: Arc<AppState>, line: Line, resource_dir: Pa
         return Ok(());
     }
     let data_dir = state.identity_root();
+    let _under_way = supervisor().start_under_way();
+    if starts_ended() != since {
+        return Err("the Vault locked".into());
+    }
     log::info!("[{}] attaching the {} line: {}", line, line, reason);
     if line == Line::V06 {
         crate::move_07::record_line_06_decision(&data_dir, true);
@@ -605,6 +645,7 @@ pub fn attach_line_from_state(state: Arc<AppState>, line: Line, resource_dir: Pa
         conductor_seed,
         conductor_tag,
         private_v2_seed,
+        since,
     });
     supervisor().attach_line(session, line, hooks);
     Ok(())
@@ -629,6 +670,8 @@ struct VaultLines {
     /// line's private cell is installed with it. None for a custodial-linked
     /// vault, which has no private cell on either line.
     private_v2_seed: Option<String>,
+    /// `starts_ended()` when this start was asked for.
+    since: u64,
 }
 
 impl VaultLines {
@@ -757,6 +800,9 @@ impl VaultLines {
         // cell, and each call for its own (an attached line's ports are
         // handed out only after this, so nothing reaches a cell still
         // coming up).
+        if !self.wanted() {
+            return Err(NOT_WANTED.into());
+        }
         if let Some(state) = &self.state {
             crate::dna::ensure_cells_ready_06(admin_port, state).await;
         }
@@ -794,6 +840,9 @@ impl VaultLines {
             return Ok(Setup { app_port, restart: true });
         }
         // Either role, before the line joins (see `setup_06`).
+        if !self.wanted() {
+            return Err(NOT_WANTED.into());
+        }
         if let Some(state) = &self.state {
             crate::dna::ensure_cells_ready_07(admin_port, state).await;
         }
@@ -909,6 +958,11 @@ impl LineHooks for VaultLines {
             Line::V07 => log::info!("[0.7] the 0.7 line came up after its 0.6 line had stopped - stopped it again"),
             Line::V06 => log::info!("[0.6] the 0.6 line came up after its 0.7 line had stopped - stopped it again"),
         }
+    }
+
+    /// No lock, erase or quit since this start was asked for.
+    fn wanted(&self) -> bool {
+        starts_ended() == self.since
     }
 }
 
@@ -1108,6 +1162,7 @@ mod live_line_tests {
             conductor_tag: "live-device-key".into(),
             expected_pub_key: key,
             private_v2_seed: None,
+            since: starts_ended(),
         };
         let mut p06 = hooks.start(Line::V06, Role::Secondary).await.expect("the 0.6 line");
         assert_eq!(p06.agents[0], key);
