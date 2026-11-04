@@ -46,7 +46,8 @@ echo "== move-retired on 1.7.0 $(date -u +%H:%M:%S)"
 P=$(launch "" instance-1.7.0-b)
 VAULT_MATRIX_PORT=$P node scripts/bridge-matrix.mjs --phase=move-retired > "$LOGS/move-retired.log" 2>&1; rc=$?; rc_all=$((rc_all+rc))
 grep -E 'RESULT|✗' "$LOGS/move-retired.log"
-kits current
+# The 0.6 line has retired, and its kit stays cached all the same.
+kits both
 echo "== kill the 0.7 conductor under the moved identity $(date -u +%H:%M:%S)"
 scripts/matrix-kill-07.sh "$P" "$SUFFIX" > "$LOGS/kill-07.log" 2>&1; rc=$?; rc_all=$((rc_all+rc)); cat "$LOGS/kill-07.log"
 stop_instance
@@ -71,7 +72,7 @@ echo "== crash loop: four kills, the fourth held until the window passes $(date 
 P=$(VAULT_TEST_WATCH_LIMIT=3,150 launch "" instance-1.7.0-d)
 scripts/matrix-crash-loop.sh "$P" "$SUFFIX" 3 150 > "$LOGS/crash-loop.log" 2>&1; rc=$?; rc_all=$((rc_all+rc)); cat "$LOGS/crash-loop.log"
 # After the crash loop: its unlock starts the conductor, which sets the kits aside.
-kits current restore
+kits both restore
 stop_instance
 echo "== done rc=$rc_all $(date -u +%H:%M:%S); logs in $LOGS and $DIR/xdg/com.flowsta.vault/logs/"
 exit $rc_all

@@ -1,11 +1,13 @@
 //! The kit cache (flowsta-hc-lines `kit`): once a run, after the primary
-//! line is up, the 0.7 kit is set aside in `<device root>/kits/`, and the
-//! 0.6 kit while an identity on this device may still need 0.6; a 0.6 kit
-//! nothing needs is removed. A later Vault that no longer bundles 0.6 runs
+//! line is up, every line this Vault bundles is set aside in
+//! `<device root>/kits/`. A later Vault that no longer bundles a line runs
 //! it from here, offline, after checking every file against the hashes it
-//! compiles in.
+//! compiles in: for this device's own data, and for apps that stay on a
+//! line the Vault has moved past (`planning/VAULT_APP_RUNTIME.md` § 4). A
+//! kit is never removed because nothing on this device needs it today; a
+//! line leaves the cache only at its published end.
 
-use flowsta_hc_lines::kit::{previous_line_needed, KitCache, KitDescriptor};
+use flowsta_hc_lines::kit::{KitCache, KitDescriptor};
 use flowsta_hc_lines::Line;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,23 +31,7 @@ pub fn refresh(device_root: &Path, resources: &Path) {
         Err(e) => log::warn!("[kit] the {} kit not cached: {}", kit.line, e),
     };
     put(&crate::dna::KIT_07);
-    if needs_06(device_root) {
-        put(&crate::dna::KIT_06);
-    } else {
-        match cache.prune(&[Line::V07]) {
-            Ok(0) => {}
-            Ok(freed) => log::info!("[kit] the 0.6 kit removed ({} KB): no identity on this device needs 0.6", freed / 1024),
-            Err(e) => log::warn!("[kit] the 0.6 kit not removed: {}", e),
-        }
-    }
-}
-
-/// Whether an identity on this device may still need the 0.6 line: one
-/// that has not moved and has a 0.6 conductor folder, or one whose marker
-/// still wants 0.6 or records no complete carry yet.
-pub fn needs_06(device_root: &Path) -> bool {
-    let roots: Vec<PathBuf> = crate::identities::list_on_disk(device_root, device_root).into_iter().map(|e| PathBuf::from(e.root)).collect();
-    previous_line_needed(&roots, &crate::move_07::MARKER_SPEC, |root| crate::paths::conductor_dir(root).exists())
+    put(&crate::dna::KIT_06);
 }
 
 /// Each line's kit by the cache's own record (for the harness).

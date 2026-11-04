@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The kit cache under a running test instance: once the primary line is up
-# the 0.7 kit is set aside, and the 0.6 kit while an identity on the device
-# may still need 0.6 (`both`), else removed (`current`). With `restore`,
+# every bundled line's kit is set aside (`both`), also after the 0.6 line has
+# retired (kits are kept for later Vaults and for apps that stay on a line;
+# `current` = only the 0.7 kit, for a build that bundles one line). With `restore`,
 # each cached line is restored from the cache and its binaries run.
 # Usage: scripts/matrix-kits.sh <ipc port> both|current [restore]
 set -u
@@ -27,7 +28,7 @@ read -r n06 n07 p06 p07 <<<"$now"
 if [ "$EXPECT" = both ]; then
   echo "  ✓ kits cached: 0.6 $n06 entries ($(mib "$p06") MiB), 0.7 $n07 ($(mib "$p07") MiB)"
 else
-  echo "  ✓ the 0.6 kit removed (nothing on this device needs 0.6); 0.7 $n07 entries ($(mib "$p07") MiB)"
+  echo "  ✓ only the 0.7 kit: 0.7 $n07 entries ($(mib "$p07") MiB)"
 fi
 
 [ "$RESTORE" = restore ] || exit 0
