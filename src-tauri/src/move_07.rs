@@ -1603,11 +1603,12 @@ mod tests {
         assert!(!a.state.identity_root().join("enrollment-pending-07").exists(), "pending note removed once published");
         assert!(!crate::identity_07::publish_enrollment_key(&a.state, &[29u8; 32], &enrollment_public, 1_790_000_000_000).await.unwrap(), "published once");
         let key_b = crate::key_derivation::public_key_of_seed(&seed_b);
-        // A network read on identity 1.5; a cold conductor answers late, the
-        // device's round asks again each minute.
-        eventually("identity 1.5 answers that b is not removed", 240, || async { crate::identity_07::removed_on_07(&a.state, &key_b).await == Some(false) }).await;
+        // A network read on identity 1.5; a cold conductor answers late (51 s
+        // to more than 4 minutes over seven runs), the device's round asks
+        // again each minute.
+        eventually("identity 1.5 answers that b is not removed", 360, || async { crate::identity_07::removed_on_07(&a.state, &key_b).await == Some(false) }).await;
         crate::identity_07::publish_removal(&a.state, &[29u8; 32], &key_b, 1_790_000_001_000).await.expect("removal published");
-        eventually("b reads its own removal from identity 1.5", 240, || async { crate::identity_07::removed_on_07(&b.state, &key_b).await == Some(true) }).await;
+        eventually("b reads its own removal from identity 1.5", 360, || async { crate::identity_07::removed_on_07(&b.state, &key_b).await == Some(true) }).await;
         assert!(crate::devices::removed_here_now(&b.state).await.unwrap(), "and stands down on it");
 
         // ── The restore rule, from the same records ──
