@@ -29,14 +29,14 @@ pub const BUNDLED_SIGNING_VERSION_07: &str = "1.5";
 const BUNDLED_IDENTITY_V1_5_HAPP_FILE: &str = "flowsta_identity_v1_5_happ.happ";
 const BUNDLED_SIGNING_V1_5_HAPP_FILE: &str = "flowsta_signing_v1_5_happ.happ";
 /// Signing v1.6 on the 0.7 line beside v1.5: the write rules and checked
-/// carried proofs (`planning/DNA_V1_6_WRITE_RULES.md`). Each device carries
-/// what it wrote on v1.5 (`signing_v16`), then writes here.
+/// carried proofs. Each device carries what it wrote on v1.5
+/// (`signing_v16`), then writes here.
 pub const BUNDLED_SIGNING_VERSION_V16: &str = "1.6";
 const BUNDLED_SIGNING_V1_6_HAPP_FILE: &str = "flowsta_signing_v1_6_happ.happ";
 /// The 0.7 line's private cell: private v2.1 (the v2.0 shape rebuilt for
-/// Holochain 0.7.1; canonical bundle in `reference/DNA_VERSION_HISTORY.md`,
-/// copied, never rebuilt). Installed per identity with the same per-user
-/// network seed as the 0.6 cell; the DNA hash keeps the two networks apart.
+/// Holochain 0.7.1; the canonical bundle, copied, never rebuilt). Installed
+/// per identity with the same per-user network seed as the 0.6 cell; the DNA
+/// hash keeps the two networks apart.
 pub const BUNDLED_PRIVATE_V2_VERSION_07: &str = "2.1";
 const BUNDLED_PRIVATE_V2_1_HAPP_FILE: &str = "flowsta_private_v2_1_happ.happ";
 /// Bundle revision of the v2.1 cell (see `BUNDLED_PRIVATE_V2_REVISION`).
