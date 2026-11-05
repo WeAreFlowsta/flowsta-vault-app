@@ -29,6 +29,14 @@ The fourth beta of 1.8.0: installing an update is smoother.
   next version.
 - On Windows and macOS, an install that fails opens the Vault again
   instead of leaving it closed.
+- Sign It reads a signature's revocations, thumbnail and history from
+  their authors' own records, and the move to the new network carries only
+  a signature's own revocations and thumbnail.
+- Linked apps are read from the links that name this identity, revoked
+  only by one of their own two agents.
+- A device being added has the email and name from your other devices by
+  the time its "on its way" card leaves. Before, they could follow a
+  minute later.
 
 ## [1.8.0-beta3] - 2026-11-05
 
