@@ -21,7 +21,7 @@ now() { curl -s -m 5 "http://127.0.0.1:$PORT/dev/status" | python3 -c 'import sy
 watchdog() { curl -s -m 180 -H 'content-type: application/json' -H 'origin: https://ourtest.flowsta.com' -X POST -d '{"op":"watchdog"}' "http://127.0.0.1:$PORT/dev/devices" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("watchdog") or "")' 2>/dev/null; }
 # Same as matrix-kill-07.sh: by process name and the data folder, from /proc.
 conductor() { for pid in $(pgrep -x vault-holochain); do tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | grep -q -- "$BIN -c $DIR/" && { echo $pid; return; }; done; }
-holds_logged() { cat "$DIR"/xdg/com.flowsta.vault/logs/*.log 2>/dev/null | grep -c "held until the oldest"; }
+holds_logged() { cat "$DIR"/xdg/com.flowsta.vault*/logs/*.log 2>/dev/null | grep -c "held until the oldest"; }
 signatures() { curl -s -m 10 -o /dev/null -w '%{http_code}' -H 'origin: https://ourtest.flowsta.com' "http://127.0.0.1:$PORT/signatures"; }
 fail() { echo "  ✗ FAIL $*"; exit 1; }
 back() { # $1 = the killed pid, $2 = seconds: ready with a new conductor
@@ -35,7 +35,7 @@ code=$(python3 -c 'import sys,json; print(json.dumps({"password": json.load(open
 [ "$code" = 200 ] || fail "POST /dev/unlock-with-password answered $code"
 for i in $(seq 1 36); do [ "$(signatures)" = 200 ] && break; sleep 5; done
 [ "$(signatures)" = 200 ] || fail "GET /signatures never answered before the first kill"
-ls "$DIR"/xdg/com.flowsta.vault/logs/*.log >/dev/null 2>&1 || fail "no Vault log under $DIR/xdg"
+ls "$DIR"/xdg/com.flowsta.vault*/logs/*.log >/dev/null 2>&1 || fail "no Vault log under $DIR/xdg"
 LOGGED=$(holds_logged)
 echo "before: $(now) (limit $MOST in $WITHIN s)"
 

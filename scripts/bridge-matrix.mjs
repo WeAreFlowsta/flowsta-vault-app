@@ -16,6 +16,9 @@
  *   node scripts/bridge-matrix.mjs --phase=grants    # email never leaks without a grant; scopes ride /authenticate
  *   node scripts/bridge-matrix.mjs --phase=full      # everything else
  *   node scripts/bridge-matrix.mjs --phase=create    # create an identity on a FRESH instance (+ restore twin)
+ *   node scripts/bridge-matrix.mjs --phase=v16-before|v16-after  # signing v1.6: write on v1.5 with
+ *       the pass held (VAULT_TEST_HOLD_V16=1 on the instance), then the carry and the switch
+ *       (scripts/matrix-signing-v16.sh runs both)
  *       needs VAULT_MATRIX_PORT = a fresh test instance (no identity yet), and
  *       optionally VAULT_MATRIX_RESTORE_PORT = a second fresh instance for the twin
  *   node scripts/bridge-matrix.mjs --phase=switcher  # 1.5.0: two identities in one Vault, switch, one agent
@@ -2063,6 +2066,12 @@ async function moveLeg(stage) {
     fs.writeFileSync(stateFile, JSON.stringify({ ...saved, carried: sigs.map((x) => x.action_hash) }, null, 2));
     return;
   }
+  // The two records the move carried: each row is that v1.5 copy, or once
+  // the device's pass has run (signing_v16) its v1.6 copy, which names the
+  // same 0.6 original (the pass rebuilds a carried record's first original).
+  const sameTwo = (sigs) => sigs.length === 2
+    && [saved.aHash, saved.bHash].every((o) => sigs.some((x) => x.original_action_hash === o))
+    && sigs.every((x) => (saved.carried || []).includes(x.action_hash) || /v1_6/.test(x.signing_app_id || ''));
   if (stage === 'move-retired') {
     const lines = await linesOf(port);
     const dev = await devOf(port);
@@ -2071,7 +2080,7 @@ async function moveLeg(stage) {
     record('move-retired: cells ready on 0.7 alone', (await waitCellsReady(port, 180)) >= 0);
     let sigs = []; for (let i = 0; i < 40; i++) { sigs = await sigsOn(); if (sigs.length === 2) break; await sleep(3000); }
     const counts = foldCounts(sigs);
-    record('move-retired: the same two carried records, 1 signature + 1 amendment, from the 0.7 read alone', sigs.length === 2 && counts.current === 1 && counts.amendments === 1 && (saved.carried || []).every((h) => sigs.some((x) => x.action_hash === h)), JSON.stringify(counts));
+    record('move-retired: the same two carried records (or their v1.6 copies), 1 signature + 1 amendment, from the 0.7 read alone', sameTwo(sigs) && counts.current === 1 && counts.amendments === 1, JSON.stringify({ ...counts, rows: sigs.map((x) => ({ h: (x.action_hash || '').slice(0, 10), orig: (x.original_action_hash || '').slice(0, 10), app: x.signing_app_id })) }));
     return;
   }
   if (stage === 'move-update') {
@@ -2096,10 +2105,82 @@ async function moveLeg(stage) {
     record('move-update: marker says no 0.6 line needed', dev.move?.moved === true && dev.move?.marker?.line_06_needed === false, JSON.stringify(dev.move?.marker || null));
     let sigs = []; for (let i = 0; i < 40; i++) { sigs = await sigsOn(); if (sigs.length === 2) break; await sleep(3000); }
     const counts = foldCounts(sigs);
-    record('move-update: the same two carried records, 1 signature + 1 amendment, on 0.7 alone', sigs.length === 2 && counts.current === 1 && counts.amendments === 1 && (saved.carried || []).every((h) => sigs.some((x) => x.action_hash === h)), JSON.stringify(counts));
+    record('move-update: the same two carried records (or their v1.6 copies), 1 signature + 1 amendment, on 0.7 alone', sameTwo(sigs) && counts.current === 1 && counts.amendments === 1, JSON.stringify({ ...counts, rows: sigs.map((x) => ({ h: (x.action_hash || '').slice(0, 10), orig: (x.original_action_hash || '').slice(0, 10), app: x.signing_app_id })) }));
     return;
   }
   record(`unknown move stage ${stage}`, false);
+}
+
+async function signingV16Leg(stage) {
+  console.log(`\n── Signing v1.6 leg (${stage})`);
+  const port = Number(process.env.VAULT_MATRIX_PORT || 0);
+  if (!port) { record('signing v1.6 leg skipped - set VAULT_MATRIX_PORT', true); return; }
+  const fs = await import('node:fs');
+  const stateFile = process.env.VAULT_MATRIX_V16_STATE || '/tmp/vault-matrix-v16-state.json';
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const sigsOn = async () => ((await vaultFetch(port, '/signatures')).data?.signatures) || [];
+  const jobOn = async (path, body) => {
+    const sub = await vaultFetch(port, path, { method: 'POST', body: { ...body, job: true } });
+    if (sub.status !== 200 || !sub.data?.job_id) return { stage: 'failed', error: `${sub.status} ${JSON.stringify(sub.data)}` };
+    let last = {};
+    const deadline = Date.now() + 300_000;
+    while (Date.now() < deadline) { last = (await vaultFetch(port, `/op-status/${sub.data.job_id}`)).data || {}; if (last.stage === 'done' || last.stage === 'failed') break; await sleep(1000); }
+    return last;
+  };
+  const isV15 = (x) => /signing_v1_5/.test(x.signing_app_id || '');
+  const isV16 = (x) => /signing_v1_6/.test(x.signing_app_id || '');
+  if (stage === 'v16-before') {
+    const fresh = await vaultFetch(port, '/status');
+    if (fresh.data?.initialized !== false) { record('v16-before skipped - instance already holds an identity', true); return; }
+    const password = `Matrix-v16-${randomHash().slice(0, 12)}!`;
+    const created = await vaultFetch(port, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, email: `matrix-v16-${Date.now()}@example.com`, display_name: 'Matrix V16' } });
+    record('v1.5: identity created', created.status === 200 && !!created.data?.agent_pub_key, `${created.status} ${created.data?.error || ''}`);
+    if (created.status !== 200) return;
+    record('v1.5: conductor ready', await waitConductorReady(port, 180));
+    record('v1.5: cells ready', (await waitCellsReady(port, 180)) >= 0);
+    const d = await devOf(port);
+    record('v1.5: the pass is held (signing_v16 false)', d.signing_v16 === false, JSON.stringify({ signing_v16: d.signing_v16 }));
+    const hashA = randomHash();
+    const hashB = randomHash();
+    const a = await jobOn('/sign-document', signBody(hashA));
+    record('v1.5: A signed', a.stage === 'done' && !!a.result?.action_hash, JSON.stringify(a).slice(0, 160));
+    const b = await jobOn('/sign-document', signBody(hashB));
+    record('v1.5: B signed', b.stage === 'done' && !!b.result?.action_hash, JSON.stringify(b).slice(0, 160));
+    const rev = await jobOn('/revoke-signature', { action_hash: a.result?.action_hash, reason: 'matrix: revoked on v1.5' });
+    record('v1.5: A revoked', rev.stage === 'done', JSON.stringify(rev).slice(0, 160));
+    const t1 = await jobOn('/set-thumbnail', { action_hash: b.result?.action_hash, thumbnail: TINY_PNG });
+    const t2 = await jobOn('/set-thumbnail', { action_hash: b.result?.action_hash, thumbnail: TINY_PNG_2 });
+    record('v1.5: B thumbnail set, then edited', t1.stage === 'done' && t2.stage === 'done', JSON.stringify([t1.stage, t2.stage]));
+    let sigs = []; for (let i = 0; i < 20; i++) { sigs = await sigsOn(); if (sigs.length === 2 && sigs.some((x) => x.revoked) && sigs.some((x) => x.thumbnail === TINY_PNG_2)) break; await sleep(3000); }
+    record('v1.5: the list reads A revoked, B with the edited thumbnail, both on v1.5', sigs.length === 2 && sigs.every(isV15) && sigs.find((x) => x.file_hash === hashA)?.revoked === true && sigs.find((x) => x.file_hash === hashB)?.thumbnail === TINY_PNG_2, JSON.stringify(sigs.map((x) => ({ f: (x.file_hash || '').slice(0, 8), app: x.signing_app_id, revoked: x.revoked, thumb: (x.thumbnail || '').slice(-12) }))));
+    fs.writeFileSync(stateFile, JSON.stringify({ password, hashA, hashB, aHash: a.result?.action_hash, bHash: b.result?.action_hash }, null, 2));
+    record(`state written to ${stateFile}`, true);
+    return;
+  }
+  const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const un = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: saved.password } });
+  record('v1.6: unlocks', un.status === 200 && un.data?.success === true, `${un.status} ${un.data?.error || ''}`);
+  record('v1.6: conductor ready', await waitConductorReady(port, 240));
+  const t0 = Date.now();
+  let dev = {};
+  const deadline = Date.now() + 600_000;
+  while (Date.now() < deadline) { dev = await devOf(port); if (dev.signing_v16 === true) break; await sleep(5000); }
+  record('v1.6: the pass carried everything and switched the writes', dev.signing_v16 === true, `${Math.round((Date.now() - t0) / 1000)} s`);
+  let sigs = []; for (let i = 0; i < 40; i++) { sigs = await sigsOn(); if (sigs.length === 2 && sigs.every(isV16)) break; await sleep(3000); }
+  const show = JSON.stringify(sigs.map((x) => ({ f: (x.file_hash || '').slice(0, 8), app: x.signing_app_id, orig: (x.original_action_hash || '').slice(0, 10), revoked: x.revoked, thumb: (x.thumbnail || '').slice(-12) })));
+  record('v1.6: still two rows, both the v1.6 copies', sigs.length === 2 && sigs.every(isV16), show);
+  record('v1.6: each copy names its v1.5 original', sigs.some((x) => x.original_action_hash === saved.aHash) && sigs.some((x) => x.original_action_hash === saved.bHash), show);
+  record('v1.6: A is still revoked, B keeps the edited thumbnail', sigs.find((x) => x.file_hash === saved.hashA)?.revoked === true && sigs.find((x) => x.file_hash === saved.hashB)?.thumbnail === TINY_PNG_2, show);
+  // Writes now go to v1.6 (a fresh identity has used its two free
+  // signatures, so a revocation and a thumbnail, which use none).
+  const bRow = sigs.find((x) => x.file_hash === saved.hashB);
+  const aRow = sigs.find((x) => x.file_hash === saved.hashA);
+  const revB = await jobOn('/revoke-signature', { action_hash: bRow?.action_hash, reason: 'matrix: revoked on v1.6' });
+  record('v1.6: B revoked on its v1.6 copy', revB.stage === 'done', JSON.stringify(revB).slice(0, 160));
+  const thA = await jobOn('/set-thumbnail', { action_hash: aRow?.action_hash, thumbnail: TINY_PNG_2 });
+  record('v1.6: A given a thumbnail on its v1.6 copy', thA.stage === 'done', JSON.stringify(thA).slice(0, 160));
+  let after = []; for (let i = 0; i < 20; i++) { after = await sigsOn(); if (after.find((x) => x.file_hash === saved.hashB)?.revoked && after.find((x) => x.file_hash === saved.hashA)?.thumbnail === TINY_PNG_2) break; await sleep(3000); }
+  record('v1.6: the list reads both writes, still two rows on v1.6', after.length === 2 && after.every(isV16) && after.find((x) => x.file_hash === saved.hashB)?.revoked === true && after.find((x) => x.file_hash === saved.hashA)?.thumbnail === TINY_PNG_2, JSON.stringify(after.map((x) => ({ f: (x.file_hash || '').slice(0, 8), app: x.signing_app_id, revoked: x.revoked, thumb: (x.thumbnail || '').slice(-20) }))));
 }
 
 (async () => {
@@ -2130,6 +2211,13 @@ async function moveLeg(stage) {
     await devicesLeg();
     const passedD = results.filter((r) => r.ok).length;
     console.log(`\nRESULT: ${passedD}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
+    process.exit(failures ? 1 : 0);
+  }
+  if (PHASE.startsWith('v16-')) {
+    await signingV16Leg(PHASE);
+    const passedV = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedV}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
     if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
     process.exit(failures ? 1 : 0);
   }

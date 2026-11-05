@@ -1993,6 +1993,9 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                     // What the 0.6 cells hold and the 0.7 cells do not,
                     // carried over (the move, and the catch-up after it).
                     crate::move_07::schedule_pass(devices_state.clone(), "devices round");
+                    // What this device wrote on signing v1.5, carried to v1.6
+                    // (its writes go there once nothing is left).
+                    crate::signing_v16::schedule(devices_state.clone());
                     // The enrollment key a registration could not publish
                     // on identity 1.5 (the 0.7 line was not up yet).
                     crate::device_registry::publish_pending_enrollment(&devices_state).await;
