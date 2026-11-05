@@ -1548,6 +1548,7 @@ export default component$(() => {
           {updateReady.value && (
             <button
               type="button"
+              data-testid="update-button"
               disabled={updateStage.value !== null && updateStage.value !== "failed"}
               title={
                 updateReady.value.asks_password
@@ -2253,6 +2254,7 @@ export default component$(() => {
       {/* "Restart to update" under way: what happens next */}
       {updateReady.value && updateStage.value && (
         <div
+          data-testid="update-panel"
           class={`pointer-events-auto flex items-start gap-2.5 rounded-lg border px-4 py-3 shadow-xl ${
             updateStage.value === "failed" ? "border-red-500/40 bg-red-950" : "border-amber-500/40 bg-gray-800"
           }`}
