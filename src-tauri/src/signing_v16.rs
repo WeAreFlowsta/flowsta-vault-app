@@ -319,6 +319,10 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// A pass in the background unless one is running or the move is done.
 pub(crate) fn schedule(state: Arc<AppState>) {
+    // The matrix holds the pass to write on v1.5 first (debug builds only).
+    if cfg!(debug_assertions) && std::env::var_os("VAULT_TEST_HOLD_V16").is_some() {
+        return;
+    }
     if switched(&state.identity_root()) || RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }

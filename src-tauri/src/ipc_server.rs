@@ -4518,6 +4518,9 @@ async fn dev_status_handler(
         serde_json::json!({
             "harness": true, "conductor": conductor, "cells_ready": cells_ready, "kits": crate::kits::status(&state.app_state.data_dir), "old_keystores": old_keystores, "email_grants": email_grants, "activity": activity, "activity_last": activity_last,
             "setup": setup,
+            // Signing v1.6: this device's v1.5 records carried and its
+            // writes switched there.
+            "signing_v16": crate::signing_v16::switched(&state.app_state.identity_root()),
             // Phase 2 partitioning: where this identity's files live.
             "layout": if state.app_state.identity_root() == state.app_state.data_dir { "legacy" } else { "partitioned" },
             "identity_root": state.app_state.identity_root().display().to_string(),
