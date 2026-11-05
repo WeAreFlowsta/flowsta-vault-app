@@ -29,6 +29,9 @@ The fourth beta of 1.8.0: installing an update is smoother.
   next version.
 - On Windows and macOS, an install that fails opens the Vault again
   instead of leaving it closed.
+- Sign It reads a signature's revocations, thumbnail and history from
+  their authors' own records, and the move to the new network carries only
+  a signature's own revocations and thumbnail.
 
 ## [1.8.0-beta3] - 2026-11-05
 

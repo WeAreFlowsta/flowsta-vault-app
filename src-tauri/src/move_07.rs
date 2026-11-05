@@ -634,11 +634,16 @@ impl CarriedRecords<AppState> for OwnSignatures {
         for (record, _entry) in &own {
             let on_07 = crate::signing_07::carry_signature(&c07, &r07, record).await?;
             report.carried += 1;
+            let signer = [record.author.as_slice()];
             for rev in crate::signing_07::revocations_06(&c06, &r06, &record.action_hash).await? {
+                if !crate::signing_07::written_by(&rev.record, &signer) {
+                    continue;
+                }
                 crate::signing_07::carry_revocation(&c07, &r07, &on_07, &rev).await?;
                 report.add(REVOCATIONS, 1);
             }
-            if let Some(thumb) = crate::signing_07::thumbnail_06(&c06, &r06, &record.action_hash).await? {
+            let thumb = crate::signing_07::thumbnail_06(&c06, &r06, &record.action_hash).await?;
+            if let Some(thumb) = thumb.filter(|t| crate::signing_07::written_by(&t.record, &signer)) {
                 crate::signing_07::carry_thumbnail(&c07, &r07, &on_07, &thumb).await?;
                 report.add(THUMBNAILS, 1);
             }
@@ -677,14 +682,19 @@ impl CarriedRecords<AppState> for WebEra {
         let (c06, r06) = crate::signing_07::signing_client(cx.app, Line::V06).await?;
         let (c07, r07) = crate::signing_07::signing_client(cx.app, Line::V07).await?;
         let theirs = crate::signing_07::records_for_agent_06(&c06, &r06, &web_key).await?;
+        let this_device = crate::signing_07::signing_agent_06(cx.app).await?;
         report.total = theirs.len();
         for (record, _entry) in &theirs {
             let on_07 = crate::signing_07::carry_signature(&c07, &r07, record).await?;
             report.carried += 1;
             for rev in crate::signing_07::revocations_network_06(&c06, &r06, &record.action_hash).await? {
+                if !crate::signing_07::written_by(&rev.record, &[record.author.as_slice()]) {
+                    continue;
+                }
                 crate::signing_07::carry_revocation(&c07, &r07, &on_07, &rev).await?;
             }
-            if let Some(thumb) = crate::signing_07::thumbnail_06(&c06, &r06, &record.action_hash).await? {
+            let thumb = crate::signing_07::thumbnail_06(&c06, &r06, &record.action_hash).await?;
+            if let Some(thumb) = thumb.filter(|t| crate::signing_07::written_by(&t.record, &[record.author.as_slice(), this_device.as_slice()])) {
                 crate::signing_07::carry_thumbnail(&c07, &r07, &on_07, &thumb).await?;
             }
         }

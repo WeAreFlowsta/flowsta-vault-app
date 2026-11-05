@@ -53,7 +53,7 @@ pub const KIT_06: KitDescriptor = KitDescriptor {
         KitFile { name: BUNDLED_PRIVATE_V2_HAPP_FILE, sha256: "1b969f6b96d9bd7bfcde4e1974d56b7a12708838693130358182ad86bcbe0668" },
         KitFile { name: BUNDLED_IDENTITY_HAPP_FILE, sha256: "09d3f3ea3a92c023fc5112734dc540bd7baeba8c069b0686afe3819b3b62fc64" },
         KitFile { name: BUNDLED_SIGNING_HAPP_FILE, sha256: "163b94d071c57b48bb6436e125afb4948cbd4d9cc24ee7ab374b96d77341a0e3" },
-        KitFile { name: SIGNING_COORDINATOR_WASM, sha256: "6fbcc44d870ad0cc89fa260d9d49544cf580113dd7df04fc22cdd06268cfbb12" },
+        KitFile { name: SIGNING_COORDINATOR_WASM, sha256: "eac2db863f177e97ccd4836df7a457b9418c4eb3010773b75cce9225a9ffd7ab" },
         KitFile { name: PRIVATE_V2_COORDINATOR_WASM, sha256: "125880705a57b14d241b5476e1c1642cfd12acba3857dc4ee15bc9b59cd801b5" },
     ],
 };
@@ -66,7 +66,7 @@ pub const KIT_07: KitDescriptor = KitDescriptor {
         KitFile { name: BUNDLED_IDENTITY_V1_5_HAPP_FILE, sha256: "abd9d2c6a7d54705fadfe4d4968b53381b821967d676d8e0a347ae5057f159fa" },
         KitFile { name: BUNDLED_SIGNING_V1_5_HAPP_FILE, sha256: "0703e4dc066f7dee97abcae9e408bbd5dcd4e220ab03a1de58f1bd324abdf61a" },
         KitFile { name: BUNDLED_PRIVATE_V2_1_HAPP_FILE, sha256: "7bf21c2449a2bc6c3770975607d2bed3df889cc2755703f76ebb666063386df8" },
-        KitFile { name: SIGNING_COORDINATOR_WASM_07, sha256: "d7e980a342d20cd987194c9cc3b0245beb2950a2f0ab302f54ffa04a692fb577" },
+        KitFile { name: SIGNING_COORDINATOR_WASM_07, sha256: "b98b9ecd6310e70cfa737335efe0845f2379cd85850a7c034da956e69b61036d" },
     ],
 };
 
@@ -148,14 +148,18 @@ fn make_happ_filename(dna_type: &str, version: &str) -> String {
 /// instead of hanging on cold-network get_links.
 /// Rev 3: adds get_own_revocations_for_signature (LOCAL) - own-view
 /// enrichment stops paying a network round-trip per record.
-pub const SIGNING_COORDINATOR_REV: u32 = 3;
+/// Rev 4: readers count an author's own deletes and link removals, check
+/// each lookup's records, and take a signature's revocations from its signer.
+pub const SIGNING_COORDINATOR_REV: u32 = 4;
 const SIGNING_COORDINATOR_WASM: &str = "signing_coordinator_v1_4.wasm";
 
 /// The signing v1.5 cell's coordinator revision (the 0.7 line). Rev 2:
 /// `get_carried` reads LOCAL - the carries asked the network whether this
 /// agent had carried a record already and waited the full request timeout
 /// per record on a cold conductor (the 1.7.0 live test, 2026-10-26).
-pub const SIGNING_COORDINATOR_REV_07: u32 = 2;
+/// Rev 3: the v1.4 rev 4 readers, revocations from the signer or the copy's
+/// witness, and `get_carried` reads only this agent's own index links.
+pub const SIGNING_COORDINATOR_REV_07: u32 = 3;
 const SIGNING_COORDINATOR_WASM_07: &str = "signing_coordinator_v1_5.wasm";
 
 /// Hot-swap the signing cell's coordinator zome to the bundled revision.

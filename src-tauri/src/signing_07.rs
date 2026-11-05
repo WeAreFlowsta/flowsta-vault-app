@@ -405,6 +405,27 @@ pub(crate) struct Revocation06 {
     pub reason: Option<String>,
 }
 
+/// The agent key this device's 0.6 signing cell runs as (39 bytes): a
+/// carried thumbnail may be its own edit of a web-era signature's.
+pub(crate) async fn signing_agent_06(state: &Arc<AppState>) -> Result<Vec<u8>, String> {
+    use holochain_client::AdminWebsocket;
+    let (admin_port, _) = crate::hc::line_ports(state, Line::V06)?;
+    let admin_ws = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+        .await
+        .map_err(|e| format!("Admin WS: {}", e))?;
+    let apps = admin_ws.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
+    let app_id = signing_app_id(Line::V06);
+    let app = apps.iter().find(|a| a.installed_app_id == app_id).ok_or_else(|| format!("{} is not installed", app_id))?;
+    Ok(app.agent_pub_key.get_raw_39().to_vec())
+}
+
+/// Whether `record` was written by one of `authors` (39-byte keys): a carry
+/// takes the signer's own revocations and history (and, for a thumbnail,
+/// this device's too).
+pub(crate) fn written_by(record: &RecordView, authors: &[&[u8]]) -> bool {
+    authors.iter().any(|a| *a == record.author.as_slice())
+}
+
 /// The person's own revocations of one v1.4 signature.
 pub(crate) async fn revocations_06(client: &AppClient, role: &str, signature_action: &[u8]) -> Result<Vec<Revocation06>, String> {
     let bytes = client
@@ -500,15 +521,16 @@ pub(crate) async fn records_for_agent_06(client: &AppClient, role: &str, agent: 
     let mut seen = std::collections::HashSet::new();
     let mut entries: Vec<(RecordView, SignatureEntry)> = records
         .into_iter()
-        .filter(|r| seen.insert(r.action_hash.clone()))
+        // Only the agent's own signatures.
+        .filter(|r| seen.insert(r.action_hash.clone()) && written_by(r, &[agent.get_raw_39()]))
         .filter_map(|r| r.entry_as::<SignatureEntry>().ok().map(|e| (r, e)))
         .collect();
     entries.sort_by_key(|(_, e)| e.signed_at);
     Ok(entries)
 }
 
-/// Every revocation of one v1.4 signature, whoever wrote it (a network
-/// read): for the web key's records, whose revocations the web key made.
+/// Every revocation of one v1.4 signature the network returns (a network
+/// read): for the web key's records; the carry keeps the web key's own.
 pub(crate) async fn revocations_network_06(client: &AppClient, role: &str, signature_action: &[u8]) -> Result<Vec<Revocation06>, String> {
     let call = client.call(role, "signing", "get_revocations_for_signature", mp(&ActionHash::from_raw_39(signature_action.to_vec()))?);
     let bytes = match tokio::time::timeout(CARRY_READ_WAIT, call).await {
