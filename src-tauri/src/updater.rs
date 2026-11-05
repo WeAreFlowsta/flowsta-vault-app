@@ -373,8 +373,10 @@ pub fn install_ready(data_dir: &Path, stage: &dyn Fn(&str)) -> Result<bool, Stri
     Ok(true)
 }
 
+/// The process restarts after this whatever the install did, so nothing
+/// starts a line again before it goes.
 fn stop_lines() {
-    crate::conductor::end_starts();
+    crate::conductor::begin_closing();
     crate::conductor::stop_all_lines();
 }
 
