@@ -8,8 +8,8 @@
 set -u
 PORT="${1:?port}"; EXPECT="${2:?both or current}"; RESTORE="${3:-}"
 case "$EXPECT" in
-  both) WANT="8 6" ;;     # 0.6: 2 binaries + 6 files; 0.7: 2 binaries + 4 files
-  current) WANT="0 6" ;;
+  both) WANT="9 7" ;;     # 0.6: 2 binaries + 7 files; 0.7: 2 binaries + 5 files
+  current) WANT="0 7" ;;
   *) echo "expect both or current"; exit 2 ;;
 esac
 # "<0.6 entries> <0.7 entries> <0.6 bytes> <0.7 bytes>"
@@ -34,7 +34,7 @@ fi
 [ "$RESTORE" = restore ] || exit 0
 lines="holochain-0.7"; [ "$EXPECT" = both ] && lines="holochain-0.6 holochain-0.7"
 for g in $lines; do
-  v=${g#holochain-}; nf=4; [ "$v" = 0.6 ] && nf=6
+  v=${g#holochain-}; nf=5; [ "$v" = 0.6 ] && nf=7
   out=$(curl -s -m 120 -H 'content-type: application/json' -H 'origin: https://ourtest.flowsta.com' -X POST -d "{\"op\":\"kit-restore\",\"line\":\"$g\"}" "http://127.0.0.1:$PORT/dev/devices")
   got=$(python3 -c 'import sys,json; d=json.loads(sys.argv[1]); print(d.get("conductor",""), "|", d.get("lair",""), "|", d.get("files",""), "|", d.get("description",""))' "$out" 2>/dev/null)
   case "$got" in

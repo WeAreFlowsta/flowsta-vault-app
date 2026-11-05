@@ -48,7 +48,10 @@ killtests; sleep 3; killtests
 # the instance folders.
 for s in md-c md-d; do
   d="$HOME/.local/share/flowsta-vault-$s"; mkdir -p "$1/$s"
-  cp "$d/xdg/com.flowsta.vault/logs/Flowsta Vault.log" "$1/$s/app.log" 2>/dev/null
+  # The release build's log, or the staging test build's.
+  for log in "$d/xdg/com.flowsta.vault/logs/Flowsta Vault.log" "$d/xdg/com.flowsta.vault.staging/logs/Flowsta Vault (Staging).log"; do
+    [ -f "$log" ] && cp "$log" "$1/$s/app.log"
+  done
   for f in "$d"/identities/*/conductor*/holochain-stderr.log; do
     [ -f "$f" ] && cp "$f" "$1/$s/$(basename "$(dirname "$f")")-holochain-stderr.log"
   done

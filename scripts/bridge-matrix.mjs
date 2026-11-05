@@ -2066,6 +2066,12 @@ async function moveLeg(stage) {
     fs.writeFileSync(stateFile, JSON.stringify({ ...saved, carried: sigs.map((x) => x.action_hash) }, null, 2));
     return;
   }
+  // The two records the move carried: each row is that v1.5 copy, or once
+  // the device's pass has run (signing_v16) its v1.6 copy, which names the
+  // same 0.6 original (the pass rebuilds a carried record's first original).
+  const sameTwo = (sigs) => sigs.length === 2
+    && [saved.aHash, saved.bHash].every((o) => sigs.some((x) => x.original_action_hash === o))
+    && sigs.every((x) => (saved.carried || []).includes(x.action_hash) || /v1_6/.test(x.signing_app_id || ''));
   if (stage === 'move-retired') {
     const lines = await linesOf(port);
     const dev = await devOf(port);
@@ -2074,7 +2080,7 @@ async function moveLeg(stage) {
     record('move-retired: cells ready on 0.7 alone', (await waitCellsReady(port, 180)) >= 0);
     let sigs = []; for (let i = 0; i < 40; i++) { sigs = await sigsOn(); if (sigs.length === 2) break; await sleep(3000); }
     const counts = foldCounts(sigs);
-    record('move-retired: the same two carried records, 1 signature + 1 amendment, from the 0.7 read alone', sigs.length === 2 && counts.current === 1 && counts.amendments === 1 && (saved.carried || []).every((h) => sigs.some((x) => x.action_hash === h)), JSON.stringify(counts));
+    record('move-retired: the same two carried records (or their v1.6 copies), 1 signature + 1 amendment, from the 0.7 read alone', sameTwo(sigs) && counts.current === 1 && counts.amendments === 1, JSON.stringify({ ...counts, rows: sigs.map((x) => ({ h: (x.action_hash || '').slice(0, 10), orig: (x.original_action_hash || '').slice(0, 10), app: x.signing_app_id })) }));
     return;
   }
   if (stage === 'move-update') {
@@ -2099,7 +2105,7 @@ async function moveLeg(stage) {
     record('move-update: marker says no 0.6 line needed', dev.move?.moved === true && dev.move?.marker?.line_06_needed === false, JSON.stringify(dev.move?.marker || null));
     let sigs = []; for (let i = 0; i < 40; i++) { sigs = await sigsOn(); if (sigs.length === 2) break; await sleep(3000); }
     const counts = foldCounts(sigs);
-    record('move-update: the same two carried records, 1 signature + 1 amendment, on 0.7 alone', sigs.length === 2 && counts.current === 1 && counts.amendments === 1 && (saved.carried || []).every((h) => sigs.some((x) => x.action_hash === h)), JSON.stringify(counts));
+    record('move-update: the same two carried records (or their v1.6 copies), 1 signature + 1 amendment, on 0.7 alone', sameTwo(sigs) && counts.current === 1 && counts.amendments === 1, JSON.stringify({ ...counts, rows: sigs.map((x) => ({ h: (x.action_hash || '').slice(0, 10), orig: (x.original_action_hash || '').slice(0, 10), app: x.signing_app_id })) }));
     return;
   }
   record(`unknown move stage ${stage}`, false);
