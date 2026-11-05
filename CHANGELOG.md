@@ -5,9 +5,10 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.8.0-beta4] - 2026-11-05
+## [1.8.0-beta4] - 2026-11-06
 
-The fourth beta of 1.8.0: installing an update is smoother.
+The fourth beta of 1.8.0: installing an update is smoother, and your Sign
+It signatures move to the next version of their network.
 
 ### Highlights
 - **Restart to update shows what it is doing.** The button turns into
@@ -15,6 +16,12 @@ The fourth beta of 1.8.0: installing an update is smoother.
   responding the whole time. On Linux your computer asks for your
   password before anything closes: if you cancel, the Vault carries on as
   it was and offers the update again.
+- **Sign It's next version.** Each device copies the signatures it wrote
+  (with their revocations and thumbnails) to version 1.6 of the signing
+  network, each copy carrying its original's proof, and once nothing is
+  left to copy it signs there. Version 1.6 checks that a revocation or a
+  thumbnail change comes from the person who signed. The Vault reads both
+  versions, so each signature shows once.
 
 ### Changed
 - The Restart to update button's hover text says what happens: the Vault
@@ -37,6 +44,9 @@ The fourth beta of 1.8.0: installing an update is smoother.
 - A device being added has the email and name from your other devices by
   the time its "on its way" card leaves. Before, they could follow a
   minute later.
+- A signature whose thumbnail was changed twice could show the earlier
+  thumbnail. Each change now follows the one before, and Sign It shows
+  the newest.
 
 ## [1.8.0-beta3] - 2026-11-05
 
