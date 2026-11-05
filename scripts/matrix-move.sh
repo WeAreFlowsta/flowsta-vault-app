@@ -50,6 +50,8 @@ grep -E 'RESULT|✗' "$LOGS/move-retired.log"
 kits both
 echo "== kill the 0.7 conductor under the moved identity $(date -u +%H:%M:%S)"
 scripts/matrix-kill-07.sh "$P" "$SUFFIX" > "$LOGS/kill-07.log" 2>&1; rc=$?; rc_all=$((rc_all+rc)); cat "$LOGS/kill-07.log"
+echo "== an update's stop: nothing starts a conductor again $(date -u +%H:%M:%S)"
+scripts/matrix-update-stop.sh "$P" "$SUFFIX" > "$LOGS/update-stop.log" 2>&1; rc=$?; rc_all=$((rc_all+rc)); cat "$LOGS/update-stop.log"
 stop_instance
 echo "== move-update: the marker in 1.7.0's shape, opened by this build $(date -u +%H:%M:%S)"
 MARKER=$(ls "$DIR"/identities/*/moved-07 2>/dev/null | head -1)

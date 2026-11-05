@@ -5280,6 +5280,49 @@ async fn dev_lock_handler(
     )))
 }
 
+#[derive(Deserialize)]
+struct DevStopForUpdateBody {
+    /// As an update's install stops the lines (the Vault closing for
+    /// good); `false` ends only the starts under way, as before that.
+    #[serde(default = "default_true")]
+    closing: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// The lines stopped as an update's install stops them, without the
+/// install or the restart, for the matrix (`scripts/matrix-update-stop.sh`).
+async fn dev_stop_for_update_handler(
+    Json(body): Json<DevStopForUpdateBody>,
+) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    if !auto_approve_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(IpcError {
+                error: "not_found".into(),
+                description: None,
+            }),
+        ));
+    }
+    let closing = body.closing;
+    let stopped = tokio::task::spawn_blocking(move || {
+        if closing {
+            crate::conductor::begin_closing();
+        } else {
+            crate::conductor::end_starts();
+        }
+        crate::conductor::stop_all_lines()
+    })
+    .await
+    .unwrap_or(false);
+    log::warn!("DEV: lines stopped as an update's install does ({})", if closing { "closing" } else { "starts under way ended only" });
+    Ok(axum::response::IntoResponse::into_response(Json(
+        serde_json::json!({ "success": true, "stopped": stopped, "closing": closing }),
+    )))
+}
+
 async fn dev_unlock_handler(
     State(state): State<Arc<IpcState>>,
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
@@ -6258,6 +6301,7 @@ pub async fn start_ipc_server(
         .route("/dev/claim", post(dev_claim_handler))
         .route("/dev/reset", post(dev_reset_handler))
         .route("/dev/erase-device", post(dev_erase_device_handler))
+        .route("/dev/stop-for-update", post(dev_stop_for_update_handler))
         // Global body cap (8 MB) - generous for base64 images/thumbnails/sign
         // payloads, bounds loopback-DoS amplification. /backup opts into a
         // larger limit above. Was axum's implicit 2 MB default (which also

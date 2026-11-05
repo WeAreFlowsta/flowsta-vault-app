@@ -623,7 +623,7 @@ pub fn run() {
             let _ = &app_handle;
             match event {
                 tauri::RunEvent::Exit => {
-                    crate::conductor::end_starts();
+                    crate::conductor::begin_closing();
                     crate::conductor::stop_all_lines();
                     // A downloaded, checked update installs now where that
                     // needs no one (Windows, macOS).

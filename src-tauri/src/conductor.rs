@@ -123,6 +123,33 @@ pub fn end_starts() {
     STARTS_ENDED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Set when the Vault begins to go away (an update's install, a quit): the
+/// lines stop for good in this process, so no start is wanted again,
+/// however it was asked for. Without it a call that found the conductor
+/// stopped during the update's stop asked the watchdog for a new one, which
+/// ran while the update installed.
+static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// [`end_starts`], and no start after this one either.
+pub fn begin_closing() {
+    CLOSING.store(true, std::sync::atomic::Ordering::SeqCst);
+    end_starts();
+}
+
+pub fn closing() -> bool {
+    CLOSING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// A start asked for at `since` is still wanted: no lock, erase, removal or
+/// quit since, and the Vault not closing.
+pub fn start_wanted(since: u64) -> bool {
+    wanted_now(closing(), starts_ended(), since)
+}
+
+fn wanted_now(closing: bool, ended: u64, since: u64) -> bool {
+    !closing && ended == since
+}
+
 /// [`end_starts`], stop the lines, then wait for the starts still under way
 /// to stop what they started (blocking): before an identity's files go.
 pub fn stop_lines_and_starts() {
@@ -551,7 +578,7 @@ pub async fn start_holochain(
     // Counted from here: what follows writes into the identity's folder
     // (the 0.6 decision), and an erase waits for that too.
     let _under_way = supervisor().start_under_way();
-    if starts_ended() != since {
+    if !start_wanted(since) {
         return Err(NOT_WANTED.into());
     }
     let state = app_handle.state::<Arc<AppState>>().inner().clone();
@@ -628,8 +655,8 @@ pub fn attach_line_from_state(state: Arc<AppState>, line: Line, resource_dir: Pa
     }
     let data_dir = state.identity_root();
     let _under_way = supervisor().start_under_way();
-    if starts_ended() != since {
-        return Err("the Vault locked".into());
+    if !start_wanted(since) {
+        return Err(if closing() { "the Vault is closing" } else { "the Vault locked" }.into());
     }
     log::info!("[{}] attaching the {} line: {}", line, line, reason);
     if line == Line::V06 {
@@ -964,9 +991,27 @@ impl LineHooks for VaultLines {
         }
     }
 
-    /// No lock, erase or quit since this start was asked for.
+    /// No lock, erase or quit since this start was asked for, and the
+    /// Vault not closing.
     fn wanted(&self) -> bool {
-        starts_ended() == self.since
+        start_wanted(self.since)
+    }
+}
+
+#[cfg(test)]
+mod closing_tests {
+    use super::*;
+
+    /// A start asked for after an update's stop began (a call that found
+    /// the conductor stopped asks the watchdog for one) is not wanted, even
+    /// though no lock or erase came after it; one asked for before is not
+    /// wanted either, as before.
+    #[test]
+    fn no_start_is_wanted_once_the_vault_is_closing() {
+        assert!(wanted_now(false, 3, 3));
+        assert!(!wanted_now(false, 4, 3), "a lock since the start was asked for");
+        assert!(!wanted_now(true, 4, 4), "asked for after the update's stop began");
+        assert!(!wanted_now(true, 4, 3));
     }
 }
 

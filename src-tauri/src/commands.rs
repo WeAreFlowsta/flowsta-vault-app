@@ -1653,6 +1653,15 @@ async fn recover_conductor(
     app_handle: &tauri::AppHandle,
     own_stop: bool,
 ) -> Result<(), String> {
+    // An update's install or a quit stopped the lines on purpose. Said
+    // once, so a log shows that a call asked during the stop and was refused.
+    if crate::conductor::closing() {
+        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SAID.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            log::info!("{}", CLOSING_NO_RESTART);
+        }
+        return Err(CLOSING_NO_RESTART.into());
+    }
     // A lock while this waits below ends the start it would make.
     let since = crate::conductor::starts_ended();
     // Serialise restart attempts so two failed commands don't both try
@@ -1816,11 +1825,15 @@ async fn recover_conductor(
 /// What `ensure_conductor_alive` returns while recoveries are held.
 pub(crate) const WATCHDOG_HELD: &str = "[watchdog] held: Holochain keeps stopping";
 
+/// What a recovery says while the Vault is closing.
+pub(crate) const CLOSING_NO_RESTART: &str = "[watchdog] the Vault is closing - the conductor stays stopped";
+
 /// The watchdog's recovery from the devices round: a hold was logged when
-/// it began, so the rounds during it stay quiet.
+/// it began, and a closing Vault stops its lines on purpose, so the rounds
+/// during either stay quiet.
 async fn recover_from_round(state: &Arc<AppState>, app_handle: &tauri::AppHandle) {
     match ensure_conductor_alive(state, app_handle).await {
-        Err(e) if e != WATCHDOG_HELD => log::warn!("[devices] a stopped line was not recovered: {}", e),
+        Err(e) if e != WATCHDOG_HELD && e != CLOSING_NO_RESTART => log::warn!("[devices] a stopped line was not recovered: {}", e),
         _ => {}
     }
 }
@@ -2486,8 +2499,8 @@ fn spawn_conductor_startup_inner(
                 // One start at a time: a command that finds the conductor
                 // down waits here instead of starting a second one.
                 let start_guard = state.conductor_restart_lock.lock().await;
-                if crate::conductor::starts_ended() != since {
-                    log::info!("The Vault locked before its conductor started - not starting it");
+                if !crate::conductor::start_wanted(since) {
+                    log::info!("The Vault locked or is closing before its conductor started - not starting it");
                     return;
                 }
                 let running_port = crate::conductor::supervisor().primary_alive().then(|| crate::conductor::supervisor().primary_admin_port());
