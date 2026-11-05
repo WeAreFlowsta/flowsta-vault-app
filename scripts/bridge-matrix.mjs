@@ -2165,12 +2165,16 @@ async function signingV16Leg(stage) {
   record('v1.6: still two rows, both the v1.6 copies', sigs.length === 2 && sigs.every(isV16), show);
   record('v1.6: each copy names its v1.5 original', sigs.some((x) => x.original_action_hash === saved.aHash) && sigs.some((x) => x.original_action_hash === saved.bHash), show);
   record('v1.6: A is still revoked, B keeps the edited thumbnail', sigs.find((x) => x.file_hash === saved.hashA)?.revoked === true && sigs.find((x) => x.file_hash === saved.hashB)?.thumbnail === TINY_PNG_2, show);
-  const hashC = randomHash();
-  const c = await jobOn('/sign-document', signBody(hashC));
-  record('v1.6: a new signature publishes', c.stage === 'done' && !!c.result?.action_hash, JSON.stringify(c).slice(0, 160));
-  let after = []; for (let i = 0; i < 20; i++) { after = await sigsOn(); if (after.length === 3) break; await sleep(3000); }
-  const cRow = after.find((x) => x.file_hash === hashC);
-  record('v1.6: it is written on v1.6, natively', !!cRow && isV16(cRow) && !cRow.original_action_hash, JSON.stringify(cRow || {}).slice(0, 200));
+  // Writes now go to v1.6 (a fresh identity has used its two free
+  // signatures, so a revocation and a thumbnail, which use none).
+  const bRow = sigs.find((x) => x.file_hash === saved.hashB);
+  const aRow = sigs.find((x) => x.file_hash === saved.hashA);
+  const revB = await jobOn('/revoke-signature', { action_hash: bRow?.action_hash, reason: 'matrix: revoked on v1.6' });
+  record('v1.6: B revoked on its v1.6 copy', revB.stage === 'done', JSON.stringify(revB).slice(0, 160));
+  const thA = await jobOn('/set-thumbnail', { action_hash: aRow?.action_hash, thumbnail: TINY_PNG_2 });
+  record('v1.6: A given a thumbnail on its v1.6 copy', thA.stage === 'done', JSON.stringify(thA).slice(0, 160));
+  let after = []; for (let i = 0; i < 20; i++) { after = await sigsOn(); if (after.find((x) => x.file_hash === saved.hashB)?.revoked && after.find((x) => x.file_hash === saved.hashA)?.thumbnail === TINY_PNG_2) break; await sleep(3000); }
+  record('v1.6: the list reads both writes, still two rows on v1.6', after.length === 2 && after.every(isV16) && after.find((x) => x.file_hash === saved.hashB)?.revoked === true && after.find((x) => x.file_hash === saved.hashA)?.thumbnail === TINY_PNG_2, JSON.stringify(after.map((x) => ({ f: (x.file_hash || '').slice(0, 8), app: x.signing_app_id, revoked: x.revoked, thumb: (x.thumbnail || '').slice(-20) }))));
 }
 
 (async () => {
