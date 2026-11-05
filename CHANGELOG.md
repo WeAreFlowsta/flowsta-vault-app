@@ -5,6 +5,31 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0-beta4] - 2026-11-05
+
+The fourth beta of 1.8.0: installing an update is smoother.
+
+### Highlights
+- **Restart to update shows what it is doing.** The button turns into
+  "Installing…" and a panel says what comes next, and the window keeps
+  responding the whole time. On Linux your computer asks for your
+  password before anything closes: if you cancel, the Vault carries on as
+  it was and offers the update again.
+
+### Changed
+- The Restart to update button's hover text says what happens: the Vault
+  installs the new version, then closes and opens again.
+- The Vault's messages (the update panel, "Updated to" and the other
+  notices) appear in one stack at the bottom right, on solid panels, so
+  none of them covers the sidebar.
+
+### Fixed
+- An update that could not be installed, or whose password prompt was
+  cancelled, is offered again. Before, it was not offered again until the
+  next version.
+- On Windows and macOS, an install that fails opens the Vault again
+  instead of leaving it closed.
+
 ## [1.8.0-beta3] - 2026-11-05
 
 The third beta of 1.8.0, and the first to arrive through the updater. It
