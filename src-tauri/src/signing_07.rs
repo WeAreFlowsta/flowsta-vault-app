@@ -103,11 +103,21 @@ fn action_hash_hex(bytes: &[u8]) -> Result<String, String> {
 
 // ── Writes on the 0.7 line ──────────────────────────────────────────────
 
+/// Where this device's 0.7 signing writes go: v1.6 once what it wrote on
+/// v1.5 is carried there (`signing_v16`), v1.5 until then.
+async fn write_client(state: &Arc<AppState>) -> Result<(AppClient, String), String> {
+    if crate::signing_v16::switched(&state.identity_root()) {
+        crate::signing_v16::client(state).await
+    } else {
+        signing_client(state, Line::V07).await
+    }
+}
+
 /// `create_signature` on the 0.7 cell: `payload_mp` is the msgpack of the
 /// same `SignatureRecord` shape the 0.6 write sends (v1.5 adds only the
 /// optional `carried_from`, absent on a native record).
 pub(crate) async fn create_signature(state: &Arc<AppState>, payload_mp: Vec<u8>) -> Result<String, String> {
-    let (client, role) = signing_client(state, Line::V07).await?;
+    let (client, role) = write_client(state).await?;
     let result = committing("create_signature", || client.call(&role, "signing", "create_signature", payload_mp.clone())).await?;
     let hex = action_hash_hex(&result)?;
     log::info!("Signature committed on the 0.7 line, action_hash: {}", hex);
@@ -121,7 +131,7 @@ pub(crate) async fn revoke_signature(state: &Arc<AppState>, action_hash_39: Vec<
         reason: Option<String>,
     }
     let payload = mp(&RevokeInput { signature_action: ActionHash::from_raw_39(action_hash_39), reason })?;
-    let (client, role) = signing_client(state, Line::V07).await?;
+    let (client, role) = write_client(state).await?;
     let result = committing("revoke_signature", || client.call(&role, "signing", "revoke_signature", payload.clone())).await?;
     let hex = hex::encode(&result);
     log::info!("Signature revoked on the 0.7 line, revocation_hash: {}", hex);
@@ -135,7 +145,7 @@ pub(crate) async fn set_thumbnail(state: &Arc<AppState>, action_hash_39: Vec<u8>
         thumbnail: String,
     }
     let payload = mp(&SetThumbnailInput { signature_action: ActionHash::from_raw_39(action_hash_39), thumbnail })?;
-    let (client, role) = signing_client(state, Line::V07).await?;
+    let (client, role) = write_client(state).await?;
     let result = committing("set_thumbnail", || client.call(&role, "signing", "set_thumbnail", payload.clone())).await?;
     Ok(hex::encode(&result))
 }
@@ -269,30 +279,68 @@ fn signature_json(record: &RecordView, entry: &SignatureEntry, label: &str, revo
 /// view rather than showing a partial count).
 pub(crate) async fn own_signatures(state: &Arc<AppState>) -> Result<Vec<serde_json::Value>, String> {
     let (client, role) = signing_client(state, Line::V07).await?;
-    let bytes = client.call(&role, "signing", "get_my_signatures", mp(&())?).await?;
+    let v15 = own_on(&client, &role, &signing_app_label(Line::V07)).await?;
+    if !crate::signing_v16::switched(&state.identity_root()) {
+        return Ok(v15);
+    }
+    let (client16, role16) = crate::signing_v16::client(state).await?;
+    let v16 = own_on(&client16, &role16, &v16_label()).await?;
+    Ok(merge_versions(v16, v15))
+}
+
+/// The signing v1.6 app's label in the app's JSON.
+fn v16_label() -> String {
+    format!("{}@{}", crate::signing_v16::app_id(), Line::V07.generation())
+}
+
+async fn own_on(client: &AppClient, role: &str, label: &str) -> Result<Vec<serde_json::Value>, String> {
+    let bytes = client.call(role, "signing", "get_my_signatures", mp(&())?).await?;
     let records = crate::hc::records(Line::V07, &bytes)?;
-    log::info!("Got {} signatures from {}", records.len(), signing_app_label(Line::V07));
-    let label = signing_app_label(Line::V07);
+    log::info!("Got {} signatures from {}", records.len(), label);
     let entries: Vec<(RecordView, SignatureEntry)> =
         records.into_iter().filter_map(|r| r.entry_as::<SignatureEntry>().ok().map(|e| (r, e))).collect();
     let futures = entries.iter().map(|(record, entry)| async {
         let hash = ActionHash::from_raw_39(record.action_hash.clone());
-        let (revocation, thumbnail) = tokio::join!(revocation_of(&client, &role, &hash), thumbnail_of(&client, &role, &hash));
-        signature_json(record, entry, &label, revocation, thumbnail)
+        let (revocation, thumbnail) = tokio::join!(revocation_of(client, role, &hash), thumbnail_of(client, role, &hash));
+        signature_json(record, entry, label, revocation, thumbnail)
     });
     Ok(futures::future::join_all(futures).await)
+}
+
+/// One list from v1.6 and v1.5: a v1.5 row whose copy is on v1.6 (the
+/// copy names it, or both name one v1.4 original) gives way to the copy.
+pub(crate) fn merge_versions(v16: Vec<serde_json::Value>, mut v15: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let originals: std::collections::HashSet<String> =
+        v16.iter().filter_map(|s| s.get("original_action_hash")?.as_str().map(String::from)).collect();
+    let field = |s: &serde_json::Value, k: &str| s.get(k).and_then(|v| v.as_str()).map(String::from);
+    v15.retain(|s| {
+        !field(s, "action_hash").is_some_and(|h| originals.contains(&h)) && !field(s, "original_action_hash").is_some_and(|h| originals.contains(&h))
+    });
+    let mut all = v16;
+    all.append(&mut v15);
+    merge_own(Vec::new(), all)
 }
 
 /// Signatures of linked agents (a migrated web account's key) on the 0.7
 /// cell: carried there by Flowsta's node, or native once the account moved.
 pub(crate) async fn linked_signatures(state: &Arc<AppState>, linked_keys: &[AgentPubKey]) -> Result<Vec<serde_json::Value>, String> {
     let (client, role) = signing_client(state, Line::V07).await?;
-    let label = signing_app_label(Line::V07);
+    let v15 = linked_on(&client, &role, &signing_app_label(Line::V07), linked_keys).await?;
+    if !crate::signing_v16::switched(&state.identity_root()) {
+        return Ok(v15);
+    }
+    let (client16, role16) = crate::signing_v16::client(state).await?;
+    let v16 = linked_on(&client16, &role16, &v16_label(), linked_keys).await?;
+    Ok(merge_versions(v16, v15))
+}
+
+async fn linked_on(client: &AppClient, role: &str, label: &str, linked_keys: &[AgentPubKey]) -> Result<Vec<serde_json::Value>, String> {
+    let label = label.to_string();
     let mut all = Vec::new();
     for key in linked_keys {
         // A network read: a cold conductor must not hold the list for the
         // websocket's five minutes (the v1.4 rev 2 lesson).
-        let call = client.call(&role, "signing", "get_signatures_for_agent", mp(key)?);
+        let call = client.call(role, "signing", "get_signatures_for_agent", mp(key)?);
         let bytes = match tokio::time::timeout(ENRICH_WAIT, call).await {
             Ok(r) => r?,
             Err(_) => return Err(format!("get_signatures_for_agent timed out after {} s (0.7)", ENRICH_WAIT.as_secs())),
@@ -301,7 +349,7 @@ pub(crate) async fn linked_signatures(state: &Arc<AppState>, linked_keys: &[Agen
         for record in records {
             let Ok(entry) = record.entry_as::<SignatureEntry>() else { continue };
             let hash = ActionHash::from_raw_39(record.action_hash.clone());
-            let thumbnail = thumbnail_of(&client, &role, &hash).await;
+            let thumbnail = thumbnail_of(client, role, &hash).await;
             all.push(signature_json(&record, &entry, &label, (false, None, None), thumbnail));
         }
     }

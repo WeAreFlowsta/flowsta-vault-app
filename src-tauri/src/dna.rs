@@ -28,6 +28,11 @@ pub const BUNDLED_IDENTITY_VERSION_07: &str = "1.5";
 pub const BUNDLED_SIGNING_VERSION_07: &str = "1.5";
 const BUNDLED_IDENTITY_V1_5_HAPP_FILE: &str = "flowsta_identity_v1_5_happ.happ";
 const BUNDLED_SIGNING_V1_5_HAPP_FILE: &str = "flowsta_signing_v1_5_happ.happ";
+/// Signing v1.6 on the 0.7 line beside v1.5: the write rules and checked
+/// carried proofs (`planning/DNA_V1_6_WRITE_RULES.md`). Each device carries
+/// what it wrote on v1.5 (`signing_v16`), then writes here.
+pub const BUNDLED_SIGNING_VERSION_V16: &str = "1.6";
+const BUNDLED_SIGNING_V1_6_HAPP_FILE: &str = "flowsta_signing_v1_6_happ.happ";
 /// The 0.7 line's private cell: private v2.1 (the v2.0 shape rebuilt for
 /// Holochain 0.7.1; canonical bundle in `reference/DNA_VERSION_HISTORY.md`,
 /// copied, never rebuilt). Installed per identity with the same per-user
@@ -66,6 +71,7 @@ pub const KIT_07: KitDescriptor = KitDescriptor {
     files: &[
         KitFile { name: BUNDLED_IDENTITY_V1_5_HAPP_FILE, sha256: "abd9d2c6a7d54705fadfe4d4968b53381b821967d676d8e0a347ae5057f159fa" },
         KitFile { name: BUNDLED_SIGNING_V1_5_HAPP_FILE, sha256: "0703e4dc066f7dee97abcae9e408bbd5dcd4e220ab03a1de58f1bd324abdf61a" },
+        KitFile { name: BUNDLED_SIGNING_V1_6_HAPP_FILE, sha256: "4fcc9fb08f9be93ceaa111d6efdbb9350c928efd710cda85c29dd4d39e929c1f" },
         KitFile { name: BUNDLED_PRIVATE_V2_1_HAPP_FILE, sha256: "7bf21c2449a2bc6c3770975607d2bed3df889cc2755703f76ebb666063386df8" },
         KitFile { name: SIGNING_COORDINATOR_WASM_07, sha256: "412c3b031d30f3b3e3681c93823c89974ba9e9ee213b326376d01383357facae" },
     ],
@@ -298,7 +304,7 @@ mod kit_tests {
         use sha2::{Digest, Sha256};
         let resources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
         let loads_06 = [BUNDLED_PRIVATE_HAPP_FILE, BUNDLED_PRIVATE_V2_HAPP_FILE, BUNDLED_IDENTITY_HAPP_FILE, BUNDLED_SIGNING_HAPP_FILE, SIGNING_COORDINATOR_WASM, PRIVATE_V2_COORDINATOR_WASM, IDENTITY_LINKING_COORDINATOR_WASM];
-        let loads_07 = [BUNDLED_IDENTITY_V1_5_HAPP_FILE, BUNDLED_SIGNING_V1_5_HAPP_FILE, BUNDLED_PRIVATE_V2_1_HAPP_FILE, SIGNING_COORDINATOR_WASM_07];
+        let loads_07 = [BUNDLED_IDENTITY_V1_5_HAPP_FILE, BUNDLED_SIGNING_V1_5_HAPP_FILE, BUNDLED_SIGNING_V1_6_HAPP_FILE, BUNDLED_PRIVATE_V2_1_HAPP_FILE, SIGNING_COORDINATOR_WASM_07];
         for (kit, loads) in [(&KIT_06, &loads_06[..]), (&KIT_07, &loads_07[..])] {
             for name in loads {
                 assert!(kit.files.iter().any(|f| f.name == *name), "{} is loaded by the {} line but not in its kit", name, kit.line);
@@ -890,6 +896,7 @@ pub async fn install_dnas_07(
     for (app_id, file) in [
         (make_app_id("identity", BUNDLED_IDENTITY_VERSION_07), BUNDLED_IDENTITY_V1_5_HAPP_FILE),
         (make_app_id("signing", BUNDLED_SIGNING_VERSION_07), BUNDLED_SIGNING_V1_5_HAPP_FILE),
+        (make_app_id("signing", BUNDLED_SIGNING_VERSION_V16), BUNDLED_SIGNING_V1_6_HAPP_FILE),
     ] {
         if existing.iter().any(|a| a.app_id == app_id) {
             admin

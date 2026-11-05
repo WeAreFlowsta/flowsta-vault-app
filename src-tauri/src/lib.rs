@@ -32,6 +32,7 @@ mod instance_guard;
 mod relay_login;
 mod sealed;
 mod signing_07;
+mod signing_v16;
 mod updater;
 mod vault;
 
