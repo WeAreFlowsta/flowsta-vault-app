@@ -53,8 +53,9 @@ pub const KIT_06: KitDescriptor = KitDescriptor {
         KitFile { name: BUNDLED_PRIVATE_V2_HAPP_FILE, sha256: "1b969f6b96d9bd7bfcde4e1974d56b7a12708838693130358182ad86bcbe0668" },
         KitFile { name: BUNDLED_IDENTITY_HAPP_FILE, sha256: "09d3f3ea3a92c023fc5112734dc540bd7baeba8c069b0686afe3819b3b62fc64" },
         KitFile { name: BUNDLED_SIGNING_HAPP_FILE, sha256: "163b94d071c57b48bb6436e125afb4948cbd4d9cc24ee7ab374b96d77341a0e3" },
-        KitFile { name: SIGNING_COORDINATOR_WASM, sha256: "eac2db863f177e97ccd4836df7a457b9418c4eb3010773b75cce9225a9ffd7ab" },
+        KitFile { name: SIGNING_COORDINATOR_WASM, sha256: "eede2d60bef8348fe5e21a87c30ece23526f47b44650ff310f837680cae5bd30" },
         KitFile { name: PRIVATE_V2_COORDINATOR_WASM, sha256: "125880705a57b14d241b5476e1c1642cfd12acba3857dc4ee15bc9b59cd801b5" },
+        KitFile { name: IDENTITY_LINKING_COORDINATOR_WASM, sha256: "7e0ca6c664cfee60b83cc217a5f57ddaa03fc684719873a9d1a14f5f387926e1" },
     ],
 };
 
@@ -66,7 +67,7 @@ pub const KIT_07: KitDescriptor = KitDescriptor {
         KitFile { name: BUNDLED_IDENTITY_V1_5_HAPP_FILE, sha256: "abd9d2c6a7d54705fadfe4d4968b53381b821967d676d8e0a347ae5057f159fa" },
         KitFile { name: BUNDLED_SIGNING_V1_5_HAPP_FILE, sha256: "0703e4dc066f7dee97abcae9e408bbd5dcd4e220ab03a1de58f1bd324abdf61a" },
         KitFile { name: BUNDLED_PRIVATE_V2_1_HAPP_FILE, sha256: "7bf21c2449a2bc6c3770975607d2bed3df889cc2755703f76ebb666063386df8" },
-        KitFile { name: SIGNING_COORDINATOR_WASM_07, sha256: "b98b9ecd6310e70cfa737335efe0845f2379cd85850a7c034da956e69b61036d" },
+        KitFile { name: SIGNING_COORDINATOR_WASM_07, sha256: "412c3b031d30f3b3e3681c93823c89974ba9e9ee213b326376d01383357facae" },
     ],
 };
 
@@ -149,7 +150,8 @@ fn make_happ_filename(dna_type: &str, version: &str) -> String {
 /// Rev 3: adds get_own_revocations_for_signature (LOCAL) - own-view
 /// enrichment stops paying a network round-trip per record.
 /// Rev 4: readers count an author's own deletes and link removals, check
-/// each lookup's records, and take a signature's revocations from its signer.
+/// each lookup's records, and take a signature's revocations from its signer;
+/// a record's details are read locally when it is held here.
 pub const SIGNING_COORDINATOR_REV: u32 = 4;
 const SIGNING_COORDINATOR_WASM: &str = "signing_coordinator_v1_4.wasm";
 
@@ -208,6 +210,41 @@ pub async fn ensure_signing_coordinators(
     Ok(())
 }
 
+/// Bundled identity `agent_linking` coordinator, one build for identity v1.3
+/// and v1.4 (the same zome). Rev 1 over the bundles' original:
+/// `get_linked_agents` takes an entry only when it names the agent, counts a
+/// revocation from one of its two agents and a lookup link's removal from
+/// its author or one of them.
+pub const IDENTITY_LINKING_COORDINATOR_REV: u32 = 1;
+const IDENTITY_LINKING_COORDINATOR_WASM: &str = "identity_agent_linking_coordinator_v1_4.wasm";
+
+/// Hot-swap the `agent_linking` coordinator of every identity v1.3 and v1.4
+/// cell on the 0.6 conductor to the bundled one. Runs on every start, for
+/// the same reason the signing one does; one call per cell (each keeps its
+/// own coordinators).
+pub async fn ensure_identity_coordinators(admin_port: u16, resource_dir: &std::path::Path) -> Result<(), String> {
+    let wasm = std::fs::read(resource_dir.join(IDENTITY_LINKING_COORDINATOR_WASM))
+        .map_err(|e| format!("read {}: {}", IDENTITY_LINKING_COORDINATOR_WASM, e))?;
+    let admin = AdminClient::connect(Line::V06, admin_port, &crate::conductor::node_origin())
+        .await
+        .map_err(|e| format!("Admin WS: {}", e))?;
+    let apps = admin.list_apps().await.map_err(|e| format!("list_apps: {}", e))?;
+    let identity = |id: &str| id.starts_with("flowsta_identity_v1_3") || id.starts_with("flowsta_identity_v1_4");
+    let mut swapped = Vec::new();
+    for app in apps.iter().filter(|a| identity(&a.app_id)) {
+        let Some(cell) = app.first_cell() else { continue };
+        admin
+            .update_coordinators(cell, CoordinatorZome { name: "agent_linking", wasm: wasm.clone() })
+            .await
+            .map_err(|e| format!("update_coordinators ({}): {}", app.app_id, e))?;
+        swapped.push(app.app_id.clone());
+    }
+    if !swapped.is_empty() {
+        log::info!("Identity agent_linking coordinator ensured at rev {} on {}", IDENTITY_LINKING_COORDINATOR_REV, swapped.join(", "));
+    }
+    Ok(())
+}
+
 /// Bundled private-v2 coordinator revision. The private v2 bundle itself is
 /// never rebuilt (its DNA hash names each person's own network), so every
 /// coordinator change reaches a cell through UpdateCoordinators.
@@ -260,7 +297,7 @@ mod kit_tests {
     fn each_kit_names_every_file_its_line_loads_and_their_hashes_match() {
         use sha2::{Digest, Sha256};
         let resources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
-        let loads_06 = [BUNDLED_PRIVATE_HAPP_FILE, BUNDLED_PRIVATE_V2_HAPP_FILE, BUNDLED_IDENTITY_HAPP_FILE, BUNDLED_SIGNING_HAPP_FILE, SIGNING_COORDINATOR_WASM, PRIVATE_V2_COORDINATOR_WASM];
+        let loads_06 = [BUNDLED_PRIVATE_HAPP_FILE, BUNDLED_PRIVATE_V2_HAPP_FILE, BUNDLED_IDENTITY_HAPP_FILE, BUNDLED_SIGNING_HAPP_FILE, SIGNING_COORDINATOR_WASM, PRIVATE_V2_COORDINATOR_WASM, IDENTITY_LINKING_COORDINATOR_WASM];
         let loads_07 = [BUNDLED_IDENTITY_V1_5_HAPP_FILE, BUNDLED_SIGNING_V1_5_HAPP_FILE, BUNDLED_PRIVATE_V2_1_HAPP_FILE, SIGNING_COORDINATOR_WASM_07];
         for (kit, loads) in [(&KIT_06, &loads_06[..]), (&KIT_07, &loads_07[..])] {
             for name in loads {

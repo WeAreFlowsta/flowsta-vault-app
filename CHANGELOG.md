@@ -32,6 +32,8 @@ The fourth beta of 1.8.0: installing an update is smoother.
 - Sign It reads a signature's revocations, thumbnail and history from
   their authors' own records, and the move to the new network carries only
   a signature's own revocations and thumbnail.
+- Linked apps are read from the links that name this identity, revoked
+  only by one of their own two agents.
 
 ## [1.8.0-beta3] - 2026-11-05
 
