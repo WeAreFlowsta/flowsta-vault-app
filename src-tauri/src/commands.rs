@@ -2387,6 +2387,16 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             if crate::devices::still_receiving_records(devices_state).await {
                 // Records are still arriving; the backups they list with them.
             } else if profile_seen || waited_long_enough || crate::devices::siblings_matched(devices_state).await {
+                // Matched counts can include a profile record that arrived
+                // after this round's profile step: apply it now, so the
+                // email and name are here before the device says it has
+                // everything.
+                if !profile_seen {
+                    if let Ok(true) = apply_profile_from_other_devices(devices_state).await {
+                        log::info!("Profile updated from another device");
+                        let _ = devices_app.emit("profile-changed", serde_json::json!({}));
+                    }
+                }
                 let _ = std::fs::write(&marker, b"");
                 let _ = std::fs::remove_file(&pending);
                 log::info!("This device has everything from the other devices");
