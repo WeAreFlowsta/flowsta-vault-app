@@ -5,6 +5,26 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0-beta5] - 2026-11-06
+
+The fifth beta of 1.8.0, the release candidate: three fixes found while beta
+4 updated itself on Linux, macOS and Windows.
+
+### Fixed
+- Installing an update keeps the Vault's background programs stopped until
+  the new version starts. Before, a signatures check that landed while they
+  were stopping could start them again during the install.
+- Sign It keeps showing the signatures your other devices made when the
+  Vault starts or restarts its background programs. Before, if it asked for
+  them before this identity's list of devices could be read, it took the
+  identity to be on this device alone and did not ask again until something
+  changed.
+- Moving signatures to Sign It's new version: a copy that did not finish
+  because the network answered too slowly is tried again in the next round
+  and logged as waiting for it, not as failed, and a signature's revocations
+  and thumbnail wait with it. Writing moves to the new version once nothing
+  failed and nothing is waiting.
+
 ## [1.8.0-beta4] - 2026-11-06
 
 The fourth beta of 1.8.0: installing an update is smoother, and your Sign
