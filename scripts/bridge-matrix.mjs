@@ -2086,17 +2086,19 @@ async function moveLeg(stage) {
   if (stage === 'move-update') {
     // A marker in 1.7.0's shape (matrix-move.sh rewrote it): nothing says a
     // pass carried everything, so the 0.6 line starts once beside the 0.7
-    // primary, and the devices round after a complete pass stops it.
+    // primary, and the devices round after a complete pass stops it. Its
+    // conductor takes ~30 s to start and may serve for only seconds before
+    // the check stops it (4 s, 11-06), so a start is any state but off.
     const t1 = Date.now();
     let linesNow = await linesOf(port);
-    let sawServing = linesNow['holochain-0.6'] === 'serving';
-    while (Date.now() - t1 < 360_000 && !(sawServing && linesNow['holochain-0.6'] === 'off')) {
-      await sleep(5000);
+    let sawStarted = (linesNow['holochain-0.6'] || 'off') !== 'off';
+    while (Date.now() - t1 < 360_000 && !(sawStarted && linesNow['holochain-0.6'] === 'off')) {
+      await sleep(2000);
       linesNow = await linesOf(port);
-      sawServing ||= linesNow['holochain-0.6'] === 'serving';
+      sawStarted ||= (linesNow['holochain-0.6'] || 'off') !== 'off';
     }
-    record('move-update: the 0.6 line starts once for a 1.7.0 marker (nothing recorded as carried)', sawServing, JSON.stringify(linesNow));
-    record('move-update: the 0.6 line stops in-session once a pass has carried everything (no device on it)', sawServing && linesNow['holochain-0.6'] === 'off' && linesNow['holochain-0.7'] === 'serving', `${Math.round((Date.now() - t1) / 1000)} s; ${JSON.stringify(linesNow)}`);
+    record('move-update: the 0.6 line starts once for a 1.7.0 marker (nothing recorded as carried)', sawStarted, JSON.stringify(linesNow));
+    record('move-update: the 0.6 line stops in-session once a pass has carried everything (no device on it)', sawStarted && linesNow['holochain-0.6'] === 'off' && linesNow['holochain-0.7'] === 'serving', `${Math.round((Date.now() - t1) / 1000)} s; ${JSON.stringify(linesNow)}`);
     // The marker records the retirement once the stop is done (up to its
     // 5 s grace), after the line already reads off (gate 11-03).
     let dev = {};
