@@ -7190,7 +7190,13 @@ pub(crate) async fn get_my_linked_signatures_inner(
         }
         log::info!("[get_my_linked_signatures] querying {} linked agent(s) on the 0.7 line", keys.len());
         // Every device carried the same records: one row per original.
-        let mut signatures = crate::signing_07::one_copy_per_original(crate::signing_07::linked_signatures(state, &keys).await?);
+        // Both callers pass the error on unlogged (the route drops it as
+        // best-effort), so the log is the one place that says why.
+        let read = crate::signing_07::linked_signatures(state, &keys).await.map_err(|e| {
+            log::warn!("[get_my_linked_signatures] the 0.7 line did not answer for {} linked agent(s): {}", keys.len(), e);
+            e
+        })?;
+        let mut signatures = crate::signing_07::one_copy_per_original(read);
         apply_superseded_by(&mut signatures);
         log::info!("[get_my_linked_signatures] {} sig(s) on the 0.7 line", signatures.len());
         return Ok(LinkedSignaturesResult { signatures, has_linked_agents: true });

@@ -11,7 +11,10 @@
 set -u
 PORT="${1:?port}"; SUFFIX="${2:?suffix}"
 DIR="$HOME/.local/share/flowsta-vault-$SUFFIX"
-LOG="$DIR/xdg/com.flowsta.vault/logs/Flowsta Vault.log"
+# The running build's log: a staging test build writes under its own
+# identifier, and a release build run earlier on this folder leaves its log too.
+LOG=$(ls -t "$DIR/xdg/com.flowsta.vault/logs/Flowsta Vault.log" "$DIR/xdg/com.flowsta.vault.staging/logs/Flowsta Vault (Staging).log" 2>/dev/null | head -1)
+[ -n "$LOG" ] || { echo "  ✗ FAIL no Vault log under $DIR/xdg"; exit 1; }
 BIN='vault-holochain-07[^ ]*'
 lines() { curl -s -m 5 "http://127.0.0.1:$PORT/dev/status" | python3 -c 'import sys,json; d=json.load(sys.stdin); print({l["generation"]:l["state"] for l in d.get("holochain_lines",[])})' 2>/dev/null; }
 # This instance's 0.7 conductor, as in matrix-kill-07.sh.
