@@ -328,10 +328,11 @@ pub(crate) fn schedule(state: Arc<AppState>) {
     }
     tauri::async_runtime::spawn(async move {
         match pass(&state).await {
-            Ok(r) if r.carried + r.failed > 0 || r.switched => log::info!(
-                "[signing 1.6] {} carried, {} already there, {} failed{}",
+            Ok(r) if r.carried + r.waiting + r.failed > 0 || r.switched => log::info!(
+                "[signing 1.6] {} carried, {} already there, {}{} failed{}",
                 r.carried,
                 r.already,
+                if r.waiting > 0 { format!("{} for the next round (the network did not answer in time), ", r.waiting) } else { String::new() },
                 r.failed,
                 if r.switched { "; writes go to 1.6 from now" } else { "" }
             ),
@@ -346,6 +347,10 @@ pub(crate) fn schedule(state: Arc<AppState>) {
 pub(crate) struct PassReport {
     pub carried: usize,
     pub already: usize,
+    /// Carries whose call ran out of time on a network read inside the
+    /// conductor (a `Timeout`: nothing was written); the next pass tries
+    /// them again.
+    pub waiting: usize,
     pub failed: usize,
     pub switched: bool,
 }
@@ -428,6 +433,13 @@ fn names(entry: &[u8]) -> Option<Vec<u8>> {
 /// its true original (idempotent by the original's hash), signatures first.
 /// Writes switch to v1.6 once a pass leaves nothing, after the move to 0.7
 /// and the web-era carry (they still write to v1.5 until then).
+/// A carry that failed only because a network read inside the call ran out
+/// of time (the zome's `must_get_valid_record` of a copy not yet answered
+/// for): it wrote nothing, and a later pass carries it.
+fn network_wait(e: &str) -> bool {
+    flowsta_hc_lines::kind_of_message(e) == crate::hc::ZomeErrorKind::Timeout
+}
+
 pub(crate) async fn pass(state: &Arc<AppState>) -> Result<PassReport, String> {
     let root = state.identity_root();
     let mut report = PassReport::default();
@@ -436,6 +448,9 @@ pub(crate) async fn pass(state: &Arc<AppState>) -> Result<PassReport, String> {
     // v1.5 signature hash -> the hash its copy is carried under here (its
     // own for a native one, its v1.4 original's for a copy).
     let mut key_of: std::collections::HashMap<Vec<u8>, Vec<u8>> = std::collections::HashMap::new();
+    // v1.5 signature hashes whose carry waits for the next pass: their
+    // revocations and thumbnails wait with them.
+    let mut waiting_sigs: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
     for m in mine.iter().filter(|m| m.kind == SIGNATURE_ENTRY) {
         let original = if m.carried { from_v15_copy(&m.entry, None) } else { Ok(Some(m.native.clone())) };
         match original {
@@ -444,8 +459,14 @@ pub(crate) async fn pass(state: &Arc<AppState>) -> Result<PassReport, String> {
                 if crate::signing_07::carried(&c16, &r16, &key).await?.is_some() {
                     report.already += 1;
                 } else if let Err(e) = carry_signature(&c16, &r16, &o).await {
-                    report.failed += 1;
-                    log::info!("[signing 1.6] a signature not carried: {}", e);
+                    if network_wait(&e) {
+                        report.waiting += 1;
+                        waiting_sigs.insert(m.hash.clone());
+                        log::info!("[signing 1.6] a signature waits for the next round: {}", e);
+                    } else {
+                        report.failed += 1;
+                        log::info!("[signing 1.6] a signature not carried: {}", e);
+                    }
                     continue;
                 } else {
                     report.carried += 1;
@@ -470,7 +491,10 @@ pub(crate) async fn pass(state: &Arc<AppState>) -> Result<PassReport, String> {
     let children = mine.iter().filter(|m| m.kind == REVOCATION_ENTRY).chain(latest_thumb.values().copied());
     for m in children {
         let Some(named) = names(&m.entry) else { report.failed += 1; continue };
-        let Some(key) = key_of.get(&named).cloned() else { report.failed += 1; continue };
+        let Some(key) = key_of.get(&named).cloned() else {
+            if waiting_sigs.contains(&named) { report.waiting += 1 } else { report.failed += 1 }
+            continue;
+        };
         let original = if m.carried { from_v15_copy(&m.entry, Some(&key)) } else { Ok(Some(m.native.clone())) };
         let o = match original {
             Ok(Some(o)) => o,
@@ -485,11 +509,12 @@ pub(crate) async fn pass(state: &Arc<AppState>) -> Result<PassReport, String> {
         let done = if m.kind == REVOCATION_ENTRY { carry_revocation(&c16, &r16, &here, &o).await } else { carry_thumbnail(&c16, &r16, &here, &o).await };
         match done {
             Ok(_) => report.carried += 1,
+            Err(e) if network_wait(&e) => { report.waiting += 1; log::info!("[signing 1.6] a revocation or thumbnail waits for the next round: {}", e) }
             Err(e) => { report.failed += 1; log::info!("[signing 1.6] a revocation or thumbnail not carried: {}", e) }
         }
     }
     let web_era_done = crate::move_07::marker(&root).map(|m| m.web_era_carried).unwrap_or(true);
-    if report.failed == 0 && crate::move_07::moved(&root) && web_era_done {
+    if report.failed == 0 && report.waiting == 0 && crate::move_07::moved(&root) && web_era_done {
         std::fs::write(root.join(SWITCHED), b"").map_err(|e| format!("write {}: {}", SWITCHED, e))?;
         report.switched = true;
     }
@@ -503,6 +528,17 @@ mod tests {
     /// A map with a nested value, a binary hash and a trailing field: the
     /// skipper walks it, and the rebuild drops the last field and swaps the
     /// hash.
+    /// The error a thumbnail's carry meets on a device with peers waits for
+    /// the next round; a refusal by the zome stays a failure.
+    #[test]
+    fn a_network_timeout_waits_and_a_refusal_fails() {
+        let field = r#"carry_thumbnail failed: ExternalApiWireError(InternalError("Source chain error: Other: Wasm runtime error while working with Ribosome: RuntimeError: holochain::core::ribosome::host_fn::must_get_valid_record:71: Host(\"Other: get response channel dropped: likely response timeout\")"))"#;
+        assert!(network_wait(field));
+        let refused = r#"carry_thumbnail failed: ExternalApiWireError(InternalError("Source chain error: InvalidCommit error: the original author's signature does not verify"))"#;
+        assert!(!network_wait(refused));
+        assert!(!network_wait("the thumbnail does not decode: missing field"));
+    }
+
     #[test]
     fn the_rebuild_drops_carried_from_and_puts_the_old_hash_back() {
         #[derive(Serialize)]
