@@ -6708,7 +6708,9 @@ async fn fetch_linked_agent_keys(
     }
 
     // So does what each of the identity's devices authored with its own key.
-    for key in identity_device_keys(state).await {
+    // Best effort: an unread list adds none here, and an empty result is
+    // proof of nothing unless the walk settled (the caller checks that).
+    for key in identity_device_keys(state).await.unwrap_or_default() {
         let same = |a: &AgentPubKey, b: &AgentPubKey| a.get_raw_32() == b.get_raw_32();
         if !same(&key, &my_agent_key) && !linked_keys.iter().any(|k| same(k, &key)) {
             linked_keys.push(key);
@@ -6766,16 +6768,51 @@ pub fn my_signing_keys(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, S
 /// The conductor key of every device the identity has or had, in the form
 /// the network uses. Read from the identity's own records: nothing about a
 /// device is asked of, or published to, the network.
-async fn identity_device_keys(state: &Arc<AppState>) -> Vec<holochain_types::prelude::AgentPubKey> {
-    let Ok(records) = crate::sealed::sealed_list_inner(state).await else {
-        return Vec::new();
+///
+/// Err when the records could not be read (a line still starting, a cell not
+/// running) and the file this device keeps of the identity's devices names
+/// no device but this one: "one device" is then unknown, not shown. An empty
+/// list here once read as "no other devices", and the signatures page stopped
+/// asking for the other devices' signatures (a line restarting after an install).
+async fn identity_device_keys(state: &Arc<AppState>) -> Result<Vec<holochain_types::prelude::AgentPubKey>, String> {
+    let raw32s: Vec<[u8; 32]> = match crate::sealed::sealed_list_inner(state).await {
+        Ok(records) => crate::devices::conductor_keys_ever(&records)
+            .iter()
+            .filter_map(|k| base64_standard_decode(k).ok())
+            .filter(|raw| raw.len() == 39)
+            .filter_map(|raw| <[u8; 32]>::try_from(&raw[3..35]).ok())
+            .collect(),
+        Err(e) => {
+            let own = own_conductor_key(state).and_then(|k| <[u8; 32]>::try_from(k.get_raw_32()).ok());
+            device_keys_when_unread(crate::devices::known_device_keys(state), own).ok_or(e)?
+        }
     };
-    crate::devices::conductor_keys_ever(&records)
-        .iter()
-        .filter_map(|k| base64_standard_decode(k).ok())
-        .filter(|raw| raw.len() == 39)
-        .map(|raw| holochain_types::prelude::AgentPubKey::from_raw_32(raw[3..35].to_vec()))
-        .collect()
+    Ok(raw32s.into_iter().map(|k| holochain_types::prelude::AgentPubKey::from_raw_32(k.to_vec())).collect())
+}
+
+/// The identity's device keys when its records could not be read: the kept
+/// file's, if it names a device other than this one (a device that signed
+/// as this identity stays one), else unknown.
+fn device_keys_when_unread(known: Vec<[u8; 32]>, own: Option<[u8; 32]>) -> Option<Vec<[u8; 32]>> {
+    known.iter().any(|k| Some(*k) != own).then_some(known)
+}
+
+#[cfg(test)]
+mod device_keys_unread_tests {
+    use super::device_keys_when_unread;
+
+    #[test]
+    fn the_kept_file_answers_only_when_it_names_another_device() {
+        let own = [1u8; 32];
+        let other = [2u8; 32];
+        // Nothing kept, or only this device: one device is not shown, so unknown.
+        assert_eq!(device_keys_when_unread(vec![], Some(own)), None);
+        assert_eq!(device_keys_when_unread(vec![own], Some(own)), None);
+        // Another device kept: its signatures are this identity's, so the list stands.
+        assert_eq!(device_keys_when_unread(vec![own, other], Some(own)), Some(vec![own, other]));
+        // This device's key unknown: any kept device is another one.
+        assert_eq!(device_keys_when_unread(vec![other], None), Some(vec![other]));
+    }
 }
 
 /// The conductor key this device signs with, in the form the network uses.
@@ -6788,13 +6825,13 @@ fn own_conductor_key(state: &AppState) -> Option<holochain_types::prelude::Agent
 /// device's own. What this device signed is its own list; asking the
 /// network for it as a linked agent's cost a cold read for nothing and
 /// made a one-device identity look linked (beta8, a born identity).
-async fn other_device_keys(state: &Arc<AppState>) -> Vec<holochain_types::prelude::AgentPubKey> {
+async fn other_device_keys(state: &Arc<AppState>) -> Result<Vec<holochain_types::prelude::AgentPubKey>, String> {
     let own = own_conductor_key(state);
-    identity_device_keys(state)
-        .await
+    Ok(identity_device_keys(state)
+        .await?
         .into_iter()
         .filter(|k| own.as_ref().map(|o| o.get_raw_32() != k.get_raw_32()).unwrap_or(true))
-        .collect()
+        .collect())
 }
 
 /// The identity's agent key in the form the network uses, from the unlocked
@@ -7129,7 +7166,8 @@ pub(crate) async fn get_my_linked_signatures_inner(
     // 0.7 line answers for it (beta6 asked only the device keys and showed
     // a migrated identity's web-era signatures as none).
     if crate::hc::line_ports(state, crate::hc::Line::V06).is_err() {
-        let mut keys = other_device_keys(state).await;
+        let devices = other_device_keys(state).await;
+        let mut keys = devices.clone().unwrap_or_default();
         if let Some(cached) = state.linked_web_agent_key.lock().unwrap().clone() {
             match base64_standard_decode(&cached) {
                 Ok(raw) if raw.len() == 39 => {
@@ -7142,6 +7180,11 @@ pub(crate) async fn get_my_linked_signatures_inner(
             }
         }
         if keys.is_empty() {
+            // Devices not read is not one device: the page takes "none" as
+            // settled and stops asking, so it waits for a real read.
+            if let Err(e) = devices {
+                return Err(format!("the identity's devices not read yet ({}) - retry", e));
+            }
             log::info!("[get_my_linked_signatures] one device, no web key - no linked agents by construction (0.7)");
             return Ok(LinkedSignaturesResult { signatures: Vec::new(), has_linked_agents: false });
         }
@@ -7203,16 +7246,22 @@ pub(crate) async fn get_my_linked_signatures_inner(
     };
     // ...unless the identity is on more than one device: each device signs
     // with a key of its own, and those signatures are this person's too.
-    let other_devices = {
+    // Asked only when the rest holds; a list not read is not one device.
+    if device_hosted && is_native && cached_web_key.is_none() {
         let joined = state.vault_config.lock().unwrap().as_ref().map(|c| c.joined_existing).unwrap_or(false);
-        joined || identity_device_keys(state).await.len() > 1
-    };
-    if device_hosted && is_native && cached_web_key.is_none() && !other_devices {
-        log::info!("[get_my_linked_signatures] native account - no linked agents by construction");
-        return Ok(LinkedSignaturesResult {
-            signatures: Vec::new(),
-            has_linked_agents: false,
-        });
+        let other_devices = joined
+            || identity_device_keys(state)
+                .await
+                .map_err(|e| format!("the identity's devices not read yet ({}) - retry", e))?
+                .len()
+                > 1;
+        if !other_devices {
+            log::info!("[get_my_linked_signatures] native account - no linked agents by construction");
+            return Ok(LinkedSignaturesResult {
+                signatures: Vec::new(),
+                has_linked_agents: false,
+            });
+        }
     }
 
     let had_cache = cached_web_key.is_some();
@@ -7322,7 +7371,10 @@ async fn get_my_signatures_inner(
     // records from the 0.7 cell, best effort as below.
     if crate::hc::line_ports(state, crate::hc::Line::V06).is_err() {
         let mut signatures = crate::signing_07::own_signatures(state).await?;
-        let keys = other_device_keys(state).await;
+        let keys = other_device_keys(state).await.unwrap_or_else(|e| {
+            log::warn!("[get_my_signatures] the identity's devices not read (0.7): {} - other devices' signatures left out", e);
+            Vec::new()
+        });
         if !keys.is_empty() {
             match crate::signing_07::linked_signatures(state, &keys).await {
                 Ok(linked) => {
