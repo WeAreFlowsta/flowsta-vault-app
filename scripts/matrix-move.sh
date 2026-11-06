@@ -76,5 +76,5 @@ scripts/matrix-crash-loop.sh "$P" "$SUFFIX" 3 150 > "$LOGS/crash-loop.log" 2>&1;
 # After the crash loop: its unlock starts the conductor, which sets the kits aside.
 kits both restore
 stop_instance
-echo "== done rc=$rc_all $(date -u +%H:%M:%S); logs in $LOGS and $DIR/xdg/com.flowsta.vault/logs/"
+echo "== done rc=$rc_all $(date -u +%H:%M:%S); logs in $LOGS and $DIR/xdg/com.flowsta.vault*/logs/"
 exit $rc_all
