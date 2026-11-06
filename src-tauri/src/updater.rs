@@ -441,9 +441,14 @@ pub fn dismiss_updated(app: tauri::AppHandle) {
 #[tauri::command]
 pub async fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
     let data_dir = app.state::<std::sync::Arc<crate::commands::AppState>>().data_dir.clone();
+    // The restart runs this process's own arguments again, so a Vault
+    // started at login would start the new version hidden in the tray.
+    // Noted before the install: on Windows the installer ends this process.
+    note_show_after_restart(&data_dir);
     let emitter = app.clone();
+    let install_dir = data_dir.clone();
     let installed = tauri::async_runtime::spawn_blocking(move || {
-        install_ready(&data_dir, &|stage| {
+        install_ready(&install_dir, &|stage| {
             let _ = emitter.emit("update-stage", stage);
         })
     })
@@ -451,7 +456,10 @@ pub async fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| format!("the install did not run: {e}"))?;
     match installed {
         Ok(true) => app.restart(),
-        Ok(false) => Ok(()),
+        Ok(false) => {
+            forget_show_after_restart(&data_dir);
+            Ok(())
+        }
         Err(e) => {
             log::warn!("[update] {}", e);
             if !INSTALLS_FIRST {
@@ -459,14 +467,68 @@ pub async fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
                 // them back, and the update downloads again at its next check.
                 app.restart();
             }
+            forget_show_after_restart(&data_dir);
             Err(e)
         }
     }
 }
 
+/// How long the note from "Restart to update" holds: a start later than
+/// this (the install failed and the Vault was opened at the next login)
+/// is not that restart.
+const SHOW_AFTER_RESTART_FOR_MS: u64 = 10 * 60 * 1000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn note_show_after_restart(data_dir: &Path) {
+    if let Err(e) = std::fs::write(crate::paths::show_after_restart_path(data_dir), now_ms().to_string()) {
+        log::warn!("[update] the window may start hidden after the restart: {}", e);
+    }
+}
+
+fn forget_show_after_restart(data_dir: &Path) {
+    let _ = std::fs::remove_file(crate::paths::show_after_restart_path(data_dir));
+}
+
+/// Whether this start is the restart "Restart to update" asked for (the
+/// note is removed either way, so it answers once).
+pub fn take_show_after_restart(data_dir: &Path) -> bool {
+    let path = crate::paths::show_after_restart_path(data_dir);
+    let Ok(text) = std::fs::read_to_string(&path) else { return false };
+    let _ = std::fs::remove_file(&path);
+    shows_after_restart(text.trim().parse().ok(), now_ms())
+}
+
+fn shows_after_restart(noted_ms: Option<u64>, now_ms: u64) -> bool {
+    matches!(noted_ms, Some(t) if t <= now_ms && now_ms - t <= SHOW_AFTER_RESTART_FOR_MS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_restart_shows_the_window_once_and_only_soon_after() {
+        let now = 1_793_950_000_000;
+        assert!(shows_after_restart(Some(now - 30_000), now));
+        assert!(shows_after_restart(Some(now - SHOW_AFTER_RESTART_FOR_MS), now));
+        assert!(!shows_after_restart(Some(now - SHOW_AFTER_RESTART_FOR_MS - 1), now), "a note from an install long ago is not this start");
+        assert!(!shows_after_restart(Some(now + 60_000), now), "a note from the future (a clock change) is not trusted");
+        assert!(!shows_after_restart(None, now), "an unreadable note is not trusted");
+
+        let dir = std::env::temp_dir().join(format!("vault-show-after-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!take_show_after_restart(&dir), "no note, no show");
+        note_show_after_restart(&dir);
+        assert!(take_show_after_restart(&dir));
+        assert!(!take_show_after_restart(&dir), "the note answers once");
+        note_show_after_restart(&dir);
+        forget_show_after_restart(&dir);
+        assert!(!take_show_after_restart(&dir), "an install that did not restart leaves no note");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn each_channel_reads_its_own_two_files() {

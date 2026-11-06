@@ -5,6 +5,15 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- After "Restart to update" the Vault's window opens on its own. Before, a
+  Vault that started when you logged in came back hidden after the update
+  restarted it, and you had to open it from the Dock, the taskbar or the
+  tray.
+
 ## [1.8.0-beta5] - 2026-11-06
 
 The fifth beta of 1.8.0, the release candidate: three fixes found while beta

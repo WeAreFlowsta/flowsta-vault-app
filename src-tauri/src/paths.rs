@@ -72,6 +72,9 @@ pub const KITS_DIR: &str = "kits";
 /// The updater's choices and state (`updater.rs`): automatic or not, the
 /// channel, the newest manifest sequence accepted, the rollout ticket.
 pub const UPDATES_FILE: &str = "updates.json";
+/// Written at "Restart to update", read and removed at the next start: the
+/// restart shows the window even for a Vault started at login.
+pub const SHOW_AFTER_RESTART_FILE: &str = "show-after-restart";
 
 /// Every identity-scoped single file (not the directories). This is the
 /// list a relocation moves and a full erase removes - one list, so the two
@@ -242,6 +245,7 @@ pub fn bump_identity_epoch(device_root: &Path) -> u64 {
 }
 pub fn settings_path(device_root: &Path) -> PathBuf { device_root.join(SETTINGS_FILE) }
 pub fn updates_path(device_root: &Path) -> PathBuf { device_root.join(UPDATES_FILE) }
+pub fn show_after_restart_path(device_root: &Path) -> PathBuf { device_root.join(SHOW_AFTER_RESTART_FILE) }
 pub fn install_id_path(device_root: &Path) -> PathBuf { device_root.join(INSTALL_ID_FILE) }
 /// The name the person gave this device (Settings → Devices); absent, the
 /// computer's hostname names it.

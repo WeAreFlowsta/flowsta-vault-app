@@ -463,7 +463,14 @@ pub fn run() {
             // hiding after creation), so hide it now. Anything that needs the
             // user - a page asking to sign, a relay code - already raises the
             // window through the existing bridge/deep-link paths.
-            if std::env::args_os().any(|a| a == "--autostart-hidden") {
+            // "Restart to update" starts the new version with this process's
+            // arguments, the login one included: a restart the person asked
+            // for shows the window.
+            let restarted_to_update = updater::take_show_after_restart(&app_state.data_dir);
+            if restarted_to_update {
+                show_main_window(app.handle());
+                log::info!("Restarted to update - showing the window");
+            } else if std::env::args_os().any(|a| a == "--autostart-hidden") {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.hide();
                 }
