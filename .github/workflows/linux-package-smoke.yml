@@ -12,12 +12,10 @@ on:
         description: "Release tag (e.g. vault-v1.8.0-beta5); empty = build this commit"
         required: false
         default: ""
-  push:
-    branches: [linux-appstream]
 
 jobs:
   build:
-    if: ${{ github.event.inputs.tag == '' || github.event_name == 'push' }}
+    if: ${{ github.event.inputs.tag == '' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 75
     env:
