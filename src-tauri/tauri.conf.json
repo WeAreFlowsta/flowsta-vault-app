@@ -68,7 +68,14 @@
     "linux": {
       "deb": {
         "files": {
-          "/usr/share/applications/flowsta-vault-sign.desktop": "installer/flowsta-vault-sign.desktop"
+          "/usr/share/applications/flowsta-vault-sign.desktop": "installer/flowsta-vault-sign.desktop",
+          "/usr/share/metainfo/com.flowsta.vault.metainfo.xml": "installer/com.flowsta.vault.metainfo.xml"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/share/applications/flowsta-vault-sign.desktop": "installer/flowsta-vault-sign.desktop",
+          "/usr/share/metainfo/com.flowsta.vault.metainfo.xml": "installer/com.flowsta.vault.metainfo.xml"
         }
       }
     },
