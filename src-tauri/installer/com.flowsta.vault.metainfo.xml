@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The app-centre entry (AppStream): GNOME Software and KDE Discover list
+     the installed app by it, and can open and remove it. -->
+<component type="desktop-application">
+  <id>com.flowsta.vault</id>
+  <name>Flowsta Vault</name>
+  <summary>The home of your Flowsta identity</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="com.flowsta">
+    <name>Flowsta</name>
+  </developer>
+  <description>
+    <p>Flowsta Vault holds your Flowsta identity, keys and data on your own device, with no one in control but you.</p>
+    <p>Sign in to apps and websites, approve what each app can see, sign documents with Sign It, and keep encrypted backups plus a portable export of everything you author.</p>
+  </description>
+  <launchable type="desktop-id">Flowsta Vault.desktop</launchable>
+  <url type="homepage">https://flowsta.com</url>
+  <url type="vcs-browser">https://github.com/WeAreFlowsta/flowsta-vault-app</url>
+  <categories>
+    <category>Utility</category>
+    <category>Security</category>
+  </categories>
+  <pkgname>flowsta-vault</pkgname>
+  <provides>
+    <binary>flowsta-vault</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+</component>

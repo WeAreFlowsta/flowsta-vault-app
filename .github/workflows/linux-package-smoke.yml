@@ -1,0 +1,122 @@
+name: Linux package smoke
+
+# A Linux package, installed the way a person installs it and started under
+# a virtual display: what the binary needs, its launchers, its app-centre
+# entry (AppStream, what GNOME Software lists) and the app's log. Run it for
+# a release tag, or leave the tag empty to build the package from this
+# commit first (Actions > Run workflow).
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. vault-v1.8.0-beta5); empty = build this commit"
+        required: false
+        default: ""
+  push:
+    branches: [linux-appstream]
+
+jobs:
+  build:
+    if: ${{ github.event.inputs.tag == '' || github.event_name == 'push' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 75
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v5
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add the build target to the pinned toolchain
+        run: rustup target add "$TARGET"
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Holochain 0.6.1 and 0.7.1 (the release binaries, checked against the pinned hashes)
+        run: |
+          mkdir -p src-tauri/binaries
+          pinned() { awk -v k="$1" '$1 !~ /^#/ && $2 == k { print $1 }' .github/holochain-sidecars.sha256; }
+          for rel in holochain-0.6.1:"" holochain-0.7.1:-07; do
+            release="${rel%%:*}"; suffix="${rel#*:}"
+            for bin in holochain lair-keystore; do
+              dest="src-tauri/binaries/vault-${bin}${suffix}-${TARGET}"
+              curl -fsSL "https://github.com/holochain/holochain/releases/download/${release}/${bin}-${TARGET}" -o "$dest"
+              chmod +x "$dest"
+              want=$(pinned "${release}/${bin}-${TARGET}"); got=$(sha256sum "$dest" | cut -d' ' -f1)
+              [ -n "$want" ] && [ "$got" = "$want" ] || { echo "${release}/${bin}: SHA-256 $got does not match the pinned ${want:-(none)}"; exit 1; }
+            done
+          done
+      - name: Build the RPM
+        run: |
+          npm ci
+          npx tauri build --target "$TARGET" --bundles rpm
+          cp src-tauri/target/$TARGET/release/bundle/rpm/*.rpm app.rpm
+          ls -la app.rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: app.rpm
+          retention-days: 7
+
+  fedora:
+    needs: [build]
+    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.event.inputs.tag }}
+      BIN: /usr/bin/flowsta-vault
+    steps:
+      - name: Fedora version
+        run: cat /etc/fedora-release
+      - name: Tools
+        run: dnf install -y -q xorg-x11-server-Xvfb xorg-x11-xauth curl findutils procps-ng binutils appstream desktop-file-utils >/dev/null
+      - name: The release's RPM
+        if: ${{ env.TAG != '' }}
+        run: |
+          V="${TAG#vault-v}"
+          curl -fsSL -o app.rpm "https://github.com/${{ github.repository }}/releases/download/${TAG}/Flowsta.Vault-${V}-Linux.rpm"
+      - name: The RPM built from this commit
+        if: ${{ env.TAG == '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: rpm
+      - name: Install it
+        run: dnf install -y ./app.rpm
+      - name: What it installed
+        run: |
+          rpm -qp --queryformat '%{NAME} %{VERSION}\n' app.rpm
+          rpm -qlp app.rpm | grep -vE '/icons/|/resources/' | head -40
+          echo "--- requires"; rpm -qRp app.rpm
+          echo "--- launchers"
+          rpm -qlp app.rpm | grep '\.desktop$' | while read -r f; do echo "== $f"; cat "$f"; desktop-file-validate "$f" && echo "launcher valid"; done
+      - name: The app-centre entry (AppStream)
+        run: |
+          set +e
+          ls /usr/share/metainfo/ | grep -i flowsta || echo "no AppStream file"
+          appstreamcli validate --no-net /usr/share/metainfo/com.flowsta.vault.metainfo.xml
+          appstreamcli refresh-cache --force >/dev/null 2>&1
+          appstreamcli get com.flowsta.vault
+      - name: Libraries
+        run: |
+          set +e
+          echo "--- needed by $BIN"; readelf -d "$BIN" | grep NEEDED
+          echo "--- not found"; ldd "$BIN" | grep -i "not found"
+          echo "--- this Fedora's OpenSSL"; rpm -qa | grep -i openssl
+      - name: Start it (60 s under a virtual display)
+        run: |
+          set +e
+          xvfb-run -a timeout 60 "$BIN" > run.out 2>&1
+          echo "exit status $? (124 = still running when the 60 s ran out)"
+          tail -60 run.out
+      - name: The app's log
+        if: always()
+        run: |
+          f="$HOME/.local/share/com.flowsta.vault/logs/Flowsta Vault.log"
+          if [ -f "$f" ]; then tail -60 "$f"; else echo "no log at $f"; fi

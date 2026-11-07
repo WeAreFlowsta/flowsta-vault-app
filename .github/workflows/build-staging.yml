@@ -232,7 +232,7 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         with:
-          args: --target ${{ matrix.target }} --config '{"identifier":"com.flowsta.vault.staging","productName":"Flowsta Vault (Staging)"}'${{ steps.tauri_args.outputs.extra }}
+          args: --target ${{ matrix.target }} --config '{"identifier":"com.flowsta.vault.staging","productName":"Flowsta Vault (Staging)","bundle":{"linux":{"deb":{"files":{"/usr/share/metainfo/com.flowsta.vault.metainfo.xml":null}},"rpm":{"files":{"/usr/share/metainfo/com.flowsta.vault.metainfo.xml":null}}}}}'${{ steps.tauri_args.outputs.extra }}
 
       # The sidecars' SHA-256 after signing, as the release workflow
       # publishes them (scripts/kit-hashes.mjs): run here too, so every
