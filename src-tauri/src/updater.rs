@@ -38,13 +38,14 @@ fn channels_for(version: &str) -> &'static [&'static str] {
     }
 }
 
-/// Where a channel's two files live: stable, the latest release's assets;
-/// beta, one fixed pre-release whose two files each beta replaces.
+/// Where a channel's two files live: one fixed pre-release per channel,
+/// whose two files each release of that channel replaces, so no release page
+/// carries them (the page people download from shows the installers).
 fn channel_base(channel: &str) -> String {
     if channel == "beta" {
         format!("{RELEASES}/download/vault-beta")
     } else {
-        format!("{RELEASES}/latest/download")
+        format!("{RELEASES}/download/vault-stable")
     }
 }
 
@@ -532,8 +533,8 @@ mod tests {
 
     #[test]
     fn each_channel_reads_its_own_two_files() {
-        assert_eq!(latest_json_url("stable"), "https://github.com/WeAreFlowsta/flowsta-vault-app/releases/latest/download/latest.json");
-        assert_eq!(manifest_url("stable"), "https://github.com/WeAreFlowsta/flowsta-vault-app/releases/latest/download/release-manifest.json");
+        assert_eq!(latest_json_url("stable"), "https://github.com/WeAreFlowsta/flowsta-vault-app/releases/download/vault-stable/latest.json");
+        assert_eq!(manifest_url("stable"), "https://github.com/WeAreFlowsta/flowsta-vault-app/releases/download/vault-stable/release-manifest.json");
         assert_eq!(manifest_url("beta"), "https://github.com/WeAreFlowsta/flowsta-vault-app/releases/download/vault-beta/release-manifest.json");
     }
 
