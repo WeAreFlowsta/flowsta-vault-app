@@ -42,6 +42,96 @@ pub struct SlotRecord {
     pub gone: bool,
 }
 
+// ── The list a locked Vault can read and write ──────────────────────────────
+//
+// The same records again, sealed with a key made from the backup key (which
+// a locked Vault keeps) instead of the data key (which it does not), and
+// linked under a tag of their own, so the identity's ordinary listing never
+// returns them. A Vault that is locked and still syncing passes app backups
+// between the person's devices from these alone; it reads and writes no
+// private record to do it.
+
+/// Where a device can be asked for a backup file: the key its conductor
+/// runs and the Holochain line it listens on. In the open list because the
+/// device records themselves are sealed with the data key.
+pub const REACH_ENTRY_TYPE: &str = "backup_reach";
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ReachRecord {
+    pub install_id: String,
+    /// Standard base64 of the 39-byte agent key, as in the device record.
+    pub conductor_key: String,
+    pub generation: String,
+}
+
+pub fn reach_record_id(install_id: &str) -> String {
+    format!("{}:{}", REACH_ENTRY_TYPE, install_id)
+}
+
+/// The key the open list is sealed with and the tag it is linked under,
+/// both made from the backup key every device of the identity derives from
+/// its seed (never the backup key itself, which encrypts the files).
+#[derive(Clone)]
+pub struct OpenList {
+    pub key: [u8; 32],
+    pub tag: Vec<u8>,
+}
+
+impl OpenList {
+    pub fn from_backup_key(legacy_backup_key: &[u8; 32]) -> Self {
+        use hmac::{Hmac, Mac};
+        let derive = |label: &str| -> [u8; 32] {
+            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(legacy_backup_key).expect("HMAC takes a key of any size");
+            mac.update(label.as_bytes());
+            mac.finalize().into_bytes().into()
+        };
+        let mut tag = b"bl1:".to_vec();
+        tag.extend_from_slice(&derive("flowsta-backup-list-tag-v1")[..12]);
+        OpenList { key: derive("flowsta-backup-list-key-v1"), tag }
+    }
+
+    pub fn of(state: &crate::commands::AppState) -> Result<Self, String> {
+        Ok(Self::from_backup_key(&crate::backup::backup_keys(state)?.legacy))
+    }
+}
+
+/// Every backup record in a listing, each with when it was written.
+fn slot_records_with_time(records: &[SealedListItem]) -> Vec<(SlotRecord, u64)> {
+    records
+        .iter()
+        .filter(|r| r.entry_type == SLOT_ENTRY_TYPE)
+        .filter_map(|r| serde_json::from_value::<SlotRecord>(r.body.clone()).ok().map(|s| (s, r.updated_at)))
+        .filter(|(r, _)| is_install_id(&r.install_id))
+        .collect()
+}
+
+/// The two lists as one: a backup counts once (by device, app and label),
+/// and where both lists name it the record written last is the one that
+/// counts. A device that is locked writes the open list only, and a device
+/// on a Vault from before the open list writes the other only.
+pub fn merged_slot_records(sealed: &[SealedListItem], open: &[SealedListItem]) -> Vec<SlotRecord> {
+    let mut newest: BTreeMap<(String, String, String), (SlotRecord, u64)> = BTreeMap::new();
+    for (record, at) in slot_records_with_time(sealed).into_iter().chain(slot_records_with_time(open)) {
+        let key = (record.install_id.clone(), record.client_id.clone(), record.slot.label.clone());
+        match newest.get(&key) {
+            Some((_, held_at)) if *held_at >= at => {}
+            _ => {
+                newest.insert(key, (record, at));
+            }
+        }
+    }
+    newest.into_values().map(|(r, _)| r).collect()
+}
+
+/// Each device's reach, from the open list.
+pub fn reach_records_in(open: &[SealedListItem]) -> Vec<ReachRecord> {
+    open.iter()
+        .filter(|r| r.entry_type == REACH_ENTRY_TYPE)
+        .filter_map(|r| serde_json::from_value::<ReachRecord>(r.body.clone()).ok())
+        .filter(|r| is_install_id(&r.install_id))
+        .collect()
+}
+
 pub fn slot_record_id(install_id: &str, client_id: &str, label: &str) -> String {
     format!("{}:{}:{}:{}", SLOT_ENTRY_TYPE, install_id, client_id, label)
 }
@@ -499,6 +589,156 @@ pub(crate) fn fresh_announcements(before: Option<&std::collections::HashSet<Stri
     (fresh, now.iter().cloned().collect())
 }
 
+/// The unlocked round's part in the open list: write this device's records
+/// there that are missing or changed, and its reach, and return the list as
+/// it stands (every device's records).
+async fn open_list_round(
+    state: &Arc<crate::commands::AppState>,
+    root: &Path,
+    me: &str,
+    devices: &[crate::devices::DeviceRecord],
+) -> Result<Vec<SealedListItem>, String> {
+    let open = OpenList::of(state)?;
+    let base = crate::commands::identity_agent_key(state).ok_or("vault_locked")?;
+    let line = crate::hc::active_line(state);
+    let mut items = crate::sealed::list_tagged(state, line, base.clone(), &open.key, open.tag.clone()).await?;
+    let said = slot_records_with_time(&items).into_iter().map(|(r, _)| r).collect::<Vec<_>>();
+    let mut wrote = 0usize;
+    for record in records_to_write(&local_index(root, me), &said, me) {
+        let now = now_ms();
+        crate::sealed::store_tagged(
+            state,
+            line,
+            base.clone(),
+            &open.key,
+            open.tag.clone(),
+            crate::sealed::StoreSpec {
+                entry_type: SLOT_ENTRY_TYPE.to_string(),
+                body: serde_json::to_value(&record).map_err(|e| e.to_string())?,
+                refs: Vec::new(),
+                created_at: now,
+                id: Some(slot_record_id(&record.install_id, &record.client_id, &record.slot.label)),
+                updated_at: Some(now),
+                deleted: false,
+            },
+        )
+        .await?;
+        wrote += 1;
+    }
+    // This device's reach, as its own device record has it.
+    if let Some(own) = devices.iter().find(|d| d.install_id == me && d.removed_at.is_none()) {
+        let reach = ReachRecord { install_id: me.to_string(), conductor_key: own.conductor_key.clone(), generation: own.generation.clone() };
+        if !reach_records_in(&items).contains(&reach) {
+            let now = now_ms();
+            crate::sealed::store_tagged(
+                state,
+                line,
+                base.clone(),
+                &open.key,
+                open.tag.clone(),
+                crate::sealed::StoreSpec {
+                    entry_type: REACH_ENTRY_TYPE.to_string(),
+                    body: serde_json::to_value(&reach).map_err(|e| e.to_string())?,
+                    refs: Vec::new(),
+                    created_at: now,
+                    id: Some(reach_record_id(me)),
+                    updated_at: Some(now),
+                    deleted: false,
+                },
+            )
+            .await?;
+            wrote += 1;
+        }
+    }
+    if wrote > 0 {
+        log::info!("[backups] the open list: {} record(s) written", wrote);
+        items = crate::sealed::list_tagged(state, line, base, &open.key, open.tag).await?;
+    }
+    Ok(items)
+}
+
+/// This device read itself as removed while locked (the identity's public
+/// record): which identity, so nothing more is fetched or answered for it.
+static LOCKED_REMOVED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Whether a locked round found this device removed from this identity.
+pub fn removed_while_locked(identity_root: &Path) -> bool {
+    LOCKED_REMOVED.lock().unwrap().as_deref() == Some(identity_root)
+}
+
+/// The round of a Vault that is locked and still syncing: its own list out
+/// and the other devices' in, from the open list alone, then the same
+/// fetching and dropping as an unlocked round. It reads and writes no
+/// private record. First it asks the identity's public record whether this
+/// device was removed: a removed device fetches nothing more.
+pub async fn locked_round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> Result<RoundOutcome, String> {
+    let (base, own_key) = {
+        let kept = state.kept_conductor.lock().unwrap();
+        let kept = kept.as_ref().ok_or("not syncing")?;
+        (kept.base.clone().ok_or("no identity key kept")?, crate::key_derivation::public_key_of_seed(&kept.seed))
+    };
+    let root = state.identity_root();
+    if removed_while_locked(&root) {
+        return Err("this device was removed from the identity".into());
+    }
+    let line = crate::hc::active_line(state);
+    if line != crate::hc::Line::V07 {
+        return Err("the identity's records are not on the 0.7 line yet".into());
+    }
+    if crate::identity_07::removed_on_07(state, &own_key).await == Some(true) {
+        *LOCKED_REMOVED.lock().unwrap() = Some(root.clone());
+        log::info!("[locked] this device is removed, by the identity's own record: no more backups are fetched");
+        return Err("this device was removed from the identity".into());
+    }
+    let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    let open = OpenList::of(state)?;
+    let mut outcome = RoundOutcome::default();
+    let mut items = crate::sealed::list_tagged(state, line, base.clone(), &open.key, open.tag.clone()).await?;
+    let said: Vec<SlotRecord> = slot_records_with_time(&items).into_iter().map(|(r, _)| r).collect();
+    for record in records_to_write(&local_index(&root, &me), &said, &me) {
+        let now = now_ms();
+        crate::sealed::store_tagged(
+            state,
+            line,
+            base.clone(),
+            &open.key,
+            open.tag.clone(),
+            crate::sealed::StoreSpec {
+                entry_type: SLOT_ENTRY_TYPE.to_string(),
+                body: serde_json::to_value(&record).map_err(|e| e.to_string())?,
+                refs: Vec::new(),
+                created_at: now,
+                id: Some(slot_record_id(&record.install_id, &record.client_id, &record.slot.label)),
+                updated_at: Some(now),
+                deleted: false,
+            },
+        )
+        .await?;
+        outcome.recorded += 1;
+    }
+    if outcome.recorded > 0 {
+        items = crate::sealed::list_tagged(state, line, base, &open.key, open.tag).await?;
+    }
+    // A lock or an identity change while this ran: stop here.
+    if !crate::commands::syncing_while_locked(state) || state.identity_root() != root {
+        return Ok(outcome);
+    }
+    let recorded = merged_slot_records(&[], &items);
+    // Where each device is reached, from the open list; only a device this
+    // one knows as current is asked.
+    let reach = reach_records_in(&items);
+    let agent_of = |install_id: &str| {
+        reach.iter().find(|r| r.install_id == install_id).and_then(|r| {
+            crate::commands::base64_standard_decode(&r.conductor_key)
+                .ok()
+                .filter(|raw| raw.len() == 39 && crate::devices::is_current_device(&root, raw))
+                .map(|raw| (holochain_types::prelude::AgentPubKey::from_raw_39(raw), r.generation.clone()))
+        })
+    };
+    let lane = lane(state).await;
+    copy_from_others(state, &root, &me, &recorded, &agent_of, lane, fetch_all, outcome).await
+}
+
 /// One round: say what this device holds (always), and copy what the other
 /// devices hold - every missing copy when `fetch_all`, else only the ones
 /// announced since the last round.
@@ -536,6 +776,18 @@ pub async fn round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> R
 
     // Where each sibling device can be reached: the key its conductor runs.
     let devices = crate::devices::devices_in(&records);
+
+    // The same again in the list a locked Vault can read and write, and
+    // what the other devices wrote there (a locked one writes nowhere else).
+    // A failure here never fails the round: the sealed list above stands.
+    let open_items = match open_list_round(state, &root, &me, &devices).await {
+        Ok(items) => items,
+        Err(e) => {
+            log::info!("[backups] the open list was not read or written this round: {}", e.chars().take(140).collect::<String>());
+            Vec::new()
+        }
+    };
+    let recorded = merged_slot_records(&records, &open_items);
     // ...and the line it listens on (its record's generation).
     let agent_of = |install_id: &str| {
         devices
@@ -549,7 +801,26 @@ pub async fn round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> R
             })
     };
 
-    let indexes = indexes_of(&recorded);
+    copy_from_others(state, &root, &me, &recorded, &agent_of, lane, fetch_all, outcome).await
+}
+
+/// Bring this device's copies in line with what the other devices hold:
+/// fetch what their lists name and this device lacks, drop what they no
+/// longer name. `agent_of` says where a device is reached.
+#[allow(clippy::too_many_arguments)]
+async fn copy_from_others(
+    state: &Arc<crate::commands::AppState>,
+    root: &Path,
+    me: &str,
+    recorded: &[SlotRecord],
+    agent_of: &(dyn Fn(&str) -> Option<(holochain_types::prelude::AgentPubKey, String)> + Sync),
+    lane: Result<Arc<crate::backup_lane::Lane>, String>,
+    fetch_all: bool,
+    mut outcome: RoundOutcome,
+) -> Result<RoundOutcome, String> {
+    let root = root.to_path_buf();
+    let me = me.to_string();
+    let indexes = indexes_of(recorded);
     let steps = plan(&root, &me, &indexes);
     let wanted_keys: Vec<String> = steps
         .iter()
@@ -673,6 +944,64 @@ pub fn copies_progress(identity_root: &Path) -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
+    fn listed(entry_type: &str, body: serde_json::Value, updated_at: u64) -> crate::sealed::SealedListItem {
+        crate::sealed::SealedListItem { action_hash: String::new(), entry_type: entry_type.into(), created_at: updated_at, body, refs: Vec::new(), id: String::new(), updated_at, device: None }
+    }
+
+    fn slot_item(install: &str, label: &str, sha: &str, gone: bool, at: u64) -> crate::sealed::SealedListItem {
+        let record = super::SlotRecord {
+            install_id: install.into(),
+            client_id: "app".into(),
+            app_name: "App".into(),
+            slot: super::SlotInfo { label: label.into(), created_at: 1, size: 10, sha256: sha.into() },
+            gone,
+        };
+        listed(super::SLOT_ENTRY_TYPE, serde_json::to_value(record).unwrap(), at)
+    }
+
+    #[test]
+    fn the_open_list_has_its_own_key_and_tag_made_from_the_backup_key() {
+        let backup_key = [7u8; 32];
+        let a = super::OpenList::from_backup_key(&backup_key);
+        let again = super::OpenList::from_backup_key(&backup_key);
+        assert_eq!((a.key, a.tag.clone()), (again.key, again.tag.clone()), "every device of the identity makes the same");
+        assert_ne!(a.key, backup_key, "never the key the backup files are encrypted with");
+        assert!(a.tag.starts_with(b"bl1:") && a.tag.len() == 16, "a tag of its own: the ordinary listing asks for links with none");
+        assert!(!a.tag.windows(12).any(|w| w == &a.key[..12]), "the tag says nothing of the key");
+        let other = super::OpenList::from_backup_key(&[8u8; 32]);
+        assert_ne!((a.key, a.tag), (other.key, other.tag), "another identity, another list");
+    }
+
+    #[test]
+    fn a_backup_counts_once_across_the_two_lists_and_the_record_written_last_counts() {
+        let a = "a".repeat(32);
+        let b = "b".repeat(32);
+        // Device a wrote both lists; then, locked, changed one backup and
+        // dropped another in the open list only.
+        let sealed = vec![slot_item(&a, "manifest", "old", false, 10), slot_item(&a, "conv-1", "c1", false, 10), slot_item(&b, "manifest", "b-old", false, 10)];
+        let open = vec![
+            slot_item(&a, "manifest", "new", false, 20),
+            slot_item(&a, "conv-1", "c1", true, 20),
+            slot_item(&a, "conv-2", "c2", false, 20),
+            // An older open record does not undo a newer sealed one (a
+            // device back on a Vault from before the open list).
+            slot_item(&b, "manifest", "b-older", false, 5),
+            super::tests::listed(super::REACH_ENTRY_TYPE, serde_json::json!({"install_id": a, "conductor_key": "k", "generation": "holochain-0.7"}), 20),
+        ];
+        let merged = super::merged_slot_records(&sealed, &open);
+        assert_eq!(merged.len(), 4, "one per device, app and label: {merged:?}");
+        let of = |install: &str, label: &str| merged.iter().find(|r| r.install_id == install && r.slot.label == label).unwrap();
+        assert_eq!(of(&a, "manifest").slot.sha256, "new");
+        assert!(of(&a, "conv-1").gone);
+        assert_eq!(of(&a, "conv-2").slot.sha256, "c2");
+        assert_eq!(of(&b, "manifest").slot.sha256, "b-old");
+        let indexes = super::indexes_of(&merged);
+        let a_index = indexes.iter().find(|i| i.install_id == a).unwrap();
+        assert_eq!(a_index.slots.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), vec!["conv-2", "manifest"], "a backup that is gone is in no index");
+        assert_eq!(super::reach_records_in(&open), vec![super::ReachRecord { install_id: a.clone(), conductor_key: "k".into(), generation: "holochain-0.7".into() }]);
+        assert!(super::merged_slot_records(&sealed, &[]).len() == 3 && super::merged_slot_records(&[], &open).len() == 4, "either list alone stands");
+    }
+
     #[test]
     fn a_new_announcement_is_fresh_once_and_a_first_round_takes_all() {
         use super::fresh_announcements;

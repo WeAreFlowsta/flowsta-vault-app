@@ -276,6 +276,12 @@ struct StatusResponse {
     /// still my identity" from "locked, someone else" before any unlock.
     /// `agent_pub_key` stays null while locked for older clients.
     active_identity: Option<String>,
+    /// Locked, with the identity's devices still syncing: app backups keep
+    /// passing between them, and `/backup/list` and `/devices` answer. False
+    /// on a Vault that is unlocked, or locked with syncing stopped. Only
+    /// for a caller that may see the identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    syncing_while_locked: Option<bool>,
     /// Per-process id, see `IpcState::instance_id`.
     instance_id: String,
     /// Bumped on every identity change on this device (setup, restore,
@@ -459,6 +465,7 @@ async fn status_handler(
     Json(StatusResponse {
         unlocked,
         active_identity,
+        syncing_while_locked: may_see_identity.then(|| crate::commands::syncing_while_locked(&state.app_state)),
         instance_id: state.instance_id.clone(),
         identity_epoch: crate::paths::read_identity_epoch(&state.app_state.data_dir),
         claims: {
@@ -2230,13 +2237,41 @@ async fn devices_handler(
             Json(IpcError { error: "not_linked".into(), description: Some("This origin is not a linked third-party app.".into()) }),
         ));
     }
-    if state.app_state.vault_config.lock().unwrap().is_none() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(IpcError { error: "vault_locked".into(), description: Some("Vault is locked.".into()) }),
-        ));
-    }
     let me = crate::paths::install_id(&state.app_state.data_dir).unwrap_or_default();
+    if state.app_state.vault_config.lock().unwrap().is_none() {
+        // Locked and still syncing: the devices as the last unlocked round
+        // listed them, said to be as of then. Nothing an unlocked Vault
+        // does not give the same app.
+        let kept = crate::commands::syncing_while_locked(&state.app_state).then(|| crate::devices::kept_list(&state.app_state.identity_root())).flatten();
+        let Some((records, as_of)) = kept else {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(IpcError { error: "vault_locked".into(), description: Some("Vault is locked.".into()) }),
+            ));
+        };
+        let devices: Vec<serde_json::Value> = records
+            .iter()
+            .filter(|d| d.removed_at.is_none())
+            .map(|d| {
+                serde_json::json!({
+                    "device": d.install_id,
+                    "name": d.name,
+                    "platform": d.platform,
+                    "generation": d.generation,
+                    "this_device": d.install_id == me,
+                    "heard_at": crate::devices::heard_at(&d.install_id),
+                })
+            })
+            .collect();
+        return Ok(axum::response::IntoResponse::into_response(Json(serde_json::json!({
+            "devices": devices,
+            "announce_every_secs": crate::devices::ANNOUNCE_EVERY_SECS,
+            "catching_up": true,
+            "known_count": crate::devices::known_device_count(&state.app_state.identity_root()),
+            "locked": true,
+            "as_of": as_of,
+        }))));
+    }
     let live = tokio::time::timeout(std::time::Duration::from_secs(5), crate::devices::list(&state.app_state))
         .await
         .ok()
@@ -2296,17 +2331,18 @@ async fn backup_list_handler(
         }
     };
 
-    {
-        let config = state.app_state.vault_config.lock().unwrap();
-        if config.is_none() {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(IpcError {
-                    error: "vault_locked".into(),
-                    description: Some("Vault is locked.".into()),
-                }),
-            ));
-        }
+    // A Vault that is locked and still syncing answers too: the list is
+    // read from the backup files and their copies, which it keeps passing
+    // between the person's devices while locked.
+    let locked = state.app_state.vault_config.lock().unwrap().is_none();
+    if locked && !crate::commands::syncing_while_locked(&state.app_state) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "vault_locked".into(),
+                description: Some("Vault is locked.".into()),
+            }),
+        ));
     }
 
     // Get all stats then filter to only the caller's app.
@@ -2337,14 +2373,15 @@ async fn backup_list_handler(
         // with Office PC" and see a device on another network generation.
         // Best effort - the list answers without names if the registry is
         // slow or unreadable.
-        let registry = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            crate::devices::list(&state.app_state),
-        )
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
+        let registry = if locked {
+            crate::devices::kept_list(&state.app_state.identity_root()).map(|(devices, _)| devices).unwrap_or_default()
+        } else {
+            tokio::time::timeout(std::time::Duration::from_secs(2), crate::devices::list(&state.app_state))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default()
+        };
         resp["other_devices"] = serde_json::json!(by_device
             .into_iter()
             .map(|(device, backups)| {

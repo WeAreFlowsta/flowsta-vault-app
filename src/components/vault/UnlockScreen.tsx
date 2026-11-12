@@ -300,10 +300,13 @@ export const UnlockScreen = component$<UnlockScreenProps>((props) => {
           )}
           {stillSyncing.value && (
             <div class="mt-4 flex items-center justify-between gap-3 rounded-md border border-gray-700 bg-gray-900/40 px-3 py-2">
-              <p class="flex items-center gap-2 text-xs text-gray-300">
-                <span class="h-2 w-2 shrink-0 rounded-full bg-green-400" />
-                Locked - still syncing
-              </p>
+              <div>
+                <p class="flex items-center gap-2 text-xs text-gray-300">
+                  <span class="h-2 w-2 shrink-0 rounded-full bg-green-400" />
+                  Locked - still syncing
+                </p>
+                <p class="mt-1 pl-4 text-xs text-gray-500">Your apps' backups keep passing between your devices.</p>
+              </div>
               <button
                 type="button"
                 class="text-xs text-gray-400 underline decoration-gray-600 underline-offset-2 hover:text-gray-200"

@@ -757,6 +757,63 @@ pub(crate) async fn sealed_store_spec_as(
     Ok(hex::encode(record.action_hash))
 }
 
+/// Store a record sealed with a key other than the data key, linked from
+/// `base` under `tag` only. The identity's ordinary listing asks for the
+/// links with no tag, so it never returns these (and a Vault from before
+/// they existed never meets them); `list_tagged` asks for them by tag.
+/// Used for what a locked Vault must be able to read and write: each
+/// device's list of the app backups it holds (`backup_sync`).
+pub(crate) async fn store_tagged(
+    state: &Arc<AppState>,
+    line: Line,
+    base: holochain_types::prelude::AgentPubKey,
+    key: &[u8; 32],
+    tag: Vec<u8>,
+    spec: StoreSpec,
+) -> Result<String, String> {
+    if tag.is_empty() {
+        return Err("a tagged record needs a tag".into());
+    }
+    let id = spec.id.unwrap_or_else(|| derived_logical_id(&spec.entry_type, spec.created_at));
+    let payload = SealedPayload {
+        v: SEALED_PAYLOAD_V2,
+        entry_type: spec.entry_type,
+        created_at: spec.created_at,
+        body: rmp_serde::to_vec_named(&spec.body).map_err(|e| e.to_string())?,
+        refs: spec.refs,
+        id: Some(id),
+        updated_at: Some(spec.updated_at.unwrap_or(spec.created_at)),
+        device: crate::paths::install_id(&state.data_dir),
+        deleted: spec.deleted,
+    };
+    let (cipher, nonce) = seal(&payload, key).map_err(|e| e.to_string())?;
+    let at = SealedAtWire { base, cipher, nonce: nonce.to_vec(), tag, extra_tags: Vec::new() };
+    let input = rmp_serde::to_vec_named(&at).map_err(|e| e.to_string())?;
+    let result = sealed_zome_call(state, line, "create_sealed_at", input).await?;
+    let record = crate::hc::record(line, &result).map_err(|e| format!("Record decode failed: {}", e))?;
+    Ok(hex::encode(record.action_hash))
+}
+
+/// The newest version of every record linked from `base` under `tag`,
+/// opened with `key`, from what this conductor holds. Records that do not
+/// open with the key are left out.
+pub(crate) async fn list_tagged(
+    state: &Arc<AppState>,
+    line: Line,
+    base: holochain_types::prelude::AgentPubKey,
+    key: &[u8; 32],
+    tag: Vec<u8>,
+) -> Result<Vec<SealedListItem>, String> {
+    if tag.is_empty() {
+        return Err("a tagged listing needs a tag".into());
+    }
+    let input = rmp_serde::to_vec_named(&ListAtWire { base, tag_prefix: tag, network: false }).map_err(|e| e.to_string())?;
+    let result = sealed_zome_call(state, line, "get_all_sealed_at", input).await?;
+    let records = decode_listed(line, &result)?;
+    let (winners, _superseded) = latest_versions(decode_versions(&records, key));
+    Ok(list_items(winners))
+}
+
 /// Fetch and decrypt every live sealed record. Records that fail to
 /// decrypt (foreign/corrupt) are skipped with a warning, never fatal.
 #[tauri::command]

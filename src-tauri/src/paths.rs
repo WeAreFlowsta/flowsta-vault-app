@@ -130,6 +130,9 @@ pub fn setup_done_path(root: &Path) -> PathBuf { root.join("setup-done") }
 pub fn moved_07_path(root: &Path) -> PathBuf { root.join("moved-07") }
 pub fn known_devices_path(root: &Path) -> PathBuf { root.join(KNOWN_DEVICES) }
 pub fn shared_connections_path(root: &Path) -> PathBuf { root.join(SHARED_CONNECTIONS) }
+/// Device removals whose public record on identity 1.5 is still to be
+/// published (see `devices::publish_owed_removals`).
+pub fn removals_owed_path(root: &Path) -> PathBuf { root.join("removals-to-publish.json") }
 pub fn activity_synced_path(root: &Path) -> PathBuf { root.join(ACTIVITY_SYNCED) }
 
 // ---- partitions ------------------------------------------------------------

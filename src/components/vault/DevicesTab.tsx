@@ -15,6 +15,8 @@ export interface DeviceRow {
   platform: string;
   added_at: number;
   state: "this_device" | "this_device_setting_up" | "up_to_date" | "setting_up" | "last_synced" | "not_seen_since" | "needs_update" | "removed";
+  /** Removed, and the removal is not yet on the identity's public record. */
+  removing?: boolean;
   /** The later of the device's own record time and when this Vault last heard it directly (ms). */
   at?: number;
   /** When the device last wrote its own record (ms). */
@@ -143,7 +145,7 @@ export function deviceLine(d: DeviceRow): string {
     case "last_synced": return isCatchingUp(d) ? "Catching up with a change made here" : heardNote(d) ? `Not up to date${heardNote(d)}` : `Not up to date - last heard from ${dayAndTime(d.at ?? 0)}`;
     case "not_seen_since": return `Not seen since ${day(d.at ?? 0)}`;
     case "needs_update": return "Needs the Vault update to sync";
-    case "removed": return "Removed";
+    case "removed": return d.removing ? "Removing…" : "Removed";
   }
 }
 
