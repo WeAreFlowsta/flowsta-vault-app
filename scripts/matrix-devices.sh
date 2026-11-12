@@ -26,13 +26,17 @@ A=$(waitnew) || { echo "md-c never answered"; find "$HOME/.local/share/flowsta-v
 dbus-run-session -- scripts/run-test-instance.sh md-d > "$1/md-d.log" 2>&1 & PB=$!
 B=$(waitnew "$A") || { echo "md-d never answered"; find "$HOME/.local/share/flowsta-vault-md-d" -name '*.log' -exec tail -20 {} +; kill $PA $PB 2>/dev/null; exit 1; }
 echo "== leg A=$A B=$B $(date -u +%H:%M:%S)"
-VAULT_MATRIX_MIXED="${LEGACY_A_BIN:+1}" VAULT_MATRIX_PORT=$A VAULT_MATRIX_RESTORE_PORT=$B node scripts/bridge-matrix.mjs --phase="${MATRIX_PHASE:-devices}" > "$1/matrix-devices.log" 2>&1
+# LEGACY_A_07=1 with LEGACY_A_BIN: A is an older Vault that already runs the
+# 0.7 line (1.7.0 beside this build), not a 1.6.1 one: the leg runs as for
+# two current devices, with the locked-Vault checks of an older sibling.
+MIXED="${LEGACY_A_BIN:+1}"; [ -n "${LEGACY_A_07:-}" ] && MIXED=""
+VAULT_MATRIX_OLD_A="${LEGACY_A_07:+1}" VAULT_MATRIX_MIXED="$MIXED" VAULT_MATRIX_PORT=$A VAULT_MATRIX_RESTORE_PORT=$B node scripts/bridge-matrix.mjs --phase="${MATRIX_PHASE:-devices}" > "$1/matrix-devices.log" 2>&1
 rc=$?
 echo "== leg rc=$rc $(date -u +%H:%M:%S)"
 grep -E 'RESULT|✗' "$1/matrix-devices.log" | head -20
 # Mixed household: B (0.7 primary) keeps a 0.6 line for A on 1.6.1. Kill
 # that 0.6 conductor: let go, then attached again the next round.
-if [ -n "${LEGACY_A_BIN:-}" ]; then
+if [ -n "${LEGACY_A_BIN:-}" ] && [ -z "${LEGACY_A_07:-}" ]; then
   echo "== kill B's 0.6 conductor $(date -u +%H:%M:%S)"
   scripts/matrix-kill-07.sh "$B" md-d 06 > "$1/kill-06.log" 2>&1; krc=$?; cat "$1/kill-06.log"; [ $krc -eq 0 ] || rc=1
 fi
