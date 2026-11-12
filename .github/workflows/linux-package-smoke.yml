@@ -40,10 +40,13 @@ jobs:
           mkdir -p src-tauri/binaries
           pinned() { awk -v k="$1" '$1 !~ /^#/ && $2 == k { print $1 }' .github/holochain-sidecars.sha256; }
           for rel in holochain-0.6.1:"" holochain-0.7.1:-07; do
-            release="${rel%%:*}"; suffix="${rel#*:}"
+            official="${rel%:*}"; suffix="${rel#*:}"
             for bin in holochain lair-keystore; do
+              # The 0.7 conductor is the WeAreFlowsta/holochain-build release.
+              release="$official"; repo="holochain/holochain"
+              if [ "$bin$suffix" = "holochain-07" ]; then release="holochain-0.7.1-flowsta.4"; repo="WeAreFlowsta/holochain-build"; fi
               dest="src-tauri/binaries/vault-${bin}${suffix}-${TARGET}"
-              curl -fsSL "https://github.com/holochain/holochain/releases/download/${release}/${bin}-${TARGET}" -o "$dest"
+              curl -fsSL "https://github.com/${repo}/releases/download/${release}/${bin}-${TARGET}" -o "$dest"
               chmod +x "$dest"
               want=$(pinned "${release}/${bin}-${TARGET}"); got=$(sha256sum "$dest" | cut -d' ' -f1)
               [ -n "$want" ] && [ "$got" = "$want" ] || { echo "${release}/${bin}: SHA-256 $got does not match the pinned ${want:-(none)}"; exit 1; }

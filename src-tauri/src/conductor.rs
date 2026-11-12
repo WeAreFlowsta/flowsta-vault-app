@@ -426,14 +426,20 @@ pub async fn resolve_bootstrap_target() -> BootstrapTarget {
 /// The Vault's network settings per line. kitsune2's request timeout is
 /// 240 s (its default 60 s): on a fresh install of a returning agent the
 /// local cell is empty, and the signing zome's first `get_links` / `get`
-/// calls time out while the DHT warms up. On 0.7: the library's gossip cap
-/// (`flowsta_hc_lines::conductor::GOSSIP_OP_BYTES_07`) and
-/// `db_sync_level: Normal`.
+/// calls time out while the DHT warms up. On 0.7: `db_sync_level: Normal`
+/// and no gossip cap. The library's default caps an exchange at 1 MiB
+/// because upstream 0.7.1's presence check fails above about 10.9k offered
+/// ids; under that cap a large batch can strand, and history older than
+/// about half an hour does not reach another conductor. The conductor the
+/// Vault ships checks in chunks (WeAreFlowsta/holochain-build, patch 0006),
+/// so Kitsune2's own limit applies. A capped conductor elsewhere is never
+/// sent more than its own limit: each side sends within the other's.
 fn vault_tuning(line: Line) -> NetworkTuning {
     let mut t = NetworkTuning::for_line(line);
     t.request_timeout_s = Some(240);
     if line == Line::V07 {
         t.db_sync_level = Some("Normal".into());
+        t.gossip_max_op_bytes = None;
     }
     t
 }
@@ -1146,12 +1152,9 @@ mod bootstrap_target_tests {
         assert!(cfg.contains("  request_timeout_s: 240"), "request_timeout_s belongs under network in 0.7");
         assert!(cfg.contains("db_sync_level: Normal"));
         assert!(!cfg.contains("db_sync_strategy"));
-        // The gossip cap sits under network.advanced.k2Gossip (kitsune2's
-        // module config, camelCase keys), one level below request_timeout_s.
-        assert!(
-            cfg.contains("  request_timeout_s: 240\n  advanced:\n    k2Gossip:\n      maxGossipOpBytes: 1048576\n      maxRequestGossipOpBytes: 1048576\ndb_sync_level: Normal"),
-            "the gossip cap belongs under network.advanced.k2Gossip: {cfg}"
-        );
+        // No gossip cap: the conductor the Vault ships does not need one.
+        assert!(cfg.contains("  request_timeout_s: 240\ndb_sync_level: Normal"), "{cfg}");
+        assert!(!cfg.contains("k2Gossip") && !cfg.contains("maxGossipOpBytes"), "no gossip cap: {cfg}");
         assert!(cfg.contains("base64_auth_material_relay: \"eyJmb28iOiJiYXIifQ==\""));
         assert!(cfg.contains("port: 4458"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1227,7 +1230,7 @@ mod live_line_tests {
         assert!(p07.conductor_alive());
         assert!(tokio::net::TcpStream::connect(("127.0.0.1", app07)).await.is_ok(), "0.7 app interface");
         let config = std::fs::read_to_string(crate::paths::conductor_dir_07(&dir).join("conductor-config.yaml")).unwrap();
-        assert!(config.contains("maxGossipOpBytes: 1048576") && config.contains("https://127.0.0.1:9"), "{config}");
+        assert!(!config.contains("maxGossipOpBytes") && config.contains("https://127.0.0.1:9"), "{config}");
 
         for p in [&mut p07, &mut p06] {
             let r = p.stop();

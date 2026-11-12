@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Highlights
+
+- **A locked Vault keeps passing your apps' backups between your
+  devices.** With the Vault locked and still syncing, the backups your
+  apps keep in it go on travelling to your other devices and arriving
+  from them, and apps can still back up and read their own backups.
+  Nobody is asked to unlock. "Lock and stop syncing" stops it. Each
+  device needs this version: a device on an older Vault gets a locked
+  Vault's new backups once that Vault is next unlocked.
+- **Long histories reach your other devices.** The Vault now runs a
+  Holochain 0.7.1 built from the official source with a small set of
+  fixes (listed at github.com/WeAreFlowsta/holochain-build). With the
+  official 0.7.1 a large amount of data could stop part way between two
+  devices, and anything older than about half an hour did not cross.
+  Nothing changes in your data, and devices on either build keep syncing
+  with each other.
+
+### Changed
+
+- A device you remove is refused by your other devices from the moment
+  they know, and gets no more of your apps' backups, also while it is
+  locked. Settings > Devices says "Removing…" until the removal has
+  reached your identity's public record.
+
 ### Fixed
+
+- **Windows: after an update the Vault is back on its usual port.** The
+  old Vault could stay behind without answering, so the new one started
+  on another port and apps could not find it until a restart of the
+  computer. A Vault left behind is now ended when the new one starts.
+- The log no longer fills with warnings while your signatures are read
+  for the first time after a start; it says once a minute that it is
+  waiting.
+- Linux packages depend on `xdg-utils`, which opening links from other
+  apps needs.
 
 - After "Restart to update" the Vault's window opens on its own. Before, a
   Vault that started when you logged in came back hidden after the update
