@@ -102,6 +102,10 @@ jobs:
         if: runner.os != 'Windows'
         env:
           HC_RELEASE_07: holochain-0.7.1
+          # The 0.7 conductor: the official source with the patches listed at
+          # https://github.com/WeAreFlowsta/holochain-build (the key store is
+          # the official release).
+          HC_BUILD_07: holochain-0.7.1-flowsta.4
         run: |
           pinned() { awk -v k="$1" '$1 !~ /^#/ && $2 == k { print $1 }' .github/holochain-sidecars.sha256; }
           sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
@@ -109,12 +113,16 @@ jobs:
             w=$(pinned "$2"); g=$(sha "$1")
             [ -n "$w" ] && [ "$g" = "$w" ] || { echo "$2: SHA-256 $g does not match the pinned ${w:-(none)}"; exit 1; }
           }
-          base="https://github.com/holochain/holochain/releases/download/${HC_RELEASE_07}"
           for bin in holochain lair-keystore; do
+            if [ "$bin" = holochain ]; then
+              rel="$HC_BUILD_07"; base="https://github.com/WeAreFlowsta/holochain-build/releases/download/${rel}"
+            else
+              rel="$HC_RELEASE_07"; base="https://github.com/holochain/holochain/releases/download/${rel}"
+            fi
             dest="src-tauri/binaries/vault-${bin}-07-${{ matrix.target }}"
             curl -fsSL "${base}/${bin}-${{ matrix.target }}" -o "$dest"
             chmod +x "$dest"
-            check "$dest" "${HC_RELEASE_07}/${bin}-${{ matrix.target }}"
+            check "$dest" "${rel}/${bin}-${{ matrix.target }}"
           done
 
       - name: Fetch Holochain 0.6.1 binaries (Windows)
@@ -143,6 +151,10 @@ jobs:
         shell: pwsh
         env:
           HC_RELEASE_07: holochain-0.7.1
+          # The 0.7 conductor: the official source with the patches listed at
+          # https://github.com/WeAreFlowsta/holochain-build (the key store is
+          # the official release).
+          HC_BUILD_07: holochain-0.7.1-flowsta.4
         run: |
           function Assert-Pinned($file, $key) {
             $want = Get-Content .github/holochain-sidecars.sha256 | Where-Object { $_ -notmatch '^\s*#' } |
@@ -150,12 +162,16 @@ jobs:
             $got = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
             if (-not $want -or $got -ne $want) { throw "${key}: SHA-256 $got does not match the pinned $want" }
           }
-          $base = "https://github.com/holochain/holochain/releases/download/$env:HC_RELEASE_07"
           $t = "${{ matrix.target }}"
           foreach ($bin in "holochain","lair-keystore") {
+            if ($bin -eq "holochain") {
+              $rel = $env:HC_BUILD_07; $base = "https://github.com/WeAreFlowsta/holochain-build/releases/download/$rel"
+            } else {
+              $rel = $env:HC_RELEASE_07; $base = "https://github.com/holochain/holochain/releases/download/$rel"
+            }
             $dest = "src-tauri/binaries/vault-$bin-07-$t.exe"
             Invoke-WebRequest "$base/$bin-$t.exe" -OutFile $dest
-            Assert-Pinned $dest "$env:HC_RELEASE_07/$bin-$t.exe"
+            Assert-Pinned $dest "$rel/$bin-$t.exe"
           }
 
       - name: Install frontend dependencies
