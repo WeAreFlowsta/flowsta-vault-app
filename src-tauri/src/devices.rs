@@ -406,6 +406,115 @@ pub fn known_device_count(identity_root: &std::path::Path) -> usize {
     installs.len().max(1)
 }
 
+/// Whether the agent key is a device of this identity that has not been
+/// removed, by the list this device keeps of the devices it has seen (a
+/// plain file, written each round while unlocked, so it answers on a locked
+/// Vault too). No list yet: nobody is known.
+pub fn is_current_device(identity_root: &std::path::Path, agent_39: &[u8]) -> bool {
+    let wanted = crate::key_derivation::base64_standard_encode(agent_39);
+    let known: Vec<KnownDevice> = std::fs::read(crate::paths::known_devices_path(identity_root)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    current_among(&known, &wanted)
+}
+
+fn current_among(known: &[KnownDevice], conductor_key: &str) -> bool {
+    // A key that was removed stays refused even if another entry names it.
+    known.iter().any(|k| k.conductor_key == conductor_key) && !known.iter().any(|k| k.conductor_key == conductor_key && k.removed)
+}
+
+/// What the identity's public record said of an asking device, and when.
+static ASKER_REMOVED: std::sync::Mutex<Option<std::collections::HashMap<Vec<u8>, (bool, std::time::Instant)>>> = std::sync::Mutex::new(None);
+const ASKER_REMOVED_KEPT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Whether a device that asks this one for a backup file may have it: one
+/// of the identity's devices as this device knows them, and not removed by
+/// the identity's own public record (asked at most every ten minutes per
+/// device; when that cannot be answered, this device's own list decides).
+pub async fn may_be_served(state: &Arc<AppState>, agent_39: &[u8]) -> bool {
+    if !is_current_device(&state.identity_root(), agent_39) {
+        return false;
+    }
+    if agent_39.len() != 39 {
+        return false;
+    }
+    let remembered = ASKER_REMOVED.lock().unwrap().as_ref().and_then(|m| m.get(agent_39).filter(|(_, at)| at.elapsed() < ASKER_REMOVED_KEPT).map(|(r, _)| *r));
+    let removed = match remembered {
+        Some(removed) => removed,
+        None => {
+            let key: [u8; 32] = agent_39[3..35].try_into().expect("32 of 39 bytes");
+            match crate::identity_07::removed_on_07(state, &key).await {
+                Some(removed) => {
+                    ASKER_REMOVED.lock().unwrap().get_or_insert_with(Default::default).insert(agent_39.to_vec(), (removed, std::time::Instant::now()));
+                    removed
+                }
+                None => false,
+            }
+        }
+    };
+    !removed
+}
+
+/// A removal whose public record is still to be published.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct OwedRemoval {
+    /// Standard base64 of the removed device's 32-byte key.
+    device_key: String,
+    at_ms: i64,
+}
+
+fn owed_removals(root: &std::path::Path) -> Vec<OwedRemoval> {
+    std::fs::read(crate::paths::removals_owed_path(root)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn write_owed_removals(root: &std::path::Path, owed: &[OwedRemoval]) {
+    let path = crate::paths::removals_owed_path(root);
+    if owed.is_empty() {
+        let _ = std::fs::remove_file(path);
+    } else if let Ok(bytes) = serde_json::to_vec(owed) {
+        let _ = crate::vault::write_atomic(&path, &bytes);
+    }
+}
+
+fn owe_removal(root: &std::path::Path, device_key_32: &[u8; 32], at_ms: i64) {
+    let mut owed = owed_removals(root);
+    let device_key = crate::key_derivation::base64_standard_encode(device_key_32);
+    if !owed.iter().any(|o| o.device_key == device_key) {
+        owed.push(OwedRemoval { device_key, at_ms });
+        write_owed_removals(root, &owed);
+    }
+}
+
+/// Publish the removals still owed to the identity's public record: each
+/// unlocked round, until each one is there. Returns how many remain.
+pub async fn publish_owed_removals(state: &Arc<AppState>) -> usize {
+    let root = state.identity_root();
+    let owed = owed_removals(&root);
+    if owed.is_empty() {
+        return 0;
+    }
+    let identity_seed: Option<[u8; 32]> = state.vault_config.lock().unwrap().as_ref().and_then(|c| c.device_seed.as_deref()).and_then(|s| s.try_into().ok());
+    let Some(identity_seed) = identity_seed else {
+        return owed.len();
+    };
+    let mut left = Vec::new();
+    for o in owed {
+        let key: Option<[u8; 32]> = crate::commands::base64_standard_decode(&o.device_key).ok().and_then(|b| b.try_into().ok());
+        let Some(key) = key else { continue };
+        // Already there (another device of the identity published it)?
+        if crate::identity_07::removed_on_07(state, &key).await == Some(true) {
+            continue;
+        }
+        match crate::identity_07::publish_removal(state, &identity_seed, &key, o.at_ms).await {
+            Ok(()) => log::info!("[identity 1.5] a removal that was owed is published"),
+            Err(_) => left.push(o),
+        }
+    }
+    // The identity may have changed while this ran.
+    if state.identity_root() == root {
+        write_owed_removals(&root, &left);
+    }
+    left.len()
+}
+
 /// Notice devices added or removed elsewhere: one Activity line each and a
 /// `devices-changed` event for the page. Returns the changes.
 pub async fn notice_changes(state: &Arc<AppState>) -> Result<Vec<DeviceChange>, String> {
@@ -957,7 +1066,10 @@ pub(crate) async fn device_remove_inner(api_url: String, install_id: String, sta
         let target_32: Option<[u8; 32]> = crate::commands::base64_standard_decode(&target).ok().and_then(|b| b.try_into().ok());
         if let (Some(identity_seed), Some(target_32)) = (identity_seed, target_32) {
             if let Err(e) = crate::identity_07::publish_removal(state, &identity_seed, &target_32, now as i64).await {
-                log::info!("[identity 1.5] the removal was not published there: {}", e.chars().take(140).collect::<String>());
+                // Owed: the devices round publishes it when it can. Other
+                // devices read this record to refuse the removed one.
+                log::info!("[identity 1.5] the removal was not published there yet (it is tried again each round): {}", e.chars().take(140).collect::<String>());
+                owe_removal(&state.identity_root(), &target_32, now as i64);
             }
         }
     }
@@ -1015,6 +1127,36 @@ async fn write_removal_on(state: &Arc<AppState>, line: crate::hc::Line, removal:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_known_device_that_is_not_removed_is_current() {
+        let known = vec![
+            KnownDevice { install_id: "a".into(), conductor_key: "key-a".into(), removed: false },
+            KnownDevice { install_id: "b".into(), conductor_key: "key-b".into(), removed: true },
+            // The same key named twice, once removed: removed.
+            KnownDevice { install_id: "c".into(), conductor_key: "key-c".into(), removed: false },
+            KnownDevice { install_id: "c2".into(), conductor_key: "key-c".into(), removed: true },
+        ];
+        assert!(current_among(&known, "key-a"));
+        assert!(!current_among(&known, "key-b"), "a removed device is not served");
+        assert!(!current_among(&known, "key-c"), "removed once is removed");
+        assert!(!current_among(&known, "key-x"), "an agent this device never saw among its devices");
+        assert!(!current_among(&[], "key-a"), "no list yet: nobody is known");
+    }
+
+    #[test]
+    fn a_removal_is_owed_once_and_the_file_goes_when_nothing_is_owed() {
+        let dir = tempfile::tempdir().unwrap();
+        owe_removal(dir.path(), &[5u8; 32], 100);
+        owe_removal(dir.path(), &[5u8; 32], 200);
+        owe_removal(dir.path(), &[6u8; 32], 300);
+        let owed = owed_removals(dir.path());
+        assert_eq!(owed.len(), 2, "one entry per device: {owed:?}");
+        assert_eq!(owed[0].at_ms, 100, "the time of the removal itself is kept");
+        write_owed_removals(dir.path(), &[]);
+        assert!(!crate::paths::removals_owed_path(dir.path()).exists());
+        assert!(owed_removals(dir.path()).is_empty());
+    }
+
     use super::*;
 
     const DAY: u64 = REFRESH_AFTER_MS;

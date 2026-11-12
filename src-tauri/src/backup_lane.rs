@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Askers refused this session, said once each in the log.
+static REFUSED_SAID: Mutex<Option<std::collections::HashSet<Vec<u8>>>> = Mutex::new(None);
+
 pub const PIECE_BYTES: usize = 512 * 1000;
 /// Pieces asked for at a time.
 pub const WINDOW: u32 = 4;
@@ -192,7 +195,19 @@ impl Lane {
                 match arrived.piece.kind.as_str() {
                     "want" => {
                         let root = state.identity_root();
+                        let state = state.clone();
                         tokio::spawn(async move {
+                            // Only a device of this identity that has not
+                            // been removed is handed a file; anyone else is
+                            // told there is none.
+                            if !crate::devices::may_be_served(&state, arrived.from.get_raw_39()).await {
+                                if REFUSED_SAID.lock().unwrap().get_or_insert_with(Default::default).insert(arrived.from.get_raw_39().to_vec()) {
+                                    log::info!("[backups] a request for a backup file was refused: the asker is not a current device of this identity");
+                                }
+                                let none = Piece { id: arrived.piece.id.clone(), kind: "none".into(), seq: 0, total: 0, data: Vec::new() };
+                                let _ = lane.send(&arrived.from, none, arrived.line).await;
+                                return;
+                            }
                             if let Err(e) = lane.serve(&root, arrived.from, arrived.piece, arrived.line).await {
                                 log::info!("[backups] a piece was not sent: {}", e);
                             }

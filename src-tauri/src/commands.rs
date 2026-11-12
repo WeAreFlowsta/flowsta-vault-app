@@ -2234,6 +2234,11 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             return DevicesRound::StoodDown;
         }
         lap("removed check");
+        // A removal this device made whose public record did not get
+        // published at the time: tried again each round.
+        if crate::devices::publish_owed_removals(devices_state).await > 0 {
+            lap("owed removals");
+        }
         // The own record goes out on full rounds, and again on the next
         // light pass (a minute) when a write failed: the first write after
         // an upgrade timed out on a cold cell and waited five minutes for
