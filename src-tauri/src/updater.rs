@@ -292,6 +292,10 @@ async fn check_once(app: &tauri::AppHandle, data_dir: &Path) -> Result<String, S
     let endpoint = url::Url::parse(&latest_json_url(&channel)).map_err(|e| format!("bad endpoint: {}", e))?;
     let updater = app
         .updater_builder()
+        // Windows: the installer starts and this process must be gone when
+        // the new version opens, or it keeps the local-API port (seen in
+        // the field: the new Vault on 27778, then 27779).
+        .on_before_exit(end_this_process_soon)
         .endpoints(vec![endpoint])
         .and_then(|b| b.build())
         .map_err(|e| format!("the updater did not start: {}", e))?;
@@ -372,6 +376,24 @@ pub fn install_ready(data_dir: &Path, stage: &dyn Fn(&str)) -> Result<bool, Stri
         stop_lines();
     }
     Ok(true)
+}
+
+/// Called as the Windows installer is about to start and the process to
+/// exit: says so in the log, and ends the process outright half a minute
+/// later in case the ordinary exit does not finish (long enough that the
+/// installer has always started; the new version's own start ends a Vault
+/// left behind sooner, `instance_guard::end_vault_left_behind`).
+fn end_this_process_soon() {
+    log::info!("[update] the installer starts now and this process ends");
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(30));
+        use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+        let me = sysinfo::Pid::from_u32(std::process::id());
+        let sys = System::new_with_specifics(RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()));
+        if let Some(p) = sys.process(me) {
+            p.kill();
+        }
+    });
 }
 
 /// The process restarts after this whatever the install did, so nothing
