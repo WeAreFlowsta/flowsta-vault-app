@@ -6359,7 +6359,17 @@ pub async fn start_ipc_server(
     // Try ports in sequence
     for port in [27777, 27778, 27779] {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        match tokio::net::TcpListener::bind(addr).await {
+        let mut bound = tokio::net::TcpListener::bind(addr).await;
+        if let Err(e) = &bound {
+            log::warn!("Port {} unavailable: {}", port, e);
+            // A Vault of ours that stayed behind and no longer answers is
+            // ended, and this start takes the port; anything else keeps it.
+            let ended = tokio::task::spawn_blocking(move || crate::instance_guard::end_vault_left_behind(port)).await.unwrap_or(false);
+            if ended {
+                bound = tokio::net::TcpListener::bind(addr).await;
+            }
+        }
+        match bound {
             Ok(listener) => {
                 log::info!("IPC server listening on http://127.0.0.1:{}", port);
                 if let Err(e) = std::fs::write(&port_file, format!("{}\n{}\n", port, instance_id)) {
@@ -6373,9 +6383,7 @@ pub async fn start_ipc_server(
                 });
                 return Ok(port);
             }
-            Err(e) => {
-                log::warn!("Port {} unavailable: {}", port, e);
-            }
+            Err(_) => {}
         }
     }
 

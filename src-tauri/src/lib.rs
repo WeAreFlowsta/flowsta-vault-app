@@ -29,6 +29,8 @@ mod quota_cache;
 mod relocate;
 mod identities;
 mod instance_guard;
+#[cfg(test)]
+mod spawn_guard;
 mod relay_login;
 mod sealed;
 mod signing_07;

@@ -73,6 +73,145 @@ fn local_http(port: u16, method: &str, path: &str) -> Option<String> {
     Some(out)
 }
 
+/// What holds a local-API port this start could not bind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Holder {
+    /// It answered an HTTP request: a running Vault (another account's, or
+    /// another install's) or some other program. Never touched.
+    pub answers: bool,
+    /// The process listening there, when the system names it.
+    pub pid: Option<u32>,
+    /// That process runs this same program file, as this same user.
+    pub same_program_and_user: bool,
+}
+
+/// Pure: a holder that is this same Vault program, run by this same user,
+/// and no longer answers is a Vault that did not finish closing (seen on
+/// Windows after an update install: the old process kept port 27777, the
+/// new one moved to 27778, then 27779). It is ended so this start takes
+/// the port every app looks at first. Anything that answers, or is not
+/// ours, is left alone.
+pub(crate) fn holder_to_end(h: &Holder, my_pid: u32) -> Option<u32> {
+    match h.pid {
+        Some(pid) if !h.answers && h.same_program_and_user && pid != my_pid => Some(pid),
+        _ => None,
+    }
+}
+
+/// The pids LISTENING on `port` in `netstat -ano -p TCP` output; a line
+/// whose FOREIGN address is the port is a client connection, not a holder.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn netstat_listening_pids(text: &str, port: u16) -> Vec<u32> {
+    let suffix = format!(":{port}");
+    text.lines()
+        .filter_map(|line| {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() < 5 || cols[0] != "TCP" || !cols[1].ends_with(&suffix) || cols[3] != "LISTENING" {
+                return None;
+            }
+            cols[4].parse().ok()
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn listening_pid(port: u16) -> Option<u32> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("netstat")
+        .args(["-ano", "-p", "TCP"])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .ok()?;
+    netstat_listening_pids(&String::from_utf8_lossy(&out.stdout), port).into_iter().next()
+}
+
+/// Only Windows has shown a Vault that stays behind holding its port; the
+/// other systems keep today's behavior (the next port).
+#[cfg(not(windows))]
+fn listening_pid(_port: u16) -> Option<u32> {
+    None
+}
+
+/// Read what holds `port`: does it answer (three tries, a busy Vault
+/// answers `/status` from its own runtime in milliseconds), which process
+/// it is, and whether that process is this program run by this user.
+pub(crate) fn holder_of(port: u16) -> Holder {
+    let answers = (0..3).any(|i| {
+        if i > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        }
+        local_http(port, "GET", "/status").is_some_and(|a| a.starts_with("HTTP/"))
+    });
+    if answers {
+        return Holder { answers, pid: None, same_program_and_user: false };
+    }
+    let pid = listening_pid(port);
+    let same_program_and_user = pid.is_some_and(|pid| {
+        use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
+        let sys = System::new_with_specifics(RefreshKind::nothing().with_processes(
+            ProcessRefreshKind::nothing().with_exe(UpdateKind::Always).with_user(UpdateKind::Always),
+        ));
+        let me = sys.process(sysinfo::Pid::from_u32(std::process::id()));
+        let it = sys.process(sysinfo::Pid::from_u32(pid));
+        match (me, it) {
+            (Some(me), Some(it)) => me.exe().is_some() && me.exe() == it.exe() && me.user_id().is_some() && me.user_id() == it.user_id(),
+            _ => false,
+        }
+    });
+    Holder { answers, pid, same_program_and_user }
+}
+
+/// End the Vault that stayed behind on `port`, when that is what holds it.
+/// Returns whether one was ended (the caller then binds the port again).
+pub(crate) fn end_vault_left_behind(port: u16) -> bool {
+    let holder = holder_of(port);
+    let Some(pid) = holder_to_end(&holder, std::process::id()) else {
+        log::info!("[instance] port {port} is held by {}", match (&holder.answers, holder.pid) {
+            (true, _) => "a program that answers: left alone".to_string(),
+            (false, Some(pid)) => format!("process {pid}, which does not answer and is not this Vault program run by this user: left alone"),
+            (false, None) => "something that does not answer; its process was not read".to_string(),
+        });
+        return false;
+    };
+    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+    let mut sys = System::new_with_specifics(RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()));
+    let target = sysinfo::Pid::from_u32(pid);
+    let killed = sys.process(target).is_some_and(|p| p.kill());
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[target]), true);
+        if sys.process(target).is_none() {
+            log::warn!("[instance] an earlier Vault (process {pid}) still held port {port} and did not answer: ended, and this start takes the port");
+            return true;
+        }
+    }
+    log::warn!("[instance] an earlier Vault (process {pid}) holds port {port} and does not answer; it could not be ended (asked: {killed})");
+    false
+}
+
+#[cfg(test)]
+mod left_behind_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_silent_vault_of_this_program_and_user_is_ended() {
+        let silent_ours = Holder { answers: false, pid: Some(4242), same_program_and_user: true };
+        assert_eq!(holder_to_end(&silent_ours, 1), Some(4242));
+        assert_eq!(holder_to_end(&Holder { answers: true, ..silent_ours.clone() }, 1), None, "a Vault that answers is running: the hand-over or the next port");
+        assert_eq!(holder_to_end(&Holder { same_program_and_user: false, ..silent_ours.clone() }, 1), None, "another program, another install or another user's Vault");
+        assert_eq!(holder_to_end(&Holder { pid: None, ..silent_ours.clone() }, 1), None, "no process named: nothing to end");
+        assert_eq!(holder_to_end(&silent_ours, 4242), None, "never this process");
+    }
+
+    #[test]
+    fn netstat_names_the_process_listening_on_the_port() {
+        let text = "\r\nActive Connections\r\n\r\n  Proto  Local Address          Foreign Address        State           PID\r\n  TCP    127.0.0.1:27777        0.0.0.0:0              LISTENING       18204\r\n  TCP    127.0.0.1:27778        0.0.0.0:0              LISTENING       5548\r\n  TCP    127.0.0.1:51000        127.0.0.1:27777        ESTABLISHED     900\r\n  TCP    127.0.0.1:127777       0.0.0.0:0              LISTENING       7\r\n";
+        assert_eq!(netstat_listening_pids(&text, 27777), vec![18204]);
+        assert_eq!(netstat_listening_pids(&text, 27778), vec![5548]);
+        assert!(netstat_listening_pids(&text, 27779).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod probe_tests {
     use super::*;

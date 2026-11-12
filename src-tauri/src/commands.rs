@@ -7178,6 +7178,42 @@ pub struct LinkedSignaturesResult {
     pub has_linked_agents: bool,
 }
 
+/// A linked-signatures read unanswered this long is a fault, not a cold start.
+const LINKED_READ_IS_SLOW_AFTER: std::time::Duration = std::time::Duration::from_secs(8 * 60);
+
+static LINKED_READ_UNANSWERED_SINCE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// How long the linked-signatures read has gone unanswered, counting from
+/// the first failure after its last answer; `None` once it answers.
+fn linked_read_streak(answered: bool, now: std::time::Instant) -> Option<std::time::Duration> {
+    let mut since = LINKED_READ_UNANSWERED_SINCE.lock().unwrap();
+    next_streak(&mut since, answered, now)
+}
+
+fn next_streak(since: &mut Option<std::time::Instant>, answered: bool, now: std::time::Instant) -> Option<std::time::Duration> {
+    if answered {
+        *since = None;
+        return None;
+    }
+    Some(now.duration_since(*since.get_or_insert(now)))
+}
+
+#[cfg(test)]
+mod linked_read_streak_tests {
+    use super::next_streak;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_streak_runs_from_the_first_failure_and_ends_at_an_answer() {
+        let t0 = Instant::now();
+        let mut since = None;
+        assert_eq!(next_streak(&mut since, false, t0), Some(Duration::ZERO));
+        assert_eq!(next_streak(&mut since, false, t0 + Duration::from_secs(300)), Some(Duration::from_secs(300)));
+        assert_eq!(next_streak(&mut since, true, t0 + Duration::from_secs(310)), None);
+        assert_eq!(next_streak(&mut since, false, t0 + Duration::from_secs(900)), Some(Duration::ZERO), "a new streak after an answer");
+    }
+}
+
 /// Returns signatures from linked agents only. Split from the own-sigs
 /// fetch - the cold-DHT `get_links` here can take minutes, so it must
 /// not gate the local own-sigs result. Returns `Err` on any sig query
@@ -7250,8 +7286,18 @@ pub(crate) async fn get_my_linked_signatures_inner(
         // Every device carried the same records: one row per original.
         // Both callers pass the error on unlogged (the route drops it as
         // best-effort), so the log is the one place that says why.
-        let read = crate::signing_07::linked_signatures(state, &keys).await.map_err(|e| {
-            log::warn!("[get_my_linked_signatures] the 0.7 line did not answer for {} linked agent(s): {}", keys.len(), e);
+        let read = crate::signing_07::linked_signatures(state, &keys).await;
+        let unanswered_for = linked_read_streak(read.is_ok(), std::time::Instant::now());
+        let read = read.map_err(|e| {
+            // A conductor's first network read after a start takes minutes
+            // (every page poll in that time fails the same way): that is
+            // waiting, said once a minute at most. A read still unanswered
+            // after LINKED_READ_IS_SLOW_AFTER is a fault worth a warning.
+            match unanswered_for {
+                Some(d) if d >= LINKED_READ_IS_SLOW_AFTER => log::warn!("[get_my_linked_signatures] the 0.7 line has not answered for {} linked agent(s) in {} min: {}", keys.len(), d.as_secs() / 60, e),
+                Some(d) if d.as_secs() % 60 < 20 => log::info!("[get_my_linked_signatures] the 0.7 line has not answered yet for {} linked agent(s) (its first network read after a start takes a few minutes)", keys.len()),
+                _ => {}
+            }
             e
         })?;
         let mut signatures = crate::signing_07::one_copy_per_original(read);
