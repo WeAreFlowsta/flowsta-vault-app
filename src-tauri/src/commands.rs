@@ -3321,6 +3321,14 @@ pub struct AuthResult {
     pub profile_picture: Option<String>,
 }
 
+// ── Moving an account made on the website into the Vault ───────────────────
+// The password sign-in below (and its two-factor step, and the phrase reset
+// in migration.rs) exists for one flow only: a person who made their
+// Flowsta account on the website, with a password, moves it into this Vault
+// once. A Vault identity has no account password: it is unlocked on this
+// device and proves itself with its keys. This code goes when that move is
+// retired.
+
 /// Authenticate against the Flowsta web API.
 /// Returns user info + JWT on success, or requires_2fa + temp_token for 2FA accounts.
 #[tauri::command]
