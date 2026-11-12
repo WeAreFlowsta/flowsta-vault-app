@@ -515,10 +515,30 @@ pub async fn publish_owed_removals(state: &Arc<AppState>) -> usize {
     left.len()
 }
 
+/// The identity's devices as the last unlocked round listed them, kept in
+/// memory while the Vault is locked and still syncing, so a linked app can
+/// still be told which devices there are (`GET /devices`). Never written to
+/// disk; gone when syncing stops or the Vault closes.
+static KEPT_LIST: std::sync::Mutex<Option<(std::path::PathBuf, Vec<DeviceRecord>, u64)>> = std::sync::Mutex::new(None);
+
+fn keep_list(identity_root: &std::path::Path, devices: &[DeviceRecord]) {
+    *KEPT_LIST.lock().unwrap() = Some((identity_root.to_path_buf(), devices.to_vec(), now_ms()));
+}
+
+pub fn forget_kept_list() {
+    *KEPT_LIST.lock().unwrap() = None;
+}
+
+/// The kept list for this identity and when it was read (ms).
+pub fn kept_list(identity_root: &std::path::Path) -> Option<(Vec<DeviceRecord>, u64)> {
+    KEPT_LIST.lock().unwrap().as_ref().filter(|(root, _, _)| root == identity_root).map(|(_, devices, at)| (devices.clone(), *at))
+}
+
 /// Notice devices added or removed elsewhere: one Activity line each and a
 /// `devices-changed` event for the page. Returns the changes.
 pub async fn notice_changes(state: &Arc<AppState>) -> Result<Vec<DeviceChange>, String> {
     let devices = list(state).await?;
+    keep_list(&state.identity_root(), &devices);
     let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
     let path = crate::paths::known_devices_path(&state.identity_root());
     let before: Option<Vec<KnownDevice>> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok());

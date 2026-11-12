@@ -200,7 +200,8 @@ impl Lane {
                             // Only a device of this identity that has not
                             // been removed is handed a file; anyone else is
                             // told there is none.
-                            if !crate::devices::may_be_served(&state, arrived.from.get_raw_39()).await {
+                            // A device that read itself as removed while locked answers nobody.
+                            if crate::backup_sync::removed_while_locked(&root) || !crate::devices::may_be_served(&state, arrived.from.get_raw_39()).await {
                                 if REFUSED_SAID.lock().unwrap().get_or_insert_with(Default::default).insert(arrived.from.get_raw_39().to_vec()) {
                                     log::info!("[backups] a request for a backup file was refused: the asker is not a current device of this identity");
                                 }

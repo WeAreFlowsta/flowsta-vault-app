@@ -739,6 +739,10 @@ pub struct KeptConductor {
     pub agent_pub_key: String,
     pub seed: [u8; 32],
     pub tag: String,
+    /// The identity's key in the form its records are linked from: where a
+    /// locked Vault finds the list of app backups it may read and write
+    /// (`backup_sync::locked_round`).
+    pub base: Option<holochain_types::prelude::AgentPubKey>,
 }
 
 impl Drop for KeptConductor {
@@ -771,6 +775,9 @@ pub(crate) fn stop_syncing_while_locked(state: &AppState) {
     crate::conductor::stop_all_lines();
     *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
     *state.unlock_passphrase.lock().unwrap() = None;
+    state.cell_credentials.lock().unwrap().clear();
+    state.cell_credentials_07.lock().unwrap().clear();
+    crate::devices::forget_kept_list();
     log::info!("Stopped syncing while locked.");
 }
 
@@ -1370,8 +1377,16 @@ pub fn stop_syncing(state: State<'_, Arc<AppState>>) {
     stop_syncing_while_locked(state.inner());
 }
 
+/// Locked, with this identity's conductor kept running.
+pub(crate) fn syncing_while_locked(state: &AppState) -> bool {
+    state.vault_config.lock().unwrap().is_none() && state.kept_conductor.lock().unwrap().is_some()
+}
+
 /// How often a locked Vault that keeps syncing checks its conductor.
 const KEPT_CONDUCTOR_CHECK: std::time::Duration = std::time::Duration::from_secs(60);
+/// Every missing copy is tried on the first locked round and each this many
+/// after it; between them only what was announced since the last round.
+const LOCKED_FETCH_ALL_EVERY: u32 = 5;
 
 /// Lock, leaving the conductor running where the identity has devices to
 /// sync with (its private network). The unlock that follows attaches to it.
@@ -1382,18 +1397,28 @@ pub(crate) fn lock_and_keep_syncing(state: &Arc<AppState>, app_handle: tauri::Ap
         config
             .as_ref()
             .filter(|c| running && c.data_key.is_some() && c.hosting_model.as_deref() == Some("device-hosted"))
-            .and_then(|c| conductor_start_params(c).map(|(seed, tag)| KeptConductor { agent_pub_key: c.agent_pub_key.clone(), seed, tag }))
+            .and_then(|c| conductor_start_params(c).map(|(seed, tag)| KeptConductor { agent_pub_key: c.agent_pub_key.clone(), seed, tag, base: None }))
     };
+    let kept = kept.map(|mut k| {
+        k.base = identity_agent_key(state);
+        k
+    });
     let Some(kept) = kept else {
         return lock_vault_inner(state);
     };
-    lock_secrets(state);
+    // The conductor keeps running, so the permissions to call its cells stay
+    // good, and the locked round uses them (a new one is a chain write).
+    lock_secrets(state, true);
     *state.kept_conductor.lock().unwrap() = Some(kept);
     log::info!("Vault locked. Still syncing.");
 
-    // Bring the conductor back if it stops while nobody is looking.
+    // Bring the conductor back if it stops while nobody is looking, and
+    // keep the apps' backups passing.
     let state = state.clone();
     tauri::async_runtime::spawn(async move {
+        let mut rounds: u32 = 0;
+        // A reason a round did not run, said once until it changes.
+        let mut said: Option<String> = None;
         loop {
             tokio::time::sleep(KEPT_CONDUCTOR_CHECK).await;
             if state.vault_config.lock().unwrap().is_some() || state.kept_conductor.lock().unwrap().is_none() {
@@ -1403,6 +1428,24 @@ pub(crate) fn lock_and_keep_syncing(state: &Arc<AppState>, app_handle: tauri::Ap
             if stopped {
                 if let Err(e) = ensure_conductor_alive(&state, &app_handle).await {
                     log::warn!("[locked] conductor not restarted: {}", e);
+                }
+                continue;
+            }
+            // App backups keep passing between the identity's devices: this
+            // device's list out, the others' in, their files fetched. No
+            // private record is read or written for it.
+            rounds += 1;
+            match crate::backup_sync::locked_round(&state, rounds % LOCKED_FETCH_ALL_EVERY == 1).await {
+                Ok(outcome) if outcome.changed() => {
+                    log::info!("[locked] backups: said {} · fetched {} · dropped {} · still to fetch {}", outcome.recorded, outcome.fetched, outcome.dropped, outcome.waiting);
+                    let _ = app_handle.emit("backups-changed", serde_json::json!({}));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    if said.as_deref() != Some(e.as_str()) {
+                        log::info!("[locked] backups not passed this round: {}", e.chars().take(160).collect::<String>());
+                        said = Some(e);
+                    }
                 }
             }
         }
@@ -1474,7 +1517,8 @@ pub(crate) fn write_active_identity_marker(data_dir: &std::path::Path, agent_pub
 
 /// Lock and stop everything (the conductor too).
 pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
-    lock_secrets(state);
+    lock_secrets(state, false);
+    crate::devices::forget_kept_list();
     *state.kept_conductor.lock().unwrap() = None;
     // The lane was open on the conductor that stops now.
     if let Ok(mut lane) = state.backup_lane.try_lock() {
@@ -1497,7 +1541,7 @@ pub(crate) fn lock_vault_inner(state: &Arc<AppState>) -> Result<(), String> {
 
 /// What every lock does: the decrypted vault leaves memory and whatever was
 /// waiting for an answer is refused.
-fn lock_secrets(state: &Arc<AppState>) {
+fn lock_secrets(state: &Arc<AppState>, conductor_stays: bool) {
     // Decrypted records read a moment ago do not outlive the lock.
     crate::sealed::forget_recent_versions();
     crate::sealed::forget_network_device_versions();
@@ -1533,8 +1577,10 @@ fn lock_secrets(state: &Arc<AppState>) {
 
     // Cached cap-grant credentials don't either (a reset/re-create after
     // this lock would otherwise reuse grants from a dead chain).
-    state.cell_credentials.lock().unwrap().clear();
-    state.cell_credentials_07.lock().unwrap().clear();
+    if !conductor_stays {
+        state.cell_credentials.lock().unwrap().clear();
+        state.cell_credentials_07.lock().unwrap().clear();
+    }
 
     // Clear MAU state before clearing vault config (needs device_seed)
     crate::mau::clear_mau_state(&state);

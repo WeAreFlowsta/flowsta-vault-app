@@ -657,6 +657,88 @@ async fn open_list_round(
     Ok(items)
 }
 
+/// This device read itself as removed while locked (the identity's public
+/// record): which identity, so nothing more is fetched or answered for it.
+static LOCKED_REMOVED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Whether a locked round found this device removed from this identity.
+pub fn removed_while_locked(identity_root: &Path) -> bool {
+    LOCKED_REMOVED.lock().unwrap().as_deref() == Some(identity_root)
+}
+
+/// The round of a Vault that is locked and still syncing: its own list out
+/// and the other devices' in, from the open list alone, then the same
+/// fetching and dropping as an unlocked round. It reads and writes no
+/// private record. First it asks the identity's public record whether this
+/// device was removed: a removed device fetches nothing more.
+pub async fn locked_round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> Result<RoundOutcome, String> {
+    let (base, own_key) = {
+        let kept = state.kept_conductor.lock().unwrap();
+        let kept = kept.as_ref().ok_or("not syncing")?;
+        (kept.base.clone().ok_or("no identity key kept")?, crate::key_derivation::public_key_of_seed(&kept.seed))
+    };
+    let root = state.identity_root();
+    if removed_while_locked(&root) {
+        return Err("this device was removed from the identity".into());
+    }
+    let line = crate::hc::active_line(state);
+    if line != crate::hc::Line::V07 {
+        return Err("the identity's records are not on the 0.7 line yet".into());
+    }
+    if crate::identity_07::removed_on_07(state, &own_key).await == Some(true) {
+        *LOCKED_REMOVED.lock().unwrap() = Some(root.clone());
+        log::info!("[locked] this device is removed, by the identity's own record: no more backups are fetched");
+        return Err("this device was removed from the identity".into());
+    }
+    let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    let open = OpenList::of(state)?;
+    let mut outcome = RoundOutcome::default();
+    let mut items = crate::sealed::list_tagged(state, line, base.clone(), &open.key, open.tag.clone()).await?;
+    let said: Vec<SlotRecord> = slot_records_with_time(&items).into_iter().map(|(r, _)| r).collect();
+    for record in records_to_write(&local_index(&root, &me), &said, &me) {
+        let now = now_ms();
+        crate::sealed::store_tagged(
+            state,
+            line,
+            base.clone(),
+            &open.key,
+            open.tag.clone(),
+            crate::sealed::StoreSpec {
+                entry_type: SLOT_ENTRY_TYPE.to_string(),
+                body: serde_json::to_value(&record).map_err(|e| e.to_string())?,
+                refs: Vec::new(),
+                created_at: now,
+                id: Some(slot_record_id(&record.install_id, &record.client_id, &record.slot.label)),
+                updated_at: Some(now),
+                deleted: false,
+            },
+        )
+        .await?;
+        outcome.recorded += 1;
+    }
+    if outcome.recorded > 0 {
+        items = crate::sealed::list_tagged(state, line, base, &open.key, open.tag).await?;
+    }
+    // A lock or an identity change while this ran: stop here.
+    if !crate::commands::syncing_while_locked(state) || state.identity_root() != root {
+        return Ok(outcome);
+    }
+    let recorded = merged_slot_records(&[], &items);
+    // Where each device is reached, from the open list; only a device this
+    // one knows as current is asked.
+    let reach = reach_records_in(&items);
+    let agent_of = |install_id: &str| {
+        reach.iter().find(|r| r.install_id == install_id).and_then(|r| {
+            crate::commands::base64_standard_decode(&r.conductor_key)
+                .ok()
+                .filter(|raw| raw.len() == 39 && crate::devices::is_current_device(&root, raw))
+                .map(|raw| (holochain_types::prelude::AgentPubKey::from_raw_39(raw), r.generation.clone()))
+        })
+    };
+    let lane = lane(state).await;
+    copy_from_others(state, &root, &me, &recorded, &agent_of, lane, fetch_all, outcome).await
+}
+
 /// One round: say what this device holds (always), and copy what the other
 /// devices hold - every missing copy when `fetch_all`, else only the ones
 /// announced since the last round.
@@ -719,7 +801,26 @@ pub async fn round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> R
             })
     };
 
-    let indexes = indexes_of(&recorded);
+    copy_from_others(state, &root, &me, &recorded, &agent_of, lane, fetch_all, outcome).await
+}
+
+/// Bring this device's copies in line with what the other devices hold:
+/// fetch what their lists name and this device lacks, drop what they no
+/// longer name. `agent_of` says where a device is reached.
+#[allow(clippy::too_many_arguments)]
+async fn copy_from_others(
+    state: &Arc<crate::commands::AppState>,
+    root: &Path,
+    me: &str,
+    recorded: &[SlotRecord],
+    agent_of: &(dyn Fn(&str) -> Option<(holochain_types::prelude::AgentPubKey, String)> + Sync),
+    lane: Result<Arc<crate::backup_lane::Lane>, String>,
+    fetch_all: bool,
+    mut outcome: RoundOutcome,
+) -> Result<RoundOutcome, String> {
+    let root = root.to_path_buf();
+    let me = me.to_string();
+    let indexes = indexes_of(recorded);
     let steps = plan(&root, &me, &indexes);
     let wanted_keys: Vec<String> = steps
         .iter()
