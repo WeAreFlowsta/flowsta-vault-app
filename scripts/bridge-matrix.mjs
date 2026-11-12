@@ -1560,7 +1560,12 @@ async function devicesLeg() {
   await op(a, { op: 'round' });
   record('a Disconnect on A disconnects the app on B', await until(async () => { await op(b, { op: 'round' }); return !((await op(b, { op: 'connections' })).apps || []).includes('matrix_app'); }, 120));
 
-  // 5. Locked but still syncing.
+  // 5. Locked but still syncing. The app is connected again first (4 above
+  // disconnected it on both): its backups are what 5b passes.
+  await op(a, { op: 'connect', client_id: 'matrix_app', app_name: 'Matrix App', origin: APP_ORIGIN_MD });
+  await op(b, { op: 'connect', client_id: 'matrix_app', app_name: 'Matrix App', origin: APP_ORIGIN_MD });
+  await op(a, { op: 'round' });
+  await op(b, { op: 'round' });
   await op(a, { op: 'earlier-web-key', key: 'uhCAkHARNESS' });
   await op(a, { op: 'lock' });
   const lockedA = await op(a, { op: 'status' });
@@ -1570,6 +1575,44 @@ async function devicesLeg() {
   record('A locked: reads are refused', refusedRead.status === 400 && /vault_locked/.test(refusedRead.data?.description || ''));
   await op(b, { op: 'write', text: 'from B, while A was locked' });
   await sleep(15000);
+  // 5b. App backups keep passing while a Vault is locked and still syncing
+  // (1.8.0). Not on a mixed run: a Vault from before it writes no open list.
+  if (process.env.VAULT_MATRIX_MIXED !== '1') {
+    const copyOn = async (port, label, device) => {
+      const r = await vaultFetch(port, '/backup/retrieve', { method: 'POST', origin: APP_ORIGIN_MD, body: { client_id: 'matrix_app', label, across: 'devices', device } });
+      return r.status === 200 ? Buffer.from(r.data?.data || '', 'hex').toString('utf8') : null;
+    };
+    const stLocked = await vaultFetch(a, '/status', { origin: APP_ORIGIN_MD });
+    record('A locked: /status tells the linked app it is still syncing', stLocked.data?.unlocked === false && stLocked.data?.syncing_while_locked === true, JSON.stringify(stLocked.data).slice(0, 160));
+    const listLocked = await vaultFetch(a, '/backup/list', { origin: APP_ORIGIN_MD });
+    record('A locked: /backup/list answers', listLocked.status === 200 && Array.isArray(listLocked.data?.apps), `${listLocked.status} ${JSON.stringify(listLocked.data).slice(0, 160)}`);
+    const devsLocked = await vaultFetch(a, '/devices', { origin: APP_ORIGIN_MD });
+    record('A locked: /devices answers from the last unlocked round, and says so', devsLocked.status === 200 && devsLocked.data?.locked === true && (devsLocked.data?.devices || []).some((d) => d.device === installB) && devsLocked.data?.as_of > 0, `${devsLocked.status} ${JSON.stringify(devsLocked.data).slice(0, 200)}`);
+    // B (unlocked) makes a backup: A, locked, fetches it.
+    let t = Date.now();
+    await op(b, { op: 'backup', client_id: 'matrix_app', label: 'while-a-locked', text: 'from B, A locked' });
+    record("A locked: gets B's new app backup", await until(async () => (await copyOn(a, 'while-a-locked', installB)) === 'from B, A locked', 420), `${Math.round((Date.now() - t) / 1000)} s`);
+    console.log(`   a backup made on B reached locked A in ${Math.round((Date.now() - t) / 1000)} s`);
+    const listLocked2 = await vaultFetch(a, '/backup/list', { origin: APP_ORIGIN_MD });
+    const fromB = (listLocked2.data?.other_devices || []).find((d) => d.device === installB);
+    record("A locked: its list names B's device and the copy it fetched while locked", !!fromB && typeof fromB.name === 'string' && fromB.name.length > 0 && (fromB.backups || []).some((x) => x.label === 'while-a-locked'), JSON.stringify(fromB).slice(0, 200));
+    // An app on A stores a backup in the locked Vault: B gets it.
+    t = Date.now();
+    const savedLocked = await op(a, { op: 'backup', client_id: 'matrix_app', label: 'made-on-locked-a', text: 'from locked A' });
+    record('A locked: an app backup is stored', savedLocked.saved === 'made-on-locked-a', JSON.stringify(savedLocked));
+    record("B: gets the backup stored in A's locked Vault", await until(async () => (await copyOn(b, 'made-on-locked-a', installA)) === 'from locked A', 420), `${Math.round((Date.now() - t) / 1000)} s`);
+    console.log(`   a backup stored in locked A reached B in ${Math.round((Date.now() - t) / 1000)} s`);
+    // Both locked.
+    await op(b, { op: 'lock' });
+    const bLocked = await op(b, { op: 'status' });
+    record('B locked too: still syncing', bLocked.unlocked === false && bLocked.syncing_while_locked === true, JSON.stringify(bLocked).slice(0, 160));
+    t = Date.now();
+    await op(a, { op: 'backup', client_id: 'matrix_app', label: 'both-locked', text: 'from A, both locked' });
+    record('both locked: a backup stored on A reaches B', await until(async () => (await copyOn(b, 'both-locked', installA)) === 'from A, both locked', 420), `${Math.round((Date.now() - t) / 1000)} s`);
+    console.log(`   with both locked a backup crossed in ${Math.round((Date.now() - t) / 1000)} s`);
+    const unlockedB = await vaultFetch(b, '/dev/unlock', { method: 'POST' });
+    record('B unlocks again', unlockedB.status === 200, `${unlockedB.status}`);
+  }
   const t0 = Date.now();
   const unlocked = await vaultFetch(a, '/dev/unlock', { method: 'POST' });
   record('A unlocks onto the running conductor', unlocked.status === 200 && (await op(a, { op: 'status' })).conductor?.status === 'ready', `${Date.now() - t0} ms`);
@@ -1579,8 +1622,22 @@ async function devicesLeg() {
   record("A: B's record written while it was locked is there", await until(async () => ((await op(a, { op: 'notes' })).notes || []).some((n) => n.text === 'from B, while A was locked'), process.env.VAULT_MATRIX_MIXED === '1' ? 240 : 60));
 
   // 6. Remove. The removal holds even after the removed device's own round.
+  // B is locked and still syncing when it is removed (1.8.0): it fetches
+  // nothing more from then on, and A hands it nothing.
+  const lockedRemoval = process.env.VAULT_MATRIX_MIXED !== '1';
+  if (lockedRemoval) await op(b, { op: 'lock' });
   const removed = await op(a, { op: 'remove', install_id: installB });
   record('A: removes B', removed.removed === true, JSON.stringify(removed));
+  if (lockedRemoval) {
+    await op(a, { op: 'backup', client_id: 'matrix_app', label: 'after-removal', text: 'made after B was removed' });
+    await op(a, { op: 'round' });
+    // Four locked rounds on B (one a minute), and A's own rounds between.
+    await sleep(250000);
+    const got = await vaultFetch(b, '/backup/retrieve', { method: 'POST', origin: APP_ORIGIN_MD, body: { client_id: 'matrix_app', label: 'after-removal', across: 'devices', device: installA } });
+    record('B, removed while locked: does not get a backup made after its removal', got.status !== 200, `${got.status}`);
+    const unlockedB2 = await vaultFetch(b, '/dev/unlock', { method: 'POST' });
+    record('B unlocks (to stand down)', unlockedB2.status === 200 || /device_removed/.test(JSON.stringify(unlockedB2.data || {})), `${unlockedB2.status} ${JSON.stringify(unlockedB2.data || {}).slice(0, 120)}`);
+  }
   const rowB = async () => ((await op(a, { op: 'list' })).devices || []).find((d) => d.install_id === installB);
   record('A: B reads as removed', (await rowB())?.state === 'removed');
   await op(b, { op: 'round' });   // B's routine round: it may refresh its record before it has heard

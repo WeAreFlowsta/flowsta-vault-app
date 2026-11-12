@@ -1384,6 +1384,9 @@ pub(crate) fn syncing_while_locked(state: &AppState) -> bool {
 
 /// How often a locked Vault that keeps syncing checks its conductor.
 const KEPT_CONDUCTOR_CHECK: std::time::Duration = std::time::Duration::from_secs(60);
+/// Counts the locks that kept syncing, so each one's loop knows when a
+/// later lock has taken over.
+static KEPT_LOCKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Every missing copy is tried on the first locked round and each this many
 /// after it; between them only what was announced since the last round.
 const LOCKED_FETCH_ALL_EVERY: u32 = 5;
@@ -1415,13 +1418,17 @@ pub(crate) fn lock_and_keep_syncing(state: &Arc<AppState>, app_handle: tauri::Ap
     // Bring the conductor back if it stops while nobody is looking, and
     // keep the apps' backups passing.
     let state = state.clone();
+    // One loop per lock: a Vault unlocked and locked again within a minute
+    // would otherwise keep the earlier lock's loop beside the new one (two
+    // rounds at once).
+    let this_lock = KEPT_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
         let mut rounds: u32 = 0;
         // A reason a round did not run, said once until it changes.
         let mut said: Option<String> = None;
         loop {
             tokio::time::sleep(KEPT_CONDUCTOR_CHECK).await;
-            if state.vault_config.lock().unwrap().is_some() || state.kept_conductor.lock().unwrap().is_none() {
+            if KEPT_LOCKS.load(std::sync::atomic::Ordering::SeqCst) != this_lock || state.vault_config.lock().unwrap().is_some() || state.kept_conductor.lock().unwrap().is_none() {
                 break;
             }
             let stopped = !crate::conductor::supervisor().primary_alive();
