@@ -1000,6 +1000,10 @@ pub struct DeviceRow {
     pub heard_at: Option<u64>,
     #[serde(flatten)]
     pub state: DeviceState,
+    /// Removed, and its removal is not yet on the identity's public record:
+    /// the list says "Removing…" until a round has published it.
+    #[serde(default)]
+    pub removing: bool,
 }
 
 /// The identity's devices, this one first, as this device knows them.
@@ -1014,11 +1018,13 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
     let mine = latest_change(&records);
     let my_generation = crate::hc::active_line(state).generation();
     let now = now_ms();
+    let owed = owed_removals(&state.identity_root());
     let mut rows: Vec<DeviceRow> = devices_in(&records)
         .into_iter()
         .map(|d| {
             let heard = heard_at(&d.install_id).map(|secs| secs * 1000);
             DeviceRow {
+                removing: still_removing(&owed, d.removed_at.is_some(), &d.conductor_key),
                 state: device_state(&d, &me, my_generation, mine, now, heard),
                 install_id: d.install_id,
                 name: d.name,
@@ -1041,10 +1047,16 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
             record_at: now,
             heard_at: None,
             state: DeviceState::ThisDeviceSettingUp,
+            removing: false,
         });
     }
     rows.sort_by_key(|r| (!matches!(r.state, DeviceState::ThisDevice | DeviceState::ThisDeviceSettingUp), r.state == DeviceState::Removed));
     Ok(rows)
+}
+
+/// Whether a removed device's public removal is still to be published.
+fn still_removing(owed: &[OwedRemoval], removed: bool, conductor_key: &str) -> bool {
+    removed && key32_of(conductor_key).is_some_and(|k| owed.iter().any(|o| o.device_key == k))
 }
 
 /// The 32-byte key (standard base64) inside a device record's conductor key.
@@ -1161,6 +1173,21 @@ mod tests {
         assert!(!current_among(&known, "key-c"), "removed once is removed");
         assert!(!current_among(&known, "key-x"), "an agent this device never saw among its devices");
         assert!(!current_among(&[], "key-a"), "no list yet: nobody is known");
+    }
+
+    #[test]
+    fn a_removed_device_reads_as_removing_until_its_removal_is_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut raw = vec![0x84, 0x20, 0x24];
+        raw.extend_from_slice(&[5u8; 32]);
+        raw.extend_from_slice(&[0u8; 4]);
+        let conductor_key = crate::key_derivation::base64_standard_encode(&raw);
+        assert!(!still_removing(&owed_removals(dir.path()), true, &conductor_key), "nothing owed: removed");
+        owe_removal(dir.path(), &[5u8; 32], 100);
+        let owed = owed_removals(dir.path());
+        assert!(still_removing(&owed, true, &conductor_key));
+        assert!(!still_removing(&owed, false, &conductor_key), "only a removed device");
+        assert!(!still_removing(&owed, true, "not-a-key"));
     }
 
     #[test]
