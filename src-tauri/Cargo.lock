@@ -1986,7 +1986,7 @@ dependencies = [
 [[package]]
 name = "flowsta-hc-lines"
 version = "0.1.0"
-source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=63062e9b6f013bfd2137eeb4f22acb7ac1fae83a#63062e9b6f013bfd2137eeb4f22acb7ac1fae83a"
+source = "git+https://github.com/WeAreFlowsta/flowsta-hc-lines?rev=f5f62e198939c077ebec9348c929c14baaf8c17c#f5f62e198939c077ebec9348c929c14baaf8c17c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1998,6 +1998,8 @@ dependencies = [
  "holochain_conductor_api 0.7.1",
  "holochain_types 0.6.1",
  "holochain_types 0.7.1",
+ "lair_keystore 0.6.3",
+ "lair_keystore 0.7.1",
  "lair_keystore_api 0.6.3",
  "lair_keystore_api 0.7.1",
  "libc",

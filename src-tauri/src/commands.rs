@@ -1244,6 +1244,8 @@ pub(crate) fn unlock_vault_inner(
     // is running; it is all-or-nothing and a skip leaves the vault working
     // exactly as before (relocate.rs).
     let _ = crate::relocate::relocate_if_legacy(state, &config.agent_pub_key);
+    // An install given a key of its own that closed mid-way finishes here.
+    crate::own_key::before_start(&state.identity_root(), &config);
 
     // Extract conductor startup params before storing config
     let conductor_seed = conductor_start_params(&config);
@@ -1320,6 +1322,14 @@ pub(crate) fn unlock_vault_inner(
 
     seed_linked_web_agent_key(state);
     log::info!("Vault unlocked.");
+    // Which key this install's conductor runs as, for anyone reading the
+    // log: every device added since 1.6.0 has a key of its own; an install
+    // set up before that, and the first device of an identity, runs as the
+    // identity's key. Two installs of one identity running as the
+    // identity's key cannot sync (each keeps its own chain under it).
+    if let Some(own) = state.vault_config.lock().unwrap().as_ref().map(|c| c.has_own_conductor_key()) {
+        log::info!("[device] this install's conductor runs as {}", if own { "a key of its own" } else { "the identity's key" });
+    }
 
     // Load MAU state from encrypted disk storage
     crate::mau::load_mau_state(&state);
@@ -1380,6 +1390,16 @@ pub fn stop_syncing(state: State<'_, Arc<AppState>>) {
 /// Locked, with this identity's conductor kept running.
 pub(crate) fn syncing_while_locked(state: &AppState) -> bool {
     state.vault_config.lock().unwrap().is_none() && state.kept_conductor.lock().unwrap().is_some()
+}
+
+/// What a locked Vault tells apps about syncing: their backups pass between
+/// the person's devices only once the identity's records are on the 0.7
+/// line (`backup_sync::locked_round`). Locked before its move finished (the
+/// first unlock after an update to 1.7.0 or later, locked again within
+/// minutes), the conductor still runs and nothing of an app's passes: an
+/// app is told syncing is stopped, and says what restarts it (unlock).
+pub(crate) fn apps_sync_while_locked(state: &AppState) -> bool {
+    syncing_while_locked(state) && crate::move_07::moved(&state.identity_root())
 }
 
 /// How often a locked Vault that keeps syncing checks its conductor.
@@ -1999,6 +2019,9 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
             // sibling offline) then goes back to the usual pace.
             let setting_up = pass < 2 * FULL_EVERY_PASSES && crate::devices::setting_up_here(&devices_state);
             let full = pass % FULL_EVERY_PASSES == 0 || setting_up;
+            // Records this install held before it was given a key of its own.
+            crate::own_key::carry_in_if_owed(&devices_state).await;
+            crate::own_key::hear_from_the_other(&devices_state).await;
             let wait = match devices_round(&devices_state, &devices_app, full).await {
                 DevicesRound::StoodDown => break,
                 DevicesRound::Done => {
@@ -2495,7 +2518,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
 /// From here this device signs beside the identity key at sign-in, and
 /// makes itself known to the identity's account (repeating is harmless;
 /// offline it is tried again at the next unlock).
-fn this_device_comes_online(conductor_seed: Option<[u8; 32]>, state: &Arc<AppState>) {
+pub(crate) fn this_device_comes_online(conductor_seed: Option<[u8; 32]>, state: &Arc<AppState>) {
     crate::device_registry::set_device_signer(conductor_seed);
     {
         let registry_state = state.clone();
@@ -2968,6 +2991,7 @@ fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, 
     }
     note("kept records", std::fs::remove_file(crate::sealed::held_records_path(root, crate::hc::Line::V06)));
     note("kept records (0.7)", std::fs::remove_file(crate::sealed::held_records_path(root, crate::hc::Line::V07)));
+    note("records being carried", std::fs::remove_file(crate::own_key::carry_path(root)));
     for dir in [
         crate::paths::lair_dir(root),
         crate::paths::conductor_dir(root),
@@ -2981,7 +3005,7 @@ fn remove_identity_files(root: &std::path::Path, device_root: &std::path::Path, 
     if let Ok(rd) = std::fs::read_dir(root) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if crate::paths::is_lair_leftover_name(&name) && e.path().is_dir() {
+            if (crate::paths::is_lair_leftover_name(&name) || name.contains(crate::own_key::SET_ASIDE_MARK)) && e.path().is_dir() {
                 note(&name, remove_tree(&e.path()));
             } else if name.contains(".corrupt-") && e.path().is_file() {
                 note(&name, std::fs::remove_file(e.path()));
@@ -7270,6 +7294,18 @@ pub(crate) async fn get_my_linked_signatures_inner(
     if crate::hc::line_ports(state, crate::hc::Line::V06).is_err() {
         let devices = other_device_keys(state).await;
         let mut keys = devices.clone().unwrap_or_default();
+        // And the identity's own key, when this device runs a key of its
+        // own: what the identity signed under it (its first device, or two
+        // installs that shared it and each took a key of their own since)
+        // is listed whether or not a device still runs as it. Until 11-13
+        // it was asked only as some device's key, so an identity with no
+        // device left on it listed none of those signatures.
+        // (Only once the devices are read: "not read yet" below still asks again.)
+        if let (true, Some(identity), Some(own)) = (devices.is_ok(), identity_agent_key(state), own_conductor_key(state)) {
+            if identity.get_raw_32() != own.get_raw_32() && !keys.iter().any(|k| k.get_raw_32() == identity.get_raw_32()) {
+                keys.push(identity);
+            }
+        }
         if let Some(cached) = state.linked_web_agent_key.lock().unwrap().clone() {
             match base64_standard_decode(&cached) {
                 Ok(raw) if raw.len() == 39 => {

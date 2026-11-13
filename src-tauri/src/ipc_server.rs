@@ -465,7 +465,7 @@ async fn status_handler(
     Json(StatusResponse {
         unlocked,
         active_identity,
-        syncing_while_locked: may_see_identity.then(|| crate::commands::syncing_while_locked(&state.app_state)),
+        syncing_while_locked: may_see_identity.then(|| crate::commands::apps_sync_while_locked(&state.app_state)),
         instance_id: state.instance_id.clone(),
         identity_epoch: crate::paths::read_identity_epoch(&state.app_state.data_dir),
         claims: {
@@ -2219,6 +2219,17 @@ async fn backup_limits_handler(
     }))
 }
 
+/// 403 `vault_locked` from a route that also answers while a locked Vault
+/// still syncs (`/devices`, `/backup/list`). `syncing` says which locked it
+/// is: false = syncing was stopped (or never kept), so an app need not wait
+/// for a copy. A Vault before 1.8.0 sends no `syncing` at all.
+fn locked_answer(syncing: bool) -> axum::response::Response {
+    axum::response::IntoResponse::into_response((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({ "error": "vault_locked", "description": "Vault is locked.", "syncing": syncing })),
+    ))
+}
+
 /// GET /devices - the identity's devices for a linked app: each one's name,
 /// platform and network generation, whether it is this device, and when this
 /// Vault last heard from it directly (`heard_at`, seconds; a device heard in
@@ -2244,10 +2255,7 @@ async fn devices_handler(
         // does not give the same app.
         let kept = crate::commands::syncing_while_locked(&state.app_state).then(|| crate::devices::kept_list(&state.app_state.identity_root())).flatten();
         let Some((records, as_of)) = kept else {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(IpcError { error: "vault_locked".into(), description: Some("Vault is locked.".into()) }),
-            ));
+            return Ok(locked_answer(crate::commands::apps_sync_while_locked(&state.app_state)));
         };
         let devices: Vec<serde_json::Value> = records
             .iter()
@@ -2336,13 +2344,7 @@ async fn backup_list_handler(
     // between the person's devices while locked.
     let locked = state.app_state.vault_config.lock().unwrap().is_none();
     if locked && !crate::commands::syncing_while_locked(&state.app_state) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(IpcError {
-                error: "vault_locked".into(),
-                description: Some("Vault is locked.".into()),
-            }),
-        ));
+        return Ok(locked_answer(false));
     }
 
     // Get all stats then filter to only the caller's app.
@@ -4664,6 +4666,40 @@ async fn dev_sealed_handler(
     }))))
 }
 
+/// Dev-only: the apps of the 0.7 line, each with its agent key and its
+/// cells' source chains (seq, action hash, action type).
+async fn chains_07(state: &Arc<AppState>) -> Result<Vec<serde_json::Value>, String> {
+    use holochain_client_07::{AdminWebsocket, CellInfo};
+    let (admin_port, _) = crate::hc::line_ports(state, flowsta_hc_lines::Line::V07)?;
+    let admin = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+        .await
+        .map_err(|e| format!("0.7 admin: {}", e))?;
+    let apps = admin.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
+    let mut out = Vec::new();
+    for app in &apps {
+        let mut cells = Vec::new();
+        for cell in app.cell_info.values().flat_map(|c| c.iter()) {
+            let CellInfo::Provisioned(p) = cell else { continue };
+            let actions: Vec<serde_json::Value> = match admin.dump_full_state(p.cell_id.clone(), None, None).await {
+                Ok(dump) => {
+                    let mut rows: Vec<(u32, String, String)> = dump
+                        .source_chain_dump
+                        .records
+                        .iter()
+                        .map(|r| (r.action.action_seq(), r.action_address.to_string(), format!("{:?}", r.action.action_type())))
+                        .collect();
+                    rows.sort();
+                    rows.into_iter().map(|(seq, hash, kind)| serde_json::json!({ "seq": seq, "hash": hash, "type": kind })).collect()
+                }
+                Err(e) => vec![serde_json::json!({ "error": e.to_string() })],
+            };
+            cells.push(serde_json::json!({ "dna": p.cell_id.dna_hash().to_string(), "agent": p.cell_id.agent_pubkey().to_string(), "actions": actions }));
+        }
+        out.push(serde_json::json!({ "app": app.installed_app_id, "status": format!("{:?}", app.status), "agent": app.agent_pub_key.to_string(), "cells": cells }));
+    }
+    Ok(out)
+}
+
 /// Dev-only: the multi-device commands, run headlessly so the harness can
 /// drive two instances: add a device with a code, list and remove devices,
 /// lock with or without syncing, write a test record.
@@ -4810,6 +4846,30 @@ async fn dev_devices_handler(
                 Err(e) => Err(e),
             }
         }
+        // Another install running as the identity's key: what the keeper has
+        // seen, the notice shown without waiting for it, and the button.
+        "same-key" => {
+            if let Some(seen) = body.get("force").and_then(|v| v.as_bool()) {
+                crate::own_key::force_seen_for_test(seen);
+            }
+            if let Some(told) = body.get("told").and_then(|v| v.as_bool()) {
+                crate::own_key::force_told_for_test(&app.identity_root(), told);
+            }
+            let rounds: Vec<serde_json::Value> = [crate::hc::Line::V06, crate::hc::Line::V07]
+                .into_iter()
+                .filter_map(|line| crate::conductor::supervisor().last_round(line).map(|s| serde_json::json!({ "line": line.to_string(), "same_key_elsewhere": s.round.same_key_elsewhere, "reached": s.round.reached })))
+                .collect();
+            Ok(serde_json::json!({ "status": crate::own_key::same_key_now(app), "rounds": rounds }))
+        }
+        // The v1.5 -> v1.6 pass, held by VAULT_TEST_HOLD_V16, runs from now.
+        "v16-release" => {
+            crate::signing_v16::release_test_hold();
+            crate::signing_v16::schedule(app.clone());
+            Ok(serde_json::json!({ "released": true, "switched": crate::signing_v16::switched(&app.identity_root()) }))
+        }
+        "own-key" => crate::own_key::give_own_key_inner(&api_url, body.get("phrase").and_then(|v| v.as_str()).map(String::from), &state.app_handle, app)
+            .await
+            .map(|carried| serde_json::json!({ "carried": carried })),
         "stop-syncing" => {
             crate::commands::stop_syncing_while_locked(app);
             Ok(serde_json::json!({ "stopped": true }))
@@ -4830,6 +4890,10 @@ async fn dev_devices_handler(
                 "profile_picture": config.as_ref().and_then(|c| c.profile_picture.clone()),
             }))
         }
+        // Every app on the 0.7 line with its key and each cell's chain as this
+        // conductor holds it (seq and action hash), so two instances' chains
+        // under one key can be laid side by side.
+        "chains-07" => chains_07(app).await.map(|apps| serde_json::json!({ "apps": apps })),
         // The key of an earlier web account, as an unlock of a migrated identity leaves it.
         "earlier-web-key" => {
             *app.linked_web_agent_key.lock().unwrap() = Some(text("key"));
