@@ -1979,6 +1979,90 @@ async function askForRateLimitExemption() {
   }
 }
 
+/** Two installs of one identity whose conductors run as the SAME key: what
+ *  two Vaults set up by phrase on 1.5.0 or earlier are since both updated
+ *  (a device had no key of its own before 1.6.0, and an update gives it
+ *  none). Made here with a throwaway identity, never the fixture: instance A
+ *  creates it (a created identity runs as its phrase key); a fresh instance B
+ *  is given the same phrase through /dev/setup-legacy-vault, which asks the
+ *  API nothing. Each then holds its own 0.7 chain under the one key.
+ *  The checks say what a person needs to hold true; the lines marked "seen"
+ *  record what the two conductors did, whatever it was.
+ *  Env: VAULT_MATRIX_PORT (A), VAULT_MATRIX_RESTORE_PORT (B), both FRESH. */
+async function sameKeyLeg() {
+  console.log('\n── Two installs on one key (set up by phrase before a device had a key of its own)');
+  const a = Number(process.env.VAULT_MATRIX_PORT || 0);
+  const b = Number(process.env.VAULT_MATRIX_RESTORE_PORT || 0);
+  if (!a || !b) { record('same-key leg skipped - set VAULT_MATRIX_PORT and VAULT_MATRIX_RESTORE_PORT to two FRESH instances', false); return; }
+  const op = async (port, body) => { const r = await vaultFetch(port, '/dev/devices', { method: 'POST', body }); return r.status === 200 ? (r.data || {}) : { failed: `${r.status} ${r.data?.description || r.data?.error || ''}` }; };
+  const until = async (fn, secs, every = 5000) => { const end = Date.now() + secs * 1000; while (Date.now() < end) { try { if (await fn()) return true; } catch { /* not yet */ } await new Promise((r) => setTimeout(r, every)); } return false; };
+  const signOn = async (port, what) => {
+    PORT = port;
+    const hash = randomHash();
+    try {
+      const job = await runJob('/sign-document', signBody(hash, { comment: what }), { timeoutMs: 6 * 60 * 1000 });
+      return { hash, ok: job.final?.stage === 'done', detail: JSON.stringify(job.final || {}).slice(0, 240) };
+    } catch (e) { return { hash, ok: false, detail: String(e).slice(0, 240) }; }
+  };
+  const signaturesOn = async (port) => ((await vaultFetch(port, '/signatures')).data?.signatures || []).map((x) => x.file_hash);
+  const notesOn = async (port) => ((await op(port, { op: 'notes' })).notes || []).map((n) => n.text);
+  const chains = async (port) => Object.fromEntries(((await op(port, { op: 'chains-07' })).apps || []).map((x) => [x.app, x]));
+  /** For each 0.7 app both hold: how far each chain goes and the seqs where the two differ. */
+  const compare = (ca, cb) => Object.keys(ca).filter((id) => cb[id]).map((id) => {
+    const rows = (x) => Object.fromEntries((x.cells?.[0]?.actions || []).filter((r) => r.hash).map((r) => [r.seq, r.hash]));
+    const [ra, rb] = [rows(ca[id]), rows(cb[id])];
+    const seqs = [...new Set([...Object.keys(ra), ...Object.keys(rb)])].map(Number).sort((x, y) => x - y);
+    const differ = seqs.filter((q) => ra[q] && rb[q] && ra[q] !== rb[q]);
+    return { app: id.replace(/@.*$/, ''), same_agent: ca[id].agent === cb[id].agent, a_len: Object.keys(ra).length, b_len: Object.keys(rb).length, differ_from_seq: differ.length ? differ[0] : null, differing: differ.length };
+  });
+
+  // A: created here. A created identity's conductor runs as its phrase key.
+  const [pwA, pwB] = [`Matrix-same-A-${randomHash().slice(0, 10)}!`, `Matrix-same-B-${randomHash().slice(0, 10)}!`];
+  const created = await vaultFetch(a, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password: pwA, email: `same-key-${Date.now()}@example.com`, display_name: 'Same key' } });
+  const phrase = created.data?.phrase || '';
+  record('A: creates a throwaway identity', created.status === 200 && phrase.split(/\s+/).length === 24, `${created.status} ${created.data?.error || ''}`);
+  if (phrase.split(/\s+/).length !== 24) return;
+  record('A: conductor and cells ready', (await waitConductorReady(a, 240)) && (await waitCellsReady(a, 300)) >= 0);
+  const stA = await op(a, { op: 'status' });
+  record('A: its conductor runs as the identity\'s phrase key (no key of its own)', stA.own_conductor_key === false, JSON.stringify({ own: stA.own_conductor_key, agent: stA.agent_pub_key }));
+  const signA1 = await signOn(a, 'A, alone');
+  record('A: signs a file while it is the only install', signA1.ok, signA1.detail);
+  const wroteA1 = await op(a, { op: 'write', text: 'from A, alone' });
+  record('A: writes a private record', !!wroteA1.action_hash, JSON.stringify(wroteA1).slice(0, 200));
+  await new Promise((r) => setTimeout(r, 20_000));
+
+  // B: the same phrase, as a Vault set up before 1.6.0 holds it.
+  const legacy = await vaultFetch(b, '/dev/setup-legacy-vault', { method: 'POST', body: { phrase, password: pwB, keep_device_hosted: true } });
+  record('B: a second install from the same phrase', legacy.status === 200, `${legacy.status} ${legacy.data?.error || ''} ${legacy.data?.description || ''}`);
+  if (legacy.status !== 200) return;
+  record('B: conductor and cells ready', (await waitConductorReady(b, 300)) && (await waitCellsReady(b, 300)) >= 0);
+  const stB = await op(b, { op: 'status' });
+  record('B: runs as the same key, with none of its own', stB.own_conductor_key === false && !!stB.agent_pub_key && stB.agent_pub_key === stA.agent_pub_key, JSON.stringify({ own: stB.own_conductor_key, a: stA.agent_pub_key, b: stB.agent_pub_key }));
+  const before = compare(await chains(a), await chains(b));
+  console.log(`  seen, as B came up: ${JSON.stringify(before)}`);
+  record('seen: both conductors hold a chain for each 0.7 app under the one key', before.length > 0 && before.every((x) => x.same_agent && x.a_len > 0 && x.b_len > 0), JSON.stringify(before));
+
+  // What a person with two such computers needs to hold true.
+  const signB = await signOn(b, 'B, the second install');
+  record('B: signs a file', signB.ok, signB.detail);
+  const wroteB = await op(b, { op: 'write', text: 'from B, the second install' });
+  record('B: writes a private record', !!wroteB.action_hash, JSON.stringify(wroteB).slice(0, 200));
+  // (No third signature: a free identity has two a period, and A and B
+  // share one identity.)
+  const wroteA2 = await op(a, { op: 'write', text: 'from A, with B up' });
+  record('A: still writes a private record with B up', !!wroteA2.action_hash, JSON.stringify(wroteA2).slice(0, 200));
+  record("B: lists the signature A made before B existed", await until(async () => (await signaturesOn(b)).includes(signA1.hash), 360));
+  record("A: lists B's signature", await until(async () => (await signaturesOn(a)).includes(signB.hash), 360));
+  record("B: holds A's private records", await until(async () => { const n = await notesOn(b); return n.includes('from A, alone') && n.includes('from A, with B up'); }, 360), JSON.stringify(await notesOn(b)));
+  record("A: holds B's private record", await until(async () => (await notesOn(a)).includes('from B, the second install'), 360), JSON.stringify(await notesOn(a)));
+
+  const after = compare(await chains(a), await chains(b));
+  console.log(`  seen, at the end: ${JSON.stringify(after)}`);
+  record('seen: no 0.7 app has two different actions at one seq under the key (no fork)', after.every((x) => x.differing === 0), JSON.stringify(after));
+  const full = { a: await chains(a), b: await chains(b) };
+  if (process.env.VAULT_MATRIX_SAME_KEY_OUT) (await import('node:fs')).writeFileSync(process.env.VAULT_MATRIX_SAME_KEY_OUT, JSON.stringify(full, null, 1));
+}
+
 /** Web-era signatures on a 0.7-only session: a migrated identity (its phrase
  *  in VAULT_MATRIX_WEBERA_PHRASE_FILE, default ~/.config/flowsta/staging-webera-phrase)
  *  restored on a FRESH instance; the Overview's counts must come from the
@@ -2310,6 +2394,13 @@ async function signingV16Leg(stage) {
     await signingV16Leg(PHASE);
     const passedV = results.filter((r) => r.ok).length;
     console.log(`\nRESULT: ${passedV}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
+    process.exit(failures ? 1 : 0);
+  }
+  if (PHASE === 'same-key') {
+    await sameKeyLeg();
+    const passedK = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedK}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
     if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
     process.exit(failures ? 1 : 0);
   }

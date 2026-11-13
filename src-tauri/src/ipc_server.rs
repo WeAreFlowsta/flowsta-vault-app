@@ -4664,6 +4664,40 @@ async fn dev_sealed_handler(
     }))))
 }
 
+/// Dev-only: the apps of the 0.7 line, each with its agent key and its
+/// cells' source chains (seq, action hash, action type).
+async fn chains_07(state: &Arc<AppState>) -> Result<Vec<serde_json::Value>, String> {
+    use holochain_client_07::{AdminWebsocket, CellInfo};
+    let (admin_port, _) = crate::hc::line_ports(state, flowsta_hc_lines::Line::V07)?;
+    let admin = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+        .await
+        .map_err(|e| format!("0.7 admin: {}", e))?;
+    let apps = admin.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
+    let mut out = Vec::new();
+    for app in &apps {
+        let mut cells = Vec::new();
+        for cell in app.cell_info.values().flat_map(|c| c.iter()) {
+            let CellInfo::Provisioned(p) = cell else { continue };
+            let actions: Vec<serde_json::Value> = match admin.dump_full_state(p.cell_id.clone(), None, None).await {
+                Ok(dump) => {
+                    let mut rows: Vec<(u32, String, String)> = dump
+                        .source_chain_dump
+                        .records
+                        .iter()
+                        .map(|r| (r.action.action_seq(), r.action_address.to_string(), format!("{:?}", r.action.action_type())))
+                        .collect();
+                    rows.sort();
+                    rows.into_iter().map(|(seq, hash, kind)| serde_json::json!({ "seq": seq, "hash": hash, "type": kind })).collect()
+                }
+                Err(e) => vec![serde_json::json!({ "error": e.to_string() })],
+            };
+            cells.push(serde_json::json!({ "dna": p.cell_id.dna_hash().to_string(), "agent": p.cell_id.agent_pubkey().to_string(), "actions": actions }));
+        }
+        out.push(serde_json::json!({ "app": app.installed_app_id, "status": format!("{:?}", app.status), "agent": app.agent_pub_key.to_string(), "cells": cells }));
+    }
+    Ok(out)
+}
+
 /// Dev-only: the multi-device commands, run headlessly so the harness can
 /// drive two instances: add a device with a code, list and remove devices,
 /// lock with or without syncing, write a test record.
@@ -4830,6 +4864,10 @@ async fn dev_devices_handler(
                 "profile_picture": config.as_ref().and_then(|c| c.profile_picture.clone()),
             }))
         }
+        // Every app on the 0.7 line with its key and each cell's chain as this
+        // conductor holds it (seq and action hash), so two instances' chains
+        // under one key can be laid side by side.
+        "chains-07" => chains_07(app).await.map(|apps| serde_json::json!({ "apps": apps })),
         // The key of an earlier web account, as an unlock of a migrated identity leaves it.
         "earlier-web-key" => {
             *app.linked_web_agent_key.lock().unwrap() = Some(text("key"));
