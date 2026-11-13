@@ -316,11 +316,16 @@ pub(crate) async fn client(state: &Arc<AppState>) -> Result<(AppClient, String),
 }
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
+/// A test lets go of `VAULT_TEST_HOLD_V16` without restarting the instance.
+static HOLD_RELEASED: AtomicBool = AtomicBool::new(false);
+pub(crate) fn release_test_hold() {
+    HOLD_RELEASED.store(true, Ordering::SeqCst);
+}
 
 /// A pass in the background unless one is running or the move is done.
 pub(crate) fn schedule(state: Arc<AppState>) {
     // The matrix holds the pass to write on v1.5 first (debug builds only).
-    if cfg!(debug_assertions) && std::env::var_os("VAULT_TEST_HOLD_V16").is_some() {
+    if cfg!(debug_assertions) && std::env::var_os("VAULT_TEST_HOLD_V16").is_some() && !HOLD_RELEASED.load(Ordering::SeqCst) {
         return;
     }
     if switched(&state.identity_root()) || RUNNING.swap(true, Ordering::SeqCst) {

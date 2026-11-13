@@ -35,6 +35,8 @@ done
 echo "== set aside (kept, never deleted)"
 for s in hc-k hc-l; do ls -d "$HOME/.local/share/flowsta-vault-$s"/identities/*/conductor*-as-identity-key-* 2>/dev/null | sed "s|$HOME/.local/share/||"; done
 grep -h "\[own key\]\|another install is running" "$LOGS"/hc-k/app.log "$LOGS"/hc-l/app.log 2>/dev/null | cut -c1-300
+echo "== FOREIGN KEY errors per 5 minutes, each 0.7 conductor log"
+for s in hc-k hc-l; do for f in "$LOGS/$s"/*07*holochain-stderr.log; do [ -f "$f" ] && echo "   $s $(basename "$f"): $(sed -E 's/\x1b\[[0-9;]*m//g' "$f" | grep "FOREIGN KEY" | grep -oE "T[0-9]{2}:[0-9]" | sort | uniq -c | awk '{printf "%s0=%s ", $2, $1}')"; done; done
 echo "== what the logs say"
 for s in hc-k hc-l; do
   for what in "head has moved" "FOREIGN KEY" "HeadMoved" "ChainHeadMoved" "fork" "Fork" "warrant" "Warrant" "InvalidChain"; do

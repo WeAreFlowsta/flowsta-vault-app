@@ -2084,7 +2084,12 @@ async function sameKeyLeg() {
   const stY = await op(y, { op: 'status' });
   record(`${ny}: is as it was`, stY.own_conductor_key === false && stY.agent_pub_key === stA.agent_pub_key, JSON.stringify({ own: stY.own_conductor_key }));
   record(`${nx}: holds the private records it wrote before (carried)`, await until(async () => { const n = await notesOn(x); return mine.every((t) => n.includes(t)); }, 420), JSON.stringify(await notesOn(x)));
-  record(`${nx}: nothing is left to carry`, await until(async () => (await sameKey(x)).status?.carrying === false, 300), JSON.stringify(await sameKey(x)));
+  // Instances held on signing v1.5 (VAULT_TEST_HOLD_V16) move to v1.6 now, as
+  // an updated Vault does by itself: the copies are read from there.
+  await op(x, { op: 'v16-release' });
+  // The first carry waits for the new conductor's first network reads (minutes, cold).
+  const t2 = Date.now();
+  record(`${nx}: nothing is left to carry`, await until(async () => (await sameKey(x)).status?.carrying === false, 900), `${Math.round((Date.now() - t2) / 1000)} s; ${JSON.stringify((await sameKey(x)).status)}`);
   record(`${nx}: holds ${ny}'s private records`, await until(async () => { const n = await notesOn(x); return theirs.every((t) => n.includes(t)); }, 900), JSON.stringify(await notesOn(x)));
   record(`${ny}: holds ${nx}'s private records`, await until(async () => { const n = await notesOn(y); return mine.every((t) => n.includes(t)); }, 900), JSON.stringify(await notesOn(y)));
   // And from here on, both ways.
@@ -2098,6 +2103,21 @@ async function sameKeyLeg() {
   // instances sign there, as every Vault before 1.8.0 did). One signed on
   // v1.6 itself under the shared key cannot be a copy (board V11).
   record(`${nx}: still lists both signatures`, await until(async () => { const l = await signaturesOn(x); return l.includes(signA1.hash) && l.includes(signB.hash); }, 420), JSON.stringify(await signaturesOn(x)));
+  // The install left as it is still holds what the shared key left in its
+  // conductor (its publish workflow fails with FOREIGN KEY after a restart,
+  // seen 11-13). Restart it, then both ways again.
+  const relock = await vaultFetch(y, '/dev/lock', { method: 'POST', body: {} });
+  await new Promise((r) => setTimeout(r, 8_000));
+  const reopen = await vaultFetch(y, '/dev/unlock', { method: 'POST', body: {} });
+  record(`${ny}: locked and unlocked (its conductor restarts)`, relock.status === 200 && reopen.status === 200, `${relock.status} ${reopen.status} ${JSON.stringify(reopen.data || {}).slice(0, 120)}`);
+  record(`${ny}: conductor and cells ready again`, (await waitConductorReady(y, 300)) && (await waitCellsReady(y, 300)) >= 0);
+  await new Promise((r) => setTimeout(r, 120_000));
+  const lateY = await op(y, { op: 'write', text: `from ${ny}, after its restart` });
+  const lateX = await op(x, { op: 'write', text: `from ${nx}, after ${ny}'s restart` });
+  record('both write a private record after that restart', !!lateY.action_hash && !!lateX.action_hash, JSON.stringify({ y: lateY, x: lateX }).slice(0, 240));
+  const t3 = Date.now();
+  record(`${nx}: holds what ${ny} wrote after its restart`, await until(async () => (await notesOn(x)).includes(`from ${ny}, after its restart`), 900), `${Math.round((Date.now() - t3) / 1000)} s`);
+  record(`${ny}: holds what ${nx} wrote after that restart`, await until(async () => (await notesOn(y)).includes(`from ${nx}, after ${ny}'s restart`), 900), `${Math.round((Date.now() - t3) / 1000)} s`);
   record(`${nx}: no longer says another install runs as its key`, (await sameKey(x)).status?.elsewhere === false, JSON.stringify(await sameKey(x)));
   const full = { a: await chains(a), b: await chains(b) };
   if (process.env.VAULT_MATRIX_SAME_KEY_OUT) (await import('node:fs')).writeFileSync(process.env.VAULT_MATRIX_SAME_KEY_OUT, JSON.stringify(full, null, 1));

@@ -4858,6 +4858,12 @@ async fn dev_devices_handler(
                 .collect();
             Ok(serde_json::json!({ "status": crate::own_key::same_key_now(app), "rounds": rounds }))
         }
+        // The v1.5 -> v1.6 pass, held by VAULT_TEST_HOLD_V16, runs from now.
+        "v16-release" => {
+            crate::signing_v16::release_test_hold();
+            crate::signing_v16::schedule(app.clone());
+            Ok(serde_json::json!({ "released": true, "switched": crate::signing_v16::switched(&app.identity_root()) }))
+        }
         "own-key" => crate::own_key::give_own_key_inner(&api_url, body.get("phrase").and_then(|v| v.as_str()).map(String::from), &state.app_handle, app)
             .await
             .map(|carried| serde_json::json!({ "carried": carried })),
