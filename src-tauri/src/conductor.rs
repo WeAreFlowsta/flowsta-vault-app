@@ -223,6 +223,7 @@ impl BootstrapTarget {
             bootstrap_url: self.bootstrap_url.clone(),
             signal_url: Some(self.signal_url.clone()),
             auth_material: self.auth_material.clone(),
+            relay_url: None,
         }
     }
 
