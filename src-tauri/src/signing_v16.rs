@@ -613,16 +613,163 @@ pub(crate) struct KeptReport {
     pub already: usize,
     pub waiting: usize,
     pub failed: usize,
-    /// Records signed on v1.6 itself by the key the install ran as: the DNA
-    /// carries only v1.4 and v1.5 originals, so these cannot be copies.
-    pub native_v16: usize,
+    /// Records signed on v1.6 itself by the key the install ran as. The DNA
+    /// carries only v1.4 and v1.5 originals, so these cannot be copies: the
+    /// device signs the file again with its own key, the stated time, tags
+    /// and note kept (Eric, 2026-11-13), and writes its revocation or
+    /// thumbnail on the new record.
+    pub signed_again: usize,
+    /// A v1.6 revocation of a signature that is a copy here: only the
+    /// signature's signer may revoke it, and this device is its witness.
+    pub unplaceable: usize,
 }
 
 impl KeptReport {
-    /// Everything that can be a copy is one.
+    /// Nothing kept is still owed: the kept records may go.
     pub(crate) fn settled(&self) -> bool {
-        self.waiting == 0 && self.failed == 0
+        self.waiting == 0 && self.failed == 0 && self.unplaceable == 0
     }
+}
+
+/// A native signature's entry with another signer and signature: every other
+/// field byte for byte (the file hash, the stated time, the tags, the note).
+fn entry_signed_by(entry: &[u8], signer: &AgentPubKey, signature: &[u8]) -> Result<Vec<u8>, String> {
+    let (_, header, pairs) = map_pairs(entry)?;
+    let mut out = entry[..header].to_vec();
+    let (mut put_signer, mut put_signature) = (false, false);
+    for (key, value, end) in pairs {
+        out.extend_from_slice(&entry[key..value]);
+        if key_is(entry, key, value, "signer") {
+            out.extend_from_slice(&mp(signer)?);
+            put_signer = true;
+        } else if key_is(entry, key, value, "signature") {
+            out.extend_from_slice(&mp(&signature.to_vec())?);
+            put_signature = true;
+        } else {
+            out.extend_from_slice(&entry[value..end]);
+        }
+    }
+    if !(put_signer && put_signature) {
+        return Err("the record has no signer or no signature".into());
+    }
+    Ok(out)
+}
+
+#[derive(serde::Deserialize)]
+struct SignedWhat {
+    file_hash: Vec<u8>,
+    signed_at: i64,
+}
+
+/// The records signed on v1.6 itself under the key the install ran as,
+/// written again by this device: each signature signed with its own key
+/// (found again by file and stated time, so a repeat signs nothing twice),
+/// then the revocations and each signature's latest thumbnail on the new
+/// records.
+async fn sign_kept_natives_again(state: &Arc<AppState>, kept: &[ChainRecord], report: &mut KeptReport) -> Result<(), String> {
+    let natives = native_on_v16(kept);
+    if natives.is_empty() {
+        return Ok(());
+    }
+    let seed = state.vault_config.lock().unwrap().as_ref().and_then(|c| c.conductor_seed_bytes()).ok_or("vault_locked")?;
+    let me = AgentPubKey::from_raw_32(crate::key_derivation::public_key_of_seed(&seed).to_vec());
+    let (c16, r16) = client(state).await?;
+    let here = chain_of(state, &app_id(), "1.6").await?;
+    let what = |entry: &[u8]| rmp_serde::from_slice::<SignedWhat>(entry).ok().map(|w| (w.file_hash, w.signed_at));
+    let mut mine: std::collections::HashMap<(Vec<u8>, i64), Vec<u8>> =
+        here.iter().filter(|r| r.kind == SIGNATURE_ENTRY && !r.carried()).filter_map(|r| what(&r.entry).map(|w| (w, r.hash.clone()))).collect();
+    // The old cell's hash of a signature -> its record here.
+    let mut now: std::collections::HashMap<Vec<u8>, Vec<u8>> = std::collections::HashMap::new();
+    for r in natives.iter().filter(|r| r.kind == SIGNATURE_ENTRY) {
+        let Some(w) = what(&r.entry) else { report.failed += 1; continue };
+        if let Some(hash) = mine.get(&w) {
+            now.insert(r.hash.clone(), hash.clone());
+            report.already += 1;
+            continue;
+        }
+        let signature = crate::key_derivation::sign_with_device_seed(&seed, &w.0);
+        let payload = entry_signed_by(&r.entry, &me, &signature[..])?;
+        match c16.call(&r16, "signing", "create_signature", payload).await.map_err(String::from) {
+            Ok(result) => {
+                let h: ActionHash = rmp_serde::from_slice(&result).map_err(|e| format!("create_signature decode: {}", e))?;
+                mine.insert(w, h.get_raw_39().to_vec());
+                now.insert(r.hash.clone(), h.get_raw_39().to_vec());
+                report.signed_again += 1;
+            }
+            Err(e) => {
+                report.failed += 1;
+                log::info!("[signing 1.6] a kept signature not signed again: {}", e);
+            }
+        }
+    }
+    // Copies the old cell held: where each is here.
+    let mut copy_here: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> = std::collections::HashMap::new();
+    for r in kept.iter().filter(|r| r.cell == "1.6" && r.kind == SIGNATURE_ENTRY) {
+        if let Ok(Some(o)) = r.original_in_v16_copy() {
+            copy_here.insert(r.hash.clone(), crate::signing_07::carried(&c16, &r16, o.action_hash.get_raw_39()).await?);
+        }
+    }
+    let names_here = |kind: u8, target: &[u8]| here.iter().filter(|r| r.kind == kind && !r.carried()).any(|r| names(&r.entry).as_deref() == Some(target));
+    #[derive(serde::Deserialize)]
+    struct Revoked {
+        reason: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Thumb {
+        thumbnail: String,
+    }
+    #[derive(Serialize)]
+    struct Revoke {
+        signature_action: ActionHash,
+        reason: Option<String>,
+    }
+    #[derive(Serialize)]
+    struct SetThumb {
+        signature_action: ActionHash,
+        thumbnail: String,
+    }
+    let mut latest_thumb: std::collections::HashMap<Vec<u8>, &ChainRecord> = std::collections::HashMap::new();
+    for r in natives.iter().filter(|r| r.kind == THUMBNAIL_ENTRY) {
+        let Some(sig) = names(&r.entry) else { continue };
+        if latest_thumb.get(&sig).map(|t| t.timestamp < r.timestamp).unwrap_or(true) {
+            latest_thumb.insert(sig, r);
+        }
+    }
+    for r in natives.iter().filter(|r| r.kind == REVOCATION_ENTRY).copied().chain(latest_thumb.values().copied()) {
+        let Some(named) = names(&r.entry) else { report.failed += 1; continue };
+        let (target, is_copy) = match (now.get(&named), copy_here.get(&named)) {
+            (Some(new), _) => (new.clone(), false),
+            (None, Some(Some(copy))) => (copy.clone(), true),
+            // Its signature's copy is not here yet.
+            (None, Some(None)) => { report.waiting += 1; continue }
+            (None, None) => { report.failed += 1; continue }
+        };
+        if r.kind == REVOCATION_ENTRY && is_copy {
+            report.unplaceable += 1;
+            log::warn!("[signing 1.6] a revocation made under the shared key names a signature this device may not revoke (it is its witness, not its signer): kept, not written");
+            continue;
+        }
+        if names_here(r.kind, &target) {
+            report.already += 1;
+            continue;
+        }
+        let call = if r.kind == REVOCATION_ENTRY {
+            let Ok(f) = rmp_serde::from_slice::<Revoked>(&r.entry) else { report.failed += 1; continue };
+            c16.call(&r16, "signing", "revoke_signature", mp(&Revoke { signature_action: ActionHash::from_raw_39(target), reason: f.reason })?).await.map_err(String::from)
+        } else {
+            let Ok(f) = rmp_serde::from_slice::<Thumb>(&r.entry) else { report.failed += 1; continue };
+            c16.call(&r16, "signing", "set_thumbnail", mp(&SetThumb { signature_action: ActionHash::from_raw_39(target), thumbnail: f.thumbnail })?).await.map_err(String::from)
+        };
+        match call {
+            Ok(_) => report.signed_again += 1,
+            Err(e) if network_wait(&e) => report.waiting += 1,
+            Err(e) => {
+                report.failed += 1;
+                log::info!("[signing 1.6] a kept revocation or thumbnail not written again: {}", e);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Which kept v1.6 records are signed on v1.6 itself (no original inside).
@@ -637,7 +784,7 @@ pub(crate) fn native_on_v16(kept: &[ChainRecord]) -> Vec<&ChainRecord> {
 pub(crate) async fn carry_kept(state: &Arc<AppState>, kept: &[ChainRecord]) -> Result<KeptReport, String> {
     let on_v15: Vec<ChainRecord> = kept.iter().filter(|r| r.cell == "1.5").cloned().collect();
     let first = carry_mine(state, &mine_of(&on_v15)?).await?;
-    let mut report = KeptReport { carried: first.carried, already: first.already, waiting: first.waiting, failed: first.failed, native_v16: native_on_v16(kept).len() };
+    let mut report = KeptReport { carried: first.carried, already: first.already, waiting: first.waiting, failed: first.failed, ..Default::default() };
     let (c16, r16) = client(state).await?;
     let copies: Vec<(&ChainRecord, Original)> = kept
         .iter()
@@ -670,7 +817,7 @@ pub(crate) async fn carry_kept(state: &Arc<AppState>, kept: &[ChainRecord]) -> R
                 None => None,
             };
             let Some(here) = here else {
-                // Its signature is native on v1.6, or waits for a later round.
+                // Its signature waits for a later round.
                 report.waiting += 1;
                 continue;
             };
@@ -688,11 +835,32 @@ pub(crate) async fn carry_kept(state: &Arc<AppState>, kept: &[ChainRecord]) -> R
             }
         }
     }
+    sign_kept_natives_again(state, kept, &mut report).await?;
     Ok(report)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_signature_signed_again_keeps_every_other_field() {
+        use super::*;
+        #[derive(Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct Rec {
+            file_hash: Vec<u8>,
+            signature: Vec<u8>,
+            signer: AgentPubKey,
+            signed_at: i64,
+            tags: Option<Vec<String>>,
+            comment: Option<String>,
+            carried_from: Option<u8>,
+        }
+        let old = Rec { file_hash: vec![7; 32], signature: vec![1; 64], signer: AgentPubKey::from_raw_32(vec![2; 32]), signed_at: 1_790_000_000_000, tags: Some(vec!["a".into()]), comment: Some("note".into()), carried_from: None };
+        let device = AgentPubKey::from_raw_32(vec![9; 32]);
+        let again: Rec = rmp_serde::from_slice(&entry_signed_by(&mp(&old).unwrap(), &device, &[5u8; 64]).unwrap()).unwrap();
+        assert_eq!(again, Rec { signature: vec![5; 64], signer: device.clone(), ..old });
+        assert!(entry_signed_by(&mp(&(1u8, 2u8)).unwrap(), &device, &[5u8; 64]).is_err(), "not a record");
+    }
+
     use super::*;
 
     /// A map with a nested value, a binary hash and a trailing field: the

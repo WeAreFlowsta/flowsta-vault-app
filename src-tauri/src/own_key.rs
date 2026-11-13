@@ -378,11 +378,11 @@ pub(crate) async fn carry_in_if_owed(state: &Arc<AppState>) {
     match done {
         Ok(((stored, skipped), signing)) => {
             log::info!(
-                "[own key] private records: {} carried in, {} already here as new or newer; signing records: {} carried, {} already here, {} for the next round, {} failed, {} signed on 1.6 under the old key",
-                stored, skipped, signing.carried, signing.already, signing.waiting, signing.failed, signing.native_v16
+                "[own key] private records: {} carried in, {} already here as new or newer; signing records: {} carried as copies, {} signed again by this device, {} already here, {} for the next round, {} failed, {} kept that this device may not write",
+                stored, skipped, signing.carried, signing.signed_again, signing.already, signing.waiting, signing.failed, signing.unplaceable
             );
-            // The file stays while a signing record is still owed.
-            if !signing.settled() || signing.native_v16 > 0 {
+            // The file (and the folders set aside) stay while a signing record is still owed.
+            if !signing.settled() {
                 return;
             }
             // Only for the identity it was read for.
