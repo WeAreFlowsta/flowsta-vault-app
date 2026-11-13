@@ -2025,6 +2025,10 @@ async function sameKeyLeg() {
   record('A: conductor and cells ready', (await waitConductorReady(a, 240)) && (await waitCellsReady(a, 300)) >= 0);
   const stA = await op(a, { op: 'status' });
   record('A: its conductor runs as the identity\'s phrase key (no key of its own)', stA.own_conductor_key === false, JSON.stringify({ own: stA.own_conductor_key, agent: stA.agent_pub_key }));
+  // VAULT_MATRIX_SAME_KEY_V16=1: A signs only once its writes go to signing
+  // v1.6, so its signature is one the DNA cannot carry as a copy and the
+  // device signs again with its own key after the change (board V11).
+  if (process.env.VAULT_MATRIX_SAME_KEY_V16) record('A: its signing writes go to v1.6 before it signs', await until(async () => (await op(a, { op: 'v16-release' })).switched === true, 600));
   const signA1 = await signOn(a, 'A, alone');
   record('A: signs a file while it is the only install', signA1.ok, signA1.detail);
   const wroteA1 = await op(a, { op: 'write', text: 'from A, alone' });
