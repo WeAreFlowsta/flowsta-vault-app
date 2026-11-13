@@ -1320,6 +1320,14 @@ pub(crate) fn unlock_vault_inner(
 
     seed_linked_web_agent_key(state);
     log::info!("Vault unlocked.");
+    // Which key this install's conductor runs as, for anyone reading the
+    // log: every device added since 1.6.0 has a key of its own; an install
+    // set up before that, and the first device of an identity, runs as the
+    // identity's key. Two installs of one identity running as the
+    // identity's key cannot sync (each keeps its own chain under it).
+    if let Some(own) = state.vault_config.lock().unwrap().as_ref().map(|c| c.has_own_conductor_key()) {
+        log::info!("[device] this install's conductor runs as {}", if own { "a key of its own" } else { "the identity's key" });
+    }
 
     // Load MAU state from encrypted disk storage
     crate::mau::load_mau_state(&state);

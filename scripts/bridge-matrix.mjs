@@ -2080,12 +2080,17 @@ async function webEraLeg() {
   if (fresh.data?.initialized !== false) { record('web-era leg skipped - instance already holds an identity', true); return; }
   const password = `Matrix-webera-${randomHash().slice(0, 12)}!`;
   const t0 = Date.now();
-  // Two doors. `migrate` (default): the phrase of a WEB account that was never
-  // in a Vault - the phrase-first upgrade (a legacy-shaped vault from the
-  // phrase, then /dev/run-upgrade), which brings the account over with its
-  // web key and owes the web-era carry. `restore`: the phrase of an identity
-  // that already lives in a Vault - the wizard's offline restore.
-  const mode = process.env.VAULT_MATRIX_WEBERA_MODE || 'migrate';
+  // Two doors. `restore` (default): the phrase of an identity that already
+  // lives in a Vault - the wizard's offline restore, which gives this
+  // instance a key of its own. `migrate`: the phrase of a WEB account that
+  // was never in a Vault - the phrase-first upgrade (a legacy-shaped vault
+  // from the phrase, then /dev/run-upgrade), which brings the account over
+  // with its web key and owes the web-era carry. `migrate` is asked for by
+  // name and only with a phrase never used before: the legacy-shaped vault
+  // runs as the phrase's own key, and every run on a FRESH instance starts
+  // another chain under that key on the network (until 2026-11-13 this leg
+  // did so to the fixture identity on every run).
+  const mode = process.env.VAULT_MATRIX_WEBERA_MODE || 'restore';
   if (mode === 'migrate') {
     const legacy = await vaultFetch(port, '/dev/setup-legacy-vault', { method: 'POST', body: { phrase, password } });
     record('web account: a legacy-shaped vault from the phrase', legacy.status === 200, `${legacy.status} ${legacy.data?.error || ''} ${legacy.data?.description || ''}`);
