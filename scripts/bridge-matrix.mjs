@@ -2107,21 +2107,33 @@ async function sameKeyLeg() {
   // instances sign there, as every Vault before 1.8.0 did). One signed on
   // v1.6 itself under the shared key cannot be a copy (board V11).
   record(`${nx}: still lists both signatures`, await until(async () => { const l = await signaturesOn(x); return l.includes(signA1.hash) && l.includes(signB.hash); }, 420), JSON.stringify(await signaturesOn(x)));
-  // The install left as it is still holds what the shared key left in its
-  // conductor (its publish workflow fails with FOREIGN KEY after a restart,
-  // seen 11-13). Restart it, then both ways again.
-  const relock = await vaultFetch(y, '/dev/lock', { method: 'POST', body: {} });
-  await new Promise((r) => setTimeout(r, 8_000));
-  const reopen = await vaultFetch(y, '/dev/unlock', { method: 'POST', body: {} });
-  record(`${ny}: locked and unlocked (its conductor restarts)`, relock.status === 200 && reopen.status === 200, `${relock.status} ${reopen.status} ${JSON.stringify(reopen.data || {}).slice(0, 120)}`);
-  record(`${ny}: conductor and cells ready again`, (await waitConductorReady(y, 300)) && (await waitCellsReady(y, 300)) >= 0);
-  await new Promise((r) => setTimeout(r, 120_000));
-  const lateY = await op(y, { op: 'write', text: `from ${ny}, after its restart` });
-  const lateX = await op(x, { op: 'write', text: `from ${nx}, after ${ny}'s restart` });
-  record('both write a private record after that restart', !!lateY.action_hash && !!lateX.action_hash, JSON.stringify({ y: lateY, x: lateX }).slice(0, 240));
+  // The other install: left on the identity's key it keeps what two chains
+  // under one key left in its conductor (publish fails after each restart;
+  // a peer may hold a warrant against the key). The first leaves it word in
+  // a private record, and it is asked to take a key of its own too.
   const t3 = Date.now();
-  record(`${nx}: holds what ${ny} wrote after its restart`, await until(async () => (await notesOn(x)).includes(`from ${ny}, after its restart`), 900), `${Math.round((Date.now() - t3) / 1000)} s`);
-  record(`${ny}: holds what ${nx} wrote after that restart`, await until(async () => (await notesOn(y)).includes(`from ${nx}, after ${ny}'s restart`), 900), `${Math.round((Date.now() - t3) / 1000)} s`);
+  record(`${ny}: is told by ${nx} and asks for the same step`, await until(async () => { const st = (await sameKey(y)).status; return st?.elsewhere === true && st?.told_by_other === true; }, 900, 10_000), `${Math.round((Date.now() - t3) / 1000)} s; ${JSON.stringify((await sameKey(y)).status)}`);
+  const t4 = Date.now();
+  const ownY = await op(y, { op: 'own-key' });
+  record(`${ny}: is given a key of its own`, typeof ownY.carried === 'number' && ownY.carried > 0, `${JSON.stringify(ownY).slice(0, 240)} in ${Math.round((Date.now() - t4) / 1000)} s`);
+  if (typeof ownY.carried !== 'number') return;
+  record(`${ny}: conductor and cells ready under the new key`, (await waitConductorReady(y, 300)) && (await waitCellsReady(y, 300)) >= 0);
+  const [endX, endY] = [await op(x, { op: 'status' }), await op(y, { op: 'status' })];
+  record('nothing runs as the identity\'s key any more: each has a key of its own, one identity', endX.own_conductor_key === true && endY.own_conductor_key === true && endX.agent_pub_key === stA.agent_pub_key && endY.agent_pub_key === stA.agent_pub_key, JSON.stringify({ x: endX.own_conductor_key, y: endY.own_conductor_key }));
+  await op(y, { op: 'v16-release' });
+  const everything = [...mine, ...theirs, `from ${nx}, its own device now`, `from ${ny}, after ${nx} changed`];
+  const t5 = Date.now();
+  record(`${ny}: holds every private record again (its own carried, the rest from ${nx})`, await until(async () => { const n = await notesOn(y); return everything.every((t) => n.includes(t)); }, 900), `${Math.round((Date.now() - t5) / 1000)} s; ${JSON.stringify(await notesOn(y))}`);
+  record(`${ny}: nothing is left to carry`, await until(async () => (await sameKey(y)).status?.carrying === false, 900), JSON.stringify((await sameKey(y)).status));
+  const lateY = await op(y, { op: 'write', text: `from ${ny}, its own device too` });
+  const lateX = await op(x, { op: 'write', text: `from ${nx}, with both changed` });
+  record('both write a private record with both changed', !!lateY.action_hash && !!lateX.action_hash, JSON.stringify({ y: lateY, x: lateX }).slice(0, 240));
+  const t6 = Date.now();
+  record(`${nx}: holds what ${ny} wrote`, await until(async () => (await notesOn(x)).includes(`from ${ny}, its own device too`), 900), `${Math.round((Date.now() - t6) / 1000)} s`);
+  record(`${ny}: holds what ${nx} wrote`, await until(async () => (await notesOn(y)).includes(`from ${nx}, with both changed`), 900), `${Math.round((Date.now() - t6) / 1000)} s`);
+  record(`${ny}: lists both signatures`, await until(async () => { const l = await signaturesOn(y); return l.includes(signA1.hash) && l.includes(signB.hash); }, 600), JSON.stringify(await signaturesOn(y)));
+  record(`${nx}: still lists both signatures with both changed`, await until(async () => { const l = await signaturesOn(x); return l.includes(signA1.hash) && l.includes(signB.hash); }, 600), JSON.stringify(await signaturesOn(x)));
+  record('neither asks for anything more', (await sameKey(x)).status?.elsewhere === false && (await sameKey(y)).status?.elsewhere === false, JSON.stringify({ x: (await sameKey(x)).status, y: (await sameKey(y)).status }));
   record(`${nx}: no longer says another install runs as its key`, (await sameKey(x)).status?.elsewhere === false, JSON.stringify(await sameKey(x)));
   const full = { a: await chains(a), b: await chains(b) };
   if (process.env.VAULT_MATRIX_SAME_KEY_OUT) (await import('node:fs')).writeFileSync(process.env.VAULT_MATRIX_SAME_KEY_OUT, JSON.stringify(full, null, 1));

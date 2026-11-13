@@ -120,14 +120,14 @@ export default component$(() => {
   // this one does (both set up from the phrase before 1.6.0): each keeps
   // its own copy of the private data and the two do not sync. The notice
   // offers this computer a key of its own.
-  const sameKey = useSignal<{ elsewhere: boolean; carrying: boolean } | null>(null);
+  const sameKey = useSignal<{ elsewhere: boolean; carrying: boolean; told_by_other?: boolean } | null>(null);
   const ownKeyBusy = useSignal(false);
   const ownKeyNote = useSignal("");
   const ownKeyAsksPhrase = useSignal(false);
   const ownKeyPhrase = useSignal("");
   const ownKeyDone = useSignal(false);
   const checkSameKey = $(async () => {
-    sameKey.value = await invoke<{ elsewhere: boolean; carrying: boolean }>("same_key_status").catch(() => null);
+    sameKey.value = await invoke<{ elsewhere: boolean; carrying: boolean; told_by_other?: boolean }>("same_key_status").catch(() => null);
   });
   const giveOwnKey = $(async () => {
     if (ownKeyBusy.value) return;
@@ -647,12 +647,24 @@ export default component$(() => {
           identity without that record kept the card forever (Billz,
           10-27). The email is asked for below instead, once setup is done. */}
       {identity.value && (sameKey.value?.elsewhere || ownKeyBusy.value) && !ownKeyDone.value && (
-        <Callout intent="warning" title="This device and another one are not syncing" class="mb-6" testId="same-key-callout">
-          <p class="mb-3">
-            Both were set up from your recovery phrase in an older Flowsta Vault, so each keeps its own copy of your
-            private data. Set this one up to sync and the two share everything from then on. Your data is kept, and you
-            only do this on one of them.
-          </p>
+        <Callout
+          intent="warning"
+          title={sameKey.value?.told_by_other ? "One more step to keep your devices syncing" : "This device and another one are not syncing"}
+          class="mb-6"
+          testId="same-key-callout"
+        >
+          {sameKey.value?.told_by_other ? (
+            <p class="mb-3" data-testid="same-key-second">
+              Your other device was set up to sync. Do the same here and both work the same way from now on. Your
+              data is kept.
+            </p>
+          ) : (
+            <p class="mb-3">
+              Both were set up from your recovery phrase in an older Flowsta Vault, so each keeps its own copy of your
+              private data. Set this one up to sync and the two share everything from then on. Your data is kept. Your
+              other device will ask for the same.
+            </p>
+          )}
           {ownKeyAsksPhrase.value && (
             <div class="mb-3">
               <p class="mb-2">This account asks for your recovery phrase to add a device.</p>
@@ -686,13 +698,13 @@ export default component$(() => {
       {identity.value && ownKeyDone.value && (
         <Callout
           intent="success"
-          title="This device syncs with your other one now"
+          title="This device is set up to sync"
           class="mb-6"
           testId="same-key-done"
           dismissible
           onDismiss$={() => { ownKeyDone.value = false; }}
         >
-          They sync whenever both are on with Flowsta Vault running. Leave the other one as it is.
+          Your devices sync whenever they are on with Flowsta Vault running. If your other device asks for the same step, do it there too.
         </Callout>
       )}
       {identity.value && card && (

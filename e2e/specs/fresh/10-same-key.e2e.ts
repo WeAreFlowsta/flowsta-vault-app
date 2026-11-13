@@ -11,7 +11,7 @@ const problems: string[] = [];
 const note = async (where: string) => { problems.push(...(await copyProblems(where))); };
 
 describe("two installs on one key", () => {
-  after(async () => { await devOp(PORT_A, { op: "same-key", force: false }); });
+  after(async () => { await devOp(PORT_A, { op: "same-key", force: false, told: false }); });
 
   it("the Vault unlocks and says nothing while no other install is seen", async () => {
     await (await byId("unlock-password")).waitForDisplayed({ timeout: 90_000 });
@@ -31,6 +31,15 @@ describe("two installs on one key", () => {
     await shot("k-not-syncing");
     await note("same-key notice");
     expect(await (await byId("same-key-phrase")).isExisting()).toBe(false);
+  });
+
+  it("told by the other install instead: the notice asks for the same step in its own words", async () => {
+    await devOp(PORT_A, { op: "same-key", force: false, told: true });
+    await (await byId("same-key-second")).waitForDisplayed({ timeout: 60_000 });
+    await shot("k-one-more-step");
+    await note("same-key second install");
+    await devOp(PORT_A, { op: "same-key", force: true, told: false });
+    await browser.waitUntil(async () => !(await (await byId("same-key-second")).isExisting()), { timeout: 60_000 });
   });
 
   it("the button sets this device up, says it is working, and then says it is done", async function () {

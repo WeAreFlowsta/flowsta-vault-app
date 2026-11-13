@@ -9,7 +9,12 @@
 //! Vault says so and offers this: the install makes a key of its own,
 //! registers it with the account, starts empty conductors under it as a
 //! device added today does, and writes the records it held back in. The
-//! other install stays as it is, and the two sync from then on.
+//! two sync from then on. The other install is then asked to do the same
+//! (the first leaves it a private record saying so): left on the identity's
+//! key it keeps what two chains under one key left in its conductor (its
+//! publish workflow fails after every restart, and a peer that has seen
+//! both chains may hold a warrant against the key; runs of 2026-11-13).
+//! Once both have a key of their own, nothing runs as the identity's.
 //!
 //! The conductor folders this install ran as the identity's key are set
 //! aside beside the new ones, and removed 30 days after every record they
@@ -122,6 +127,71 @@ pub struct SameKey {
     pub elsewhere: bool,
     /// Records this install held are still being written under its new key.
     pub carrying: bool,
+    /// Not seen at the rendezvous: another install that shared this key has
+    /// taken a key of its own and left word. The two sync already; this one
+    /// is asked to do the same.
+    pub told_by_other: bool,
+}
+
+/// The private record an install leaves once it has a key of its own, for
+/// the install it shared the identity's key with (one per identity).
+const SHARED_KEY_RECORD: &str = "shared_key_seen";
+/// Identity roots whose other install has left that record.
+static TOLD: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+fn told_here(root: &Path) -> bool {
+    TOLD.lock().unwrap().as_deref() == Some(root)
+}
+
+/// Whether a `shared_key_seen` record names an install other than `me`.
+fn left_by_another(body: &serde_json::Value, me: &str) -> bool {
+    body.get("install_id").and_then(|v| v.as_str()).is_some_and(|id| !id.is_empty() && id != me)
+}
+
+/// Each devices round, on an install that runs as the identity's key: has
+/// another install left word that it shared this key and now has its own?
+pub(crate) async fn hear_from_the_other(state: &Arc<AppState>) {
+    let root = state.identity_root();
+    let runs_as_identity = state.vault_config.lock().unwrap().as_ref().map(|c| !c.has_own_conductor_key() && c.hosting_model.as_deref() == Some("device-hosted")).unwrap_or(false);
+    if !runs_as_identity || told_here(&root) {
+        return;
+    }
+    let Some(me) = crate::paths::install_id(&state.data_dir) else { return };
+    let Ok(held) = crate::sealed::sealed_held(state).await else { return };
+    let told = held
+        .get(SHARED_KEY_RECORD)
+        .filter(|v| !v.payload.deleted)
+        .and_then(|v| rmp_serde::from_slice::<serde_json::Value>(&v.payload.body).ok())
+        .is_some_and(|body| left_by_another(&body, &me));
+    if told {
+        log::warn!("[own key] another install of this identity shared this install's key and has taken a key of its own: this one is asked to do the same");
+        *TOLD.lock().unwrap() = Some(root);
+    }
+}
+
+/// Leave word for the install this one shared the identity's key with.
+async fn leave_word(state: &Arc<AppState>) -> Result<(), String> {
+    if crate::sealed::sealed_held(state).await?.contains_key(SHARED_KEY_RECORD) {
+        return Ok(());
+    }
+    let me = crate::paths::install_id(&state.data_dir).ok_or("no install id")?;
+    let now = crate::ipc_server::unix_now() as u64 * 1000;
+    let _guard = state.commit_serial.lock().await;
+    crate::sealed::sealed_store_spec(
+        state,
+        crate::sealed::StoreSpec {
+            entry_type: SHARED_KEY_RECORD.into(),
+            body: serde_json::json!({ "install_id": me, "at_ms": now }),
+            refs: Vec::new(),
+            created_at: now,
+            id: Some(SHARED_KEY_RECORD.into()),
+            updated_at: Some(now),
+            deleted: false,
+        },
+        None,
+    )
+    .await
+    .map(|_| ())
 }
 
 pub(crate) fn same_key_now(state: &Arc<AppState>) -> SameKey {
@@ -136,9 +206,11 @@ pub(crate) fn same_key_now(state: &Arc<AppState>) -> SameKey {
         || [crate::hc::Line::V06, crate::hc::Line::V07]
             .into_iter()
             .any(|line| crate::conductor::supervisor().last_round(line).is_some_and(|s| s.round.same_key_elsewhere > 0));
+    let told = told_here(&state.identity_root());
     SameKey {
-        elsewhere: runs_as_identity && seen,
+        elsewhere: runs_as_identity && (seen || told),
         carrying: data_key.is_some_and(|k| load_carry(&state.identity_root(), &k).is_some()),
+        told_by_other: runs_as_identity && told && !seen,
     }
 }
 
@@ -146,6 +218,10 @@ pub(crate) fn same_key_now(state: &Arc<AppState>) -> SameKey {
 static FORCED: AtomicBool = AtomicBool::new(false);
 pub(crate) fn force_seen_for_test(seen: bool) {
     FORCED.store(seen, Ordering::SeqCst);
+}
+/// And the second install's notice, without a first install.
+pub(crate) fn force_told_for_test(root: &Path, told: bool) {
+    *TOLD.lock().unwrap() = told.then(|| root.to_path_buf());
 }
 
 #[tauri::command]
@@ -381,6 +457,11 @@ pub(crate) async fn carry_in_if_owed(state: &Arc<AppState>) {
                 "[own key] private records: {} carried in, {} already here as new or newer; signing records: {} carried as copies, {} signed again by this device, {} already here, {} for the next round, {} failed, {} kept that this device may not write",
                 stored, skipped, signing.carried, signing.signed_again, signing.already, signing.waiting, signing.failed, signing.unplaceable
             );
+            // The other install learns of it from the first private records that cross.
+            if let Err(e) = leave_word(state).await {
+                log::info!("[own key] word for the other install not left yet: {}", e.chars().take(160).collect::<String>());
+                return;
+            }
             // The file (and the folders set aside) stay while a signing record is still owed.
             if !signing.settled() {
                 return;
@@ -483,6 +564,14 @@ mod tests {
         finish_set_aside(&root, &[1u8; 32]).unwrap();
         assert!(crate::paths::conductor_dir_07(&root).exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn word_left_by_this_install_is_not_word_from_another() {
+        assert!(left_by_another(&serde_json::json!({ "install_id": "aaaa", "at_ms": 1 }), "bbbb"));
+        assert!(!left_by_another(&serde_json::json!({ "install_id": "bbbb", "at_ms": 1 }), "bbbb"), "its own record asks nothing of it");
+        assert!(!left_by_another(&serde_json::json!({ "at_ms": 1 }), "bbbb"));
+        assert!(!left_by_another(&serde_json::json!({ "install_id": "" }), "bbbb"));
     }
 
     #[test]

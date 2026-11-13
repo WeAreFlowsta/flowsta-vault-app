@@ -2021,6 +2021,7 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
             let full = pass % FULL_EVERY_PASSES == 0 || setting_up;
             // Records this install held before it was given a key of its own.
             crate::own_key::carry_in_if_owed(&devices_state).await;
+            crate::own_key::hear_from_the_other(&devices_state).await;
             let wait = match devices_round(&devices_state, &devices_app, full).await {
                 DevicesRound::StoodDown => break,
                 DevicesRound::Done => {

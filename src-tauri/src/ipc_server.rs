@@ -4852,6 +4852,9 @@ async fn dev_devices_handler(
             if let Some(seen) = body.get("force").and_then(|v| v.as_bool()) {
                 crate::own_key::force_seen_for_test(seen);
             }
+            if let Some(told) = body.get("told").and_then(|v| v.as_bool()) {
+                crate::own_key::force_told_for_test(&app.identity_root(), told);
+            }
             let rounds: Vec<serde_json::Value> = [crate::hc::Line::V06, crate::hc::Line::V07]
                 .into_iter()
                 .filter_map(|line| crate::conductor::supervisor().last_round(line).map(|s| serde_json::json!({ "line": line.to_string(), "same_key_elsewhere": s.round.same_key_elsewhere, "reached": s.round.reached })))
