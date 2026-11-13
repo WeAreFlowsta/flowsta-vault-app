@@ -998,6 +998,12 @@ fn forget_held_records() {
     *HELD_RECORDS_07.lock().unwrap() = None;
 }
 
+/// The conductors the held records were read from are gone (`own_key`).
+pub(crate) fn forget_held() {
+    *HELD_RECORDS_06.lock().unwrap() = None;
+    *HELD_RECORDS_07.lock().unwrap() = None;
+}
+
 #[cfg(test)]
 static LIST_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]

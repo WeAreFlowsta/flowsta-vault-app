@@ -113,6 +113,31 @@ pub fn moved(root: &Path) -> bool {
     flowsta_hc_lines::marker::Marker::writes_to(&read, &MARKER_SPEC) == Line::V07
 }
 
+/// Nothing still has to be read from this install's 0.6 chain: its records
+/// have moved, and an earlier web account's signatures are carried.
+pub fn settled(root: &Path) -> bool {
+    moved(root) && marker(root).map(|m| m.born || m.web_era_carried).unwrap_or(false)
+}
+
+/// This install was given a key of its own (`own_key`): its conductors
+/// start empty, as a restored identity's do, so it decides about the 0.6
+/// line the way one does (a device record naming 0.6, or nothing heard
+/// while it listens). An identity born on 0.7 never has a 0.6 line.
+pub fn mark_own_key(root: &Path) -> Result<(), String> {
+    let m = marker(root).ok_or("no marker")?;
+    if m.born || (m.restored && m.line_06_needed.is_none()) {
+        return Ok(());
+    }
+    update_marker(root, |m| {
+        m.restored = true;
+        m.line_06_needed = None;
+    })?;
+    flowsta_hc_lines::marker::update_marker(root, &MARKER_SPEC, |m| {
+        m.listening_since_ms = Some(now_ms());
+        m.reachable_rounds = 0;
+    })
+}
+
 /// Whether this identity was born on 1.7.0 (no 0.6 line, ever).
 pub fn born_on_07(root: &Path) -> bool {
     marker(root).map(|m| m.born).unwrap_or(false)

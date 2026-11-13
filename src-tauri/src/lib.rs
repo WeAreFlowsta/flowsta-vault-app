@@ -20,6 +20,7 @@ mod key_derivation;
 mod kits;
 mod lair;
 mod mau;
+mod own_key;
 mod paths;
 mod migration;
 mod move_07;
@@ -543,6 +544,8 @@ pub fn run() {
             commands::get_identity,
             commands::validate_recovery_phrase,
             commands::phrase_matches_vault,
+            own_key::same_key_status,
+            own_key::give_this_computer_its_own_key,
             commands::check_account_hosting,
             commands::authenticate_web_account,
             commands::authenticate_2fa,

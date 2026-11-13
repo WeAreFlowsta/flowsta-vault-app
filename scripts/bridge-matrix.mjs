@@ -2053,12 +2053,47 @@ async function sameKeyLeg() {
   record('A: still writes a private record with B up', !!wroteA2.action_hash, JSON.stringify(wroteA2).slice(0, 200));
   record("B: lists the signature A made before B existed", await until(async () => (await signaturesOn(b)).includes(signA1.hash), 360));
   record("A: lists B's signature", await until(async () => (await signaturesOn(a)).includes(signB.hash), 360));
-  record("B: holds A's private records", await until(async () => { const n = await notesOn(b); return n.includes('from A, alone') && n.includes('from A, with B up'); }, 360), JSON.stringify(await notesOn(b)));
-  record("A: holds B's private record", await until(async () => (await notesOn(a)).includes('from B, the second install'), 360), JSON.stringify(await notesOn(a)));
-
+  // Under one key each conductor keeps its own chain: private records do not cross.
+  await new Promise((r) => setTimeout(r, 90_000));
+  const [apart_a, apart_b] = [await notesOn(a), await notesOn(b)];
+  console.log(`  seen, 90 s on: A holds ${JSON.stringify(apart_a)}; B holds ${JSON.stringify(apart_b)}`);
   const after = compare(await chains(a), await chains(b));
-  console.log(`  seen, at the end: ${JSON.stringify(after)}`);
-  record('seen: no 0.7 app has two different actions at one seq under the key (no fork)', after.every((x) => x.differing === 0), JSON.stringify(after));
+  console.log(`  seen, before the fix: ${JSON.stringify(after)}`);
+
+  // Each install's keeper reads the rendezvous once a minute: the other
+  // conductor's note for our agent, signed after ours, twice (a note is
+  // signed again about every 15 minutes).
+  const sameKey = async (port) => (await op(port, { op: 'same-key' }));
+  const t0 = Date.now();
+  let first = 0;
+  await until(async () => { for (const port of [a, b]) { if ((await sameKey(port)).status?.elsewhere === true) { first = port; return true; } } return false; }, 50 * 60, 20_000);
+  record('one install sees that another runs as its key', first !== 0, `${first === a ? 'A' : first === b ? 'B' : 'neither'} after ${Math.round((Date.now() - t0) / 1000)} s; A ${JSON.stringify(await sameKey(a))} B ${JSON.stringify(await sameKey(b))}`);
+  if (!first) return;
+  const [x, y, nx, ny] = first === a ? [a, b, 'A', 'B'] : [b, a, 'B', 'A'];
+  const [mine, theirs] = first === a ? [['from A, alone', 'from A, with B up'], ['from B, the second install']] : [['from B, the second install'], ['from A, alone', 'from A, with B up']];
+
+  // The button: this install takes a key of its own and carries its records.
+  const t1 = Date.now();
+  const own = await op(x, { op: 'own-key' });
+  record(`${nx}: is given a key of its own`, typeof own.carried === 'number' && own.carried > 0, `${JSON.stringify(own).slice(0, 240)} in ${Math.round((Date.now() - t1) / 1000)} s`);
+  if (typeof own.carried !== 'number') return;
+  record(`${nx}: conductor and cells ready under the new key`, (await waitConductorReady(x, 300)) && (await waitCellsReady(x, 300)) >= 0);
+  const stX = await op(x, { op: 'status' });
+  record(`${nx}: runs as a key of its own, the same identity`, stX.own_conductor_key === true && stX.agent_pub_key === stA.agent_pub_key, JSON.stringify({ own: stX.own_conductor_key, agent: stX.agent_pub_key }));
+  const stY = await op(y, { op: 'status' });
+  record(`${ny}: is as it was`, stY.own_conductor_key === false && stY.agent_pub_key === stA.agent_pub_key, JSON.stringify({ own: stY.own_conductor_key }));
+  record(`${nx}: holds the private records it wrote before (carried)`, await until(async () => { const n = await notesOn(x); return mine.every((t) => n.includes(t)); }, 420), JSON.stringify(await notesOn(x)));
+  record(`${nx}: nothing is left to carry`, await until(async () => (await sameKey(x)).status?.carrying === false, 300), JSON.stringify(await sameKey(x)));
+  record(`${nx}: holds ${ny}'s private records`, await until(async () => { const n = await notesOn(x); return theirs.every((t) => n.includes(t)); }, 900), JSON.stringify(await notesOn(x)));
+  record(`${ny}: holds ${nx}'s private records`, await until(async () => { const n = await notesOn(y); return mine.every((t) => n.includes(t)); }, 900), JSON.stringify(await notesOn(y)));
+  // And from here on, both ways.
+  const newX = await op(x, { op: 'write', text: `from ${nx}, its own device now` });
+  const newY = await op(y, { op: 'write', text: `from ${ny}, after ${nx} changed` });
+  record('both write a private record after the change', !!newX.action_hash && !!newY.action_hash, JSON.stringify({ x: newX, y: newY }).slice(0, 240));
+  record(`${ny}: holds what ${nx} wrote after`, await until(async () => (await notesOn(y)).includes(`from ${nx}, its own device now`), 600), JSON.stringify(await notesOn(y)));
+  record(`${nx}: holds what ${ny} wrote after`, await until(async () => (await notesOn(x)).includes(`from ${ny}, after ${nx} changed`), 600), JSON.stringify(await notesOn(x)));
+  record(`${nx}: still lists both signatures`, await until(async () => { const l = await signaturesOn(x); return l.includes(signA1.hash) && l.includes(signB.hash); }, 420), JSON.stringify(await signaturesOn(x)));
+  record(`${nx}: no longer says another install runs as its key`, (await sameKey(x)).status?.elsewhere === false, JSON.stringify(await sameKey(x)));
   const full = { a: await chains(a), b: await chains(b) };
   if (process.env.VAULT_MATRIX_SAME_KEY_OUT) (await import('node:fs')).writeFileSync(process.env.VAULT_MATRIX_SAME_KEY_OUT, JSON.stringify(full, null, 1));
 }

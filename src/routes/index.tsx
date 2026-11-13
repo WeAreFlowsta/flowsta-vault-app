@@ -116,6 +116,51 @@ export default component$(() => {
       }
     } catch { /* locked */ }
   });
+  // Another install of this identity runs as the identity's own key, as
+  // this one does (both set up from the phrase before 1.6.0): each keeps
+  // its own copy of the private data and the two do not sync. The notice
+  // offers this computer a key of its own.
+  const sameKey = useSignal<{ elsewhere: boolean; carrying: boolean } | null>(null);
+  const ownKeyBusy = useSignal(false);
+  const ownKeyNote = useSignal("");
+  const ownKeyAsksPhrase = useSignal(false);
+  const ownKeyPhrase = useSignal("");
+  const ownKeyDone = useSignal(false);
+  const checkSameKey = $(async () => {
+    sameKey.value = await invoke<{ elsewhere: boolean; carrying: boolean }>("same_key_status").catch(() => null);
+  });
+  const giveOwnKey = $(async () => {
+    if (ownKeyBusy.value) return;
+    ownKeyBusy.value = true;
+    ownKeyNote.value = "";
+    try {
+      await invoke<number>("give_this_computer_its_own_key", {
+        apiUrl: __API_URL__,
+        mnemonic: ownKeyAsksPhrase.value ? ownKeyPhrase.value : null,
+      });
+      ownKeyPhrase.value = "";
+      ownKeyAsksPhrase.value = false;
+      ownKeyDone.value = true;
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("needs_phrase")) {
+        ownKeyAsksPhrase.value = true;
+      } else {
+        ownKeyNote.value = msg.includes("phrase_mismatch")
+          ? "That is not this identity's recovery phrase."
+          : msg.includes("api_unreachable")
+            ? "Couldn't reach Flowsta. Are you online?"
+            : msg.includes("still_moving")
+              ? "Flowsta Vault is still moving your data to its new version. Try again in a few minutes."
+              : msg.includes("not_ready") || msg.includes("already_running")
+                ? "Flowsta Vault is still starting. Try again in a minute."
+                : "That did not work, and nothing was changed. Try again in a minute.";
+      }
+    } finally {
+      ownKeyBusy.value = false;
+      await checkSameKey();
+    }
+  });
   // Defined before the task below uses it: the optimizer does not pass a
   // QRL declared later into a task, which then fails on the bare name.
   // Copies this device keeps of the backups made on the person's other
@@ -146,7 +191,8 @@ export default component$(() => {
     const unlistenBackups = await listen("backups-changed", loadKept);
     checkSettingUp();
     loadKept();
-    const everyHalfMinute = setInterval(() => { if (settingUp.value) checkSettingUp(); }, 30_000);
+    checkSameKey();
+    const everyHalfMinute = setInterval(() => { if (settingUp.value) checkSettingUp(); checkSameKey(); }, 30_000);
     cleanup(() => { unlisten(); unlistenProfile(); unlistenDevices(); unlistenSetup(); unlistenBackups(); clearInterval(everyHalfMinute); });
   });
   // Soft update notice: a newer Vault is shipped. Dismissed per version.
@@ -600,6 +646,55 @@ export default component$(() => {
           waiting for the other device's profile record to bring it; an
           identity without that record kept the card forever (Billz,
           10-27). The email is asked for below instead, once setup is done. */}
+      {identity.value && (sameKey.value?.elsewhere || ownKeyBusy.value) && !ownKeyDone.value && (
+        <Callout intent="warning" title="This device and another one are not syncing" class="mb-6" testId="same-key-callout">
+          <p class="mb-3">
+            Both were set up from your recovery phrase in an older Flowsta Vault, so each keeps its own copy of your
+            private data. Set this one up to sync and the two share everything from then on. Your data is kept, and you
+            only do this on one of them.
+          </p>
+          {ownKeyAsksPhrase.value && (
+            <div class="mb-3">
+              <p class="mb-2">This account asks for your recovery phrase to add a device.</p>
+              <textarea
+                rows={2}
+                autocomplete="off"
+                spellcheck={false}
+                placeholder="Your 24-word recovery phrase"
+                data-testid="same-key-phrase"
+                class="w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-amber-400 focus:outline-none"
+                value={ownKeyPhrase.value}
+                onInput$={(_, el) => { ownKeyPhrase.value = el.value; ownKeyNote.value = ""; }}
+              />
+            </div>
+          )}
+          {ownKeyNote.value && <p class="mb-3 text-xs text-red-300" data-testid="same-key-note">{ownKeyNote.value}</p>}
+          <div class="flex items-center justify-end gap-3">
+            {ownKeyBusy.value && <span class="text-xs text-gray-400" data-testid="same-key-busy">This takes a minute or two. You can keep using Flowsta Vault.</span>}
+            <GlassButton
+              variant="warning"
+              class="text-sm"
+              testId="same-key-go"
+              disabled={ownKeyBusy.value || (ownKeyAsksPhrase.value && !ownKeyPhrase.value.trim())}
+              onClick$={giveOwnKey}
+            >
+              {ownKeyBusy.value ? "Working…" : "Set this device up to sync"}
+            </GlassButton>
+          </div>
+        </Callout>
+      )}
+      {identity.value && ownKeyDone.value && (
+        <Callout
+          intent="success"
+          title="This device syncs with your other one now"
+          class="mb-6"
+          testId="same-key-done"
+          dismissible
+          onDismiss$={() => { ownKeyDone.value = false; }}
+        >
+          They sync whenever both are on with Flowsta Vault running. Leave the other one as it is.
+        </Callout>
+      )}
       {identity.value && card && (
         <Callout intent="info" title={longSilence ? "No other device has answered yet" : "Your private data is on its way"} class="mb-6" testId="setup-card">
           {longSilence ? (

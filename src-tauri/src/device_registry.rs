@@ -361,6 +361,40 @@ pub(crate) async fn register_new_device(
     send_registration(base, &body).await.map(|_| ())
 }
 
+/// An install that runs as the identity's key registers a key of its own
+/// (`own_key`). It is a device of the account already, so it approves the
+/// new key itself; an account that wants the phrase's enrollment key for
+/// that answers `approval_required`, and the caller comes back with it.
+pub(crate) async fn register_own_new_key(
+    api_url: &str,
+    identity_agent_b64: &str,
+    identity_seed: &[u8; 32],
+    new_seed: &[u8; 32],
+    install_id: &str,
+    enrollment_seed: Option<&[u8; 32]>,
+) -> Result<(), String> {
+    let base = api_url.trim_end_matches('/');
+    let body = own_new_key_body(identity_agent_b64, identity_seed, new_seed, install_id, now_ms(), enrollment_seed);
+    send_registration(base, &body).await.map(|_| ())
+}
+
+fn own_new_key_body(
+    identity_agent_b64: &str,
+    identity_seed: &[u8; 32],
+    new_seed: &[u8; 32],
+    install_id: &str,
+    now_ms: u64,
+    enrollment_seed: Option<&[u8; 32]>,
+) -> serde_json::Value {
+    match enrollment_seed {
+        Some(seed) => registration_body(identity_agent_b64, identity_seed, new_seed, install_id, now_ms, Some(seed)),
+        None => {
+            let approval = approve_device(&public_key_of_seed(identity_seed), identity_seed, &public_key_of_seed(new_seed), install_id, now_ms);
+            approved_registration_body(identity_agent_b64, identity_seed, new_seed, install_id, &approval)
+        }
+    }
+}
+
 /// Post a registration and read the answer. Ok(true) = the server knows the
 /// device now.
 async fn send_registration(base: &str, body: &serde_json::Value) -> Result<bool, String> {

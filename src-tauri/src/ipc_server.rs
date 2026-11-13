@@ -465,7 +465,7 @@ async fn status_handler(
     Json(StatusResponse {
         unlocked,
         active_identity,
-        syncing_while_locked: may_see_identity.then(|| crate::commands::syncing_while_locked(&state.app_state)),
+        syncing_while_locked: may_see_identity.then(|| crate::commands::apps_sync_while_locked(&state.app_state)),
         instance_id: state.instance_id.clone(),
         identity_epoch: crate::paths::read_identity_epoch(&state.app_state.data_dir),
         claims: {
@@ -2219,6 +2219,17 @@ async fn backup_limits_handler(
     }))
 }
 
+/// 403 `vault_locked` from a route that also answers while a locked Vault
+/// still syncs (`/devices`, `/backup/list`). `syncing` says which locked it
+/// is: false = syncing was stopped (or never kept), so an app need not wait
+/// for a copy. A Vault before 1.8.0 sends no `syncing` at all.
+fn locked_answer(syncing: bool) -> axum::response::Response {
+    axum::response::IntoResponse::into_response((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({ "error": "vault_locked", "description": "Vault is locked.", "syncing": syncing })),
+    ))
+}
+
 /// GET /devices - the identity's devices for a linked app: each one's name,
 /// platform and network generation, whether it is this device, and when this
 /// Vault last heard from it directly (`heard_at`, seconds; a device heard in
@@ -2244,10 +2255,7 @@ async fn devices_handler(
         // does not give the same app.
         let kept = crate::commands::syncing_while_locked(&state.app_state).then(|| crate::devices::kept_list(&state.app_state.identity_root())).flatten();
         let Some((records, as_of)) = kept else {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(IpcError { error: "vault_locked".into(), description: Some("Vault is locked.".into()) }),
-            ));
+            return Ok(locked_answer(crate::commands::apps_sync_while_locked(&state.app_state)));
         };
         let devices: Vec<serde_json::Value> = records
             .iter()
@@ -2336,13 +2344,7 @@ async fn backup_list_handler(
     // between the person's devices while locked.
     let locked = state.app_state.vault_config.lock().unwrap().is_none();
     if locked && !crate::commands::syncing_while_locked(&state.app_state) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(IpcError {
-                error: "vault_locked".into(),
-                description: Some("Vault is locked.".into()),
-            }),
-        ));
+        return Ok(locked_answer(false));
     }
 
     // Get all stats then filter to only the caller's app.
@@ -4844,6 +4846,21 @@ async fn dev_devices_handler(
                 Err(e) => Err(e),
             }
         }
+        // Another install running as the identity's key: what the keeper has
+        // seen, the notice shown without waiting for it, and the button.
+        "same-key" => {
+            if let Some(seen) = body.get("force").and_then(|v| v.as_bool()) {
+                crate::own_key::force_seen_for_test(seen);
+            }
+            let rounds: Vec<serde_json::Value> = [crate::hc::Line::V06, crate::hc::Line::V07]
+                .into_iter()
+                .filter_map(|line| crate::conductor::supervisor().last_round(line).map(|s| serde_json::json!({ "line": line.to_string(), "same_key_elsewhere": s.round.same_key_elsewhere, "reached": s.round.reached })))
+                .collect();
+            Ok(serde_json::json!({ "status": crate::own_key::same_key_now(app), "rounds": rounds }))
+        }
+        "own-key" => crate::own_key::give_own_key_inner(&api_url, body.get("phrase").and_then(|v| v.as_str()).map(String::from), &state.app_handle, app)
+            .await
+            .map(|carried| serde_json::json!({ "carried": carried })),
         "stop-syncing" => {
             crate::commands::stop_syncing_while_locked(app);
             Ok(serde_json::json!({ "stopped": true }))

@@ -355,6 +355,126 @@ pub(crate) struct PassReport {
     pub switched: bool,
 }
 
+/// One record of a signing cell's source chain, as its conductor holds it:
+/// what `own_key` keeps of the cells an install ran as the identity's key,
+/// so their records are carried under its new key.
+#[derive(Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub(crate) struct ChainRecord {
+    /// "1.5" or "1.6": the signing DNA whose cell wrote it.
+    pub cell: String,
+    #[serde(with = "serde_bytes")]
+    pub hash: Vec<u8>,
+    pub kind: u8,
+    pub timestamp: i64,
+    #[serde(with = "serde_bytes")]
+    pub author: Vec<u8>,
+    /// The action as its author signed it, and the signature.
+    #[serde(with = "serde_bytes")]
+    pub action: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub signature: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub entry: Vec<u8>,
+}
+
+#[derive(serde::Deserialize)]
+struct HasCarried {
+    #[serde(default)]
+    carried_from: Option<serde::de::IgnoredAny>,
+}
+
+impl ChainRecord {
+    pub(crate) fn carried(&self) -> bool {
+        rmp_serde::from_slice::<HasCarried>(&self.entry).map(|c| c.carried_from.is_some()).unwrap_or(false)
+    }
+
+    /// The record as its own original (a record signed on its cell).
+    fn native(&self) -> Result<Original, String> {
+        Ok(Original {
+            dna: self.cell.clone(),
+            action_hash: ActionHash::from_raw_39(self.hash.clone()),
+            author: AgentPubKey::from_raw_39(self.author.clone()),
+            timestamp: Timestamp::from_micros(self.timestamp),
+            action: self.action.clone(),
+            signature: Signature(self.signature.as_slice().try_into().map_err(|_| "a signature that is not 64 bytes")?),
+            entry: self.entry.clone(),
+        })
+    }
+
+    /// The original a v1.6 copy carries inside it (`CarriedFrom`), exactly
+    /// as the DNA checked it when the copy was written.
+    fn original_in_v16_copy(&self) -> Result<Option<Original>, String> {
+        #[derive(serde::Deserialize)]
+        struct From {
+            original_dna: String,
+            original_action_hash: ActionHash,
+            original_author: AgentPubKey,
+            original_timestamp: Timestamp,
+            #[serde(with = "serde_bytes")]
+            original_action: Vec<u8>,
+            original_signature: Signature,
+            #[serde(with = "serde_bytes")]
+            original_entry: Vec<u8>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Copy {
+            #[serde(default)]
+            carried_from: Option<From>,
+        }
+        let copy: Copy = rmp_serde::from_slice(&self.entry).map_err(|e| format!("a v1.6 record does not decode: {e}"))?;
+        Ok(copy.carried_from.map(|f| Original {
+            dna: f.original_dna,
+            action_hash: f.original_action_hash,
+            author: f.original_author,
+            timestamp: f.original_timestamp,
+            action: f.original_action,
+            signature: f.original_signature,
+            entry: f.original_entry,
+        }))
+    }
+}
+
+/// Every signing record on the source chain of the 0.7 conductor's cell for
+/// `app_id` ("1.5" or "1.6" names it in the records). An app that is not
+/// installed has none.
+pub(crate) async fn chain_of(state: &Arc<AppState>, app_id: &str, cell: &str) -> Result<Vec<ChainRecord>, String> {
+    use holochain_client_07::{AdminWebsocket, CellInfo};
+    use holochain_types_07::prelude::{Entry, EntryType};
+    let (admin_port, _) = crate::hc::line_ports(state, Line::V07)?;
+    let admin = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
+        .await
+        .map_err(|e| format!("0.7 admin: {}", e))?;
+    let apps = admin.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
+    let Some(cell_id) = apps.iter().find(|a| a.installed_app_id == app_id).and_then(|app| {
+        app.cell_info.values().flat_map(|c| c.iter()).find_map(|c| match c {
+            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
+            _ => None,
+        })
+    }) else {
+        return Ok(Vec::new());
+    };
+    let dump = admin.dump_full_state(cell_id, None, None).await.map_err(|e| format!("dump {}: {}", app_id, e))?;
+    let mut out = Vec::new();
+    for rec in dump.source_chain_dump.records {
+        let Some((_, EntryType::App(def))) = rec.action.entry_data() else { continue };
+        if def.zome_index.0 != 0 {
+            continue;
+        }
+        let Some(Entry::App(bytes)) = rec.entry.as_ref() else { continue };
+        out.push(ChainRecord {
+            cell: cell.to_string(),
+            hash: rec.action_address.get_raw_39().to_vec(),
+            kind: def.entry_index.0,
+            timestamp: rec.action.timestamp().as_micros(),
+            author: rec.action.author().get_raw_39().to_vec(),
+            action: holochain_types_07::prelude::encode(&rec.action).map_err(|e| format!("encode a {} action: {e}", cell))?,
+            signature: rec.signature.0.to_vec(),
+            entry: bytes.bytes().to_vec(),
+        });
+    }
+    Ok(out)
+}
+
 /// One record this device wrote on v1.5.
 struct Mine {
     hash: Vec<u8>,
@@ -368,56 +488,14 @@ struct Mine {
 
 /// Every record this device's v1.5 cell wrote (its source chain).
 async fn mine_on_v15(state: &Arc<AppState>) -> Result<Vec<Mine>, String> {
-    use holochain_client_07::{AdminWebsocket, CellInfo};
-    use holochain_types_07::prelude::{Entry, EntryType};
-    let (admin_port, _) = crate::hc::line_ports(state, Line::V07)?;
-    let admin = AdminWebsocket::connect(format!("localhost:{}", admin_port), Some(crate::conductor::node_origin()))
-        .await
-        .map_err(|e| format!("0.7 admin: {}", e))?;
-    let v15 = crate::signing_07::signing_app_id(Line::V07);
-    let apps = admin.list_apps(None).await.map_err(|e| format!("list_apps: {}", e))?;
-    let Some(cell_id) = apps.iter().find(|a| a.installed_app_id == v15).and_then(|app| {
-        app.cell_info.values().flat_map(|c| c.iter()).find_map(|c| match c {
-            CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
-            _ => None,
-        })
-    }) else {
-        return Ok(Vec::new());
-    };
-    let dump = admin.dump_full_state(cell_id, None, None).await.map_err(|e| format!("dump {}: {}", v15, e))?;
-    #[derive(serde::Deserialize)]
-    struct Carried {
-        #[serde(default)]
-        carried_from: Option<serde::de::IgnoredAny>,
-    }
-    let mut out = Vec::new();
-    for rec in dump.source_chain_dump.records {
-        let Some((_, EntryType::App(def))) = rec.action.entry_data() else { continue };
-        if def.zome_index.0 != 0 {
-            continue;
-        }
-        let Some(Entry::App(bytes)) = rec.entry.as_ref() else { continue };
-        let entry = bytes.bytes().to_vec();
-        let carried = rmp_serde::from_slice::<Carried>(&entry).map(|c| c.carried_from.is_some()).unwrap_or(false);
-        let action = holochain_types_07::prelude::encode(&rec.action).map_err(|e| format!("encode a v1.5 action: {e}"))?;
-        out.push(Mine {
-            hash: rec.action_address.get_raw_39().to_vec(),
-            kind: def.entry_index.0,
-            timestamp: rec.action.timestamp().as_micros(),
-            native: Original {
-                dna: "1.5".into(),
-                action_hash: rec.action_address.clone(),
-                author: rec.action.author().clone(),
-                timestamp: rec.action.timestamp(),
-                action,
-                signature: rec.signature.clone(),
-                entry: entry.clone(),
-            },
-            entry,
-            carried,
-        });
-    }
-    Ok(out)
+    mine_of(&chain_of(state, &crate::signing_07::signing_app_id(Line::V07), "1.5").await?)
+}
+
+fn mine_of(chain: &[ChainRecord]) -> Result<Vec<Mine>, String> {
+    chain
+        .iter()
+        .map(|r| Ok(Mine { hash: r.hash.clone(), kind: r.kind, entry: r.entry.clone(), timestamp: r.timestamp, native: r.native()?, carried: r.carried() }))
+        .collect()
 }
 
 /// The hash a v1.5 record names in `signature_action`.
@@ -442,8 +520,20 @@ fn network_wait(e: &str) -> bool {
 
 pub(crate) async fn pass(state: &Arc<AppState>) -> Result<PassReport, String> {
     let root = state.identity_root();
-    let mut report = PassReport::default();
     let mine = mine_on_v15(state).await?;
+    let mut report = carry_mine(state, &mine).await?;
+    let web_era_done = crate::move_07::marker(&root).map(|m| m.web_era_carried).unwrap_or(true);
+    if report.failed == 0 && report.waiting == 0 && crate::move_07::moved(&root) && web_era_done {
+        std::fs::write(root.join(SWITCHED), b"").map_err(|e| format!("write {}: {}", SWITCHED, e))?;
+        report.switched = true;
+    }
+    Ok(report)
+}
+
+/// Carry v1.5 chain records to this device's v1.6 cell with their true
+/// originals (idempotent by the original's hash), signatures first.
+async fn carry_mine(state: &Arc<AppState>, mine: &[Mine]) -> Result<PassReport, String> {
+    let mut report = PassReport::default();
     let (c16, r16) = client(state).await?;
     // v1.5 signature hash -> the hash its copy is carried under here (its
     // own for a native one, its v1.4 original's for a copy).
@@ -513,10 +603,90 @@ pub(crate) async fn pass(state: &Arc<AppState>) -> Result<PassReport, String> {
             Err(e) => { report.failed += 1; log::info!("[signing 1.6] a revocation or thumbnail not carried: {}", e) }
         }
     }
-    let web_era_done = crate::move_07::marker(&root).map(|m| m.web_era_carried).unwrap_or(true);
-    if report.failed == 0 && report.waiting == 0 && crate::move_07::moved(&root) && web_era_done {
-        std::fs::write(root.join(SWITCHED), b"").map_err(|e| format!("write {}: {}", SWITCHED, e))?;
-        report.switched = true;
+    Ok(report)
+}
+
+/// What `carry_kept` did with the records an install kept of its old cells.
+#[derive(Default, Debug, PartialEq)]
+pub(crate) struct KeptReport {
+    pub carried: usize,
+    pub already: usize,
+    pub waiting: usize,
+    pub failed: usize,
+    /// Records signed on v1.6 itself by the key the install ran as: the DNA
+    /// carries only v1.4 and v1.5 originals, so these cannot be copies.
+    pub native_v16: usize,
+}
+
+impl KeptReport {
+    /// Everything that can be a copy is one.
+    pub(crate) fn settled(&self) -> bool {
+        self.waiting == 0 && self.failed == 0
+    }
+}
+
+/// Which kept v1.6 records are signed on v1.6 itself (no original inside).
+pub(crate) fn native_on_v16(kept: &[ChainRecord]) -> Vec<&ChainRecord> {
+    kept.iter().filter(|r| r.cell == "1.6" && !r.carried()).collect()
+}
+
+/// Carry the signing records an install kept of the cells it ran as the
+/// identity's key (`own_key`) into this device's v1.6 cell: what it wrote on
+/// v1.5 as `pass` carries it, and the v1.6 copies by the original each
+/// holds. Idempotent by the original's hash; a repeat writes nothing.
+pub(crate) async fn carry_kept(state: &Arc<AppState>, kept: &[ChainRecord]) -> Result<KeptReport, String> {
+    let on_v15: Vec<ChainRecord> = kept.iter().filter(|r| r.cell == "1.5").cloned().collect();
+    let first = carry_mine(state, &mine_of(&on_v15)?).await?;
+    let mut report = KeptReport { carried: first.carried, already: first.already, waiting: first.waiting, failed: first.failed, native_v16: native_on_v16(kept).len() };
+    let (c16, r16) = client(state).await?;
+    let copies: Vec<(&ChainRecord, Original)> = kept
+        .iter()
+        .filter(|r| r.cell == "1.6")
+        .filter_map(|r| match r.original_in_v16_copy() {
+            Ok(Some(o)) => Some((r, o)),
+            Ok(None) => None,
+            Err(e) => {
+                report.failed += 1;
+                log::info!("[signing 1.6] a kept record not read: {}", e);
+                None
+            }
+        })
+        .collect();
+    // The old cell's copy of a signature -> the original it was carried by.
+    let key_of: std::collections::HashMap<&[u8], Vec<u8>> =
+        copies.iter().filter(|(r, _)| r.kind == SIGNATURE_ENTRY).map(|(r, o)| (r.hash.as_slice(), o.action_hash.get_raw_39().to_vec())).collect();
+    let (signatures, children): (Vec<_>, Vec<_>) = copies.iter().partition(|(r, _)| r.kind == SIGNATURE_ENTRY);
+    for (r, o) in signatures.into_iter().chain(children) {
+        if crate::signing_07::carried(&c16, &r16, o.action_hash.get_raw_39()).await?.is_some() {
+            report.already += 1;
+            continue;
+        }
+        let done = if r.kind == SIGNATURE_ENTRY {
+            carry_signature(&c16, &r16, o).await
+        } else {
+            // The copy here of the signature the old copy named.
+            let here = match names(&r.entry).and_then(|named| key_of.get(named.as_slice()).cloned()) {
+                Some(key) => crate::signing_07::carried(&c16, &r16, &key).await?,
+                None => None,
+            };
+            let Some(here) = here else {
+                // Its signature is native on v1.6, or waits for a later round.
+                report.waiting += 1;
+                continue;
+            };
+            if r.kind == REVOCATION_ENTRY { carry_revocation(&c16, &r16, &here, o).await } else { carry_thumbnail(&c16, &r16, &here, o).await }
+        };
+        match done {
+            Ok(_) => report.carried += 1,
+            Err(e) if network_wait(&e) => {
+                report.waiting += 1;
+                log::info!("[signing 1.6] a kept record waits for the next round: {}", e)
+            }
+            Err(e) => {
+                report.failed += 1;
+                log::info!("[signing 1.6] a kept record not carried: {}", e)
+            }
+        }
     }
     Ok(report)
 }

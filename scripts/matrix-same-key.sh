@@ -3,7 +3,8 @@
 # Vaults set up by phrase on 1.5.0 or earlier, both since updated): two FRESH
 # test instances (hc-k / hc-l), `bridge-matrix.mjs --phase=same-key`, then
 # both instances' logs searched for what a second chain under a key makes
-# Holochain 0.7.1 say. A throwaway identity each run; the web-era fixture is
+# Holochain 0.7.1 say. The leg waits (up to 50 min) for one install to see
+# the other, gives it a key of its own, and checks both then sync. A throwaway identity each run; the web-era fixture is
 # never used. Usage: scripts/matrix-same-key.sh [log dir]. Needs the installed
 # Vault CLOSED and the test binary built (scripts/build-test-binary.sh).
 set -u
@@ -31,6 +32,9 @@ for s in hc-k hc-l; do
   for log in "$d/xdg/com.flowsta.vault/logs/Flowsta Vault.log" "$d/xdg/com.flowsta.vault.staging/logs/Flowsta Vault (Staging).log"; do [ -f "$log" ] && cp "$log" "$LOGS/$s/app.log"; done
   for f in "$d"/identities/*/conductor*/holochain-stderr.log; do [ -f "$f" ] && cp "$f" "$LOGS/$s/$(basename "$(dirname "$f")")-holochain-stderr.log"; done
 done
+echo "== set aside (kept, never deleted)"
+for s in hc-k hc-l; do ls -d "$HOME/.local/share/flowsta-vault-$s"/identities/*/conductor*-as-identity-key-* 2>/dev/null | sed "s|$HOME/.local/share/||"; done
+grep -h "\[own key\]\|another install is running" "$LOGS"/hc-k/app.log "$LOGS"/hc-l/app.log 2>/dev/null | cut -c1-300
 echo "== what the logs say"
 for s in hc-k hc-l; do
   for what in "head has moved" "FOREIGN KEY" "HeadMoved" "ChainHeadMoved" "fork" "Fork" "warrant" "Warrant" "InvalidChain"; do
