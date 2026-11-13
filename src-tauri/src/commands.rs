@@ -7294,6 +7294,18 @@ pub(crate) async fn get_my_linked_signatures_inner(
     if crate::hc::line_ports(state, crate::hc::Line::V06).is_err() {
         let devices = other_device_keys(state).await;
         let mut keys = devices.clone().unwrap_or_default();
+        // And the identity's own key, when this device runs a key of its
+        // own: what the identity signed under it (its first device, or two
+        // installs that shared it and each took a key of their own since)
+        // is listed whether or not a device still runs as it. Until 11-13
+        // it was asked only as some device's key, so an identity with no
+        // device left on it listed none of those signatures.
+        // (Only once the devices are read: "not read yet" below still asks again.)
+        if let (true, Some(identity), Some(own)) = (devices.is_ok(), identity_agent_key(state), own_conductor_key(state)) {
+            if identity.get_raw_32() != own.get_raw_32() && !keys.iter().any(|k| k.get_raw_32() == identity.get_raw_32()) {
+                keys.push(identity);
+            }
+        }
         if let Some(cached) = state.linked_web_agent_key.lock().unwrap().clone() {
             match base64_standard_decode(&cached) {
                 Ok(raw) if raw.len() == 39 => {
