@@ -371,6 +371,9 @@ pub struct AppState {
     pub key_store_07: Mutex<Option<Arc<lair_keystore_api_07::LairClient>>>,
     /// An app interface attached for asking cells before the line's own
     /// exists (one per conductor session; forgotten with the sets).
+    /// Where each line's key store listens (0.6, 0.7), as its last setup
+    /// was told.
+    pub key_store_urls: Mutex<[Option<String>; 2]>,
     pub ask_port_06: Mutex<Option<u16>>,
     pub ask_port_07: Mutex<Option<u16>>,
     /// Committing operations write to the device's source chains - run them
@@ -403,6 +406,18 @@ pub(crate) type CellSigner = Arc<dyn holochain_client::AgentSigner + Send + Sync
 /// The same on the 0.7 line.
 pub(crate) type CellSigner07 = Arc<dyn holochain_client_07::AgentSigner + Send + Sync>;
 
+/// A line's key store is up at `url` (told at the start of the line's
+/// setup, before the supervisor counts the line as running). The address
+/// carries the connection key: never log it.
+pub(crate) fn note_key_store(state: &AppState, line: crate::hc::Line, url: &str) {
+    let slot = if line == crate::hc::Line::V06 { 0 } else { 1 };
+    state.key_store_urls.lock().unwrap()[slot] = Some(url.to_string());
+    match line {
+        crate::hc::Line::V06 => *state.key_store_06.lock().unwrap() = None,
+        crate::hc::Line::V07 => *state.key_store_07.lock().unwrap() = None,
+    }
+}
+
 /// Forget which 0.6 cells answered, and the connection to their key store
 /// (a new conductor session has a new one).
 pub(crate) fn forget_cells_06(state: &AppState) {
@@ -424,7 +439,7 @@ async fn key_store_06(state: &AppState) -> Result<Arc<lair_keystore_api::LairCli
     if let Some(c) = state.key_store_06.lock().unwrap().as_ref() {
         return Ok(c.clone());
     }
-    let url = crate::conductor::supervisor().key_store_url(crate::hc::Line::V06).ok_or("the 0.6 key store is not running")?;
+    let url = state.key_store_urls.lock().unwrap()[0].clone().or_else(|| crate::conductor::supervisor().key_store_url(crate::hc::Line::V06)).ok_or("the 0.6 key store is not running")?;
     let passphrase = live_passphrase(state).ok_or("the Vault is locked")?;
     let client = flowsta_hc_lines::keystore::v06::connect(&url, &passphrase, std::time::Duration::from_secs(30)).await.map_err(|e| format!("key store: {e}"))?;
     let client = Arc::new(client);
@@ -437,7 +452,7 @@ async fn key_store_07(state: &AppState) -> Result<Arc<lair_keystore_api_07::Lair
     if let Some(c) = state.key_store_07.lock().unwrap().as_ref() {
         return Ok(c.clone());
     }
-    let url = crate::conductor::supervisor().key_store_url(crate::hc::Line::V07).ok_or("the 0.7 key store is not running")?;
+    let url = state.key_store_urls.lock().unwrap()[1].clone().or_else(|| crate::conductor::supervisor().key_store_url(crate::hc::Line::V07)).ok_or("the 0.7 key store is not running")?;
     let passphrase = live_passphrase(state).ok_or("the Vault is locked")?;
     let client = flowsta_hc_lines::keystore::v07::connect(&url, &passphrase, std::time::Duration::from_secs(30)).await.map_err(|e| format!("key store (0.7): {e}"))?;
     let client = Arc::new(client);
@@ -697,6 +712,7 @@ impl AppState {
             cells_ready_07: Mutex::new(std::collections::HashSet::new()),
             key_store_06: Mutex::new(None),
             key_store_07: Mutex::new(None),
+            key_store_urls: Mutex::new([None, None]),
             ask_port_06: Mutex::new(None),
             ask_port_07: Mutex::new(None),
             credentials_fill_lock: tokio::sync::Mutex::new(()),

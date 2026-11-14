@@ -927,6 +927,11 @@ impl LineHooks for VaultLines {
     }
 
     async fn setup(&self, line: Line, role: Role, process: &mut LineProcess) -> Result<Setup, String> {
+        // The line is not the supervisor's yet while it is set up, and the
+        // probe of its cells signs through this key store already.
+        if let Some(state) = &self.state {
+            crate::commands::note_key_store(state, line, &process.lair_url);
+        }
         match line {
             Line::V06 => self.setup_06(role, process).await.map(Setup::from),
             Line::V07 => self.setup_07(role, process).await,
