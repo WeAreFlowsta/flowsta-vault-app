@@ -1927,6 +1927,12 @@ mod tests {
         let state = Arc::new(AppState::new(dir.join("vault")));
         *state.vault_config.lock().unwrap() = Some(config.clone());
         *state.test_conductor_ports.lock().unwrap() = Some((admin_port, app_port));
+        // Calls are signed through the conductor's key store, as an unlocked
+        // Vault's are: its address is in the config it wrote.
+        let ks = std::fs::read_to_string(dir.join("ks").join("lair-keystore-config.yaml")).expect("the key store's config");
+        let url = ks.lines().find_map(|l| l.trim().strip_prefix("connectionUrl:")).expect("the key store's address").trim().to_string();
+        crate::commands::note_key_store(&state, crate::hc::Line::V06, &url);
+        *state.unlock_passphrase.lock().unwrap() = Some(lair_keystore_api::dependencies::sodoken::LockedArray::from(b"live-test".to_vec()));
         LiveDevice { state, child, dir }
     }
 
