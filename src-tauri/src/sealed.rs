@@ -209,7 +209,7 @@ pub(crate) async fn connect_sealed_app_ws(
     app_port: u16,
 ) -> Result<(holochain_client::AppWebsocket, String), String> {
     use holochain_client::{
-        AdminWebsocket, AppWebsocket, CellInfo, ClientAgentSigner,
+        AdminWebsocket, AppWebsocket, CellInfo,
         IssueAppAuthenticationTokenPayload,
     };
 
@@ -246,7 +246,7 @@ pub(crate) async fn connect_sealed_app_ws(
         .ok_or("No provisioned sealed cell")?;
 
     let credentials =
-        crate::commands::cell_credentials_cached(state, &admin_ws, &cell_id).await?;
+        crate::commands::cell_signer(state, &admin_ws, &app_id, &cell_id).await?;
 
     let issued = admin_ws
         .issue_app_auth_token(IssueAppAuthenticationTokenPayload::for_installed_app_id(
@@ -255,13 +255,12 @@ pub(crate) async fn connect_sealed_app_ws(
         .await
         .map_err(|e| format!("issue_app_auth_token failed: {}", e))?;
 
-    let signer = ClientAgentSigner::default();
-    signer.add_credentials(cell_id, credentials);
+    let signer = credentials;
     let app_ws = AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
         crate::commands::long_request_ws_config(),
         issued.token,
-        signer.into(),
+        signer,
         Some(crate::conductor::node_origin()),
     )
     .await
@@ -1928,6 +1927,12 @@ mod tests {
         let state = Arc::new(AppState::new(dir.join("vault")));
         *state.vault_config.lock().unwrap() = Some(config.clone());
         *state.test_conductor_ports.lock().unwrap() = Some((admin_port, app_port));
+        // Calls are signed through the conductor's key store, as an unlocked
+        // Vault's are: its address is in the config it wrote.
+        let ks = std::fs::read_to_string(dir.join("ks").join("lair-keystore-config.yaml")).expect("the key store's config");
+        let url = ks.lines().find_map(|l| l.trim().strip_prefix("connectionUrl:")).expect("the key store's address").trim().to_string();
+        crate::commands::note_key_store(&state, crate::hc::Line::V06, &url);
+        *state.unlock_passphrase.lock().unwrap() = Some(lair_keystore_api::dependencies::sodoken::LockedArray::from(b"live-test".to_vec()));
         LiveDevice { state, child, dir }
     }
 

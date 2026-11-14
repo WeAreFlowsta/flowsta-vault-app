@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Unlocking your Vault no longer adds a record to your history.** Every
+  unlock wrote one small permission record for each part of your data,
+  which then had to sync to your other devices. Flowsta Vault now signs
+  with your identity's own key and writes nothing at an unlock.
+
 - A device you remove is refused by your other devices from the moment
   they know, and gets no more of your apps' backups, also while it is
   locked. Settings > Devices says "Removing…" until the removal has

@@ -77,13 +77,13 @@ lair_keystore_api = "=0.6.3"
 
 # Holochain conductor client (AdminWebsocket for DNA install + AppWebsocket for zome calls).
 # Conductor 0.6.1 → Rust client 0.8.1 (released 2026-05-12 for Holochain 0.6.1).
-holochain_client = { version = "=0.8.1", default-features = false }
+holochain_client = { version = "=0.8.1", default-features = false, features = ["lair_signing"] }
 holochain_types = "=0.6.1"
 
 # The Holochain 0.7.1 line, renamed so both lines live in one binary during
 # the 1.7.0 transition (a 0.7 conductor beside the 0.6 one per identity;
 # one lair per line). ProofPoll 0.5.0 is the pattern.
-holochain_client_07 = { package = "holochain_client", version = "=0.9.1", default-features = false }
+holochain_client_07 = { package = "holochain_client", version = "=0.9.1", default-features = false, features = ["lair_signing"] }
 holochain_types_07 = { package = "holochain_types", version = "=0.7.1" }
 lair_keystore_api_07 = { package = "lair_keystore_api", version = "=0.7.1" }
 # Building CoordinatorBundle for UpdateCoordinators hot-swaps (same version
@@ -92,7 +92,7 @@ mr_bundle = "=0.6.1"
 mr_bundle_07 = { package = "mr_bundle", version = "=0.7.1" }
 # The two-line machinery, extracted into a library other apps share.
 async-trait = "0.1"
-flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "f5f62e198939c077ebec9348c929c14baaf8c17c" }
+flowsta-hc-lines = { git = "https://github.com/WeAreFlowsta/flowsta-hc-lines", rev = "06b1318f4a10e6093a170476fba32e38b2641fc8" }
 
 # Save dialog
 tauri-plugin-dialog = "2"

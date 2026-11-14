@@ -1117,6 +1117,10 @@ mod tests {
         *state.vault_config.lock().unwrap() = Some(config.clone());
         *state.test_conductor_ports.lock().unwrap() = Some((admin_06, app_06));
         *state.test_conductor_ports_07.lock().unwrap() = Some((admin_07, app_07));
+        // Calls are signed through each line's key store, as an unlocked Vault's are.
+        crate::commands::note_key_store(&state, crate::hc::Line::V06, &url_06);
+        crate::commands::note_key_store(&state, crate::hc::Line::V07, &url_07);
+        *state.unlock_passphrase.lock().unwrap() = Some(lair_keystore_api::dependencies::sodoken::LockedArray::from(pass.as_bytes().to_vec()));
         LivePair { state, children: vec![c06, c07], lairs: vec![lair_child_06, lair_child_07], dir }
     }
 
@@ -1522,6 +1526,8 @@ mod tests {
         mark_born(&state.identity_root()).expect("the born marker");
         *state.vault_config.lock().unwrap() = Some(config.clone());
         *state.test_conductor_ports_07.lock().unwrap() = Some((admin_07, app_07));
+        crate::commands::note_key_store(&state, crate::hc::Line::V07, &url_07);
+        *state.unlock_passphrase.lock().unwrap() = Some(lair_keystore_api::dependencies::sodoken::LockedArray::from(pass.as_bytes().to_vec()));
         LivePair { state, children: vec![c07], lairs: vec![lair_child_07], dir }
     }
 
@@ -1654,6 +1660,8 @@ mod tests {
         mark_restored(&restored.identity_root(), false).unwrap();
         *restored.vault_config.lock().unwrap() = Some(config_a.clone());
         *restored.test_conductor_ports_07.lock().unwrap() = *a.state.test_conductor_ports_07.lock().unwrap();
+        *restored.key_store_urls.lock().unwrap() = a.state.key_store_urls.lock().unwrap().clone();
+        *restored.unlock_passphrase.lock().unwrap() = Some(lair_keystore_api::dependencies::sodoken::LockedArray::from(b"live-test".to_vec()));
         assert_eq!(crate::hc::active_line(&restored), Line::V07);
         assert!(!crate::conductor::line_06_wanted(&restored.identity_root(), Some(&[36u8; 32]), None), "nothing owed, nothing held: 0.7 first");
         crate::sealed::forget_recent_versions();

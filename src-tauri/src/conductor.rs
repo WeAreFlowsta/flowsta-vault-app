@@ -594,8 +594,8 @@ pub async fn start_holochain(
     // A fresh conductor session gets fresh cap grants - drop any cached
     // credentials so the readiness probe re-verifies (and re-fills) them.
     let (data_key, private_v2_seed) = {
-        state.cell_credentials.lock().unwrap().clear();
-        state.cell_credentials_07.lock().unwrap().clear();
+        crate::commands::forget_cells_06(&state);
+        crate::commands::forget_cells_07(&state);
         let cfg = state.vault_config.lock().unwrap();
         let key: Option<[u8; 32]> = cfg.as_ref().and_then(|c| c.data_key.as_deref()).and_then(|k| k.try_into().ok());
         let seed = cfg.as_ref().and_then(|c| if c.hosting_model.as_deref() == Some("device-hosted") { c.private_network_seed.clone() } else { None });
@@ -927,6 +927,11 @@ impl LineHooks for VaultLines {
     }
 
     async fn setup(&self, line: Line, role: Role, process: &mut LineProcess) -> Result<Setup, String> {
+        // The line is not the supervisor's yet while it is set up, and the
+        // probe of its cells signs through this key store already.
+        if let Some(state) = &self.state {
+            crate::commands::note_key_store(state, line, &process.lair_url);
+        }
         match line {
             Line::V06 => self.setup_06(role, process).await.map(Setup::from),
             Line::V07 => self.setup_07(role, process).await,
