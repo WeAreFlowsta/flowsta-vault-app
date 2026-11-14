@@ -352,8 +352,8 @@ fn forget_what_the_old_conductors_gave(state: &Arc<AppState>) {
     crate::sealed::forget_network_device_versions();
     crate::sealed::forget_held();
     crate::devices::forget_network_asked();
-    state.cell_credentials.lock().unwrap().clear();
-    state.cell_credentials_07.lock().unwrap().clear();
+    crate::commands::forget_cells_06(&state);
+    crate::commands::forget_cells_07(&state);
 }
 
 /// Set the old conductor folders aside when a carry says it is still owed.

@@ -356,15 +356,23 @@ pub struct AppState {
     /// the process. Only written while the auto-approve harness flag is
     /// active; the endpoints that touch it 404 in release builds.
     pub dev_relock_passphrase: Mutex<Option<lair_keystore_api::dependencies::sodoken::LockedArray>>,
-    /// Cap-grant signing credentials cached per cell for the conductor
-    /// session. Every `authorize_signing_credentials` COMMITS a grant to
-    /// that cell's source chain - per-call authorization was bloating
-    /// chains (seq 500+ in a day) and colliding with real writes ("chain
-    /// head has moved"). Cleared on lock and on conductor start; filled
-    /// once per cell and reused everywhere.
-    pub cell_credentials: Mutex<HashMap<holochain_types::prelude::CellId, CachedCellCredentials>>,
+    /// The cells that have answered this conductor session: a conductor
+    /// lists a cell as enabled before it runs. Calls are signed with the
+    /// cell's own agent key through the key store (`cell_signer`), so no
+    /// signing grant is written to any chain (a grant was one chain action
+    /// per cell at every unlock, and per call before that: seq 500+ in a
+    /// day). Cleared on lock and on conductor start.
+    pub cells_ready: Mutex<std::collections::HashSet<holochain_types::prelude::CellId>>,
     /// The same for the cells on the 0.7 line (its own key type).
-    pub cell_credentials_07: Mutex<HashMap<holochain_types_07::prelude::CellId, CachedCellCredentials07>>,
+    pub cells_ready_07: Mutex<std::collections::HashSet<holochain_types_07::prelude::CellId>>,
+    /// Each line's key store, connected for signing zome calls with the
+    /// cell's own agent key. Dropped wherever the two sets are cleared.
+    pub key_store_06: Mutex<Option<Arc<lair_keystore_api::LairClient>>>,
+    pub key_store_07: Mutex<Option<Arc<lair_keystore_api_07::LairClient>>>,
+    /// An app interface attached for asking cells before the line's own
+    /// exists (one per conductor session; forgotten with the sets).
+    pub ask_port_06: Mutex<Option<u16>>,
+    pub ask_port_07: Mutex<Option<u16>>,
     /// Committing operations write to the device's source chains - run them
     /// one at a time (shared by the IPC bridge and in-app commands). Two
     /// concurrent publishes would fight over the chain head and one fails.
@@ -382,144 +390,222 @@ pub struct AppState {
     pub cell_probe_gen_07: std::sync::atomic::AtomicU64,
 }
 
-/// Owned copy of a cell's signing credentials (holochain_client's
-/// `SigningCredentials` doesn't derive Clone).
-pub struct CachedCellCredentials {
-    pub signing_agent_key: holochain_types::prelude::AgentPubKey,
-    pub keypair: ed25519_dalek::SigningKey,
-    pub cap_secret: holochain_types::prelude::CapSecret,
-}
-
-impl CachedCellCredentials {
-    pub(crate) fn to_signing(&self) -> holochain_client::SigningCredentials {
-        holochain_client::SigningCredentials {
-            signing_agent_key: self.signing_agent_key.clone(),
-            keypair: self.keypair.clone(),
-            cap_secret: self.cap_secret,
-        }
-    }
-    pub(crate) fn from_signing(c: &holochain_client::SigningCredentials) -> Self {
-        Self {
-            signing_agent_key: c.signing_agent_key.clone(),
-            keypair: c.keypair.clone(),
-            cap_secret: c.cap_secret,
-        }
-    }
-}
-
-/// The 0.7 line's copy of `CachedCellCredentials` (its own types).
-pub struct CachedCellCredentials07 {
-    pub signing_agent_key: holochain_types_07::prelude::AgentPubKey,
-    pub keypair: ed25519_dalek::SigningKey,
-    pub cap_secret: holochain_types_07::prelude::CapSecret,
-}
-
-impl CachedCellCredentials07 {
-    pub(crate) fn to_signing(&self) -> holochain_client_07::SigningCredentials {
-        holochain_client_07::SigningCredentials {
-            signing_agent_key: self.signing_agent_key.clone(),
-            keypair: self.keypair.clone(),
-            cap_secret: self.cap_secret,
-        }
-    }
-    pub(crate) fn from_signing(c: &holochain_client_07::SigningCredentials) -> Self {
-        Self {
-            signing_agent_key: c.signing_agent_key.clone(),
-            keypair: c.keypair.clone(),
-            cap_secret: c.cap_secret,
-        }
-    }
-}
-
-/// `cell_credentials_cached` for a cell on the 0.7 line: one cap grant per
-/// cell per conductor session, single-flighted the same way.
-pub(crate) async fn cell_credentials_cached_07(
-    state: &Arc<AppState>,
-    admin_ws: &holochain_client_07::AdminWebsocket,
-    cell_id: &holochain_types_07::prelude::CellId,
-) -> Result<holochain_client_07::SigningCredentials, String> {
-    {
-        let cache = state.cell_credentials_07.lock().unwrap();
-        if let Some(c) = cache.get(cell_id) {
-            return Ok(c.to_signing());
-        }
-    }
-    // Right after a start the cell can still be coming up: wait for the
-    // line's probe to reach it (its grant then lands in the cache).
-    crate::dna::wait_for_cell(state, crate::hc::Line::V07, || state.cell_credentials_07.lock().unwrap().contains_key(cell_id)).await;
-    let _fill = state.credentials_fill_lock.lock().await;
-    {
-        let cache = state.cell_credentials_07.lock().unwrap();
-        if let Some(c) = cache.get(cell_id) {
-            return Ok(c.to_signing());
-        }
-    }
-    let creds = admin_ws
-        .authorize_signing_credentials(holochain_client_07::AuthorizeSigningCredentialsPayload {
-            cell_id: cell_id.clone(),
-            functions: None,
-        })
-        .await
-        .map_err(|e| format!("{AUTH_CREDS} (0.7): {}", e))?;
-    state
-        .cell_credentials_07
-        .lock()
-        .unwrap()
-        .insert(cell_id.clone(), CachedCellCredentials07::from_signing(&creds));
-    Ok(creds)
-}
-
-/// The label a failed credential grant carries in its error text. A grant
-/// that fails right after an unlock usually passes on a retry, whatever the
-/// conductor said, so retry loops check for it.
+/// The label a refused signer carries in its error text: the cell did not
+/// answer. Right after an unlock that usually passes on a retry, so retry
+/// loops check for it.
 pub(crate) const AUTH_CREDS: &str = "auth creds";
 
-/// Authorize-once-per-session: return cached credentials for the cell, or
-/// authorize (ONE chain write) and cache them. All zome-call setup paths
-/// go through here.
-pub(crate) async fn cell_credentials_cached(
-    state: &Arc<AppState>,
-    admin_ws: &holochain_client::AdminWebsocket,
-    cell_id: &holochain_types::prelude::CellId,
-) -> Result<holochain_client::SigningCredentials, String> {
-    {
-        let cache = state.cell_credentials.lock().unwrap();
-        if let Some(c) = cache.get(cell_id) {
-            return Ok(c.to_signing());
-        }
-    }
-    // As on the 0.7 line: wait for the probe to reach a cell still coming up.
-    crate::dna::wait_for_cell(state, crate::hc::Line::V06, || state.cell_credentials.lock().unwrap().contains_key(cell_id)).await;
-    // Single-flight the fill: whoever wins the lock authorizes once; the
-    // others find the cache populated on the re-check.
-    let _fill = state.credentials_fill_lock.lock().await;
-    {
-        let cache = state.cell_credentials.lock().unwrap();
-        if let Some(c) = cache.get(cell_id) {
-            return Ok(c.to_signing());
-        }
-    }
-    let creds = admin_ws
-        .authorize_signing_credentials(holochain_client::AuthorizeSigningCredentialsPayload {
-            cell_id: cell_id.clone(),
-            functions: None,
-        })
-        .await
-        .map_err(|e| format!("{AUTH_CREDS}: {}", e))?;
-    state
-        .cell_credentials
-        .lock()
-        .unwrap()
-        .insert(cell_id.clone(), CachedCellCredentials::from_signing(&creds));
-    Ok(creds)
+/// What signs a cell's calls on the 0.6 line: the cell's own agent key, in
+/// the key store. A cell takes its own agent's calls, so nothing is written
+/// to its chain (a signing grant was one action per cell at every unlock)
+/// and the Vault holds no secret for it.
+pub(crate) type CellSigner = Arc<dyn holochain_client::AgentSigner + Send + Sync>;
+/// The same on the 0.7 line.
+pub(crate) type CellSigner07 = Arc<dyn holochain_client_07::AgentSigner + Send + Sync>;
+
+/// Forget which 0.6 cells answered, and the connection to their key store
+/// (a new conductor session has a new one).
+pub(crate) fn forget_cells_06(state: &AppState) {
+    state.cells_ready.lock().unwrap().clear();
+    *state.key_store_06.lock().unwrap() = None;
+    *state.ask_port_06.lock().unwrap() = None;
 }
 
-/// Drop all cached cell credentials - call when a zome call fails
-/// "unauthorized" (e.g. the chain was reset underneath a cached grant) so
-/// the next attempt re-authorizes.
+/// [`forget_cells_06`] on the 0.7 line.
+pub(crate) fn forget_cells_07(state: &AppState) {
+    state.cells_ready_07.lock().unwrap().clear();
+    *state.key_store_07.lock().unwrap() = None;
+    *state.ask_port_07.lock().unwrap() = None;
+}
+
+/// The 0.6 key store, connected once per conductor session and dropped
+/// where the record of ready cells is cleared.
+async fn key_store_06(state: &AppState) -> Result<Arc<lair_keystore_api::LairClient>, String> {
+    if let Some(c) = state.key_store_06.lock().unwrap().as_ref() {
+        return Ok(c.clone());
+    }
+    let url = crate::conductor::supervisor().key_store_url(crate::hc::Line::V06).ok_or("the 0.6 key store is not running")?;
+    let passphrase = live_passphrase(state).ok_or("the Vault is locked")?;
+    let client = flowsta_hc_lines::keystore::v06::connect(&url, &passphrase, std::time::Duration::from_secs(30)).await.map_err(|e| format!("key store: {e}"))?;
+    let client = Arc::new(client);
+    *state.key_store_06.lock().unwrap() = Some(client.clone());
+    Ok(client)
+}
+
+/// The 0.7 key store ([`key_store_06`]).
+async fn key_store_07(state: &AppState) -> Result<Arc<lair_keystore_api_07::LairClient>, String> {
+    if let Some(c) = state.key_store_07.lock().unwrap().as_ref() {
+        return Ok(c.clone());
+    }
+    let url = crate::conductor::supervisor().key_store_url(crate::hc::Line::V07).ok_or("the 0.7 key store is not running")?;
+    let passphrase = live_passphrase(state).ok_or("the Vault is locked")?;
+    let client = flowsta_hc_lines::keystore::v07::connect(&url, &passphrase, std::time::Duration::from_secs(30)).await.map_err(|e| format!("key store (0.7): {e}"))?;
+    let client = Arc::new(client);
+    *state.key_store_07.lock().unwrap() = Some(client.clone());
+    Ok(client)
+}
+
+/// A signer for one 0.6 cell, whether or not the cell has answered.
+pub(crate) async fn signer_for(state: &AppState, cell_id: &holochain_types::prelude::CellId) -> Result<CellSigner, String> {
+    let mut signer = holochain_client::LairAgentSigner::new(key_store_06(state).await?);
+    signer.add_credentials(cell_id.clone(), cell_id.agent_pubkey().clone());
+    Ok(Arc::new(signer))
+}
+
+/// A signer for one 0.7 cell, whether or not the cell has answered.
+pub(crate) async fn signer_for_07(state: &AppState, cell_id: &holochain_types_07::prelude::CellId) -> Result<CellSigner07, String> {
+    let mut signer = holochain_client_07::LairAgentSigner::new(key_store_07(state).await?);
+    signer.add_credentials(cell_id.clone(), cell_id.agent_pubkey().clone());
+    Ok(Arc::new(signer))
+}
+
+/// Does this 0.6 cell run? Asked without writing: a call to a zome no cell
+/// has, over a connection of its own. Some(true) when it answers that the
+/// zome is not there, Some(false) when it says it is not running, Err for
+/// anything else.
+pub(crate) async fn ask_cell_06(state: &AppState, admin_ws: &holochain_client::AdminWebsocket, app_id: &str, cell_id: &holochain_types::prelude::CellId) -> Result<bool, String> {
+    use holochain_client::{AllowedOrigins, AppWebsocket, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    let signer = signer_for(state, cell_id).await?;
+    let origin = crate::conductor::node_origin();
+    // The line's app interface once it has one; before that (a start still
+    // setting up) one of this session's own, attached once.
+    let known = crate::conductor::supervisor().ports(crate::hc::Line::V06).map(|(_, app)| app).filter(|p| *p != 0).or(*state.ask_port_06.lock().unwrap());
+    let port = match known {
+        Some(p) => p,
+        None => {
+            let p = admin_ws
+                .attach_app_interface(0, None, AllowedOrigins::Origins(std::collections::HashSet::from([origin.clone()])), None)
+                .await
+                .map_err(|e| format!("attach_app_interface: {e}"))?;
+            *state.ask_port_06.lock().unwrap() = Some(p);
+            p
+        }
+    };
+    let issued = admin_ws
+        .issue_app_auth_token(IssueAppAuthenticationTokenPayload::for_installed_app_id(app_id.to_string()))
+        .await
+        .map_err(|e| format!("issue_app_auth_token: {e}"))?;
+    let ws = AppWebsocket::connect(format!("localhost:{port}"), issued.token, signer, Some(origin)).await.map_err(|e| format!("app connect: {e}"))?;
+    match ws
+        .call_zome(ZomeCallTarget::CellId(cell_id.clone()), flowsta_hc_lines::NO_SUCH_ZOME.into(), "is_the_cell_running".into(), holochain_types::prelude::ExternIO::from(vec![0xc0]))
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(e) => {
+            let detail = format!("{e:?}");
+            if flowsta_hc_lines::says_the_cell_runs(&detail) {
+                Ok(true)
+            } else if flowsta_hc_lines::client::kind_06(&e) == flowsta_hc_lines::ZomeErrorKind::CellNotRunning {
+                Ok(false)
+            } else {
+                Err(detail)
+            }
+        }
+    }
+}
+
+/// [`ask_cell_06`] on the 0.7 line.
+pub(crate) async fn ask_cell_07(state: &AppState, admin_ws: &holochain_client_07::AdminWebsocket, app_id: &str, cell_id: &holochain_types_07::prelude::CellId) -> Result<bool, String> {
+    use holochain_client_07::{AllowedOrigins, AppWebsocket, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    let signer = signer_for_07(state, cell_id).await?;
+    let origin = crate::conductor::node_origin();
+    let known = crate::conductor::supervisor().ports(crate::hc::Line::V07).map(|(_, app)| app).filter(|p| *p != 0).or(*state.ask_port_07.lock().unwrap());
+    let port = match known {
+        Some(p) => p,
+        None => {
+            let p = admin_ws
+                .attach_app_interface(0, None, AllowedOrigins::Origins(std::collections::HashSet::from([origin.clone()])), None)
+                .await
+                .map_err(|e| format!("attach_app_interface (0.7): {e}"))?;
+            *state.ask_port_07.lock().unwrap() = Some(p);
+            p
+        }
+    };
+    let issued = admin_ws
+        .issue_app_auth_token(IssueAppAuthenticationTokenPayload::for_installed_app_id(app_id.to_string()))
+        .await
+        .map_err(|e| format!("issue_app_auth_token (0.7): {e}"))?;
+    let ws = AppWebsocket::connect(format!("localhost:{port}"), issued.token, signer, Some(origin)).await.map_err(|e| format!("app connect (0.7): {e}"))?;
+    match ws
+        .call_zome(ZomeCallTarget::CellId(cell_id.clone()), flowsta_hc_lines::NO_SUCH_ZOME.into(), "is_the_cell_running".into(), holochain_types_07::prelude::ExternIO::from(vec![0xc0]))
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(e) => {
+            let detail = format!("{e:?}");
+            if flowsta_hc_lines::says_the_cell_runs(&detail) {
+                Ok(true)
+            } else if flowsta_hc_lines::client::kind_07(&e) == flowsta_hc_lines::ZomeErrorKind::CellNotRunning {
+                Ok(false)
+            } else {
+                Err(detail)
+            }
+        }
+    }
+}
+
+/// The signer for a 0.7 cell that has answered this conductor session. A
+/// cell not yet marked waits for the line's probe to reach it; one the probe
+/// did not reach is asked here, once at a time, and marked when it answers.
+/// A cell that is not running is refused with [`AUTH_CREDS`], as a failed
+/// grant was.
+pub(crate) async fn cell_signer_07(
+    state: &Arc<AppState>,
+    admin_ws: &holochain_client_07::AdminWebsocket,
+    app_id: &str,
+    cell_id: &holochain_types_07::prelude::CellId,
+) -> Result<CellSigner07, String> {
+    if state.cells_ready_07.lock().unwrap().contains(cell_id) {
+        return signer_for_07(state, cell_id).await.map_err(|e| format!("{AUTH_CREDS} (0.7): {e}"));
+    }
+    // Right after a start the cell can still be coming up: wait for the
+    // line's probe to reach it.
+    crate::dna::wait_for_cell(state, crate::hc::Line::V07, || state.cells_ready_07.lock().unwrap().contains(cell_id)).await;
+    let _fill = state.credentials_fill_lock.lock().await;
+    if !state.cells_ready_07.lock().unwrap().contains(cell_id) {
+        match ask_cell_07(state, admin_ws, app_id, cell_id).await {
+            Ok(true) => {
+                state.cells_ready_07.lock().unwrap().insert(cell_id.clone());
+            }
+            Ok(false) => return Err(format!("{AUTH_CREDS} (0.7): CellNotRunning: the cell of {app_id} is not running yet")),
+            Err(e) => return Err(format!("{AUTH_CREDS} (0.7): {e}")),
+        }
+    }
+    signer_for_07(state, cell_id).await.map_err(|e| format!("{AUTH_CREDS} (0.7): {e}"))
+}
+
+/// [`cell_signer_07`] on the 0.6 line. All zome-call setup paths go
+/// through one of the two.
+pub(crate) async fn cell_signer(
+    state: &Arc<AppState>,
+    admin_ws: &holochain_client::AdminWebsocket,
+    app_id: &str,
+    cell_id: &holochain_types::prelude::CellId,
+) -> Result<CellSigner, String> {
+    if state.cells_ready.lock().unwrap().contains(cell_id) {
+        return signer_for(state, cell_id).await.map_err(|e| format!("{AUTH_CREDS}: {e}"));
+    }
+    crate::dna::wait_for_cell(state, crate::hc::Line::V06, || state.cells_ready.lock().unwrap().contains(cell_id)).await;
+    // One asker at a time: the others find the cell marked on the re-check.
+    let _fill = state.credentials_fill_lock.lock().await;
+    if !state.cells_ready.lock().unwrap().contains(cell_id) {
+        match ask_cell_06(state, admin_ws, app_id, cell_id).await {
+            Ok(true) => {
+                state.cells_ready.lock().unwrap().insert(cell_id.clone());
+            }
+            Ok(false) => return Err(format!("{AUTH_CREDS}: CellDisabled: the cell of {app_id} is not running yet")),
+            Err(e) => return Err(format!("{AUTH_CREDS}: {e}")),
+        }
+    }
+    signer_for(state, cell_id).await.map_err(|e| format!("{AUTH_CREDS}: {e}"))
+}
+
+/// Forget which cells answered - call when a zome call fails
+/// "unauthorized" (the chain was reset underneath, say) so the next attempt
+/// asks its cell again.
 pub(crate) fn invalidate_cell_credentials(state: &Arc<AppState>) {
-    state.cell_credentials.lock().unwrap().clear();
-    state.cell_credentials_07.lock().unwrap().clear();
+    crate::commands::forget_cells_06(&state);
+    crate::commands::forget_cells_07(&state);
 }
 
 impl AppState {
@@ -607,8 +693,12 @@ impl AppState {
             skip_lair_sweep_once: std::sync::atomic::AtomicBool::new(false),
             registration_conflict: Mutex::new(false),
             dev_relock_passphrase: Mutex::new(None),
-            cell_credentials: Mutex::new(HashMap::new()),
-            cell_credentials_07: Mutex::new(HashMap::new()),
+            cells_ready: Mutex::new(std::collections::HashSet::new()),
+            cells_ready_07: Mutex::new(std::collections::HashSet::new()),
+            key_store_06: Mutex::new(None),
+            key_store_07: Mutex::new(None),
+            ask_port_06: Mutex::new(None),
+            ask_port_07: Mutex::new(None),
             credentials_fill_lock: tokio::sync::Mutex::new(()),
             commit_serial: tokio::sync::Mutex::new(()),
             cell_probes_06: std::sync::atomic::AtomicUsize::new(0),
@@ -775,8 +865,8 @@ pub(crate) fn stop_syncing_while_locked(state: &AppState) {
     crate::conductor::stop_all_lines();
     *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
     *state.unlock_passphrase.lock().unwrap() = None;
-    state.cell_credentials.lock().unwrap().clear();
-    state.cell_credentials_07.lock().unwrap().clear();
+    crate::commands::forget_cells_06(&state);
+    crate::commands::forget_cells_07(&state);
     crate::devices::forget_kept_list();
     log::info!("Stopped syncing while locked.");
 }
@@ -1605,8 +1695,8 @@ fn lock_secrets(state: &Arc<AppState>, conductor_stays: bool) {
     // Cached cap-grant credentials don't either (a reset/re-create after
     // this lock would otherwise reuse grants from a dead chain).
     if !conductor_stays {
-        state.cell_credentials.lock().unwrap().clear();
-        state.cell_credentials_07.lock().unwrap().clear();
+        crate::commands::forget_cells_06(&state);
+        crate::commands::forget_cells_07(&state);
     }
 
     // Clear MAU state before clearing vault config (needs device_seed)
@@ -1673,9 +1763,9 @@ pub fn joined_setup_pending(state: State<'_, Arc<AppState>>) -> Result<bool, Str
 pub fn primary_cells_ready(state: &AppState) -> bool {
     let primary_07 = crate::conductor::supervisor().primary() == Some(crate::hc::Line::V07);
     if primary_07 {
-        !state.cell_credentials_07.lock().unwrap().is_empty()
+        !state.cells_ready_07.lock().unwrap().is_empty()
     } else {
-        !state.cell_credentials.lock().unwrap().is_empty()
+        !state.cells_ready.lock().unwrap().is_empty()
     }
 }
 
@@ -6451,7 +6541,7 @@ pub(crate) async fn connect_signing_app_ws(
     app_port: u16,
     signing_app: &holochain_client::AppInfo,
 ) -> Option<(holochain_client::AppWebsocket, String)> {
-    use holochain_client::{AppWebsocket, ClientAgentSigner, CellInfo,
+    use holochain_client::{AppWebsocket, CellInfo,
         IssueAppAuthenticationTokenPayload};
 
     let role_name = signing_app.cell_info.keys()
@@ -6462,7 +6552,7 @@ pub(crate) async fn connect_signing_app_ws(
             CellInfo::Provisioned(p) => Some(p.cell_id.clone()),
             _ => None,
         })?;
-    let creds = match cell_credentials_cached(state, admin_ws, &cell_id).await {
+    let creds = match cell_signer(state, admin_ws, &signing_app.installed_app_id, &cell_id).await {
         Ok(c) => c,
         Err(e) => {
             log::warn!("auth creds for {}: {}", signing_app.installed_app_id, e);
@@ -6480,12 +6570,11 @@ pub(crate) async fn connect_signing_app_ws(
             return None;
         }
     };
-    let signer = ClientAgentSigner::default();
-    signer.add_credentials(cell_id, creds);
+    let signer = creds;
     let app_ws = match AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
         long_request_ws_config(),
-        issued.token, signer.into(),
+        issued.token, signer,
         Some(crate::conductor::node_origin()),
     ).await {
         Ok(ws) => ws,
@@ -6647,8 +6736,8 @@ async fn fetch_linked_agent_keys(
     apps: &[holochain_client::AppInfo],
     cached_web_agent_key: Option<String>,
 ) -> (Vec<holochain_types::prelude::AgentPubKey>, bool) {
-    use holochain_client::{AppWebsocket, AuthorizeSigningCredentialsPayload,
-        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    use holochain_client::{AppWebsocket,
+        CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
     use holochain_types::prelude::{AgentPubKey, ExternIO};
 
     let mut identity_apps: Vec<_> = apps.iter()
@@ -6684,7 +6773,7 @@ async fn fetch_linked_agent_keys(
     // identity itself counts as one of this person's agents.
     let identity_key = identity_agent_key(state).unwrap_or_else(|| my_agent_key.clone());
 
-    let creds = match cell_credentials_cached(state, admin_ws, &identity_cell_id).await {
+    let creds = match cell_signer(state, admin_ws, &identity_app.installed_app_id, &identity_cell_id).await {
         Ok(c) => c,
         Err(e) => { log::warn!("identity auth creds: {}", e); return (Vec::new(), false); }
     };
@@ -6696,12 +6785,11 @@ async fn fetch_linked_agent_keys(
         Ok(t) => t,
         Err(e) => { log::warn!("identity token: {}", e); return (Vec::new(), false); }
     };
-    let signer = ClientAgentSigner::default();
-    signer.add_credentials(identity_cell_id, creds);
+    let signer = creds;
     let identity_ws = match AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
         long_request_ws_config(),
-        issued.token, signer.into(),
+        issued.token, signer,
         Some(crate::conductor::node_origin()),
     ).await {
         Ok(ws) => ws,
@@ -7657,8 +7745,8 @@ async fn revoke_signature_attempt(
     action_hash_hex: String,
     reason: Option<String>,
 ) -> Result<String, String> {
-    use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
-        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    use holochain_client::{AdminWebsocket, AppWebsocket,
+        CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
     use holochain_types::prelude::ExternIO;
 
     if crate::hc::active_line(state) == crate::hc::Line::V07 {
@@ -7698,18 +7786,17 @@ async fn revoke_signature_attempt(
         })
         .ok_or("No provisioned signing cell")?;
 
-    let credentials = cell_credentials_cached(state, &admin_ws, &cell_id).await?;
+    let credentials = cell_signer(state, &admin_ws, &signing_app_id, &cell_id).await?;
 
     let issued = admin_ws.issue_app_auth_token(
         IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app_id),
     ).await.map_err(|e| format!("auth token: {}", e))?;
 
-    let signer = ClientAgentSigner::default();
-    signer.add_credentials(cell_id, credentials);
+    let signer = credentials;
     let app_ws = AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
         long_request_ws_config(),
-        issued.token, signer.into(),
+        issued.token, signer,
         Some(crate::conductor::node_origin()),
     ).await.map_err(|e| format!("App WS: {}", e))?;
 
@@ -7767,8 +7854,8 @@ pub(crate) async fn set_thumbnail_inner(
     action_hash_hex: String,
     thumbnail: String,
 ) -> Result<String, String> {
-    use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
-        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    use holochain_client::{AdminWebsocket, AppWebsocket,
+        CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
     use holochain_types::prelude::ExternIO;
 
     if crate::hc::active_line(state) == crate::hc::Line::V07 {
@@ -7808,18 +7895,17 @@ pub(crate) async fn set_thumbnail_inner(
         })
         .ok_or("No provisioned signing cell")?;
 
-    let credentials = cell_credentials_cached(state, &admin_ws, &cell_id).await?;
+    let credentials = cell_signer(state, &admin_ws, &signing_app_id, &cell_id).await?;
 
     let issued = admin_ws.issue_app_auth_token(
         IssueAppAuthenticationTokenPayload::for_installed_app_id(signing_app_id),
     ).await.map_err(|e| format!("auth token: {}", e))?;
 
-    let signer = ClientAgentSigner::default();
-    signer.add_credentials(cell_id, credentials);
+    let signer = credentials;
     let app_ws = AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
         retryable_request_ws_config(),
-        issued.token, signer.into(),
+        issued.token, signer,
         Some(crate::conductor::node_origin()),
     ).await.map_err(|e| format!("App WS: {}", e))?;
 
@@ -7917,8 +8003,8 @@ pub(crate) async fn commit_signature_to_dht(
     comment: Option<&str>,
     supersedes: Option<&[u8]>,
 ) -> Result<String, String> {
-    use holochain_client::{AdminWebsocket, AppWebsocket, AuthorizeSigningCredentialsPayload,
-        ClientAgentSigner, CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
+    use holochain_client::{AdminWebsocket, AppWebsocket,
+        CellInfo, IssueAppAuthenticationTokenPayload, ZomeCallTarget};
     use holochain_types::prelude::ExternIO;
 
     // An identity whose records have moved signs on the 0.7 line.
@@ -7966,8 +8052,7 @@ pub(crate) async fn commit_signature_to_dht(
         })
         .ok_or("No provisioned signing cell")?;
 
-    // Session-cached cap-grant credentials for this cell
-    let credentials = cell_credentials_cached(state, &admin_ws, &cell_id).await?;
+    let credentials = cell_signer(state, &admin_ws, &signing_app_id, &cell_id).await?;
 
     // Issue auth token
     let issued = admin_ws
@@ -7977,14 +8062,12 @@ pub(crate) async fn commit_signature_to_dht(
         .await
         .map_err(|e| format!("issue_app_auth_token failed: {}", e))?;
 
-    // Connect app WS with a ClientAgentSigner (must have credentials loaded)
-    let signer = ClientAgentSigner::default();
-    signer.add_credentials(cell_id, credentials);
+    let signer = credentials;
     let app_ws = AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
         long_request_ws_config(),
         issued.token,
-        signer.into(),
+        signer,
         Some(crate::conductor::node_origin()),
     )
     .await

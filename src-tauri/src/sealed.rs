@@ -209,7 +209,7 @@ pub(crate) async fn connect_sealed_app_ws(
     app_port: u16,
 ) -> Result<(holochain_client::AppWebsocket, String), String> {
     use holochain_client::{
-        AdminWebsocket, AppWebsocket, CellInfo, ClientAgentSigner,
+        AdminWebsocket, AppWebsocket, CellInfo,
         IssueAppAuthenticationTokenPayload,
     };
 
@@ -246,7 +246,7 @@ pub(crate) async fn connect_sealed_app_ws(
         .ok_or("No provisioned sealed cell")?;
 
     let credentials =
-        crate::commands::cell_credentials_cached(state, &admin_ws, &cell_id).await?;
+        crate::commands::cell_signer(state, &admin_ws, &app_id, &cell_id).await?;
 
     let issued = admin_ws
         .issue_app_auth_token(IssueAppAuthenticationTokenPayload::for_installed_app_id(
@@ -255,13 +255,12 @@ pub(crate) async fn connect_sealed_app_ws(
         .await
         .map_err(|e| format!("issue_app_auth_token failed: {}", e))?;
 
-    let signer = ClientAgentSigner::default();
-    signer.add_credentials(cell_id, credentials);
+    let signer = credentials;
     let app_ws = AppWebsocket::connect_with_config(
         format!("localhost:{}", app_port),
         crate::commands::long_request_ws_config(),
         issued.token,
-        signer.into(),
+        signer,
         Some(crate::conductor::node_origin()),
     )
     .await

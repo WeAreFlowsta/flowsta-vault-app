@@ -594,8 +594,8 @@ pub async fn start_holochain(
     // A fresh conductor session gets fresh cap grants - drop any cached
     // credentials so the readiness probe re-verifies (and re-fills) them.
     let (data_key, private_v2_seed) = {
-        state.cell_credentials.lock().unwrap().clear();
-        state.cell_credentials_07.lock().unwrap().clear();
+        crate::commands::forget_cells_06(&state);
+        crate::commands::forget_cells_07(&state);
         let cfg = state.vault_config.lock().unwrap();
         let key: Option<[u8; 32]> = cfg.as_ref().and_then(|c| c.data_key.as_deref()).and_then(|k| k.try_into().ok());
         let seed = cfg.as_ref().and_then(|c| if c.hosting_model.as_deref() == Some("device-hosted") { c.private_network_seed.clone() } else { None });
