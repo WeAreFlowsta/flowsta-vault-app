@@ -5,7 +5,7 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.8.0-beta6] - 2026-11-15
 
 ### Highlights
 
@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Nobody is asked to unlock. "Lock and stop syncing" stops it. Each
   device needs this version: a device on an older Vault gets a locked
   Vault's new backups once that Vault is next unlocked.
+- **Two devices set up from the same recovery phrase can now sync.** A
+  device set up from your recovery phrase in an older Flowsta Vault shares
+  one key with your other device, and each keeps its own copy of your
+  private data. Overview now says so on such a device and
+  offers "Set this device up to sync": the device gets a key of its own,
+  your other device asks for the same step, and from then on the two
+  share everything. Your data is kept, and the signatures you made on
+  either device stay listed.
 - **Long histories reach your other devices.** The Vault now runs a
   Holochain 0.7.1 built from the official source with a small set of
   fixes (listed at github.com/WeAreFlowsta/holochain-build). With the
@@ -30,7 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unlock wrote one small permission record for each part of your data,
   which then had to sync to your other devices. Flowsta Vault now signs
   with your identity's own key and writes nothing at an unlock.
-
+- Windows: when the Vault quits or installs an update, its background
+  services are asked to shut down and given time to finish before they
+  are ended.
 - A device you remove is refused by your other devices from the moment
   they know, and gets no more of your apps' backups, also while it is
   locked. Settings > Devices says "Removing…" until the removal has
@@ -47,7 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting.
 - Linux packages depend on `xdg-utils`, which opening links from other
   apps needs.
-
 - After "Restart to update" the Vault's window opens on its own. Before, a
   Vault that started when you logged in came back hidden after the update
   restarted it, and you had to open it from the Dock, the taskbar or the
