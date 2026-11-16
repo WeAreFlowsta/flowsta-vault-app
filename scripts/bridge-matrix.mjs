@@ -2496,6 +2496,10 @@ async function hardeningLeg() {
   const pagePost = await raw('/show', { method: 'POST', headers: { ...here, 'Sec-Fetch-Site': 'cross-site' }, body: {} });
   record('a page with no Origin cannot post', pagePost.status === 403 && pagePost.data?.error === 'origin_required', `${pagePost.status} ${JSON.stringify(pagePost.data)}`);
 
+  // A link is found again by its origin: one asked for with none is refused before any dialog.
+  const noOriginLink = await raw('/link-identity', { method: 'POST', headers: here, body: { app_name: 'No origin', client_id: process.env.VAULT_MATRIX_APP_CLIENT_ID || 'flowsta_app_test', app_agent_pub_key: fakeAgentKey() } });
+  record('a link request with no origin is refused', noOriginLink.status === 403 && noOriginLink.data?.error === 'origin_required' && /Origin header/.test(noOriginLink.data?.description || ''), `${noOriginLink.status} ${JSON.stringify(noOriginLink.data)}`);
+
   // 3. The identity, its header and the instance id, per caller.
   record('a local program sees the identity and its header', local.headers['x-flowsta-vault-identity'] === me);
   const stranger = await raw('/status', { headers: from(STRANGER) });

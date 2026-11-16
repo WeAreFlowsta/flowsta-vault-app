@@ -10,9 +10,11 @@
  *
  * The Vault tells apps apart by the origin a request carries, and Node
  * sends none. SDK_ORIGIN is the origin the app registered: the program adds
- * it to its requests to the Vault, as a desktop app's own client does.
- * Without SDK_ORIGIN the same calls are made with no origin and what the
- * Vault answers is printed, not judged.
+ * it to its requests to the Vault (`setVaultOrigin` from SDK 3.12.0; with
+ * an earlier SDK this script adds the header itself).
+ * Without SDK_ORIGIN the program sends no origin: it is told the identity
+ * (a local program), and its request to connect is refused with words
+ * that say what to do.
  *
  *   SDK_DIR=<a folder where `npm install @flowsta/holochain` was run> \
  *   SDK_ORIGIN=<the app's registered origin, for example tauri://localhost> \
@@ -40,7 +42,11 @@ const sdk = await import(pathToFileURL(require.resolve('@flowsta/holochain')).hr
 const version = JSON.parse(fs.readFileSync(path.join(path.resolve(sdkDir), 'node_modules/@flowsta/holochain/package.json'), 'utf8')).version;
 const ipcUrl = `http://127.0.0.1:${port}`;
 const origin = process.env.SDK_ORIGIN || '';
-if (origin) {
+// An SDK with setVaultOrigin (3.12.0) is told the origin; an earlier one has
+// it added to its requests here.
+if (origin && typeof sdk.setVaultOrigin === 'function') {
+  sdk.setVaultOrigin(origin);
+} else if (origin) {
   const plain = globalThis.fetch;
   globalThis.fetch = (input, init = {}) => {
     const url = typeof input === 'string' ? input : input.url;
@@ -54,10 +60,6 @@ if (origin) {
 let passed = 0;
 let failed = 0;
 const record = (name, ok, detail = '') => {
-  if (!origin && !name.startsWith('status')) {
-    console.log(`  · ${name}: ${ok ? 'yes' : 'no'}${detail ? ` — ${String(detail).slice(0, 200)}` : ''}`);
-    return;
-  }
   if (ok) passed += 1; else failed += 1;
   console.log(`  ${ok ? '✓' : '✗'} ${name}${detail ? ` — ${String(detail).slice(0, 200)}` : ''}`);
 };
@@ -80,6 +82,13 @@ if (!origin) record('status: a local program is told the identity', !!status.val
 else record('status: an origin that is not linked yet is not told the identity', !status.value?.agentPubKey);
 
 const link = await attempt(() => sdk.linkFlowstaIdentity({ appName, clientId, localAgentPubKey: appKey, ipcUrl }));
+if (!origin) {
+  record('with no origin, the request to connect is refused and says what to do', link.error?.code === 'origin_required' && /Origin header/.test(link.error?.message || ''), link.error ? `${link.error.name}: ${link.error.message}` : 'it was linked');
+  const none = await attempt(() => sdk.getFlowstaLinkStatus({ clientId, localAgentPubKey: appKey, ipcUrl }));
+  record('and nothing was linked', !!none.value && none.value.state !== 'linked', JSON.stringify(none.value ?? String(none.error)));
+  console.log(`RESULT: ${passed}/${passed + failed} checks passed${failed ? '' : ' — ALL GREEN'}`);
+  process.exit(failed ? 1 : 0);
+}
 const me = link.value?.payload?.vaultAgentPubKey;
 record('link: approved, signed by the Vault identity', link.value?.success === true && !!me && !!link.value?.payload?.vaultSignature, link.error ? `${link.error.name}: ${link.error.message}` : '');
 record('link: a link token came back', typeof link.value?.linkToken === 'string' && link.value.linkToken.length > 0);
