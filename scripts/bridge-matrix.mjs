@@ -2521,6 +2521,13 @@ async function hardeningLeg() {
   record('nor can a page with no Origin', pageGuess.status === 200, `${pageGuess.status}`);
   record('a Flowsta site is told at once', (await raw(q(other), { headers: from(ORIGIN) })).status === 409 && (await raw(q(me), { headers: from(ORIGIN) })).status === 200);
   record('a local program is told at once', (await raw(q(other), { headers: here })).status === 409);
+  // Node's built-in fetch marks every request `sec-fetch-mode: cors` and
+  // sends no Origin: a local program all the same, on a GET and on a POST.
+  const nodeGuess = await fetch(`http://127.0.0.1:${port}${q(other)}`);
+  const nodeStatus = await (await fetch(`http://127.0.0.1:${port}/status`)).json().catch(() => ({}));
+  const nodePost = await fetch(`http://127.0.0.1:${port}/backup/retrieve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: 'flowsta_app_' + '0'.repeat(64) }) });
+  const nodePostBody = await nodePost.json().catch(() => ({}));
+  record("a Node program's fetch is a local program's", nodeGuess.status === 409 && !!nodeStatus.active_identity && nodePostBody.error !== 'origin_required', `${nodeGuess.status} ${JSON.stringify(nodeStatus).slice(0, 80)} ${nodePost.status} ${nodePostBody.error}`);
   const LINKED = 'https://linked-matrix.example';
   await op({ op: 'connect', client_id: 'matrix_linked', app_name: 'Matrix Linked', origin: LINKED, app_agent_pub_key: 'matrix-linked-key' });
   const linkedWrong = await raw(q(other), { headers: from(LINKED) });
