@@ -1485,6 +1485,9 @@ struct LinkIdentityResponse {
     link_token: String,
 }
 
+/// What a program that asks to connect with no origin is told.
+const LINK_NEEDS_AN_ORIGIN: &str = "A connection is kept under the origin a request carries, and this request carried none. Send the request from your app's window, or have your program send the origin you registered for your app in its Origin header.";
+
 async fn link_identity_handler(
     State(state): State<Arc<IpcState>>,
     headers: HeaderMap,
@@ -1492,6 +1495,19 @@ async fn link_identity_handler(
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "link-identity");
+    // A link is kept under the origin its request carried, and found again
+    // by the origin of each later request. A link made with none could
+    // never be found: the person would approve a connection no call could
+    // use, and the app could not remove it. Refused before any dialog.
+    if origin.as_deref().map_or(true, str::is_empty) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "origin_required".into(),
+                description: Some(LINK_NEEDS_AN_ORIGIN.into()),
+            }),
+        ));
+    }
     note_site_app(&state.app_state, origin.as_deref(), &req.client_id);
 
     // Vault must be unlocked
