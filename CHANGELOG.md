@@ -5,6 +5,53 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Connections
+
+- **An app carries its own connection.** When you connect an app, the Vault
+  hands that install a private token, and the app presents it on every
+  later call. The Vault then knows which app a call is from, whatever else
+  on the computer presents the same address. Apps built with
+  `@flowsta/holochain` 3.11.0 or `flowsta-vault-client` 0.2 do this
+  themselves; apps on older versions keep working as before.
+- **The connect dialog names who is asking.** For a website it leads with
+  the website's address ("example.org wants to connect as ..."); for a
+  desktop app, with the name its maker registered with Flowsta. When the
+  app is already connected from somewhere else, the dialog says so, and
+  allowing it adds a connection without moving the existing one.
+- **Developers list where their app connects from**, at dev.flowsta.com.
+  The Vault takes a connection request for that app only from those
+  addresses, and the dialog says when an address is not one the app's maker
+  has listed.
+- **An app disconnects only itself.** When you disconnect inside an app, the
+  Vault removes that app's own connection, tells the app whether it did,
+  and records it in Activity.
+- **Every signature an app asks for shows its own approval**, a request made
+  straight after connecting included.
+
+### Devices
+
+- A device that was given a key of its own with "Set this device up to
+  sync" keeps its earlier copy of your records for 30 days after the last
+  of them has been written under the new key, and removes that copy then.
+  Your records themselves stay.
+
+### Fixed
+
+- Overview's plan card says it is checking your plan while the Vault is
+  online and waiting for the answer. It said "unavailable offline" then
+  too.
+
+### Hardening
+
+- The Vault answers only requests addressed to this computer (`127.0.0.1`
+  or `localhost`).
+- Which identity the Vault holds is told only to Flowsta's own sites, to
+  sites and apps you have connected, and to programs on your computer.
+- A request that says which identity it expects is answered about that
+  identity only after you have approved the request.
+
 ## [1.8.0-beta6] - 2026-11-15
 
 ### Highlights
