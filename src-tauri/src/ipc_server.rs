@@ -235,17 +235,23 @@ fn set_job_stage(state: &Arc<IpcState>, job_id: &Option<String>, stage: &str) {
 const BROWSER_WITHOUT_ORIGIN: &str = "browser://no-origin";
 
 /// Who is asking, as far as headers can say: the `Origin` a browser or an
-/// app sent; else, when the request carries any of the `Sec-Fetch-*`
-/// headers only a browser adds, the stand-in above; else `None`, a local
-/// program. Absence of those headers proves nothing (older webviews send
-/// none), so `None` is granted nothing it was not granted before.
+/// app sent; else, when the request carries a `Sec-Fetch-*` header only a
+/// browser adds, the stand-in above; else `None`, a local program. Absence
+/// of those headers proves nothing (older webviews send none), so `None` is
+/// granted nothing it was not granted before.
+///
+/// `Sec-Fetch-Mode` by itself is not a browser's mark: Node's built-in
+/// `fetch` sends `sec-fetch-mode: cors` on every request and nothing else
+/// of the family, and a Node program is a local program. A browser sends
+/// `Sec-Fetch-Site` and `Sec-Fetch-Dest` with every request it marks, and
+/// a page can neither set nor remove them.
 fn extract_origin(headers: &HeaderMap) -> Option<String> {
     if let Some(o) = headers.get(axum::http::header::ORIGIN).and_then(|h| h.to_str().ok()) {
         return Some(o.to_string());
     }
     headers
         .keys()
-        .any(|k| k.as_str().starts_with("sec-fetch-"))
+        .any(|k| matches!(k.as_str(), "sec-fetch-site" | "sec-fetch-dest" | "sec-fetch-user"))
         .then(|| BROWSER_WITHOUT_ORIGIN.to_string())
 }
 
@@ -6781,6 +6787,9 @@ mod caller_tests {
         assert_eq!(extract_origin(&headers(&[("origin", "https://example.org")])).as_deref(), Some("https://example.org"));
         assert_eq!(extract_origin(&headers(&[("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "no-cors")])).as_deref(), Some(BROWSER_WITHOUT_ORIGIN));
         assert_eq!(extract_origin(&headers(&[("sec-fetch-dest", "image")])).as_deref(), Some(BROWSER_WITHOUT_ORIGIN));
+        // Node's built-in fetch: the mode alone, no site and no destination.
+        assert_eq!(extract_origin(&headers(&[("sec-fetch-mode", "cors"), ("user-agent", "node")])), None, "a Node program is a local program");
+        assert_eq!(extract_origin(&headers(&[("sec-fetch-site", "cross-site")])).as_deref(), Some(BROWSER_WITHOUT_ORIGIN));
         assert_eq!(extract_origin(&headers(&[("origin", "tauri://localhost"), ("sec-fetch-site", "cross-site")])).as_deref(), Some("tauri://localhost"), "a stated origin stands");
         // The stand-in is no Flowsta origin and can match no link.
         assert!(!is_flowsta_origin(Some(BROWSER_WITHOUT_ORIGIN)));
