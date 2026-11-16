@@ -1697,7 +1697,9 @@ async function devicesLeg() {
   record('A: is told a device was added elsewhere', await until(async () => { await op(a, { op: 'round' }); return ((await vaultFetch(a, '/dev/status')).data?.activity || []).includes('device_added_elsewhere'); }, 120));
   // Beside an older sibling nothing else holds signing v1.6, and A's v1.5
   // signature is a network read on a cold conductor: allow it ten minutes.
-  record('B: after the phrase re-add, still no two rows name the same original', await until(async () => (await sigsOn(b)).length > 0 && oneRowPerOriginal(await sigsOn(b)), process.env.VAULT_MATRIX_OLD_A === '1' ? 600 : 120), JSON.stringify((await sigsOn(b)).map((x) => [x.action_hash?.slice(0, 8), x.original_action_hash?.slice(0, 8) || null])));
+  // Otherwise five: a device added back reads its signatures from the
+  // network on a conductor minutes old (11-16: the list came at 120 s).
+  record('B: after the phrase re-add, still no two rows name the same original', await until(async () => (await sigsOn(b)).length > 0 && oneRowPerOriginal(await sigsOn(b)), process.env.VAULT_MATRIX_OLD_A === '1' ? 600 : 300), JSON.stringify((await sigsOn(b)).map((x) => [x.action_hash?.slice(0, 8), x.original_action_hash?.slice(0, 8) || null])));
 }
 
 // ───────────────────────── main ─────────────────────────
