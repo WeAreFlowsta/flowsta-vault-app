@@ -7,6 +7,8 @@
 //   3. A remembered desktop app signs silently only with its link key.
 //   4. The same sign-in sent twice at once (a page that started twice): one
 //      dialog, one answer, both requests get it (Windows, 2026-10-16).
+//   5. A website's and a desktop app's connect dialogs; a signature asked
+//      for straight after connecting shows its own dialog.
 import { randomBytes } from "node:crypto";
 import { byId, click, fill, PASSWORD, PORT_A, devOp, vault } from "../_helpers";
 
@@ -168,6 +170,25 @@ describe("approval dialogs", () => {
     const linked = await desktop;
     expect(linked.status).toBe(200);
     expect(typeof linked.data?.link_token).toBe("string");
+    // A signature asked for straight after connecting still shows its own
+    // dialog: connecting is not a yes to signing.
+    const sign = (bytes: string) => ipc("/sign", "yoai://dialog-desktop", {
+      type: "bytes", bytes: Buffer.from(bytes, "utf8").toString("base64"), reason: "dialog test",
+      link_token: linked.data.link_token, client_id: FIXTURE_CLIENT,
+    });
+    const refused = sign("dialog test payload one");
+    await browser.waitUntil(() => shown("raw-sign-dialog"), { timeout: 30_000, timeoutMsg: "a signature asked for straight after connecting showed no dialog" });
+    await click("raw-sign-deny");
+    const no = await refused;
+    console.log(`e2e: a signature denied straight after connecting: ${no.status} ${no.data?.error}`);
+    expect(no.status).toBe(403);
+    expect(no.data?.error).toBe("user_denied");
+    const allowed = sign("dialog test payload two");
+    await browser.waitUntil(() => shown("raw-sign-dialog"), { timeout: 30_000, timeoutMsg: "the second signing dialog never showed" });
+    await click("raw-sign-approve");
+    const yes = await allowed;
+    expect(yes.status).toBe(200);
+    expect(typeof yes.data?.signature).toBe("string");
     // A website asking to connect as the same app: its address leads, and
     // the dialog says the app is already connected from elsewhere.
     const site = ipc("/link-identity", "https://dialog-site.example", {
