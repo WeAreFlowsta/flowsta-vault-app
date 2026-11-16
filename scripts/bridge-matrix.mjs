@@ -2468,6 +2468,11 @@ async function hardeningLeg() {
   const here = { Host: `127.0.0.1:${port}` };
   const from = (origin, extra = {}) => ({ ...here, ...(origin ? { Origin: origin } : {}), ...extra });
   const op = async (body) => (await vaultFetch(port, '/dev/devices', { method: 'POST', body })).data || {};
+  const until = async (fn, secs) => {
+    const deadline = Date.now() + secs * 1000;
+    while (Date.now() < deadline) { if (await fn().catch(() => false)) return true; await sleep(2000); }
+    return false;
+  };
 
   const local = await raw('/status', { headers: here });
   const me = local.data?.agent_pub_key;
@@ -2571,14 +2576,20 @@ async function hardeningLeg() {
   const revoke = (origin, body) => raw('/revoke-identity', { method: 'POST', headers: from(origin), body: { app_name: 'x', ...body } });
   const connections = async () => (await op({ op: 'connections' })).connections || (await op({ op: 'connections' }));
   const linkedNow = async (key) => (await ls(null, key)).data?.linked === true;
+  const lastLine = async () => { const d = (await vaultFetch(port, '/dev/status')).data || {}; return { kind: (d.activity || [])[0] || null, text: JSON.stringify(d.activity_last || null) }; };
+  const lineBefore = await lastLine();
   const byStranger = await revoke(STRANGER, { app_agent_pub_key: 'matrix-first-key' });
   record('another site cannot unlink an app', byStranger.data?.removed === false && (await linkedNow('matrix-first-key')), `${byStranger.status} ${JSON.stringify(byStranger.data)}`);
   const byFlowsta = await revoke(ORIGIN, { app_agent_pub_key: 'matrix-first-key' });
   record('nor can a Flowsta site', byFlowsta.data?.removed === false && (await linkedNow('matrix-first-key')), `${byFlowsta.status} ${JSON.stringify(byFlowsta.data)}`);
   const noToken = await revoke(TOKEN_ORIGIN, { app_agent_pub_key: 'matrix-token-key' });
   record('a link that needs its token is not dropped on its key alone', noToken.data?.removed === false && (await linkedNow('matrix-token-key')), JSON.stringify(noToken.data));
+  const lineAfterRefusals = await lastLine();
+  record('an unlink that removed nothing writes no activity line', lineAfterRefusals.text === lineBefore.text, `${lineBefore.text.slice(0, 120)} | ${lineAfterRefusals.text.slice(0, 120)}`);
   const withToken = await revoke(TOKEN_ORIGIN, { app_agent_pub_key: 'matrix-token-key', link_token: 'matrix-token-value' });
   record('the app drops its own link with its token, and is told so', withToken.status === 200 && withToken.data?.removed === true && !(await linkedNow('matrix-token-key')), JSON.stringify(withToken.data));
+  const lineAfterUnlink = await lastLine();
+  record('the app\'s own unlink is the newest activity line, by the app\'s name', lineAfterUnlink.kind === 'app_unlinked' && /Matrix Token disconnected itself/.test(lineAfterUnlink.text), `${lineAfterUnlink.kind} ${lineAfterUnlink.text.slice(0, 160)}`);
   const gone = await tok({ link_token: 'matrix-token-value' });
   record('after that its token opens nothing', gone.status === 403, `${gone.status} ${JSON.stringify(gone.data)}`);
   const ownOld = await revoke(SHELL, { app_agent_pub_key: 'matrix-second-key' });
@@ -2607,6 +2618,25 @@ async function hardeningLeg() {
     record('and the app can drop that link', drop.data?.removed === true, JSON.stringify(drop.data));
   } else {
     record('real link skipped - set VAULT_MATRIX_APP_CLIENT_ID', true);
+  }
+
+  // 10. Locked: a caller with no history learns no more than unlocked.
+  const locked = await vaultFetch(port, '/dev/lock', { method: 'POST', body: {} });
+  if (locked.status === 200) {
+    const sl = await raw('/status', { headers: from(STRANGER) });
+    record('locked: a site the person never approved is shown no identity', sl.status === 200 && sl.data?.unlocked === false && !sl.data?.agent_pub_key && !sl.data?.did && !sl.data?.active_identity && !sl.headers['x-flowsta-vault-identity'], JSON.stringify(sl.data).slice(0, 200));
+    const pl = await raw('/status', { headers: { ...here, 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'no-cors' } });
+    record('locked: nor is a page with no Origin', pl.status === 200 && !pl.data?.agent_pub_key && !pl.data?.active_identity && !pl.headers['x-flowsta-vault-identity'], JSON.stringify(pl.data).slice(0, 200));
+    const rl = await raw(q(me), { headers: from(STRANGER) });
+    const wl = await raw(q(other), { headers: from(STRANGER) });
+    record('locked: a site with no history cannot tell a right guess from a wrong one', rl.status === wl.status && strip(rl.data) === strip(wl.data), `${rl.status} ${wl.status}`);
+    const hl = await raw('/status', { headers: { Host: `example.org:${port}` } });
+    record('locked: a request addressed elsewhere is refused', hl.status === 403 && hl.data?.error === 'not_addressed_here', `${hl.status}`);
+    const unlocked = await vaultFetch(port, '/dev/unlock', { method: 'POST', body: {} });
+    const back = await until(async () => (await raw('/status', { headers: here })).data?.agent_pub_key === me, 180);
+    record('unlocked again as the same identity', unlocked.status === 200 && back, `${unlocked.status}`);
+  } else {
+    record('locked checks skipped - this instance has no /dev/lock', true);
   }
 
   // Leave the instance as it was found.
