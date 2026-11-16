@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Every signature an app asks for shows its own approval**, a request made
   straight after connecting included.
 
+### Devices
+
+- A device that was given a key of its own with "Set this device up to
+  sync" keeps its earlier copy of your records for 30 days after the last
+  of them has been written under the new key, and removes that copy then.
+  Your records themselves stay.
+
+### Fixed
+
+- Overview's plan card says it is checking your plan while the Vault is
+  online and waiting for the answer. It said "unavailable offline" then
+  too.
+
 ### Hardening
 
 - The Vault answers only requests addressed to this computer (`127.0.0.1`
