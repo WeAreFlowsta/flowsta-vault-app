@@ -1084,7 +1084,9 @@ export default component$(() => {
           <p class="mt-1 text-sm text-gray-400">
             {planInfo.value
               ? `${planInfo.value.used} of ${planInfo.value.limit} signs used this month`
-              : "Plan status unavailable offline"}
+              : connectionStatus.value === "online"
+                ? "Checking your plan..."
+                : "Plan status unavailable offline"}
           </p>
           <p class="mt-0.5 text-xs text-sky-400">
             {planInfo.value && planInfo.value.tier !== "free"
