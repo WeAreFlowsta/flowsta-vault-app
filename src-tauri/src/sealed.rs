@@ -2043,6 +2043,22 @@ mod tests {
         let lane_b = crate::backup_lane::Lane::open(&b.state).await.expect("B's lane");
         assert!(lane_a.alive().await && lane_b.alive().await);
 
+        // A hands a file only to a device it lists as one of the identity's
+        // current devices (`devices::may_be_served`). An unlocked Vault
+        // writes that list each round from the identity's device records;
+        // the test writes the same file, each device naming the other.
+        for (root, other, install) in [(&root_a, &lane_b.me, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), (&root_b, &lane_a.me, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")] {
+            let known = vec![crate::devices::KnownDevice {
+                install_id: install.to_string(),
+                conductor_key: crate::key_derivation::base64_standard_encode(other.get_raw_39()),
+                removed: false,
+            }];
+            let path = crate::paths::known_devices_path(root);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, serde_json::to_vec(&known).unwrap()).unwrap();
+            assert!(crate::devices::is_current_device(root, other.get_raw_39()));
+        }
+
         let started = std::time::Instant::now();
         let mut fetched = None;
         while fetched.is_none() {
