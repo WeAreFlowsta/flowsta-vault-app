@@ -1272,6 +1272,11 @@ async fn authenticate_inner(
         }
     };
 
+    // Approved without a dialog (a headless dev run): the same check the
+    // dialog's approval is followed by.
+    if approved {
+        recheck_expected_identity_after_consent(&state)?;
+    }
     if !approved {
         return Err((
             StatusCode::FORBIDDEN,
@@ -1818,6 +1823,9 @@ async fn link_identity_handler(
     // Window restore happens in the interactive branch above, next to the
     // raise that paired with it.
 
+    if approved {
+        recheck_expected_identity_after_consent(&state)?;
+    }
     if !approved {
         return Err((
             StatusCode::FORBIDDEN,
@@ -3528,6 +3536,9 @@ async fn sign_document_core(
     }
     };
 
+    if approved {
+        recheck_expected_identity_after_consent(&state)?;
+    }
     if !approved {
         return Err((
             StatusCode::FORBIDDEN,
@@ -4958,8 +4969,8 @@ async fn dev_devices_handler(
                 companion_client_id: body.get("companion_client_id").and_then(|v| v.as_str()).filter(|c| !c.is_empty()).map(String::from),
                 // A harness may give the link a token, and require it, to
                 // drive the token rules without a dialog.
-                link_token_hash: body.get("link_token").and_then(|v| v.as_str()).filter(|t| !t.is_empty()).map(link_token_hash),
-                token_required: body.get("token_required").and_then(|v| v.as_bool()).unwrap_or(false),
+                link_token_hash: body.get("give_link_token").and_then(|v| v.as_str()).filter(|t| !t.is_empty()).map(link_token_hash),
+                token_required: body.get("require_its_token").and_then(|v| v.as_bool()).unwrap_or(false),
             });
             app.save_linked_apps();
             app.linked_app_scopes.lock().unwrap().insert(client_id, vec!["profile".into()]);

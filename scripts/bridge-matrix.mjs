@@ -2554,7 +2554,7 @@ async function hardeningLeg() {
 
   // 7. The link token.
   const TOKEN_ORIGIN = 'matrix-token://app';
-  await op({ op: 'connect', client_id: 'matrix_token', app_name: 'Matrix Token', origin: TOKEN_ORIGIN, app_agent_pub_key: 'matrix-token-key', link_token: 'matrix-token-value', token_required: true });
+  await op({ op: 'connect', client_id: 'matrix_token', app_name: 'Matrix Token', origin: TOKEN_ORIGIN, app_agent_pub_key: 'matrix-token-key', give_link_token: 'matrix-token-value', require_its_token: true });
   const tok = (body) => raw('/app-secret', { method: 'POST', headers: from(TOKEN_ORIGIN), body: { label: 'network', ...body } });
   const none = await tok({});
   record('a link that needs its token is not reachable without it', none.status === 403 && none.data?.error === 'link_token_required', `${none.status} ${JSON.stringify(none.data)}`);
