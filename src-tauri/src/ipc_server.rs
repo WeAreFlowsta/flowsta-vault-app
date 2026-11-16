@@ -6300,6 +6300,34 @@ async fn identity_gate(
     Ok(resp)
 }
 
+/// Whether a `Host` header (with or without a port) names this computer:
+/// `localhost`, a 127.x.x.x address or `::1`.
+fn host_names_this_computer(host: &str) -> bool {
+    let a = host.trim();
+    let name = if a.starts_with('[') {
+        a.split_inclusive(']').next().unwrap_or(a)
+    } else {
+        a.rsplit_once(':').filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit())).map(|(h, _)| h).unwrap_or(a)
+    };
+    let h = name.trim_end_matches('.').to_ascii_lowercase();
+    h == "localhost" || h == "[::1]" || h.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(test)]
+mod addressed_here_tests {
+    use super::host_names_this_computer as here;
+
+    #[test]
+    fn only_a_loopback_name_or_address_names_this_computer() {
+        for ok in ["127.0.0.1:27777", "127.0.0.1", "localhost:27778", "LOCALHOST:27777", "localhost.", "[::1]:27777", "127.0.0.2:27777"] {
+            assert!(here(ok), "{ok}");
+        }
+        for no in ["example.org:27777", "example.org", "127.0.0.1.example.org:27777", "localhost.example.org:27777", "192.168.1.20:27777", "0.0.0.0:27777", "", "flowsta.com"] {
+            assert!(!here(no), "{no}");
+        }
+    }
+}
+
 /// Refuse every request from another account on this computer
 /// (`peer_owner`). Outside the identity gate so a refused caller learns
 /// nothing - not even the identity header; inside CORS so the page can read
@@ -6309,6 +6337,26 @@ async fn owner_guard(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
+    // The request must be addressed to this computer by a loopback name
+    // or address: a page that reached this port under a name of its own is
+    // not a page on another site (whose origin the routes judge), and not
+    // a local program either.
+    let here = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(host_names_this_computer)
+        // HTTP/1.0 sends none: a program, never a browser.
+        .unwrap_or(true);
+    if !here {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "not_addressed_here".into(),
+                description: Some("Flowsta Vault answers at 127.0.0.1 or localhost.".into()),
+            }),
+        ));
+    }
     if peer.verdict().await == crate::peer_owner::Verdict::Other {
         return Err((
             StatusCode::FORBIDDEN,
