@@ -255,6 +255,8 @@ mod tests {
                 client_id: Some("flowsta_app_x".into()),
                 origin: None,
                 companion_client_id: None,
+                link_token_hash: None,
+                token_required: false,
             }];
             std::fs::write(crate::paths::store_path(root, crate::paths::LINKED_APPS), serde_json::to_vec(&apps).unwrap()).unwrap();
         };

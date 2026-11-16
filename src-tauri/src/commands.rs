@@ -141,6 +141,11 @@ pub struct VerifiedAppInfo {
     /// challenge for its companion signed, so its web app opens signed in.
     #[serde(default)]
     pub companion_client_id: Option<String>,
+    /// The origins the app's maker registered for it (empty: none
+    /// registered). A link request for the app from any other origin is
+    /// refused.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 /// A pending identity link request awaiting user approval.
@@ -228,6 +233,14 @@ pub struct LinkedThirdPartyApp {
     /// this app may obtain a web-login signature for it (desktop-to-web hand-off).
     #[serde(default)]
     pub companion_client_id: Option<String>,
+    /// SHA-256 (hex) of the link token the Vault handed this install at
+    /// /link-identity. A request that presents the token is this install,
+    /// whatever else shares its origin. Never the token itself.
+    #[serde(default)]
+    pub link_token_hash: Option<String>,
+    /// The app asked that this link be reachable only with its token.
+    #[serde(default)]
+    pub token_required: bool,
 }
 
 /// Application state shared across commands.
