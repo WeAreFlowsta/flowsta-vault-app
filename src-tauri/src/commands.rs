@@ -193,8 +193,8 @@ pub struct PendingCellOpRequest {
     pub responder: tokio::sync::oneshot::Sender<bool>,
 }
 
-/// A pending generic /sign request awaiting user approval (linked apps
-/// signing arbitrary payloads outside the post-link ceremony window).
+/// A pending generic /sign request awaiting the person's approval (a linked
+/// app signing a payload of its own).
 pub struct PendingRawSignRequest {
     pub id: String,
     pub app_name: String,
@@ -272,10 +272,6 @@ pub struct AppState {
     pub pending_raw_sign: Mutex<Option<PendingRawSignRequest>>,
     /// A pending /sign-node-manifest request waiting for user approval.
     pub pending_manifest_sign: Mutex<Option<PendingManifestSignRequest>>,
-    /// Origins whose /link-identity approval is recent enough that the
-    /// immediate follow-up /sign of the agent-pair payload (the linking
-    /// ceremony) proceeds without a second dialog.
-    pub recent_link_approvals: Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// Origins the user has chosen to auto-approve for /authenticate.
     pub approved_apps: Mutex<Vec<String>>,
     /// Third-party apps linked via /link-identity.
@@ -692,7 +688,6 @@ impl AppState {
             pending_cell_op: Mutex::new(None),
             pending_raw_sign: Mutex::new(None),
             pending_manifest_sign: Mutex::new(None),
-            recent_link_approvals: Mutex::new(std::collections::HashMap::new()),
             approved_apps: Mutex::new(approved_sites),
             linked_third_party_apps: Mutex::new(linked_apps),
             kept_conductor: Mutex::new(None),
@@ -1715,11 +1710,6 @@ fn lock_secrets(state: &Arc<AppState>, conductor_stays: bool) {
     // Remembered sites deliberately survive a lock (and a restart): the user
     // chose "remember", and unlocking again is what proves it is still them.
     // Revoking in Connections is the way to forget one.
-
-    // The 120s post-link "ceremony window" that suppresses the /sign dialog
-    // must not survive a lock either - otherwise it keeps ticking against a
-    // now-locked vault and a re-unlock could land inside a no-dialog window.
-    state.recent_link_approvals.lock().unwrap().clear();
 
     // Cached cap-grant credentials don't either (a reset/re-create after
     // this lock would otherwise reuse grants from a dead chain).

@@ -678,21 +678,10 @@ async fn sign_handler(
         (seed_arr, config.agent_pub_key.clone(), config.did.clone())
     };
 
-    // Per-action approval: signing with the user's identity key is never
-    // silent. Exception: within the post-link ceremony window, the linking
-    // flow's agent-pair signature proceeds on the strength of the link
-    // approval the user just gave (one dialog for the ceremony, not two).
-    let in_ceremony_window = origin
-        .as_deref()
-        .map(|o| {
-            let map = state.app_state.recent_link_approvals.lock().unwrap();
-            map.get(o)
-                .map(|t| t.elapsed() < std::time::Duration::from_secs(120))
-                .unwrap_or(false)
-        })
-        .unwrap_or(false);
-
-    if !in_ceremony_window {
+    // Per-action approval: signing with the person's identity key is never
+    // silent, a moment after connecting included. Connecting answers with
+    // the link's own signature, so the link flow asks nothing of this route.
+    {
         let app_name = origin_to_client_id(&state.app_state, origin.as_deref())
             .and_then(|cid| {
                 let apps = state.app_state.linked_third_party_apps.lock().unwrap();
@@ -1847,18 +1836,6 @@ async fn link_identity_handler(
             apps.push(orig.clone());
         }
     }
-    // Open the linking-ceremony window: the immediate follow-up /sign of the
-    // agent-pair payload proceeds without a second dialog. Outside this
-    // window, /sign shows per-action approval.
-    if let Some(ref orig) = origin {
-        state
-            .app_state
-            .recent_link_approvals
-            .lock()
-            .unwrap()
-            .insert(orig.clone(), std::time::Instant::now());
-    }
-
     // User approved - extract signing material from vault config (scoped to drop lock)
     let (seed_arr, vault_ed25519_pub, vault_agent_39) = {
         let config = state.app_state.vault_config.lock().unwrap();
@@ -2050,9 +2027,6 @@ async fn revoke_identity_handler(
         state.app_state.linked_app_scopes.lock().unwrap().remove(cid);
         state.app_state.save_linked_app_scopes();
         crate::commands::revoke_email_grant(&state.app_state, cid);
-    }
-    if let Some(o) = origin.as_deref() {
-        state.app_state.recent_link_approvals.lock().unwrap().remove(o);
     }
     state.app_state.activity.record("app_unlinked", format!("{} disconnected itself", gone.app_name), None, origin.clone(), Some(gone.app_name.clone()));
 
