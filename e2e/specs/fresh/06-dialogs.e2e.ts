@@ -148,4 +148,40 @@ describe("approval dialogs", () => {
       await devOp(PORT_A, { op: "disconnect", client_id: KEY_CLIENT }).catch(() => null);
     }
   });
+
+  it("names a website by its address, and says when the app is already connected from somewhere else", async function () {
+    this.timeout(180_000);
+    const text = async (id: string) => ((await (await byId(id)).getText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+    // A desktop app: its verified name leads, and its made-up name is not shown.
+    const desktop = ipc("/link-identity", "yoai://dialog-desktop", {
+      app_name: "A name the caller made up",
+      client_id: FIXTURE_CLIENT,
+      app_agent_pub_key: "uhCAk" + randomBytes(36).toString("base64url").slice(0, 48),
+    });
+    await browser.waitUntil(() => shown("link-dialog"), { timeout: 30_000, timeoutMsg: "the link dialog never showed" });
+    const desktopTitle = await text("link-title");
+    console.log(`e2e: a desktop app's link dialog says: ${desktopTitle}`);
+    expect(desktopTitle).toMatch(/^Connect .+\?$/);
+    expect(desktopTitle).not.toContain("A name the caller made up");
+    expect(await shown("link-elsewhere-warning")).toBe(false);
+    await click("link-allow");
+    const linked = await desktop;
+    expect(linked.status).toBe(200);
+    expect(typeof linked.data?.link_token).toBe("string");
+    // A website asking to connect as the same app: its address leads, and
+    // the dialog says the app is already connected from elsewhere.
+    const site = ipc("/link-identity", "https://dialog-site.example", {
+      app_name: "Dialog link test",
+      client_id: FIXTURE_CLIENT,
+      app_agent_pub_key: "uhCAk" + randomBytes(36).toString("base64url").slice(0, 48),
+    });
+    await browser.waitUntil(() => shown("link-dialog"), { timeout: 30_000, timeoutMsg: "the second link dialog never showed" });
+    const siteTitle = await text("link-title");
+    const warning = await text("link-elsewhere-warning");
+    console.log(`e2e: a website's link dialog says: ${siteTitle} | ${warning}`);
+    expect(siteTitle).toMatch(/^dialog-site\.example wants to connect as /);
+    expect(warning).toContain("is already connected from yoai://dialog-desktop");
+    await click("link-deny");
+    expect((await site).status).toBe(403);
+  });
 });

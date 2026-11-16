@@ -367,6 +367,8 @@ export default component$(() => {
     description: string | null;
     logo_url: string | null;
     replacing_existing: boolean;
+    origin_registered?: boolean | null;
+    already_linked_from?: string | null;
     client_id?: string | null;
   } | null>(null);
   // The person may already use this app on another of their devices.
@@ -795,6 +797,8 @@ export default component$(() => {
       logo_url: string | null;
       origin: string | null;
       replacing_existing: boolean;
+      origin_registered?: boolean | null;
+      already_linked_from?: string | null;
       client_id?: string | null;
     }>("link-identity-request", (event) => {
       pendingLinkIdentity.value = event.payload;
@@ -2541,8 +2545,11 @@ export default component$(() => {
                 </svg>
               </div>
               <div>
-                <h3 class="text-base font-semibold text-white">
-                  Connect {pendingLinkIdentity.value.app_name}?
+                {/* A website is named by its address, which it cannot choose; the app it asks to connect as comes second. A desktop app is named by its verified name. */}
+                <h3 class="text-base font-semibold text-white" data-testid="link-title">
+                  {/^https?:\/\//.test(pendingLinkIdentity.value.origin ?? "") && !/^https?:\/\/tauri\.localhost/i.test(pendingLinkIdentity.value.origin ?? "")
+                    ? `${(pendingLinkIdentity.value.origin ?? "").replace(/^https?:\/\//, "")} wants to connect as ${pendingLinkIdentity.value.app_name}`
+                    : `Connect ${pendingLinkIdentity.value.app_name}?`}
                 </h3>
                 {pendingLinkIdentity.value.organization_name && (
                   <p class="text-xs text-gray-400">
@@ -2559,6 +2566,20 @@ export default component$(() => {
                   {pendingLinkIdentity.value.origin}
                 </p>
               </div>
+            )}
+
+            {pendingLinkIdentity.value.already_linked_from && (
+              <p class="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-300" data-testid="link-elsewhere-warning">
+                {pendingLinkIdentity.value.app_name} is already connected from {pendingLinkIdentity.value.already_linked_from}. This request comes from somewhere else. Allow it only if you started it.
+              </p>
+            )}
+            {pendingLinkIdentity.value.origin && pendingLinkIdentity.value.origin_registered === null && (
+              <p class="mb-3 text-xs text-gray-400" data-testid="link-origin-unverified">
+                The maker of {pendingLinkIdentity.value.app_name} has not said where it connects from, so this address is not checked.
+              </p>
+            )}
+            {pendingLinkIdentity.value.description && (
+              <p class="mb-3 text-xs text-gray-400">{pendingLinkIdentity.value.description}</p>
             )}
 
             {pendingLinkIdentity.value.replacing_existing && (

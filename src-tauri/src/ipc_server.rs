@@ -128,6 +128,27 @@ pub struct IpcState {
     pub instance_id: String,
 }
 
+/// The instance id a caller is given. A local program gets the process's
+/// own id (the Vault's second launch looks for exactly it, and the port
+/// file holds it). A web origin gets one made from that id and its own
+/// origin: steady for that origin while the process lives, so "the same
+/// Vault, still here" still works, and different for every other origin,
+/// so two sites cannot use it to recognise the same visitor.
+fn instance_id_for(process_id: &str, origin: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    match origin.filter(|o| !o.is_empty()) {
+        None => process_id.to_string(),
+        Some(o) => {
+            let mut h = Sha256::new();
+            h.update(b"flowsta-vault-instance\0");
+            h.update(process_id.as_bytes());
+            h.update([0u8]);
+            h.update(o.as_bytes());
+            hex::encode(&h.finalize()[..8])
+        }
+    }
+}
+
 fn mint_instance_id() -> String {
     use rand::RngCore;
     let mut b = [0u8; 8];
@@ -207,11 +228,25 @@ fn set_job_stage(state: &Arc<IpcState>, job_id: &Option<String>, stage: &str) {
 
 // ── Origin tracking helper ──────────────────────────────────────────
 
+/// Stands in for the origin of a request a BROWSER sent without one (an
+/// image, a script tag, a `no-cors` fetch, a typed address): a page of
+/// unknown origin, never a local program. Linked to nothing, remembered
+/// nowhere, so every origin rule treats it as an unapproved site.
+const BROWSER_WITHOUT_ORIGIN: &str = "browser://no-origin";
+
+/// Who is asking, as far as headers can say: the `Origin` a browser or an
+/// app sent; else, when the request carries any of the `Sec-Fetch-*`
+/// headers only a browser adds, the stand-in above; else `None`, a local
+/// program. Absence of those headers proves nothing (older webviews send
+/// none), so `None` is granted nothing it was not granted before.
 fn extract_origin(headers: &HeaderMap) -> Option<String> {
+    if let Some(o) = headers.get(axum::http::header::ORIGIN).and_then(|h| h.to_str().ok()) {
+        return Some(o.to_string());
+    }
     headers
-        .get(axum::http::header::ORIGIN)
-        .and_then(|h| h.to_str().ok())
-        .map(String::from)
+        .keys()
+        .any(|k| k.as_str().starts_with("sec-fetch-"))
+        .then(|| BROWSER_WITHOUT_ORIGIN.to_string())
 }
 
 pub(crate) fn unix_now() -> i64 {
@@ -365,34 +400,88 @@ fn holochain_lines(app_state: &AppState) -> Vec<HolochainLine> {
 /// Use this to gate sensitive operations (signing, backup retrieve/delete) so
 /// that an unlinked / hostile local process can't impersonate a linked app.
 fn origin_to_client_id(state: &AppState, origin: Option<&str>) -> Option<String> {
-    let orig = match origin {
-        Some(o) if !o.is_empty() => o,
-        _ => return None,
-    };
+    let facts = captured_expectation();
     let linked = state.linked_third_party_apps.lock().unwrap();
-    linked
-        .iter()
-        .find(|a| a.origin.as_deref() == Some(orig))
-        .and_then(|a| a.client_id.clone())
+    match resolve_app(&linked, origin, facts.client_id.as_deref(), facts.link_token.as_deref()) {
+        AppResolution::App { client_id, .. } => Some(client_id),
+        _ => None,
+    }
+}
+
+/// Whether any app is linked from this origin (it may be several).
+fn origin_is_linked(state: &AppState, origin: Option<&str>) -> bool {
+    let Some(o) = origin.filter(|o| !o.is_empty()) else { return false };
+    state.linked_third_party_apps.lock().unwrap().iter().any(|a| a.origin.as_deref() == Some(o))
+}
+
+/// Which linked app a request is from.
+#[derive(Clone, Debug, PartialEq)]
+enum AppResolution {
+    /// No link was made from this origin.
+    Unlinked,
+    App { client_id: String },
+    /// Several apps are linked from this origin and the request does not
+    /// say which it is.
+    Ambiguous,
+    /// The request presented a link token no link from this origin holds.
+    InvalidToken,
+    /// The app's link is reachable only with its token, and none came.
+    TokenRequired,
+}
+
+fn link_token_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// From what a request presents to ONE linked app, or to a refusal; never
+/// "the first link that matches". The origin is where the request says it
+/// is from (a browser enforces it; a desktop app chooses it). A link token
+/// (handed to the app's install at /link-identity) names that install's
+/// app outright. Without one: an origin linked for one app is that app, as
+/// it always was; an origin linked for several (every desktop app built
+/// on the SDK presents the same one) needs the request's `client_id` to
+/// say which, and gets no app's data otherwise.
+fn resolve_app(
+    linked: &[crate::commands::LinkedThirdPartyApp],
+    origin: Option<&str>,
+    client_hint: Option<&str>,
+    token: Option<&str>,
+) -> AppResolution {
+    let Some(o) = origin.filter(|o| !o.is_empty()) else { return AppResolution::Unlinked };
+    let from_here: Vec<&crate::commands::LinkedThirdPartyApp> =
+        linked.iter().filter(|a| a.origin.as_deref() == Some(o) && a.client_id.is_some()).collect();
+    if let Some(t) = token.filter(|t| !t.is_empty()) {
+        let hash = link_token_hash(t);
+        return match from_here.iter().find(|a| a.link_token_hash.as_deref() == Some(hash.as_str())) {
+            Some(a) => AppResolution::App { client_id: a.client_id.clone().unwrap_or_default() },
+            None => AppResolution::InvalidToken,
+        };
+    }
+    if from_here.is_empty() {
+        return AppResolution::Unlinked;
+    }
+    let mut clients: Vec<&str> = from_here.iter().filter_map(|a| a.client_id.as_deref()).collect();
+    clients.sort_unstable();
+    clients.dedup();
+    let chosen = match client_hint.filter(|c| clients.contains(c)) {
+        Some(c) => c,
+        None if clients.len() == 1 => clients[0],
+        None => return AppResolution::Ambiguous,
+    };
+    if from_here.iter().any(|a| a.client_id.as_deref() == Some(chosen) && a.token_required) {
+        return AppResolution::TokenRequired;
+    }
+    AppResolution::App { client_id: chosen.to_string() }
 }
 
 /// Look up the scopes granted to the app at the given origin.
 ///
-/// Finds the origin in `linked_third_party_apps`, retrieves its `client_id`,
-/// then looks up the scopes stored in `linked_app_scopes`. Returns an empty
-/// vec if the origin has not been linked or has no stored scopes.
+/// Resolves the request to its linked app (`origin_to_client_id`), then
+/// looks up the scopes stored in `linked_app_scopes`. Returns an empty vec
+/// if the request resolves to no app or the app has no stored scopes.
 fn get_scopes_for_origin(state: &AppState, origin: Option<&str>) -> Vec<String> {
-    let orig = match origin {
-        Some(o) if !o.is_empty() => o,
-        _ => return vec![],
-    };
-    let client_id = {
-        let linked = state.linked_third_party_apps.lock().unwrap();
-        linked
-            .iter()
-            .find(|a| a.origin.as_deref() == Some(orig))
-            .and_then(|a| a.client_id.clone())
-    };
+    let client_id = origin_to_client_id(state, origin);
     match client_id {
         Some(cid) => state
             .linked_app_scopes
@@ -466,12 +555,18 @@ async fn status_handler(
         unlocked,
         active_identity,
         syncing_while_locked: may_see_identity.then(|| crate::commands::apps_sync_while_locked(&state.app_state)),
-        instance_id: state.instance_id.clone(),
+        instance_id: instance_id_for(&state.instance_id, origin.as_deref()),
         identity_epoch: crate::paths::read_identity_epoch(&state.app_state.data_dir),
         claims: {
             let mut c = state.app_state.recent_claims.lock().unwrap();
             c.retain(|(_, at)| at.elapsed() < crate::relay_login::CLAIM_TTL);
-            c.iter().map(|(n, _)| n.clone()).collect()
+            // The nonces Flowsta's own sign-in page left to find this
+            // person's Vault: for that page and for local programs only.
+            if origin.is_none() || is_flowsta_origin(origin.as_deref()) {
+                c.iter().map(|(n, _)| n.clone()).collect()
+            } else {
+                Vec::new()
+            }
         },
         initialized,
         agent_pub_key,
@@ -639,7 +734,7 @@ async fn sign_handler(
         let approved = match waited {
             Ok(Ok(result)) => {
                 if result {
-                    recheck_expected_identity(&state)?;
+                    recheck_expected_identity_after_consent(&state)?;
                 }
                 result
             }
@@ -803,6 +898,19 @@ struct AuthenticateRequest {
     app_agent_pub_key: Option<String>,
 }
 
+/// An origin only a browser can have put on the request: http or https,
+/// except the one a desktop shell presents for its own window on Windows
+/// (`http://tauri.localhost`), which any program can claim as easily as
+/// `tauri://localhost`.
+fn is_browser_origin(origin: &str) -> bool {
+    let rest = match origin.strip_prefix("https://").or_else(|| origin.strip_prefix("http://")) {
+        Some(r) => r,
+        None => return false,
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or("").to_ascii_lowercase();
+    host != "tauri.localhost"
+}
+
 /// May a remembered origin be signed for WITHOUT a dialog? Browser origins
 /// (http/https) are trusted on the Origin header the browser enforces; any
 /// other origin is a native process, which must also present the link key
@@ -812,7 +920,7 @@ fn silent_signature_allowed(remembered: bool, email_grant_needed: bool, origin: 
     if !remembered || email_grant_needed {
         return false;
     }
-    if origin.starts_with("https://") || origin.starts_with("http://") {
+    if is_browser_origin(origin) {
         return true;
     }
     matches!((linked_key, presented_key), (Some(l), Some(p)) if !l.is_empty() && l == p)
@@ -874,6 +982,7 @@ async fn resolve_requested_scopes(
                 .unwrap_or_default(),
             organization_name: app.get("organization_name").and_then(|v| v.as_str()).map(String::from),
             companion_client_id: app.get("companion_client_id").and_then(|v| v.as_str()).filter(|c| !c.is_empty()).map(String::from),
+            allowed_origins: app.get("allowed_origins").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
         };
         Some(info)
     }
@@ -1022,9 +1131,17 @@ async fn authenticate_inner(
     // shared, so the dialog shows once more.
     let auto_approved = if let Some(ref orig) = origin {
         let remembered = state.app_state.approved_apps.lock().unwrap().contains(orig);
+        // The link this request's key names, among every link made from
+        // this origin (several installs, or several apps, can share one):
+        // never "the oldest".
         let linked_key = {
             let linked = state.app_state.linked_third_party_apps.lock().unwrap();
-            linked.iter().find(|a| a.origin.as_deref() == Some(orig.as_str())).map(|a| a.app_agent_pub_key.clone())
+            let from_here = || linked.iter().filter(|a| a.origin.as_deref() == Some(orig.as_str()));
+            req.app_agent_pub_key
+                .as_deref()
+                .and_then(|k| from_here().find(|a| a.app_agent_pub_key == k))
+                .or_else(|| from_here().next())
+                .map(|a| a.app_agent_pub_key.clone())
         };
         let ok = silent_signature_allowed(remembered, email_grant_needed, orig, linked_key.as_deref(), req.app_agent_pub_key.as_deref());
         if remembered && !email_grant_needed && !ok {
@@ -1121,7 +1238,7 @@ async fn authenticate_inner(
         match waited {
             Ok(Ok(result)) => {
                 if result {
-                    recheck_expected_identity(&state)?;
+                    recheck_expected_identity_after_consent(&state)?;
                 }
                 result
             }
@@ -1155,6 +1272,11 @@ async fn authenticate_inner(
         }
     };
 
+    // Approved without a dialog (a headless dev run): the same check the
+    // dialog's approval is followed by.
+    if approved {
+        recheck_expected_identity_after_consent(&state)?;
+    }
     if !approved {
         return Err((
             StatusCode::FORBIDDEN,
@@ -1351,6 +1473,10 @@ struct LinkIdentityRequest {
     client_id: String,
     /// The third-party app's agent public key in uhCAk... format.
     app_agent_pub_key: String,
+    /// The app keeps the link token this answer carries and will send it
+    /// on every call: its link is then reachable only with the token.
+    #[serde(default)]
+    require_link_token: bool,
 }
 
 #[derive(Serialize)]
@@ -1359,6 +1485,9 @@ struct LinkIdentityResponse {
     vault_agent_pub_key: String,
     /// Base64 standard encoded Ed25519 signature (64 bytes).
     vault_signature: String,
+    /// This install's link token (43 characters). The app keeps it and
+    /// sends it as `link_token` on its calls; the Vault keeps only its hash.
+    link_token: String,
 }
 
 async fn link_identity_handler(
@@ -1525,6 +1654,11 @@ async fn link_identity_handler(
                 .and_then(|v| v.as_str())
                 .map(String::from),
             companion_client_id: app_obj.get("companion_client_id").and_then(|v| v.as_str()).filter(|c| !c.is_empty()).map(String::from),
+            allowed_origins: app_obj
+                .get("allowed_origins")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|o| o.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
         };
 
         // Update cache with fresh data
@@ -1559,6 +1693,22 @@ async fn link_identity_handler(
       }
     };
 
+    // The app's maker may register the origins the app calls from. Once
+    // any is registered, a request for the app from anywhere else is not
+    // put to the person at all: a site cannot ask to connect as an app
+    // whose maker says it never calls from there.
+    let origin_registered = registered_origin(&app_info.allowed_origins, origin.as_deref());
+    if origin_registered == Some(false) {
+        log::warn!("[ipc] /link-identity for {} from an origin its registration does not list", req.client_id);
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError {
+                error: "origin_not_registered".into(),
+                description: Some("This app is not registered to connect from this address.".into()),
+            }),
+        ));
+    }
+
     // Check for existing link with different client_id (app registration changed)
     let replacing_existing = {
         let linked = state.app_state.linked_third_party_apps.lock().unwrap();
@@ -1566,6 +1716,17 @@ async fn link_identity_handler(
             a.app_agent_pub_key == req.app_agent_pub_key
                 && a.client_id.as_deref() != Some(&req.client_id)
         })
+    };
+    // The same app, or the same install's key, already connected from a
+    // DIFFERENT origin: the dialog says both places, so a request that
+    // borrows a known app's name is seen for what it is.
+    let already_linked_from: Option<String> = {
+        let linked = state.app_state.linked_third_party_apps.lock().unwrap();
+        linked
+            .iter()
+            .filter(|a| a.client_id.as_deref() == Some(req.client_id.as_str()) || a.app_agent_pub_key == req.app_agent_pub_key)
+            .filter_map(|a| a.origin.clone())
+            .find(|o| Some(o.as_str()) != origin.as_deref())
     };
 
     // Always require user approval for identity linking
@@ -1602,6 +1763,10 @@ async fn link_identity_handler(
         "origin": origin,
         "replacing_existing": replacing_existing,
         "client_id": req.client_id,
+        // true: the app's maker registered this origin; false cannot reach
+        // here; null: the maker registered none, so the origin is unverified.
+        "origin_registered": origin_registered,
+        "already_linked_from": already_linked_from,
     });
 
     // Headless dev runs resolve the dialog automatically, exactly as
@@ -1625,7 +1790,7 @@ async fn link_identity_handler(
             Ok(Ok(result)) => {
                 restore_window(&state.app_handle, prior);
                 if result {
-                    recheck_expected_identity(&state)?;
+                    recheck_expected_identity_after_consent(&state)?;
                 }
                 result
             }
@@ -1658,6 +1823,9 @@ async fn link_identity_handler(
     // Window restore happens in the interactive branch above, next to the
     // raise that paired with it.
 
+    if approved {
+        recheck_expected_identity_after_consent(&state)?;
+    }
     if !approved {
         return Err((
             StatusCode::FORBIDDEN,
@@ -1738,24 +1906,33 @@ async fn link_identity_handler(
 
     let vault_agent_pub_key = construct_agent_pub_key_string(&vault_ed25519_pub);
 
+    let link_token = mint_link_token();
+
     // Track this linked app in state for the Vault UI and persist to disk
     {
         let mut linked = state.app_state.linked_third_party_apps.lock().unwrap();
         if let Some(existing) = linked.iter_mut().find(|a| a.app_agent_pub_key == req.app_agent_pub_key) {
-            // Update existing link (client_id, app name, or origin may have changed)
+            // Update existing link (client_id, app name, or origin may have changed).
+            // The name kept is the one the API verified and the dialog
+            // showed, never the caller's own word for itself. A new token
+            // ends the old one.
             existing.client_id = Some(req.client_id.clone());
-            existing.app_name = req.app_name.clone();
+            existing.app_name = app_info.name.clone();
             existing.origin = origin.clone();
             existing.linked_at = unix_now();
             existing.companion_client_id = app_info.companion_client_id.clone();
+            existing.link_token_hash = Some(link_token_hash(&link_token));
+            existing.token_required = req.require_link_token;
         } else {
             linked.push(crate::commands::LinkedThirdPartyApp {
-                app_name: req.app_name.clone(),
+                app_name: app_info.name.clone(),
                 app_agent_pub_key: req.app_agent_pub_key.clone(),
                 linked_at: unix_now(),
                 client_id: Some(req.client_id.clone()),
                 origin: origin.clone(),
                 companion_client_id: app_info.companion_client_id.clone(),
+                link_token_hash: Some(link_token_hash(&link_token)),
+                token_required: req.require_link_token,
             });
         }
     }
@@ -1775,7 +1952,7 @@ async fn link_identity_handler(
     let _ = state.app_handle.emit(
         "linked-app-added",
         serde_json::json!({
-            "app_name": req.app_name,
+            "app_name": app_info.name,
             "app_agent_pub_key": req.app_agent_pub_key,
             "linked_at": unix_now(),
         }),
@@ -1785,6 +1962,7 @@ async fn link_identity_handler(
         success: true,
         vault_agent_pub_key,
         vault_signature: base64_standard_encode(&signature),
+        link_token,
     };
 
     Ok(axum::response::IntoResponse::into_response(Json(resp)))
@@ -1798,13 +1976,44 @@ async fn link_identity_handler(
 #[derive(Deserialize)]
 struct RevokeIdentityRequest {
     #[allow(dead_code)]
+    #[serde(default)]
     app_name: String,
     app_agent_pub_key: String,
+    /// The install's link token, when it has one: proof the request is
+    /// from the app that holds this link.
+    #[serde(default)]
+    link_token: Option<String>,
 }
 
 #[derive(Serialize)]
 struct RevokeIdentityResponse {
     success: bool,
+    /// Whether a link was removed (an app can tell "the Vault dropped it"
+    /// from "there was nothing to drop").
+    removed: bool,
+}
+
+/// Which of the links an unlink request may remove: its own, and only its
+/// own. With a link token: the link that holds it (made from this origin).
+/// Without: a link with the named key that was made from the request's own
+/// origin. No caller, a Flowsta site included, removes another app's link
+/// this way; the person does that in the Vault.
+fn own_link_index(
+    linked: &[crate::commands::LinkedThirdPartyApp],
+    origin: Option<&str>,
+    app_agent_pub_key: &str,
+    token: Option<&str>,
+) -> Option<usize> {
+    let o = origin.filter(|o| !o.is_empty())?;
+    match token.filter(|t| !t.is_empty()) {
+        Some(t) => {
+            let hash = link_token_hash(t);
+            linked.iter().position(|a| a.origin.as_deref() == Some(o) && a.link_token_hash.as_deref() == Some(hash.as_str()))
+        }
+        None => linked
+            .iter()
+            .position(|a| a.origin.as_deref() == Some(o) && a.app_agent_pub_key == app_agent_pub_key && !a.token_required),
+    }
 }
 
 async fn revoke_identity_handler(
@@ -1815,68 +2024,45 @@ async fn revoke_identity_handler(
     let origin = extract_origin(&headers);
     track_request(&state.app_state, origin.as_deref(), "revoke-identity");
 
-    // Two legitimate callers, gated differently. Without a gate ANY web
-    // page could unlink the user's apps (integrity/DoS + re-link phishing),
-    // since the handler otherwise takes the target key straight from the body:
-    //   1. Flowsta first-party surfaces may revoke any app (dashboard action).
-    //   2. A linked app may revoke ITS OWN link - its origin must resolve to
-    //      a linked client_id AND the key it targets must belong to that same
-    //      client's link record. (Until this second arm existed, an app's
-    //      "disconnect" never reached the Vault: its notification was 403'd
-    //      and swallowed, leaving the Vault listing the app forever.)
-    if !is_flowsta_origin(origin.as_deref()) {
-        let own_link = origin_to_client_id(&state.app_state, origin.as_deref())
-            .map(|caller_cid| {
-                let apps = state.app_state.linked_third_party_apps.lock().unwrap();
-                apps.iter().any(|a| {
-                    a.app_agent_pub_key == req.app_agent_pub_key
-                        && a.client_id.as_deref() == Some(caller_cid.as_str())
-                })
-            })
-            .unwrap_or(false);
-        if !own_link {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(IpcError {
-                    error: "forbidden".into(),
-                    description: Some(
-                        "revoke-identity is only available to Flowsta, or to a linked \
-                         app revoking its own link."
-                            .into(),
-                    ),
-                }),
-            ));
-        }
-    }
-
-    // Capture client_id before removing the entry so we can purge its scopes.
-    let client_id_to_remove = {
-        let apps = state.app_state.linked_third_party_apps.lock().unwrap();
-        apps.iter()
-            .find(|a| a.app_agent_pub_key == req.app_agent_pub_key)
-            .and_then(|a| a.client_id.clone())
-    };
-
-    // Remove the matching linked app
-    {
+    // An app drops its own link; nobody drops another's. (An app that
+    // chooses to disconnect needs no permission: the person pressed the
+    // button in the app. What must not happen is a different party doing
+    // it, or it happening unseen.)
+    let removed = {
         let mut apps = state.app_state.linked_third_party_apps.lock().unwrap();
-        apps.retain(|a| a.app_agent_pub_key != req.app_agent_pub_key);
-    }
+        own_link_index(&apps, origin.as_deref(), &req.app_agent_pub_key, req.link_token.as_deref()).map(|i| apps.remove(i))
+    };
+    let Some(gone) = removed else {
+        // Nothing of this caller's matched. Not an error an app must
+        // handle: it asked for its link to be gone, and it has none here.
+        return Ok(Json(RevokeIdentityResponse { success: true, removed: false }));
+    };
     state.app_state.save_linked_apps();
 
-    // Purge granted scopes for this app.
-    if let Some(cid) = client_id_to_remove {
-        state.app_state.linked_app_scopes.lock().unwrap().remove(&cid);
+    // What the Vault's own Disconnect does, so the two paths leave the
+    // same state: the permissions and the email grant go when no other
+    // install of the app is still linked; the pass-without-a-dialog window
+    // for this origin closes; the activity list says what happened.
+    let another_install = gone.client_id.as_ref().is_some_and(|cid| {
+        state.app_state.linked_third_party_apps.lock().unwrap().iter().any(|a| a.client_id.as_ref() == Some(cid))
+    });
+    if let (Some(cid), false) = (gone.client_id.as_ref(), another_install) {
+        state.app_state.linked_app_scopes.lock().unwrap().remove(cid);
         state.app_state.save_linked_app_scopes();
+        crate::commands::revoke_email_grant(&state.app_state, cid);
     }
+    if let Some(o) = origin.as_deref() {
+        state.app_state.recent_link_approvals.lock().unwrap().remove(o);
+    }
+    state.app_state.activity.record("app_unlinked", format!("{} disconnected itself", gone.app_name), None, origin.clone(), Some(gone.app_name.clone()));
 
     // Emit event for real-time Vault UI update
     let _ = state.app_handle.emit(
         "linked-app-revoked",
-        serde_json::json!({ "app_agent_pub_key": req.app_agent_pub_key }),
+        serde_json::json!({ "app_agent_pub_key": gone.app_agent_pub_key, "app_name": gone.app_name, "by_app": true }),
     );
 
-    Ok(Json(RevokeIdentityResponse { success: true }))
+    Ok(Json(RevokeIdentityResponse { success: true, removed: true }))
 }
 
 // ── GET /link-status ──────────────────────────────────────────────
@@ -1905,7 +2091,14 @@ async fn link_status_handler(
     let app_agent_pub_key = query.get("app_agent_pub_key").cloned().unwrap_or_default();
 
     let apps = state.app_state.linked_third_party_apps.lock().unwrap();
-    let found = apps.iter().find(|a| a.app_agent_pub_key == app_agent_pub_key);
+    // "Am I linked?" is answered for the caller's own link: the origin it
+    // was made from. A Flowsta site and a local program may ask about any.
+    // Anyone else asking about a key is told it is not linked, as for a
+    // key that is unknown.
+    let any = origin.is_none() || is_flowsta_origin(origin.as_deref());
+    let found = apps
+        .iter()
+        .find(|a| a.app_agent_pub_key == app_agent_pub_key && (any || (a.origin.is_some() && a.origin == origin)));
 
     match found {
         Some(app) => Json(LinkStatusResponse {
@@ -2928,7 +3121,7 @@ fn origin_may_see_identity(state: &AppState, origin: Option<&str>) -> bool {
     if is_flowsta_origin(Some(o)) {
         return true;
     }
-    if origin_to_client_id(state, Some(o)).is_some() {
+    if origin_is_linked(state, Some(o)) {
         return true;
     }
     state.approved_apps.lock().unwrap().iter().any(|a| a == o)
@@ -3315,7 +3508,7 @@ async fn sign_document_core(
         match tokio::time::timeout(std::time::Duration::from_secs(approval_budget), rx).await {
         Ok(Ok(result)) => {
                 if result {
-                    recheck_expected_identity(&state)?;
+                    recheck_expected_identity_after_consent(&state)?;
                 }
                 result
             }
@@ -3343,6 +3536,9 @@ async fn sign_document_core(
     }
     };
 
+    if approved {
+        recheck_expected_identity_after_consent(&state)?;
+    }
     if !approved {
         return Err((
             StatusCode::FORBIDDEN,
@@ -3808,7 +4004,7 @@ async fn profile_update_core(
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
             Ok(Ok(result)) => {
                 if result {
-                    recheck_expected_identity(&state)?;
+                    recheck_expected_identity_after_consent(&state)?;
                 }
                 result
             }
@@ -3947,7 +4143,7 @@ async fn cell_op_approval(
     }
     match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
         Ok(Ok(true)) => {
-            recheck_expected_identity(state)?;
+            recheck_expected_identity_after_consent(state)?;
             let _ = state.app_handle.emit(
                 "op-progress",
                 serde_json::json!({ "op": op, "origin": origin, "label": detail }),
@@ -4771,6 +4967,10 @@ async fn dev_devices_handler(
                 // (`/app-secret`, `/backup/*`) for this app.
                 origin: body.get("origin").and_then(|v| v.as_str()).filter(|o| !o.is_empty()).map(String::from),
                 companion_client_id: body.get("companion_client_id").and_then(|v| v.as_str()).filter(|c| !c.is_empty()).map(String::from),
+                // A harness may give the link a token, and require it, to
+                // drive the token rules without a dialog.
+                link_token_hash: body.get("give_link_token").and_then(|v| v.as_str()).filter(|t| !t.is_empty()).map(link_token_hash),
+                token_required: body.get("require_its_token").and_then(|v| v.as_bool()).unwrap_or(false),
             });
             app.save_linked_apps();
             app.linked_app_scopes.lock().unwrap().insert(client_id, vec!["profile".into()]);
@@ -5714,13 +5914,76 @@ tokio::task_local! {
     /// it AGAIN after a long wait (unlock up to 180 s, approval 60 s): the
     /// identity can change while the request waits, and a gate that ran
     /// once at entry would then act as the wrong person.
-    static REQUEST_EXPECTED_IDENTITY: Option<String>;
+    static REQUEST_EXPECTED_IDENTITY: ExpectedIdentity;
+}
+
+/// What a request said about the identity it expects.
+#[derive(Clone, Default)]
+struct ExpectedIdentity {
+    key: Option<String>,
+    /// The caller is not entitled to learn, before the person consents,
+    /// whether this Vault holds that identity (`entitled_to_identity_answer`):
+    /// no check at entry or after an unlock wait; the check runs once the
+    /// person has allowed the request, before anything is signed or stored.
+    after_consent_only: bool,
+    /// The request's own `client_id` and `link_token` (body or query):
+    /// what `resolve_app` reads to tell which linked app is asking.
+    client_id: Option<String>,
+    link_token: Option<String>,
 }
 
 /// The request's expected identity, if it carried one (None outside a
 /// request or when none was given).
 fn captured_expected_identity() -> Option<String> {
-    REQUEST_EXPECTED_IDENTITY.try_with(|e| e.clone()).ok().flatten()
+    REQUEST_EXPECTED_IDENTITY.try_with(|e| e.key.clone()).ok().flatten()
+}
+
+fn captured_expectation() -> ExpectedIdentity {
+    REQUEST_EXPECTED_IDENTITY.try_with(|e| e.clone()).unwrap_or_default()
+}
+
+/// May this caller be told at once whether the Vault holds identity
+/// `expected`? A caller that can already see which identity the Vault
+/// holds (a local program, a Flowsta site, an origin linked or remembered
+/// under it) learns nothing new from the answer. So does an origin the
+/// person linked or remembered UNDER THE IDENTITY IT NAMES on this device:
+/// that is an app bound to an identity the Vault has since switched away
+/// from, the case the check exists for. Any other origin could use the
+/// answer to test a guessed key, and is not told.
+fn entitled_to_identity_answer(state: &IpcState, origin: Option<&str>, expected: &str) -> bool {
+    if origin_may_see_identity(&state.app_state, origin) {
+        return true;
+    }
+    let Some(o) = origin.filter(|o| !o.is_empty()) else { return true };
+    let Some(partition) = crate::paths::partition_key(expected) else { return false };
+    origin_known_in_root(&crate::paths::identity_root_for(&state.app_state.data_dir, &partition), o)
+}
+
+/// Whether a link token belongs to a link made from this origin under an
+/// identity on this device other than the one whose lists are loaded.
+fn token_known_under_another_identity(state: &IpcState, origin: &str, token: &str) -> bool {
+    let hash = link_token_hash(token);
+    let current = state.app_state.identity_root();
+    crate::identities::list_on_disk(&state.app_state.data_dir, &current)
+        .into_iter()
+        .filter(|e| !e.active)
+        .any(|e| token_in_root(std::path::Path::new(&e.root), origin, &hash))
+}
+
+fn token_in_root(root: &std::path::Path, origin: &str, hash: &str) -> bool {
+    crate::commands::load_linked_apps(root)
+        .iter()
+        .any(|a| a.origin.as_deref() == Some(origin) && a.link_token_hash.as_deref() == Some(hash))
+}
+
+/// Whether an identity's own files (readable locked or unlocked) hold
+/// this origin as a linked app's or a remembered site's.
+fn origin_known_in_root(root: &std::path::Path, origin: &str) -> bool {
+    if !root.is_dir() {
+        return false;
+    }
+    crate::commands::load_linked_apps(root).iter().any(|a| a.origin.as_deref() == Some(origin))
+        || crate::commands::load_approved_sites(root).iter().any(|s| s == origin)
 }
 
 /// Re-run the entry gate after a wait. No expected identity = nothing to
@@ -5907,7 +6170,7 @@ async fn approve_and_sign_manifest(
     let approved = match waited {
         Ok(Ok(result)) => {
             if result {
-                recheck_expected_identity(state)?;
+                recheck_expected_identity_after_consent(state)?;
             }
             result
         }
@@ -6188,6 +6451,17 @@ mod node_manifest_tests {
 }
 
 fn recheck_expected_identity(state: &IpcState) -> Result<(), (StatusCode, Json<IpcError>)> {
+    let e = captured_expectation();
+    match e.key {
+        Some(expected) if !e.after_consent_only => check_expected_identity(state, &expected),
+        _ => Ok(()),
+    }
+}
+
+/// The same check once the person has allowed the request: it runs for
+/// every caller, entitled to the early answer or not, before anything is
+/// signed or stored.
+fn recheck_expected_identity_after_consent(state: &IpcState) -> Result<(), (StatusCode, Json<IpcError>)> {
     match captured_expected_identity() {
         Some(expected) => check_expected_identity(state, &expected),
         None => Ok(()),
@@ -6201,8 +6475,42 @@ where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let expected = captured_expected_identity();
-    tokio::spawn(REQUEST_EXPECTED_IDENTITY.scope(expected, fut))
+    tokio::spawn(REQUEST_EXPECTED_IDENTITY.scope(captured_expectation(), fut))
+}
+
+/// A fresh link token: 32 random bytes, base64url, 43 characters.
+fn mint_link_token() -> String {
+    use base64::Engine as _;
+    use rand::RngCore;
+    let mut b = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut b);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+}
+
+/// Is `origin` one the app's maker registered? `None` when the maker
+/// registered none (nothing to hold the request to). Compared without
+/// regard to letter case or a trailing slash.
+fn registered_origin(allowed: &[String], origin: Option<&str>) -> Option<bool> {
+    if allowed.is_empty() {
+        return None;
+    }
+    let norm = |o: &str| o.trim().trim_end_matches('/').to_ascii_lowercase();
+    let Some(o) = origin.filter(|o| !o.is_empty()) else { return Some(false) };
+    Some(allowed.iter().any(|a| norm(a) == norm(o)))
+}
+
+/// The routes that act for a linked app and nothing else.
+const LINKED_APP_ROUTES: &[&str] = &[
+    "/sign", "/backup", "/backup/retrieve", "/backup/delete", "/backup/list", "/app-secret", "/devices",
+    "/sign-node-manifest", "/sign-release-manifest",
+];
+
+/// One non-empty value out of a query string, percent-decoded.
+fn query_value(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key && !v.is_empty()).then(|| percent_encoding::percent_decode_str(v).decode_utf8_lossy().to_string())
+    })
 }
 
 /// `expected_identity=<key>` out of a query string (GETs carry no body).
@@ -6252,7 +6560,17 @@ async fn identity_gate(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
-    let mut expected: Option<String> = None;
+    let origin = extract_origin(req.headers());
+    let mut expected = ExpectedIdentity::default();
+    // An entitled caller is answered at entry; anyone else after consent.
+    let at_entry = |e: &str| -> Result<bool, (StatusCode, Json<IpcError>)> {
+        let entitled = entitled_to_identity_answer(&state, origin.as_deref(), e);
+        if entitled {
+            check_expected_identity(&state, e)?;
+        }
+        Ok(!entitled)
+    };
+    let text = |v: Option<&serde_json::Value>| v.and_then(|x| x.as_str()).filter(|x| !x.is_empty()).map(String::from);
     let req = if req.method() == Method::POST {
         let (parts, body) = req.into_parts();
         // Buffer within the largest route allowance (55 MB on /backup); the
@@ -6267,20 +6585,62 @@ async fn identity_gate(
             })?;
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             if let Some(e) = v.get("expected_identity").and_then(|x| x.as_str()) {
-                check_expected_identity(&state, e)?;
-                expected = Some(e.to_string());
+                expected.after_consent_only = at_entry(e)?;
+                expected.key = Some(e.to_string());
             }
+            expected.client_id = text(v.get("client_id"));
+            expected.link_token = text(v.get("link_token"));
         }
         axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
     } else {
         // GETs (/link-status, /backup/list, /signatures, /connections, ...)
         // carry it in the query string.
         if let Some(e) = req.uri().query().and_then(expected_identity_from_query) {
-            check_expected_identity(&state, &e)?;
-            expected = Some(e);
+            expected.after_consent_only = at_entry(&e)?;
+            expected.key = Some(e);
         }
+        expected.client_id = req.uri().query().and_then(|q| query_value(q, "client_id"));
+        expected.link_token = req.uri().query().and_then(|q| query_value(q, "link_token"));
         req
     };
+
+    // Which linked app is asking, settled before any route runs: a token
+    // that matches no link is refused everywhere; on the routes that act
+    // for a linked app, so is a request that does not say which of several
+    // apps it is, or that leaves out a token its link requires.
+    {
+        let resolution = {
+            let linked = state.app_state.linked_third_party_apps.lock().unwrap();
+            resolve_app(&linked, origin.as_deref(), expected.client_id.as_deref(), expected.link_token.as_deref())
+        };
+        let for_linked_app = LINKED_APP_ROUTES.contains(&req.uri().path());
+        // A token this Vault issued under ANOTHER identity on this device
+        // is not a bad token: the Vault holds a different identity than the
+        // one the app is linked under. Saying so (and not "invalid") keeps
+        // the app from throwing a good token away.
+        if resolution == AppResolution::InvalidToken {
+            if let (Some(o), Some(t)) = (origin.as_deref(), expected.link_token.as_deref()) {
+                if token_known_under_another_identity(&state, o, t) {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(IpcError {
+                            error: "identity_mismatch".into(),
+                            description: Some("This Vault holds a different identity than the one this app is connected under.".into()),
+                        }),
+                    ));
+                }
+            }
+        }
+        let refusal = match resolution {
+            AppResolution::InvalidToken => Some(("invalid_link_token", "This link token is not one this Vault issued for this origin. Connect again.")),
+            AppResolution::TokenRequired if for_linked_app => Some(("link_token_required", "This app's connection needs its link token.")),
+            AppResolution::Ambiguous if for_linked_app => Some(("app_ambiguous", "Several apps on this computer share this origin. Send client_id.")),
+            _ => None,
+        };
+        if let Some((error, description)) = refusal {
+            return Err((StatusCode::FORBIDDEN, Json(IpcError { error: error.into(), description: Some(description.into()) })));
+        }
+    }
 
     let mut resp = REQUEST_EXPECTED_IDENTITY.scope(expected, next.run(req)).await;
 
@@ -6292,7 +6652,9 @@ async fn identity_gate(
         .unwrap()
         .as_ref()
         .map(|c| c.agent_pub_key.clone());
-    if let Some(key) = identity {
+    // Only for a caller that may see the identity on /status: the header
+    // says the same thing.
+    if let Some(key) = identity.filter(|_| origin_may_see_identity(&state.app_state, origin.as_deref())) {
         if let Ok(val) = axum::http::HeaderValue::from_str(&key) {
             resp.headers_mut().insert("x-flowsta-vault-identity", val);
         }
@@ -6311,6 +6673,175 @@ fn host_names_this_computer(host: &str) -> bool {
     };
     let h = name.trim_end_matches('.').to_ascii_lowercase();
     h == "localhost" || h == "[::1]" || h.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(test)]
+mod linked_app_tests {
+    use super::*;
+    use crate::commands::LinkedThirdPartyApp;
+
+    fn link(name: &str, key: &str, client: &str, origin: Option<&str>, token: Option<&str>, required: bool) -> LinkedThirdPartyApp {
+        LinkedThirdPartyApp {
+            app_name: name.into(),
+            app_agent_pub_key: key.into(),
+            linked_at: 1,
+            client_id: Some(client.into()),
+            origin: origin.map(String::from),
+            companion_client_id: None,
+            link_token_hash: token.map(link_token_hash),
+            token_required: required,
+        }
+    }
+    fn app(c: &str) -> AppResolution {
+        AppResolution::App { client_id: c.into() }
+    }
+    const SHELL: &str = "tauri://localhost";
+
+    #[test]
+    fn one_app_on_an_origin_is_that_app_as_it_always_was() {
+        let linked = vec![link("ProofPoll", "k1", "pp", Some(SHELL), None, false), link("Your Own AI", "k2", "yoai", Some("yoai://app"), None, false)];
+        assert_eq!(resolve_app(&linked, Some(SHELL), None, None), app("pp"));
+        assert_eq!(resolve_app(&linked, Some("yoai://app"), None, None), app("yoai"));
+        assert_eq!(resolve_app(&linked, Some("https://other.example"), None, None), AppResolution::Unlinked);
+        assert_eq!(resolve_app(&linked, None, None, None), AppResolution::Unlinked);
+        // Two installs of one app (two keys, one client) are still one app.
+        let two = vec![link("ProofPoll", "k1", "pp", Some(SHELL), None, false), link("ProofPoll", "k3", "pp", Some(SHELL), None, false)];
+        assert_eq!(resolve_app(&two, Some(SHELL), None, None), app("pp"));
+        // A request that names another client than the origin's one app is
+        // still that one app: the route's own client_id check then refuses it.
+        assert_eq!(resolve_app(&linked, Some(SHELL), Some("someone-else"), None), app("pp"));
+        // A link made with no origin can be reached from none.
+        let no_origin = vec![link("Tool", "k9", "tool", None, None, false)];
+        assert_eq!(resolve_app(&no_origin, Some(SHELL), None, None), AppResolution::Unlinked);
+    }
+
+    #[test]
+    fn two_apps_on_one_origin_are_never_resolved_to_the_first() {
+        let linked = vec![link("First", "k1", "first", Some(SHELL), None, false), link("Second", "k2", "second", Some(SHELL), None, false)];
+        assert_eq!(resolve_app(&linked, Some(SHELL), None, None), AppResolution::Ambiguous, "no first-match");
+        assert_eq!(resolve_app(&linked, Some(SHELL), Some("second"), None), app("second"));
+        assert_eq!(resolve_app(&linked, Some(SHELL), Some("first"), None), app("first"));
+        assert_eq!(resolve_app(&linked, Some(SHELL), Some("neither"), None), AppResolution::Ambiguous);
+    }
+
+    #[test]
+    fn a_link_token_names_its_app_and_a_wrong_one_is_refused() {
+        let linked = vec![
+            link("First", "k1", "first", Some(SHELL), Some("token-one"), true),
+            link("Second", "k2", "second", Some(SHELL), Some("token-two"), false),
+        ];
+        assert_eq!(resolve_app(&linked, Some(SHELL), None, Some("token-one")), app("first"));
+        assert_eq!(resolve_app(&linked, Some(SHELL), Some("first"), Some("token-two")), app("second"), "the token decides, not the name the request gives itself");
+        assert_eq!(resolve_app(&linked, Some(SHELL), None, Some("nobody's")), AppResolution::InvalidToken);
+        assert_eq!(resolve_app(&linked, Some("https://elsewhere.example"), None, Some("token-one")), AppResolution::InvalidToken, "a token is good only from the origin its link was made from");
+        // First asked for its link to need the token; Second did not.
+        assert_eq!(resolve_app(&linked, Some(SHELL), Some("first"), None), AppResolution::TokenRequired);
+        assert_eq!(resolve_app(&linked, Some(SHELL), Some("second"), None), app("second"));
+        // Alone on its origin, a link that needs its token still needs it.
+        let alone = vec![link("First", "k1", "first", Some(SHELL), Some("token-one"), true)];
+        assert_eq!(resolve_app(&alone, Some(SHELL), None, None), AppResolution::TokenRequired);
+        assert_eq!(resolve_app(&alone, Some(SHELL), None, Some("token-one")), app("first"));
+    }
+
+    #[test]
+    fn an_app_unlinks_only_its_own_link() {
+        let linked = vec![
+            link("ProofPoll", "k1", "pp", Some(SHELL), Some("token-one"), true),
+            link("Old app", "k2", "old", Some("https://old.example"), None, false),
+        ];
+        assert_eq!(own_link_index(&linked, Some(SHELL), "k1", Some("token-one")), Some(0));
+        assert_eq!(own_link_index(&linked, Some(SHELL), "k1", None), None, "a link that needs its token is not dropped on a key anyone can know");
+        assert_eq!(own_link_index(&linked, Some(SHELL), "k2", Some("token-one")), Some(0), "the token names the link; the key in the body does not redirect it");
+        assert_eq!(own_link_index(&linked, Some("https://old.example"), "k2", None), Some(1), "an app on an older SDK: its own origin and key");
+        assert_eq!(own_link_index(&linked, Some("https://evil.example"), "k2", None), None, "another site");
+        assert_eq!(own_link_index(&linked, Some("https://login.flowsta.com"), "k2", None), None, "no site of ours either");
+        assert_eq!(own_link_index(&linked, None, "k2", None), None);
+        assert_eq!(own_link_index(&linked, Some("https://old.example"), "k2", Some("wrong")), None);
+    }
+
+    #[test]
+    fn a_registered_app_links_only_from_an_origin_its_maker_listed() {
+        let none: Vec<String> = vec![];
+        assert_eq!(registered_origin(&none, Some("https://anything.example")), None, "nothing registered: nothing to hold it to");
+        let listed = vec!["https://app.example.org".to_string(), "tauri://localhost".to_string()];
+        assert_eq!(registered_origin(&listed, Some("https://app.example.org")), Some(true));
+        assert_eq!(registered_origin(&listed, Some("HTTPS://APP.example.org/")), Some(true));
+        assert_eq!(registered_origin(&listed, Some("tauri://localhost")), Some(true));
+        assert_eq!(registered_origin(&listed, Some("https://evil.example")), Some(false));
+        assert_eq!(registered_origin(&listed, Some("https://app.example.org.evil.example")), Some(false));
+        assert_eq!(registered_origin(&listed, None), Some(false));
+    }
+
+    #[test]
+    fn a_desktop_shell_is_not_a_browser_and_a_token_is_fresh_each_time() {
+        assert!(is_browser_origin("https://example.org"));
+        assert!(is_browser_origin("http://localhost:7331"));
+        assert!(!is_browser_origin("http://tauri.localhost"), "Windows' desktop shell origin");
+        assert!(!is_browser_origin("http://TAURI.localhost"));
+        assert!(!is_browser_origin("tauri://localhost"));
+        assert!(!is_browser_origin("yoai://app"));
+        let (a, b) = (mint_link_token(), mint_link_token());
+        assert_eq!(a.len(), 43);
+        assert_ne!(a, b);
+        assert_eq!(link_token_hash(&a).len(), 64);
+        assert_eq!(query_value("a=1&link_token=ab%2Bc&client_id=x", "link_token").as_deref(), Some("ab+c"));
+        assert_eq!(query_value("client_id=", "client_id"), None);
+    }
+}
+
+#[cfg(test)]
+mod caller_tests {
+    use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(), axum::http::HeaderValue::from_str(v).unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn a_browser_request_without_an_origin_is_a_page_not_a_local_program() {
+        assert_eq!(extract_origin(&headers(&[])), None, "a local program");
+        assert_eq!(extract_origin(&headers(&[("origin", "https://example.org")])).as_deref(), Some("https://example.org"));
+        assert_eq!(extract_origin(&headers(&[("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "no-cors")])).as_deref(), Some(BROWSER_WITHOUT_ORIGIN));
+        assert_eq!(extract_origin(&headers(&[("sec-fetch-dest", "image")])).as_deref(), Some(BROWSER_WITHOUT_ORIGIN));
+        assert_eq!(extract_origin(&headers(&[("origin", "tauri://localhost"), ("sec-fetch-site", "cross-site")])).as_deref(), Some("tauri://localhost"), "a stated origin stands");
+        // The stand-in is no Flowsta origin and can match no link.
+        assert!(!is_flowsta_origin(Some(BROWSER_WITHOUT_ORIGIN)));
+    }
+
+    #[test]
+    fn each_origin_gets_its_own_instance_id_and_a_local_program_the_real_one() {
+        let real = "0123456789abcdef";
+        assert_eq!(instance_id_for(real, None), real);
+        assert_eq!(instance_id_for(real, Some("")), real);
+        let a = instance_id_for(real, Some("https://a.example"));
+        let b = instance_id_for(real, Some("https://b.example"));
+        assert_eq!(a.len(), 16);
+        assert!(a != real && b != real && a != b);
+        assert_eq!(a, instance_id_for(real, Some("https://a.example")), "steady for one origin");
+        assert_ne!(a, instance_id_for("fedcba9876543210", Some("https://a.example")), "a new process, a new id");
+    }
+
+    #[test]
+    fn an_origin_is_known_under_an_identity_from_that_identitys_own_files() {
+        let dir = std::env::temp_dir().join(format!("fv-known-{}-{}", std::process::id(), unix_now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!origin_known_in_root(&dir, "yoai://app"), "no files yet");
+        std::fs::write(
+            crate::paths::store_path(&dir, crate::paths::LINKED_APPS),
+            r#"[{"app_name":"A","app_agent_pub_key":"k1","linked_at":1,"client_id":"c1","origin":"yoai://app"}]"#,
+        )
+        .unwrap();
+        std::fs::write(crate::paths::store_path(&dir, crate::paths::APPROVED_SITES), r#"["https://remembered.example"]"#).unwrap();
+        assert!(origin_known_in_root(&dir, "yoai://app"), "a linked app's origin");
+        assert!(origin_known_in_root(&dir, "https://remembered.example"), "a remembered site");
+        assert!(!origin_known_in_root(&dir, "https://other.example"));
+        assert!(!origin_known_in_root(&dir.join("missing"), "yoai://app"), "an identity that is not on this device");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -6355,6 +6886,14 @@ async fn owner_guard(
                 error: "not_addressed_here".into(),
                 description: Some("Flowsta Vault answers at 127.0.0.1 or localhost.".into()),
             }),
+        ));
+    }
+    // Browsers put an Origin on every POST. One that arrives marked as a
+    // browser's and without it is not a request any page of ours makes.
+    if req.method() == Method::POST && extract_origin(req.headers()).as_deref() == Some(BROWSER_WITHOUT_ORIGIN) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError { error: "origin_required".into(), description: Some("A page must send its Origin.".into()) }),
         ));
     }
     if peer.verdict().await == crate::peer_owner::Verdict::Other {
