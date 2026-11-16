@@ -1893,7 +1893,7 @@ export default component$(() => {
 
       {/* Generic /sign approval dialog */}
       {pendingRawSign.value && activeRequest.value === "raw-sign" && (
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" data-testid="raw-sign-dialog">
           <div class="mx-4 w-full max-w-sm rounded-xl border border-gray-600 bg-gray-800 p-6 shadow-2xl">
             <div class="mb-4 flex items-center gap-3">
               <div class="flex h-10 w-10 items-center justify-center rounded-full bg-amber-500/20">
@@ -1923,10 +1923,10 @@ export default component$(() => {
               right now. A signature made with your key speaks as you.
             </p>
             <div class="flex gap-3">
-              <GlassButton variant="secondary" class="flex-1" onClick$={() => handleRawSignResponse(false)}>
+              <GlassButton testId="raw-sign-deny" variant="secondary" class="flex-1" onClick$={() => handleRawSignResponse(false)}>
                 Deny
               </GlassButton>
-              <GlassButton class="flex-1" onClick$={() => handleRawSignResponse(true)}>
+              <GlassButton testId="raw-sign-approve" class="flex-1" onClick$={() => handleRawSignResponse(true)}>
                 Approve
               </GlassButton>
             </div>
