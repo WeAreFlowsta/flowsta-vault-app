@@ -21,6 +21,7 @@
  *       (scripts/matrix-signing-v16.sh runs both)
  *       needs VAULT_MATRIX_PORT = a fresh test instance (no identity yet), and
  *       optionally VAULT_MATRIX_RESTORE_PORT = a second fresh instance for the twin
+ *   node scripts/bridge-matrix.mjs --phase=hardening # who may learn or do what: addressing, callers, shared origins, link tokens, unlink
  *   node scripts/bridge-matrix.mjs --phase=switcher  # 1.5.0: two identities in one Vault, switch, one agent
  *       one identity, the epoch, claims, reset -> restore -> email. Same two fresh instances
  *       as --phase=create (VAULT_MATRIX_PORT required, VAULT_MATRIX_RESTORE_PORT optional).
@@ -725,13 +726,13 @@ async function backupLegs() {
     method: 'POST', origin: EVIL_ORIGIN,
     body: { app_name: 'Matrix Backup Fixture', app_agent_pub_key: linkKey },
   });
-  record('own-link revoke refused for unlinked origin', evilRevoke.status === 403);
+  record('another origin\'s unlink removes nothing', evilRevoke.status === 200 && evilRevoke.data?.removed === false, `${evilRevoke.status} ${JSON.stringify(evilRevoke.data)}`);
   const revoke = await api('/revoke-identity', {
     method: 'POST', origin: APP_ORIGIN,
     body: { app_name: 'Matrix Backup Fixture', app_agent_pub_key: linkKey },
   });
-  record('app revokes its own link', revoke.status === 200 && revoke.data?.success === true,
-    `${revoke.status}`);
+  record('app revokes its own link', revoke.status === 200 && revoke.data?.removed === true,
+    `${revoke.status} ${JSON.stringify(revoke.data)}`);
   const afterRevoke = await api('/backup', {
     method: 'POST', origin: APP_ORIGIN,
     body: { client_id: APP_CLIENT_ID, app_name: 'x', label: 'after', data: {} },
@@ -2440,9 +2441,189 @@ async function signingV16Leg(stage) {
   record('v1.6: the list reads both writes, still two rows on v1.6', after.length === 2 && after.every(isV16) && after.find((x) => x.file_hash === saved.hashB)?.revoked === true && after.find((x) => x.file_hash === saved.hashA)?.thumbnail === TINY_PNG_2, JSON.stringify(after.map((x) => ({ f: (x.file_hash || '').slice(0, 8), app: x.signing_app_id, revoked: x.revoked, thumb: (x.thumbnail || '').slice(-20) }))));
 }
 
+// ── Hardening leg (--phase=hardening) ──────────────────────────────────
+//
+// Who may learn or do what through the local API, on ONE unlocked test
+// instance with an identity (VAULT_MATRIX_PORT): where a request is
+// addressed, a page with no Origin, the identity check's answer per caller,
+// per-origin instance ids, apps that share an origin, the link token, and
+// an app unlinking only its own link. Links are made with the harness
+// (`/dev/devices` connect), so no dialog is needed.
+async function hardeningLeg() {
+  const http = await import('node:http');
+  const port = Number(process.env.VAULT_MATRIX_PORT || 0);
+  if (!port) throw new Error('--phase=hardening needs VAULT_MATRIX_PORT');
+  // A request with exactly the headers written here (fetch will not set Host).
+  const raw = (path, { method = 'GET', headers = {}, body } = {}) => new Promise((done, fail) => {
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const req = http.request({ host: '127.0.0.1', port, path, method, headers: { ...(payload ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } : {}), ...headers } }, (res) => {
+      let text = '';
+      res.on('data', (c) => (text += c));
+      res.on('end', () => { let data = null; try { data = JSON.parse(text); } catch {} done({ status: res.statusCode, data, headers: res.headers }); });
+    });
+    req.on('error', fail);
+    if (payload) req.write(payload);
+    req.end();
+  });
+  const here = { Host: `127.0.0.1:${port}` };
+  const from = (origin, extra = {}) => ({ ...here, ...(origin ? { Origin: origin } : {}), ...extra });
+  const op = async (body) => (await vaultFetch(port, '/dev/devices', { method: 'POST', body })).data || {};
+
+  const local = await raw('/status', { headers: here });
+  const me = local.data?.agent_pub_key;
+  record('hardening: the test Vault is unlocked with an identity', local.status === 200 && !!me, JSON.stringify(local.data).slice(0, 160));
+  if (!me) return;
+  const other = fakeAgentKey();
+  const STRANGER = 'https://stranger.example';
+
+  // 1. Where the request is addressed.
+  for (const host of [`example.org:${port}`, `127.0.0.1.example.org:${port}`, `192.168.1.20:${port}`]) {
+    const r = await raw('/status', { headers: { Host: host } });
+    record(`a request addressed to ${host} is refused`, r.status === 403 && r.data?.error === 'not_addressed_here', `${r.status} ${JSON.stringify(r.data)}`);
+  }
+  record('localhost is this computer too', (await raw('/status', { headers: { Host: `localhost:${port}` } })).status === 200);
+
+  // 2. A browser request with no Origin is a page, not a local program.
+  const page = await raw('/status', { headers: { ...here, 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'no-cors' } });
+  record('a page with no Origin is not shown the identity', page.status === 200 && !page.data?.agent_pub_key && !page.data?.active_identity && !page.headers['x-flowsta-vault-identity'], JSON.stringify(page.data).slice(0, 160));
+  const pagePost = await raw('/show', { method: 'POST', headers: { ...here, 'Sec-Fetch-Site': 'cross-site' }, body: {} });
+  record('a page with no Origin cannot post', pagePost.status === 403 && pagePost.data?.error === 'origin_required', `${pagePost.status} ${JSON.stringify(pagePost.data)}`);
+
+  // 3. The identity, its header and the instance id, per caller.
+  record('a local program sees the identity and its header', local.headers['x-flowsta-vault-identity'] === me);
+  const stranger = await raw('/status', { headers: from(STRANGER) });
+  record('a site the person never approved sees neither', stranger.status === 200 && !stranger.data?.agent_pub_key && !stranger.headers['x-flowsta-vault-identity']);
+  const idA = stranger.data?.instance_id;
+  const idA2 = (await raw('/status', { headers: from(STRANGER) })).data?.instance_id;
+  const idB = (await raw('/status', { headers: from('https://another.example') })).data?.instance_id;
+  record('each origin gets its own instance id, steady for that origin', !!idA && idA === idA2 && idA !== idB && idA !== local.data?.instance_id && idB !== local.data?.instance_id, `${idA} ${idB} ${local.data?.instance_id}`);
+  const portFile = (await vaultFetch(port, '/dev/status').catch(() => null))?.data || {};
+  record('a local program gets the id the second launch looks for', /^[0-9a-f]{16}$/.test(local.data?.instance_id || ''), JSON.stringify(portFile.instance_id ?? local.data?.instance_id));
+  await vaultFetch(port, '/dev/claim', { method: 'POST', body: { url: `flowsta://claim/v1?nonce=${'ab'.repeat(16)}` } });
+  const claimsStranger = (await raw('/status', { headers: from(STRANGER) })).data?.claims;
+  const claimsFlowsta = (await raw('/status', { headers: from(ORIGIN) })).data?.claims;
+  record('the sign-in nonces go to Flowsta sites and local programs only', Array.isArray(claimsStranger) && claimsStranger.length === 0 && (claimsFlowsta || []).includes('ab'.repeat(16)), `${JSON.stringify(claimsStranger)} ${JSON.stringify(claimsFlowsta)}`);
+
+  // 4. The identity check answers at once only for an entitled caller.
+  const q = (key) => `/status?expected_identity=${encodeURIComponent(key)}`;
+  const right = await raw(q(me), { headers: from(STRANGER) });
+  const wrong = await raw(q(other), { headers: from(STRANGER) });
+  const strip = (d) => JSON.stringify({ ...d, instance_id: undefined });
+  record('a site with no history cannot tell a right guess from a wrong one', right.status === 200 && wrong.status === 200 && strip(right.data) === strip(wrong.data), `${right.status} ${wrong.status}`);
+  const pageGuess = await raw(q(other), { headers: { ...here, 'Sec-Fetch-Site': 'cross-site' } });
+  record('nor can a page with no Origin', pageGuess.status === 200, `${pageGuess.status}`);
+  record('a Flowsta site is told at once', (await raw(q(other), { headers: from(ORIGIN) })).status === 409 && (await raw(q(me), { headers: from(ORIGIN) })).status === 200);
+  record('a local program is told at once', (await raw(q(other), { headers: here })).status === 409);
+  const LINKED = 'https://linked-matrix.example';
+  await op({ op: 'connect', client_id: 'matrix_linked', app_name: 'Matrix Linked', origin: LINKED, app_agent_pub_key: 'matrix-linked-key' });
+  const linkedWrong = await raw(q(other), { headers: from(LINKED) });
+  record('an app linked under this identity is told at once', linkedWrong.status === 409 && linkedWrong.data?.error === 'identity_mismatch' && (await raw(q(me), { headers: from(LINKED) })).status === 200, `${linkedWrong.status}`);
+  const auth = (origin, key) => raw('/authenticate', { method: 'POST', headers: from(origin), body: { app_name: 'Matrix', reason: 'hardening', challenge: Buffer.from(`matrix-hardening:${crypto.randomBytes(8).toString('hex')}`, 'utf8').toString('base64'), expected_identity: key } });
+  const deferred = await auth(STRANGER, other);
+  record('for a site with no history the check runs after consent, and still refuses', deferred.status === 409 && deferred.data?.error === 'identity_mismatch', `${deferred.status} ${JSON.stringify(deferred.data).slice(0, 120)}`);
+  const deferredOk = await auth(STRANGER, me);
+  record('and passes for the right identity', deferredOk.status === 200 && !!deferredOk.data?.signature, `${deferredOk.status} ${JSON.stringify(deferredOk.data).slice(0, 120)}`);
+
+  // 5. /link-status answers for the caller's own link.
+  const ls = (origin, key) => raw(`/link-status?app_agent_pub_key=${encodeURIComponent(key)}`, { headers: from(origin) });
+  record('an app is told its own link', (await ls(LINKED, 'matrix-linked-key')).data?.linked === true);
+  record('another site asking about that key is told it is not linked', (await ls(STRANGER, 'matrix-linked-key')).data?.linked === false);
+  record('a local program may ask about any link', (await ls(null, 'matrix-linked-key')).data?.linked === true);
+
+  // 6. Two apps on one origin: never "the first".
+  const SHELL = 'matrix-shell://localhost';
+  await op({ op: 'connect', client_id: 'matrix_first', app_name: 'Matrix First', origin: SHELL, app_agent_pub_key: 'matrix-first-key' });
+  const alone = await raw('/app-secret', { method: 'POST', headers: from(SHELL), body: { label: 'network' } });
+  record('one app on an origin is that app, as before', alone.status === 200 && /^[0-9a-f]{64}$/.test(alone.data?.secret_hex || ''), `${alone.status}`);
+  await op({ op: 'connect', client_id: 'matrix_second', app_name: 'Matrix Second', origin: SHELL, app_agent_pub_key: 'matrix-second-key' });
+  const secret = (body) => raw('/app-secret', { method: 'POST', headers: from(SHELL), body: { label: 'network', ...body } });
+  const unnamed = await secret({});
+  record('two apps on one origin: a request that does not say which gets no app\'s secret', unnamed.status === 403 && unnamed.data?.error === 'app_ambiguous', `${unnamed.status} ${JSON.stringify(unnamed.data)}`);
+  const s1 = await secret({ client_id: 'matrix_first' });
+  const s2 = await secret({ client_id: 'matrix_second' });
+  record('each gets its own when it says which it is', s1.status === 200 && s2.status === 200 && s1.data?.secret_hex === alone.data?.secret_hex && s2.data?.secret_hex !== s1.data?.secret_hex, `${s1.status} ${s2.status}`);
+  const list = await raw('/backup/list?client_id=matrix_second', { headers: from(SHELL) });
+  const listUnnamed = await raw('/backup/list', { headers: from(SHELL) });
+  record('the same on a GET', list.status === 200 && listUnnamed.status === 403 && listUnnamed.data?.error === 'app_ambiguous', `${list.status} ${listUnnamed.status}`);
+  const seesIdentity = await raw('/status', { headers: from(SHELL) });
+  record('both still see the identity they are linked under', seesIdentity.data?.agent_pub_key === me);
+  const wrote = await raw('/backup', { method: 'POST', headers: from(SHELL), body: { client_id: 'matrix_second', app_name: 'Matrix Second', label: 'hardening', data: { n: 2 } } });
+  const readBack = await raw('/backup/retrieve', { method: 'POST', headers: from(SHELL), body: { client_id: 'matrix_second', label: 'hardening' } });
+  const firstReads = await raw('/backup/retrieve', { method: 'POST', headers: from(SHELL), body: { client_id: 'matrix_first', label: 'hardening' } });
+  record('the second app writes and reads its own backup (it could not before), and it is not the first app\'s', wrote.status === 200 && readBack.status === 200 && firstReads.status === 404, `${wrote.status} ${readBack.status} ${firstReads.status}`);
+
+  // 7. The link token.
+  const TOKEN_ORIGIN = 'matrix-token://app';
+  await op({ op: 'connect', client_id: 'matrix_token', app_name: 'Matrix Token', origin: TOKEN_ORIGIN, app_agent_pub_key: 'matrix-token-key', link_token: 'matrix-token-value', token_required: true });
+  const tok = (body) => raw('/app-secret', { method: 'POST', headers: from(TOKEN_ORIGIN), body: { label: 'network', ...body } });
+  const none = await tok({});
+  record('a link that needs its token is not reachable without it', none.status === 403 && none.data?.error === 'link_token_required', `${none.status} ${JSON.stringify(none.data)}`);
+  const good = await tok({ link_token: 'matrix-token-value' });
+  record('with its token it is', good.status === 200 && !!good.data?.secret_hex, `${good.status}`);
+  const bad = await tok({ link_token: 'not-the-token' });
+  record('a token no link holds is refused', bad.status === 403 && bad.data?.error === 'invalid_link_token', `${bad.status} ${JSON.stringify(bad.data)}`);
+  const elsewhere = await raw('/app-secret', { method: 'POST', headers: from(SHELL), body: { label: 'network', link_token: 'matrix-token-value' } });
+  record('a token is good only from the origin its link was made from', elsewhere.status === 403 && elsewhere.data?.error === 'invalid_link_token', `${elsewhere.status}`);
+  const getTok = await raw('/backup/list?link_token=matrix-token-value', { headers: from(TOKEN_ORIGIN) });
+  record('a GET carries the token in the query', getTok.status === 200, `${getTok.status}`);
+
+  // 8. An app unlinks only its own link.
+  const revoke = (origin, body) => raw('/revoke-identity', { method: 'POST', headers: from(origin), body: { app_name: 'x', ...body } });
+  const connections = async () => (await op({ op: 'connections' })).connections || (await op({ op: 'connections' }));
+  const linkedNow = async (key) => (await ls(null, key)).data?.linked === true;
+  const byStranger = await revoke(STRANGER, { app_agent_pub_key: 'matrix-first-key' });
+  record('another site cannot unlink an app', byStranger.data?.removed === false && (await linkedNow('matrix-first-key')), `${byStranger.status} ${JSON.stringify(byStranger.data)}`);
+  const byFlowsta = await revoke(ORIGIN, { app_agent_pub_key: 'matrix-first-key' });
+  record('nor can a Flowsta site', byFlowsta.data?.removed === false && (await linkedNow('matrix-first-key')), `${byFlowsta.status} ${JSON.stringify(byFlowsta.data)}`);
+  const noToken = await revoke(TOKEN_ORIGIN, { app_agent_pub_key: 'matrix-token-key' });
+  record('a link that needs its token is not dropped on its key alone', noToken.data?.removed === false && (await linkedNow('matrix-token-key')), JSON.stringify(noToken.data));
+  const withToken = await revoke(TOKEN_ORIGIN, { app_agent_pub_key: 'matrix-token-key', link_token: 'matrix-token-value' });
+  record('the app drops its own link with its token, and is told so', withToken.status === 200 && withToken.data?.removed === true && !(await linkedNow('matrix-token-key')), JSON.stringify(withToken.data));
+  const gone = await tok({ link_token: 'matrix-token-value' });
+  record('after that its token opens nothing', gone.status === 403, `${gone.status} ${JSON.stringify(gone.data)}`);
+  const ownOld = await revoke(SHELL, { app_agent_pub_key: 'matrix-second-key' });
+  record('an app on an older SDK drops its own link by its origin and key', ownOld.data?.removed === true && !(await linkedNow('matrix-second-key')) && (await linkedNow('matrix-first-key')), JSON.stringify(ownOld.data));
+  const again = await secret({});
+  record('and the origin has one app again', again.status === 200 && again.data?.secret_hex === alone.data?.secret_hex, `${again.status}`);
+  void connections;
+
+  // 9. A real link (auto-approved) hands out a token.
+  const APP_CLIENT_ID = process.env.VAULT_MATRIX_APP_CLIENT_ID;
+  if (APP_CLIENT_ID) {
+    const REAL = 'https://hardening-matrix.example';
+    const key = fakeAgentKey();
+    const link = await raw('/link-identity', { method: 'POST', headers: from(REAL), body: { app_name: 'A name the caller made up', client_id: APP_CLIENT_ID, app_agent_pub_key: key, require_link_token: true } });
+    const token = link.data?.link_token;
+    record('linking hands the app a link token', link.status === 200 && typeof token === 'string' && token.length === 43, `${link.status} ${JSON.stringify(link.data).slice(0, 160)}`);
+    const stored = (await ls(null, key)).data?.app_name;
+    record('the Vault keeps the name the API verified, not the caller\'s', !!stored && stored !== 'A name the caller made up', `${stored}`);
+    const withIt = await raw(`/backup/list?link_token=${encodeURIComponent(token || '')}`, { headers: from(REAL) });
+    const without = await raw('/backup/list', { headers: from(REAL) });
+    record('the new link answers to its token and not without it', withIt.status === 200 && without.status === 403 && without.data?.error === 'link_token_required', `${withIt.status} ${without.status} ${JSON.stringify(without.data)}`);
+    const relink = await raw('/link-identity', { method: 'POST', headers: from(REAL), body: { app_name: 'x', client_id: APP_CLIENT_ID, app_agent_pub_key: key, require_link_token: true } });
+    const oldToken = await raw(`/backup/list?link_token=${encodeURIComponent(token || '')}`, { headers: from(REAL) });
+    record('linking again ends the old token', relink.status === 200 && relink.data?.link_token !== token && oldToken.status === 403, `${relink.status} ${oldToken.status}`);
+    const drop = await revoke(REAL, { app_agent_pub_key: key, link_token: relink.data?.link_token });
+    record('and the app can drop that link', drop.data?.removed === true, JSON.stringify(drop.data));
+  } else {
+    record('real link skipped - set VAULT_MATRIX_APP_CLIENT_ID', true);
+  }
+
+  // Leave the instance as it was found.
+  await revoke(LINKED, { app_agent_pub_key: 'matrix-linked-key' });
+  await revoke(SHELL, { app_agent_pub_key: 'matrix-first-key' });
+}
+
 (async () => {
   console.log(`Bridge matrix — phase: ${PHASE}, origin: ${ORIGIN}`);
   await askForRateLimitExemption();
+  if (PHASE === 'hardening') {
+    await hardeningLeg();
+    const passedH = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedH}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
+    process.exit(failures ? 1 : 0);
+  }
   if (PHASE === 'switcher') {
     await switcherLeg();
     const passedS = results.filter((r) => r.ok).length;
