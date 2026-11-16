@@ -128,6 +128,27 @@ pub struct IpcState {
     pub instance_id: String,
 }
 
+/// The instance id a caller is given. A local program gets the process's
+/// own id (the Vault's second launch looks for exactly it, and the port
+/// file holds it). A web origin gets one made from that id and its own
+/// origin: steady for that origin while the process lives, so "the same
+/// Vault, still here" still works, and different for every other origin,
+/// so two sites cannot use it to recognise the same visitor.
+fn instance_id_for(process_id: &str, origin: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    match origin.filter(|o| !o.is_empty()) {
+        None => process_id.to_string(),
+        Some(o) => {
+            let mut h = Sha256::new();
+            h.update(b"flowsta-vault-instance\0");
+            h.update(process_id.as_bytes());
+            h.update([0u8]);
+            h.update(o.as_bytes());
+            hex::encode(&h.finalize()[..8])
+        }
+    }
+}
+
 fn mint_instance_id() -> String {
     use rand::RngCore;
     let mut b = [0u8; 8];
@@ -207,11 +228,25 @@ fn set_job_stage(state: &Arc<IpcState>, job_id: &Option<String>, stage: &str) {
 
 // ── Origin tracking helper ──────────────────────────────────────────
 
+/// Stands in for the origin of a request a BROWSER sent without one (an
+/// image, a script tag, a `no-cors` fetch, a typed address): a page of
+/// unknown origin, never a local program. Linked to nothing, remembered
+/// nowhere, so every origin rule treats it as an unapproved site.
+const BROWSER_WITHOUT_ORIGIN: &str = "browser://no-origin";
+
+/// Who is asking, as far as headers can say: the `Origin` a browser or an
+/// app sent; else, when the request carries any of the `Sec-Fetch-*`
+/// headers only a browser adds, the stand-in above; else `None`, a local
+/// program. Absence of those headers proves nothing (older webviews send
+/// none), so `None` is granted nothing it was not granted before.
 fn extract_origin(headers: &HeaderMap) -> Option<String> {
+    if let Some(o) = headers.get(axum::http::header::ORIGIN).and_then(|h| h.to_str().ok()) {
+        return Some(o.to_string());
+    }
     headers
-        .get(axum::http::header::ORIGIN)
-        .and_then(|h| h.to_str().ok())
-        .map(String::from)
+        .keys()
+        .any(|k| k.as_str().starts_with("sec-fetch-"))
+        .then(|| BROWSER_WITHOUT_ORIGIN.to_string())
 }
 
 pub(crate) fn unix_now() -> i64 {
@@ -466,12 +501,18 @@ async fn status_handler(
         unlocked,
         active_identity,
         syncing_while_locked: may_see_identity.then(|| crate::commands::apps_sync_while_locked(&state.app_state)),
-        instance_id: state.instance_id.clone(),
+        instance_id: instance_id_for(&state.instance_id, origin.as_deref()),
         identity_epoch: crate::paths::read_identity_epoch(&state.app_state.data_dir),
         claims: {
             let mut c = state.app_state.recent_claims.lock().unwrap();
             c.retain(|(_, at)| at.elapsed() < crate::relay_login::CLAIM_TTL);
-            c.iter().map(|(n, _)| n.clone()).collect()
+            // The nonces Flowsta's own sign-in page left to find this
+            // person's Vault: for that page and for local programs only.
+            if origin.is_none() || is_flowsta_origin(origin.as_deref()) {
+                c.iter().map(|(n, _)| n.clone()).collect()
+            } else {
+                Vec::new()
+            }
         },
         initialized,
         agent_pub_key,
@@ -639,7 +680,7 @@ async fn sign_handler(
         let approved = match waited {
             Ok(Ok(result)) => {
                 if result {
-                    recheck_expected_identity(&state)?;
+                    recheck_expected_identity_after_consent(&state)?;
                 }
                 result
             }
@@ -1121,7 +1162,7 @@ async fn authenticate_inner(
         match waited {
             Ok(Ok(result)) => {
                 if result {
-                    recheck_expected_identity(&state)?;
+                    recheck_expected_identity_after_consent(&state)?;
                 }
                 result
             }
@@ -1625,7 +1666,7 @@ async fn link_identity_handler(
             Ok(Ok(result)) => {
                 restore_window(&state.app_handle, prior);
                 if result {
-                    recheck_expected_identity(&state)?;
+                    recheck_expected_identity_after_consent(&state)?;
                 }
                 result
             }
@@ -1905,7 +1946,14 @@ async fn link_status_handler(
     let app_agent_pub_key = query.get("app_agent_pub_key").cloned().unwrap_or_default();
 
     let apps = state.app_state.linked_third_party_apps.lock().unwrap();
-    let found = apps.iter().find(|a| a.app_agent_pub_key == app_agent_pub_key);
+    // "Am I linked?" is answered for the caller's own link: the origin it
+    // was made from. A Flowsta site and a local program may ask about any.
+    // Anyone else asking about a key is told it is not linked, as for a
+    // key that is unknown.
+    let any = origin.is_none() || is_flowsta_origin(origin.as_deref());
+    let found = apps
+        .iter()
+        .find(|a| a.app_agent_pub_key == app_agent_pub_key && (any || (a.origin.is_some() && a.origin == origin)));
 
     match found {
         Some(app) => Json(LinkStatusResponse {
@@ -3315,7 +3363,7 @@ async fn sign_document_core(
         match tokio::time::timeout(std::time::Duration::from_secs(approval_budget), rx).await {
         Ok(Ok(result)) => {
                 if result {
-                    recheck_expected_identity(&state)?;
+                    recheck_expected_identity_after_consent(&state)?;
                 }
                 result
             }
@@ -3808,7 +3856,7 @@ async fn profile_update_core(
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
             Ok(Ok(result)) => {
                 if result {
-                    recheck_expected_identity(&state)?;
+                    recheck_expected_identity_after_consent(&state)?;
                 }
                 result
             }
@@ -3947,7 +3995,7 @@ async fn cell_op_approval(
     }
     match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
         Ok(Ok(true)) => {
-            recheck_expected_identity(state)?;
+            recheck_expected_identity_after_consent(state)?;
             let _ = state.app_handle.emit(
                 "op-progress",
                 serde_json::json!({ "op": op, "origin": origin, "label": detail }),
@@ -5714,13 +5762,55 @@ tokio::task_local! {
     /// it AGAIN after a long wait (unlock up to 180 s, approval 60 s): the
     /// identity can change while the request waits, and a gate that ran
     /// once at entry would then act as the wrong person.
-    static REQUEST_EXPECTED_IDENTITY: Option<String>;
+    static REQUEST_EXPECTED_IDENTITY: ExpectedIdentity;
+}
+
+/// What a request said about the identity it expects.
+#[derive(Clone, Default)]
+struct ExpectedIdentity {
+    key: Option<String>,
+    /// The caller is not entitled to learn, before the person consents,
+    /// whether this Vault holds that identity (`entitled_to_identity_answer`):
+    /// no check at entry or after an unlock wait; the check runs once the
+    /// person has allowed the request, before anything is signed or stored.
+    after_consent_only: bool,
 }
 
 /// The request's expected identity, if it carried one (None outside a
 /// request or when none was given).
 fn captured_expected_identity() -> Option<String> {
-    REQUEST_EXPECTED_IDENTITY.try_with(|e| e.clone()).ok().flatten()
+    REQUEST_EXPECTED_IDENTITY.try_with(|e| e.key.clone()).ok().flatten()
+}
+
+fn captured_expectation() -> ExpectedIdentity {
+    REQUEST_EXPECTED_IDENTITY.try_with(|e| e.clone()).unwrap_or_default()
+}
+
+/// May this caller be told at once whether the Vault holds identity
+/// `expected`? A caller that can already see which identity the Vault
+/// holds (a local program, a Flowsta site, an origin linked or remembered
+/// under it) learns nothing new from the answer. So does an origin the
+/// person linked or remembered UNDER THE IDENTITY IT NAMES on this device:
+/// that is an app bound to an identity the Vault has since switched away
+/// from, the case the check exists for. Any other origin could use the
+/// answer to test a guessed key, and is not told.
+fn entitled_to_identity_answer(state: &IpcState, origin: Option<&str>, expected: &str) -> bool {
+    if origin_may_see_identity(&state.app_state, origin) {
+        return true;
+    }
+    let Some(o) = origin.filter(|o| !o.is_empty()) else { return true };
+    let Some(partition) = crate::paths::partition_key(expected) else { return false };
+    origin_known_in_root(&crate::paths::identity_root_for(&state.app_state.data_dir, &partition), o)
+}
+
+/// Whether an identity's own files (readable locked or unlocked) hold
+/// this origin as a linked app's or a remembered site's.
+fn origin_known_in_root(root: &std::path::Path, origin: &str) -> bool {
+    if !root.is_dir() {
+        return false;
+    }
+    crate::commands::load_linked_apps(root).iter().any(|a| a.origin.as_deref() == Some(origin))
+        || crate::commands::load_approved_sites(root).iter().any(|s| s == origin)
 }
 
 /// Re-run the entry gate after a wait. No expected identity = nothing to
@@ -5907,7 +5997,7 @@ async fn approve_and_sign_manifest(
     let approved = match waited {
         Ok(Ok(result)) => {
             if result {
-                recheck_expected_identity(state)?;
+                recheck_expected_identity_after_consent(state)?;
             }
             result
         }
@@ -6188,6 +6278,17 @@ mod node_manifest_tests {
 }
 
 fn recheck_expected_identity(state: &IpcState) -> Result<(), (StatusCode, Json<IpcError>)> {
+    let e = captured_expectation();
+    match e.key {
+        Some(expected) if !e.after_consent_only => check_expected_identity(state, &expected),
+        _ => Ok(()),
+    }
+}
+
+/// The same check once the person has allowed the request: it runs for
+/// every caller, entitled to the early answer or not, before anything is
+/// signed or stored.
+fn recheck_expected_identity_after_consent(state: &IpcState) -> Result<(), (StatusCode, Json<IpcError>)> {
     match captured_expected_identity() {
         Some(expected) => check_expected_identity(state, &expected),
         None => Ok(()),
@@ -6201,8 +6302,7 @@ where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let expected = captured_expected_identity();
-    tokio::spawn(REQUEST_EXPECTED_IDENTITY.scope(expected, fut))
+    tokio::spawn(REQUEST_EXPECTED_IDENTITY.scope(captured_expectation(), fut))
 }
 
 /// `expected_identity=<key>` out of a query string (GETs carry no body).
@@ -6252,7 +6352,17 @@ async fn identity_gate(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
-    let mut expected: Option<String> = None;
+    let origin = extract_origin(req.headers());
+    let mut expected = ExpectedIdentity::default();
+    // An entitled caller is answered at entry; anyone else after consent.
+    let mut at_entry = |e: String| -> Result<(), (StatusCode, Json<IpcError>)> {
+        let entitled = entitled_to_identity_answer(&state, origin.as_deref(), &e);
+        if entitled {
+            check_expected_identity(&state, &e)?;
+        }
+        expected = ExpectedIdentity { key: Some(e), after_consent_only: !entitled };
+        Ok(())
+    };
     let req = if req.method() == Method::POST {
         let (parts, body) = req.into_parts();
         // Buffer within the largest route allowance (55 MB on /backup); the
@@ -6267,8 +6377,7 @@ async fn identity_gate(
             })?;
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             if let Some(e) = v.get("expected_identity").and_then(|x| x.as_str()) {
-                check_expected_identity(&state, e)?;
-                expected = Some(e.to_string());
+                at_entry(e.to_string())?;
             }
         }
         axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
@@ -6276,8 +6385,7 @@ async fn identity_gate(
         // GETs (/link-status, /backup/list, /signatures, /connections, ...)
         // carry it in the query string.
         if let Some(e) = req.uri().query().and_then(expected_identity_from_query) {
-            check_expected_identity(&state, &e)?;
-            expected = Some(e);
+            at_entry(e)?;
         }
         req
     };
@@ -6292,7 +6400,9 @@ async fn identity_gate(
         .unwrap()
         .as_ref()
         .map(|c| c.agent_pub_key.clone());
-    if let Some(key) = identity {
+    // Only for a caller that may see the identity on /status: the header
+    // says the same thing.
+    if let Some(key) = identity.filter(|_| origin_may_see_identity(&state.app_state, origin.as_deref())) {
         if let Ok(val) = axum::http::HeaderValue::from_str(&key) {
             resp.headers_mut().insert("x-flowsta-vault-identity", val);
         }
@@ -6311,6 +6421,61 @@ fn host_names_this_computer(host: &str) -> bool {
     };
     let h = name.trim_end_matches('.').to_ascii_lowercase();
     h == "localhost" || h == "[::1]" || h.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(test)]
+mod caller_tests {
+    use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(), axum::http::HeaderValue::from_str(v).unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn a_browser_request_without_an_origin_is_a_page_not_a_local_program() {
+        assert_eq!(extract_origin(&headers(&[])), None, "a local program");
+        assert_eq!(extract_origin(&headers(&[("origin", "https://example.org")])).as_deref(), Some("https://example.org"));
+        assert_eq!(extract_origin(&headers(&[("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "no-cors")])).as_deref(), Some(BROWSER_WITHOUT_ORIGIN));
+        assert_eq!(extract_origin(&headers(&[("sec-fetch-dest", "image")])).as_deref(), Some(BROWSER_WITHOUT_ORIGIN));
+        assert_eq!(extract_origin(&headers(&[("origin", "tauri://localhost"), ("sec-fetch-site", "cross-site")])).as_deref(), Some("tauri://localhost"), "a stated origin stands");
+        // The stand-in is no Flowsta origin and can match no link.
+        assert!(!is_flowsta_origin(Some(BROWSER_WITHOUT_ORIGIN)));
+    }
+
+    #[test]
+    fn each_origin_gets_its_own_instance_id_and_a_local_program_the_real_one() {
+        let real = "0123456789abcdef";
+        assert_eq!(instance_id_for(real, None), real);
+        assert_eq!(instance_id_for(real, Some("")), real);
+        let a = instance_id_for(real, Some("https://a.example"));
+        let b = instance_id_for(real, Some("https://b.example"));
+        assert_eq!(a.len(), 16);
+        assert!(a != real && b != real && a != b);
+        assert_eq!(a, instance_id_for(real, Some("https://a.example")), "steady for one origin");
+        assert_ne!(a, instance_id_for("fedcba9876543210", Some("https://a.example")), "a new process, a new id");
+    }
+
+    #[test]
+    fn an_origin_is_known_under_an_identity_from_that_identitys_own_files() {
+        let dir = std::env::temp_dir().join(format!("fv-known-{}-{}", std::process::id(), unix_now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!origin_known_in_root(&dir, "yoai://app"), "no files yet");
+        std::fs::write(
+            crate::paths::store_path(&dir, crate::paths::LINKED_APPS),
+            r#"[{"app_name":"A","app_agent_pub_key":"k1","linked_at":1,"client_id":"c1","origin":"yoai://app"}]"#,
+        )
+        .unwrap();
+        std::fs::write(crate::paths::store_path(&dir, crate::paths::APPROVED_SITES), r#"["https://remembered.example"]"#).unwrap();
+        assert!(origin_known_in_root(&dir, "yoai://app"), "a linked app's origin");
+        assert!(origin_known_in_root(&dir, "https://remembered.example"), "a remembered site");
+        assert!(!origin_known_in_root(&dir, "https://other.example"));
+        assert!(!origin_known_in_root(&dir.join("missing"), "yoai://app"), "an identity that is not on this device");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -6355,6 +6520,14 @@ async fn owner_guard(
                 error: "not_addressed_here".into(),
                 description: Some("Flowsta Vault answers at 127.0.0.1 or localhost.".into()),
             }),
+        ));
+    }
+    // Browsers put an Origin on every POST. One that arrives marked as a
+    // browser's and without it is not a request any page of ours makes.
+    if req.method() == Method::POST && extract_origin(req.headers()).as_deref() == Some(BROWSER_WITHOUT_ORIGIN) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(IpcError { error: "origin_required".into(), description: Some("A page must send its Origin.".into()) }),
         ));
     }
     if peer.verdict().await == crate::peer_owner::Verdict::Other {

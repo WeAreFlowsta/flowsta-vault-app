@@ -793,7 +793,7 @@ pub(crate) fn load_linked_apps(data_dir: &std::path::Path) -> Vec<LinkedThirdPar
     crate::vault::load_json_or_quarantine(&crate::paths::store_path(data_dir, crate::paths::LINKED_APPS))
 }
 
-fn load_approved_sites(data_dir: &std::path::Path) -> Vec<String> {
+pub(crate) fn load_approved_sites(data_dir: &std::path::Path) -> Vec<String> {
     crate::vault::load_json_or_quarantine(&crate::paths::store_path(data_dir, crate::paths::APPROVED_SITES))
 }
 
