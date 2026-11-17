@@ -5,6 +5,12 @@
 ; require admin elevation. The same registry path lives under HKEY_CLASSES_ROOT
 ; at runtime, so File Explorer picks up the menu item for any file type.
 
+!include "${__FILEDIR__}\wait-for-program-file.nsh"
+
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro WaitForProgramFile
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
   WriteRegStr HKCU "Software\Classes\*\shell\FlowstaVaultSign" "" "Sign It with Flowsta Vault"
   WriteRegStr HKCU "Software\Classes\*\shell\FlowstaVaultSign" "Icon" "$INSTDIR\${MAINBINARYNAME}.exe"

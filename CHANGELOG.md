@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection made that way could not be used afterwards, and the app could
   not remove it.
 
+### Fixed
+
+- Windows: the update's installer waits for the program file to be free
+  before it writes it. It could stop at "Error opening file for writing".
+
 ## [1.8.0-beta7] - 2026-11-17
 
 ### Connections
