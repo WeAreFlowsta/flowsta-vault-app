@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection made that way could not be used afterwards, and the app could
   not remove it.
 
+### Signing a release
+
+- A release manifest can name further downloads the release needs beside
+  the app itself (an optional engine, a helper program). The signing dialog
+  lists each one with its version, size and hash, like the files, and a
+  manifest whose list is malformed is refused.
+
 ### Fixed
 
 - Windows: the update's installer waits for the program file to be free

@@ -43,6 +43,8 @@ interface ReleaseManifestSign {
     rollout_percent: number;
     files: { platform: string; kind: string; name: string; size: number; sha256: string }[];
     kit: { line: string; target: string; sidecar: string; sha256: string }[];
+    /** Further downloads the release needs beside the app itself. */
+    parts?: { name: string; target: string; version: string; size: number; sha256: string }[];
     statement: string;
   };
 }
@@ -2064,6 +2066,16 @@ export default component$(() => {
                   {pendingReleaseSign.value.summary.kit.map((k) => (
                     <p key={k.line + k.target + k.sidecar} class="text-xs text-gray-400">
                       {k.sidecar} · {k.target} · <span class="font-mono">{k.sha256}</span>
+                    </p>
+                  ))}
+                </div>
+              )}
+              {(pendingReleaseSign.value.summary.parts ?? []).length > 0 && (
+                <div data-testid="release-sign-parts">
+                  <span class="text-xs text-gray-500">Other downloads this version needs</span>
+                  {(pendingReleaseSign.value.summary.parts ?? []).map((p) => (
+                    <p key={p.name + p.target} class="text-xs text-gray-400">
+                      {p.name} {p.version} · {p.target} · {(p.size / 1048576).toFixed(1)} MB · <span class="font-mono">{p.sha256}</span>
                     </p>
                   ))}
                 </div>
