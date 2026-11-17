@@ -6233,6 +6233,16 @@ fn is_version(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().next().is_some_and(|c| c.is_ascii_digit()) && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
+/// Letters, digits, dots, dashes and underscores, starting with a letter or
+/// digit: a word an app can put in a file name or an address.
+fn is_plain_word(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && !s.contains("..")
+}
+
 /// The statement for a release manifest, plus the summary the dialog shows.
 pub(crate) fn release_manifest_statement(manifest: &serde_json::Value) -> Result<(String, serde_json::Value), String> {
     let obj = manifest.as_object().ok_or("manifest must be an object")?;
@@ -6303,6 +6313,20 @@ pub(crate) fn release_manifest_statement(manifest: &serde_json::Value) -> Result
         let sha256 = field("sha256").filter(|h| is_sha256_hex(h)).ok_or(format!("manifest.kit[{}].sha256 must be 64 lowercase hex", i))?;
         kit_rows.push(serde_json::json!({ "line": line, "target": target, "sidecar": sidecar, "sha256": &sha256[..12] }));
     }
+    // Further downloads the release needs beside the app itself (an optional
+    // engine, a helper program): a name, a target, a version, a size and a
+    // hash each, never an address. They are part of what is signed, so the
+    // dialog shows them like the files.
+    let mut part_rows = Vec::new();
+    for (i, p) in body.get("parts").and_then(|p| p.as_array()).map(|p| p.as_slice()).unwrap_or(&[]).iter().enumerate() {
+        let word = |key: &str| p.get(key).and_then(|v| v.as_str()).filter(|v| is_plain_word(v));
+        let (Some(name), Some(target), Some(version)) = (word("name"), word("target"), word("version")) else {
+            return Err(format!("manifest.parts[{}] needs a name, a target and a version in plain words (letters, digits, . - _)", i));
+        };
+        let size = p.get("size").and_then(|v| v.as_u64()).filter(|n| *n > 0).ok_or(format!("manifest.parts[{}].size must be a positive integer", i))?;
+        let sha256 = p.get("sha256").and_then(|v| v.as_str()).filter(|h| is_sha256_hex(h)).ok_or(format!("manifest.parts[{}].sha256 must be 64 lowercase hex", i))?;
+        part_rows.push(serde_json::json!({ "name": name, "target": target, "version": version, "size": size, "sha256": &sha256[..12] }));
+    }
     let mut canon = String::new();
     canonical_json(&serde_json::Value::Object(body.clone()), &mut canon);
     use sha2::{Digest, Sha256};
@@ -6322,6 +6346,7 @@ pub(crate) fn release_manifest_statement(manifest: &serde_json::Value) -> Result
         "rollout_percent": percent,
         "files": file_rows,
         "kit": kit_rows,
+        "parts": part_rows,
         "statement": statement,
     });
     Ok((statement, summary))
@@ -6386,6 +6411,37 @@ mod release_manifest_tests {
         let mut other = fixture();
         other["signature"] = serde_json::json!({ "signer": "someone else" });
         assert_eq!(release_manifest_statement(&other).unwrap().0, statement);
+    }
+
+    #[test]
+    fn the_parts_a_release_names_are_shown_and_checked() {
+        // None named: an empty list, and the statement is the one above.
+        let (_, plain) = release_manifest_statement(&fixture()).unwrap();
+        assert_eq!(plain["parts"].as_array().unwrap().len(), 0);
+
+        let mut m = fixture();
+        m["parts"] = serde_json::json!([
+            { "name": "nvidia-engine", "target": "x86_64-pc-windows-msvc", "version": "b12359", "size": 790346417u64, "sha256": "d".repeat(64) },
+            { "name": "projects-helper", "target": "linux-x86_64", "version": "0.4.3", "size": 73031195u64, "sha256": "e".repeat(64) }
+        ]);
+        let (statement, summary) = release_manifest_statement(&m).unwrap();
+        assert_eq!(summary["parts"][0]["name"], "nvidia-engine");
+        assert_eq!(summary["parts"][0]["version"], "b12359");
+        assert_eq!(summary["parts"][0]["size"], 790346417u64);
+        assert_eq!(summary["parts"][1]["sha256"], "eeeeeeeeeeee");
+        // They are inside what is signed: another hash, another statement.
+        let (without, _) = release_manifest_statement(&fixture()).unwrap();
+        assert_ne!(statement, without);
+        let mut other = m.clone();
+        other["parts"][0]["sha256"] = serde_json::json!("f".repeat(64));
+        assert_ne!(release_manifest_statement(&other).unwrap().0, statement);
+
+        // A part's words end up in file names and addresses: plain ones only.
+        for (key, bad) in [("version", serde_json::json!("../b1")), ("version", serde_json::json!("b1/x")), ("name", serde_json::json!("a b")), ("target", serde_json::json!("")), ("size", serde_json::json!(0)), ("sha256", serde_json::json!("short"))] {
+            let mut m = m.clone();
+            m["parts"][0][key] = bad;
+            assert!(release_manifest_statement(&m).unwrap_err().contains("manifest.parts[0]"), "{key}");
+        }
     }
 
     #[test]
