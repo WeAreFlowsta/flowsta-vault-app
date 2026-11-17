@@ -21,6 +21,7 @@ mod kits;
 mod lair;
 mod mau;
 mod own_key;
+mod page_process;
 mod paths;
 mod migration;
 mod move_07;
@@ -640,7 +641,13 @@ pub fn run() {
             #[cfg(not(any(target_os = "macos", target_os = "ios")))]
             let _ = &app_handle;
             match event {
+                // Linux: the page's processes end as the quit begins, not
+                // in their own clean-up (see `page_process`).
+                tauri::RunEvent::ExitRequested { .. } => {
+                    crate::page_process::end_all();
+                }
                 tauri::RunEvent::Exit => {
+                    crate::page_process::end_all();
                     crate::conductor::begin_closing();
                     crate::conductor::stop_all_lines();
                     // A downloaded, checked update installs now where that

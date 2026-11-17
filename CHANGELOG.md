@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Windows: the update's installer waits for the program file to be free
   before it writes it. It could stop at "Error opening file for writing".
+- Linux: quitting no longer brings up the desktop's crash report dialog.
+  The page's own process could fail in its clean-up a second after a
+  clean quit; the Vault now ends it as the quit begins.
 
 ## [1.8.0-beta7] - 2026-11-17
 
