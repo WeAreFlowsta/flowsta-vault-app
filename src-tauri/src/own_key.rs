@@ -319,7 +319,12 @@ pub(crate) async fn give_own_key_inner(api_url: &str, mnemonic: Option<String>, 
             let cfg = config.as_mut().ok_or("vault_locked")?;
             cfg.conductor_seed = Some(new_seed.to_vec());
             cfg.joined_existing = true;
+            // The other install running this key is why this step exists.
+            cfg.has_other_device = Some(true);
         }
+        // This install already holds the identity's records: it is not a
+        // device being set up, and must not read as one to itself or the others.
+        let _ = std::fs::write(crate::paths::setup_done_path(&root), b"");
         if let Err(e) = crate::commands::persist_config_now(state) {
             // Not saved: this install is what it was.
             if let Some(cfg) = state.vault_config.lock().unwrap().as_mut() {

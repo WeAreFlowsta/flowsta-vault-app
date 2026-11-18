@@ -5,6 +5,33 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0-beta9] - 2026-11-19
+
+### Devices
+
+- **Adding a device finishes when the device has what your others hold,
+  not after a set time.** When you restore an identity, the Vault asks
+  whether it is on another device you still have. If it is, setup stays
+  open until this device holds what the devices it has heard from hold,
+  and the page says which device it is waiting for. If that device is
+  off, "Continue without it" ends the wait; nothing is lost, and the rest
+  arrives when the two are next on together.
+- **Your devices find each other sooner.** A device restored from the
+  recovery phrase could wait many minutes before it knew of your other
+  devices. Devices of one identity now tell each other about themselves
+  as soon as they meet on your private network.
+- A locked Vault that is still syncing shows as on to your other devices.
+- The Devices page and its count no longer say "Checking devices" on a
+  new identity with one device.
+
+### Fixed
+
+- After a restore made while Flowsta could not be reached, the notice
+  said your username and email would reconnect. It now says what happens:
+  any username, display name and picture on your Flowsta account come
+  back when Flowsta is reachable. The Vault also tries again by itself
+  after a few minutes instead of waiting for the next start.
+
 ## [1.8.0-beta8] - 2026-11-18
 
 ### Connections
