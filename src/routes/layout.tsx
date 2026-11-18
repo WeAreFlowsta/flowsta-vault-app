@@ -442,6 +442,21 @@ export default component$(() => {
     };
   } | null>(null);
   const pendingReleaseSign = useSignal<ReleaseManifestSign | null>(null);
+  // The whole of a release has been in view: its list scrolls, and the
+  // rows at its end (the other downloads, the statement that is signed)
+  // start below the edge. "Sign and publish" waits for the end of the list.
+  const releaseRead = useSignal(false);
+  useVisibleTask$(({ track, cleanup }) => {
+    const pending = track(() => pendingReleaseSign.value);
+    releaseRead.value = false;
+    if (!pending) return;
+    // A list short enough to show whole needs no scrolling.
+    const t = setTimeout(() => {
+      const el = document.querySelector('[data-testid="release-sign-details"]');
+      if (el && el.scrollHeight <= el.clientHeight + 8) releaseRead.value = true;
+    }, 100);
+    cleanup(() => clearTimeout(t));
+  });
   // Transient notice when a remembered app authenticated without a dialog.
   const autoApprovedNotice = useSignal<string | null>(null);
   // The Vault's own update: downloaded and checked, waiting for a restart;
@@ -2024,7 +2039,11 @@ export default component$(() => {
                 </p>
               </div>
             </div>
-            <div class="mb-4 max-h-[50vh] space-y-3 overflow-y-auto rounded-lg border border-gray-700 bg-gray-900 p-3 text-sm">
+            <div
+              class="mb-4 max-h-[50vh] space-y-3 overflow-y-auto rounded-lg border border-gray-700 bg-gray-900 p-3 text-sm"
+              data-testid="release-sign-details"
+              onScroll$={(_, el) => { if (el.scrollTop + el.clientHeight >= el.scrollHeight - 8) releaseRead.value = true; }}
+            >
               <div class="flex justify-between">
                 <span class="text-xs text-gray-500">Version</span>
                 <span class="font-mono text-gray-200">
@@ -2085,11 +2104,14 @@ export default component$(() => {
             <p class="mb-4 text-xs text-amber-200/90">
               Approve only if the app, version, channel and file hashes match what the release tool just printed. Every install on this channel will update to it.
             </p>
+            {!releaseRead.value && (
+              <p class="mb-3 text-xs text-gray-300" data-testid="release-sign-scroll-first">The list above continues. Scroll to its end to sign.</p>
+            )}
             <div class="flex gap-3">
-              <GlassButton variant="secondary" class="flex-1" onClick$={() => handleManifestSignResponse(false)}>
+              <GlassButton variant="secondary" class="flex-1" testId="release-sign-deny" onClick$={() => handleManifestSignResponse(false)}>
                 Deny
               </GlassButton>
-              <GlassButton class="flex-1" onClick$={() => handleManifestSignResponse(true)}>
+              <GlassButton class="flex-1" testId="release-sign-approve" disabled={!releaseRead.value} onClick$={() => handleManifestSignResponse(true)}>
                 Sign and publish
               </GlassButton>
             </div>
