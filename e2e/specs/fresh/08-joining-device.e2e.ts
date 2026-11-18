@@ -80,7 +80,7 @@ describe("the device being added, in its own window", () => {
     expect(await setupOf(PORT_B)).toEqual({ joined: true, pending: true });
     if (await existsOnB("setup-card")) {
       const card = await (await b.$('[data-testid="setup-card"]')).getText();
-      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way/);
+      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way|Your private data is here/);
       expect(card).not.toMatch(/No other device has answered|Nothing to do|can stay locked/);
     }
     await shotB("after-yes");
@@ -100,7 +100,7 @@ describe("the device being added, in its own window", () => {
       if (!(await existsOnB("setup-card"))) break; // already done - fine
       const card = await (await b!.$('[data-testid="setup-card"]')).getText();
       expect(card).not.toMatch(/Waiting for|a moment ago|offline|unreachable|No other device has answered|Nothing to do/);
-      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way/);
+      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way|Your private data is here/);
       if (await existsOnB("setup-progress")) {
         sawProgress = true;
         const progress = await (await b!.$('[data-testid="setup-progress"]')).getText();
@@ -132,7 +132,7 @@ describe("the device being added, in its own window", () => {
     if (!byItself) {
       expect(await setupOf(PORT_B)).toEqual({ joined: true, pending: true });
       const card = await (await b!.$('[data-testid="setup-card"]')).getText();
-      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way/);
+      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way|Your private data is here/);
       expect(card).not.toMatch(/No other device has answered|Nothing to do|can stay locked|has everything/);
       expect(await existsOnB("email-callout")).toBe(false);
       await shotB("still-waiting");

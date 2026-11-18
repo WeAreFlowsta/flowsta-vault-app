@@ -74,6 +74,8 @@ export interface DevicesProgress {
   siblings: { install_id: string; holds: Holds; at: number }[];
   /** Backups this device is still getting, by the device that holds them. */
   fetching?: { install_id: string; backups: number; bytes: number }[];
+  /** Seconds since this Vault first asked for its other devices this session. */
+  session_secs?: number | null;
 }
 
 export function sizeText(bytes: number): string {

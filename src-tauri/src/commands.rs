@@ -2165,8 +2165,14 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
             // is being set up the first ten rounds are all full: a profile
             // that lands a minute after the first round no longer waits five
             // minutes for the next. One whose setup cannot finish yet (a
-            // sibling offline) then goes back to the usual pace.
-            let setting_up = pass < 2 * FULL_EVERY_PASSES && crate::devices::setting_up_here(&devices_state);
+            // sibling offline) then goes back to the usual pace, until a
+            // device that is not itself being set up is heard: from then
+            // every round is full again. 11-19: a Mac restarted by its
+            // update heard its sibling after those ten rounds, held all 431
+            // records, and kept "Your private data is on its way" up for the
+            // minutes until the next full round came.
+            let setting_up = crate::devices::setting_up_here(&devices_state)
+                && crate::devices::setup_rounds_are_full(pass, FULL_EVERY_PASSES, !crate::devices::heard_settled_holds().is_empty());
             let full = pass % FULL_EVERY_PASSES == 0 || setting_up;
             // Records this install held before it was given a key of its own.
             crate::own_key::carry_in_if_owed(&devices_state).await;

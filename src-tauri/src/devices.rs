@@ -832,6 +832,13 @@ pub fn setup_done(f: &SetupFacts) -> Option<SetupDone> {
         .then_some(SetupDone::HasWhatHeardDevicesHold)
 }
 
+/// Whether a device being set up runs this round in full (only a full round
+/// ends setup): its first ten rounds, and every round once a device that is
+/// not itself being set up has been heard this session.
+pub fn setup_rounds_are_full(pass: u32, full_every: u32, heard_a_settled_device: bool) -> bool {
+    pass < 2 * full_every || heard_a_settled_device
+}
+
 /// What the devices heard this session that are not being set up said they hold.
 pub fn heard_settled_holds() -> Vec<Option<u64>> {
     SIBLING_HOLDS
@@ -869,6 +876,9 @@ pub struct DevicesProgress {
     pub siblings: Vec<SiblingProgress>,
     /// Backups this device is still getting, by the device that holds them.
     pub fetching: Vec<crate::backup_sync::FetchingFrom>,
+    /// Seconds since this session first asked for the other devices (None:
+    /// not yet). The Overview says "connecting" in a session's first minutes.
+    pub session_secs: Option<u64>,
 }
 
 /// How far each device has got, for the Overview's "on its way" card and the
@@ -884,7 +894,7 @@ pub async fn devices_progress(state: tauri::State<'_, Arc<AppState>>) -> Result<
         .map(|m| m.iter().map(|(id, (h, at))| SiblingProgress { install_id: id.clone(), holds: h.clone(), at: *at }).collect())
         .unwrap_or_default();
     let fetching = crate::backup_sync::still_to_fetch(&state.identity_root());
-    Ok(DevicesProgress { setting_up: mine.setting_up, mine, siblings, fetching })
+    Ok(DevicesProgress { setting_up: mine.setting_up, mine, siblings, fetching, session_secs: session_age().map(|a| a.as_secs()) })
 }
 
 /// Say again soon: the next round tells every sibling about this device,
@@ -904,7 +914,14 @@ pub async fn announce_to(state: &Arc<AppState>, lane: &crate::backup_lane::Lane,
             }
             Err(e) => log::info!("[devices] not told a sibling about this device: {}", e.chars().take(120).collect::<String>()),
         },
-        Ok(None) => {}
+        // Said once a session: until 11-19 a device with no record of its
+        // own to send told nobody, and its log did not say so.
+        Ok(None) => {
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                log::info!("[devices] this device holds no record of its own yet: the other devices are not told about it until it does");
+            }
+        }
         Err(e) => log::info!("[devices] this device's record is not ready to send: {}", e.chars().take(120).collect::<String>()),
     }
 }
@@ -1388,6 +1405,20 @@ async fn write_removal_on(state: &Arc<AppState>, line: crate::hc::Line, removal:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_device_in_setup_that_hears_a_settled_device_checks_in_full_every_round() {
+        // Its first ten rounds, whoever is heard.
+        assert!(setup_rounds_are_full(0, 5, false));
+        assert!(setup_rounds_are_full(9, 5, false));
+        // Then the usual pace while nobody settled is heard (a sibling off).
+        assert!(!setup_rounds_are_full(10, 5, false));
+        assert!(!setup_rounds_are_full(400, 5, false));
+        // 11-19: heard at round 12 holding the same 431 records; setup
+        // waited for round 15.
+        assert!(setup_rounds_are_full(12, 5, true));
+        assert!(setup_rounds_are_full(400, 5, true));
+    }
+
     #[test]
     fn only_a_known_device_that_is_not_removed_is_current() {
         let known = vec![

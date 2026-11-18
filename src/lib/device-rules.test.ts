@@ -4,7 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  arrivingFrom, asksForEmail, cardWords, chip, deviceRow, knownDevices, overviewCard, ownRow, recordsTarget, setupDone,
+  arrivingFrom, asksForEmail, CONNECT_SECS, cardWords, chip, deviceRow, knownDevices, overviewCard, ownRow, recordsTarget, setupDone,
   CONTINUE_HINT, ONLINE_MS, SLOW_SECS,
   type CardFacts, type KnownDevice, type SetupFacts,
 } from "./device-rules";
@@ -48,7 +48,7 @@ describe("when setup is done", () => {
 });
 
 describe("the Overview card", () => {
-  const facts = (over: Partial<CardFacts>): CardFacts => ({ joined: true, settingUp: true, known: true, answer: "yes", online: true, others: [], arriving: false, quietSecs: null, now: NOW, ...over });
+  const facts = (over: Partial<CardFacts>): CardFacts => ({ joined: true, settingUp: true, known: true, answer: "yes", online: true, others: [], arriving: false, quietSecs: null, mine: 40, backupsPending: 0, sessionSecs: 3600, now: NOW, ...over });
 
   it("no answer yet: it asks, once", () => {
     const c = overviewCard(facts({ answer: null }));
@@ -58,12 +58,40 @@ describe("the Overview card", () => {
   });
   it("answer Yes, no device listed: looking, with what to do and the way out", () => {
     const c = overviewCard(facts({}));
-    assert.deepEqual(c, { kind: "looking" });
+    assert.deepEqual(c, { kind: "looking", connecting: false });
     assert.deepEqual(cardWords(c!), { title: "Looking for your other devices", line: "Open Flowsta Vault on your other device and leave it running.", canContinue: true });
+  });
+  it("in the minutes after a start nobody has been heard yet: it says it is connecting, not to go and open a Vault that may be open", () => {
+    // 11-19: a Mac restarted by its update said "Open Flowsta Vault there
+    // and leave it running" of a device that was on, a minute after its start.
+    for (const sessionSecs of [null, 0, CONNECT_SECS - 1]) {
+      const c = overviewCard(facts({ others: [device()], sessionSecs }));
+      assert.deepEqual(c, { kind: "on_device", names: ["Mac"], connecting: true });
+      assert.doesNotMatch(cardWords(c!).line, /Open Flowsta Vault/);
+      assert.match(cardWords(c!).line, /Connecting/);
+      assert.equal(cardWords(c!).canContinue, true, "the way out is there from the start");
+      assert.doesNotMatch(cardWords(overviewCard(facts({ sessionSecs }))!).line, /Open Flowsta Vault/);
+    }
+    // Time changed a sentence, never the state.
+    const later = overviewCard(facts({ others: [device()], sessionSecs: CONNECT_SECS }));
+    assert.deepEqual(later, { kind: "on_device", names: ["Mac"], connecting: false });
+    assert.equal(cardWords(later!).line, "Open Flowsta Vault there and leave it running.");
+  });
+  it("every device that is on holds no more than this one: nothing is on its way, and no way out is offered", () => {
+    // 11-19: "Your private data is on its way. Arriving slowly. Keep both
+    // devices on", 431 of 431, beside a device the list called in sync.
+    const c = overviewCard(facts({ mine: 431, others: [heardNow({ holds: 431 })], quietSecs: 86_400 }));
+    assert.deepEqual(c, { kind: "finishing" });
+    assert.deepEqual(cardWords(c!), { title: "Your private data is here", line: "Finishing setup on this device.", canContinue: false });
+    assert.deepEqual(overviewCard(facts({ mine: 431, others: [heardNow({ holds: 400 }), device({ name: "Windows PC" })] })), { kind: "finishing" }, "a device that is off does not hold it back");
+    assert.deepEqual(overviewCard(facts({ mine: 431, others: [heardNow({ holds: 432 })] })), { kind: "progress" }, "one holds more");
+    assert.deepEqual(overviewCard(facts({ mine: 431, others: [heardNow({ holds: null })] })), { kind: "progress" }, "it has not said what it holds");
+    assert.deepEqual(overviewCard(facts({ mine: 431, others: [heardNow({ holds: 431 })], backupsPending: 1 })), { kind: "progress" }, "app backups are still arriving");
+    assert.deepEqual(overviewCard(facts({ mine: 431, others: [heardNow({ holds: 10, settingUp: true })] })), { kind: "progress" }, "the only device on is itself being set up");
   });
   it("a device listed and not heard: its name, and no claim that it is online or asleep", () => {
     const c = overviewCard(facts({ others: [device()] }));
-    assert.deepEqual(c, { kind: "on_device", names: ["Mac"] });
+    assert.deepEqual(c, { kind: "on_device", names: ["Mac"], connecting: false });
     const w = cardWords(c!);
     assert.equal(w.title, "Your things are on Mac");
     assert.equal(w.canContinue, true);
@@ -84,7 +112,7 @@ describe("the Overview card", () => {
     const c = overviewCard(facts({ online: false, others: [device()] }));
     assert.deepEqual(c, { kind: "offline" });
     assert.doesNotMatch(cardWords(c!).title + cardWords(c!).line, /Mac/);
-    assert.deepEqual(overviewCard(facts({ online: null })), { kind: "looking" }, "not known yet is not offline");
+    assert.deepEqual(overviewCard(facts({ online: null })), { kind: "looking", connecting: false }, "not known yet is not offline");
   });
   it("answer No: no card", () => {
     assert.equal(overviewCard(facts({ answer: "no" })), null);
@@ -103,11 +131,15 @@ describe("the Overview card", () => {
     assert.equal(overviewCard(facts({ known: false })), null);
   });
   it("a removed device is not something to wait for", () => {
-    assert.deepEqual(overviewCard(facts({ others: [device({ removed: "removed" })] })), { kind: "looking" });
+    assert.deepEqual(overviewCard(facts({ others: [device({ removed: "removed" })] })), { kind: "looking", connecting: false });
   });
   it("the words never promise what cannot be known", () => {
-    for (const kind of ["ask", "offline", "looking", "progress", "slow"] as const) {
-      const w = cardWords({ kind });
+    const cards: NonNullable<ReturnType<typeof overviewCard>>[] = [
+      { kind: "ask" }, { kind: "offline" }, { kind: "looking", connecting: false }, { kind: "looking", connecting: true },
+      { kind: "on_device", names: ["Mac"], connecting: true }, { kind: "progress" }, { kind: "slow" }, { kind: "finishing" },
+    ];
+    for (const card of cards) {
+      const w = cardWords(card);
       assert.doesNotMatch(w.title + " " + w.line, /Nothing to do|it can stay locked|No other device has answered/);
     }
     assert.match(CONTINUE_HINT, /Remove it in Settings, Devices/);
