@@ -4940,6 +4940,7 @@ async fn dev_devices_handler(
             "sites": app.approved_apps.lock().unwrap().clone(),
             "apps": app.linked_third_party_apps.lock().unwrap().iter().map(|a| a.client_id.clone()).collect::<Vec<_>>(),
             "scopes": app.linked_app_scopes.lock().unwrap().clone(),
+            "email_grants": app.email_grants.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
             // Connected on another device only: a link here says "you already use this app".
             "elsewhere": crate::connections_sync::known_elsewhere(),
         })),
@@ -4969,8 +4970,15 @@ async fn dev_devices_handler(
                 token_required: body.get("require_its_token").and_then(|v| v.as_bool()).unwrap_or(false),
             });
             app.save_linked_apps();
-            app.linked_app_scopes.lock().unwrap().insert(client_id, vec!["profile".into()]);
+            app.linked_app_scopes.lock().unwrap().insert(client_id.clone(), vec!["profile".into()]);
             app.save_linked_app_scopes();
+            // A harness may have the person share their email with the app,
+            // as the consent screen leaves it (already filed, so nothing is
+            // sent): for driving what an unlink does to the grant.
+            if body.get("give_email_grant").and_then(|v| v.as_bool()).unwrap_or(false) {
+                app.email_grants.lock().unwrap().insert(client_id, crate::commands::EmailGrant { app_name: text("app_name"), granted_at: crate::ipc_server::unix_now() as i64, synced: true });
+                app.save_email_grants();
+            }
             Ok(serde_json::json!({ "connected": true }))
         }
         "disconnect" => {
@@ -5874,9 +5882,8 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 
 /// The identity this vault's on-disk state belongs to, readable locked or
 /// unlocked: the live key first, the active-identity marker as fallback.
-fn active_identity_for_gate(state: &IpcState) -> Option<String> {
-    if let Some(key) = state
-        .app_state
+fn active_identity_for_gate(app: &AppState) -> Option<String> {
+    if let Some(key) = app
         .vault_config
         .lock()
         .unwrap()
@@ -5885,7 +5892,7 @@ fn active_identity_for_gate(state: &IpcState) -> Option<String> {
     {
         return Some(key);
     }
-    let path = crate::paths::active_identity_path(&state.app_state.data_dir);
+    let path = crate::paths::active_identity_path(&app.data_dir);
     std::fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
@@ -5946,21 +5953,21 @@ fn captured_expectation() -> ExpectedIdentity {
 /// that is an app bound to an identity the Vault has since switched away
 /// from, the case the check exists for. Any other origin could use the
 /// answer to test a guessed key, and is not told.
-fn entitled_to_identity_answer(state: &IpcState, origin: Option<&str>, expected: &str) -> bool {
-    if origin_may_see_identity(&state.app_state, origin) {
+fn entitled_to_identity_answer(app: &AppState, origin: Option<&str>, expected: &str) -> bool {
+    if origin_may_see_identity(app, origin) {
         return true;
     }
     let Some(o) = origin.filter(|o| !o.is_empty()) else { return true };
     let Some(partition) = crate::paths::partition_key(expected) else { return false };
-    origin_known_in_root(&crate::paths::identity_root_for(&state.app_state.data_dir, &partition), o)
+    origin_known_in_root(&crate::paths::identity_root_for(&app.data_dir, &partition), o)
 }
 
 /// Whether a link token belongs to a link made from this origin under an
 /// identity on this device other than the one whose lists are loaded.
-fn token_known_under_another_identity(state: &IpcState, origin: &str, token: &str) -> bool {
+fn token_known_under_another_identity(app: &AppState, origin: &str, token: &str) -> bool {
     let hash = link_token_hash(token);
-    let current = state.app_state.identity_root();
-    crate::identities::list_on_disk(&state.app_state.data_dir, &current)
+    let current = app.identity_root();
+    crate::identities::list_on_disk(&app.data_dir, &current)
         .into_iter()
         .filter(|e| !e.active)
         .any(|e| token_in_root(std::path::Path::new(&e.root), origin, &hash))
@@ -6505,7 +6512,7 @@ mod node_manifest_tests {
 fn recheck_expected_identity(state: &IpcState) -> Result<(), (StatusCode, Json<IpcError>)> {
     let e = captured_expectation();
     match e.key {
-        Some(expected) if !e.after_consent_only => check_expected_identity(state, &expected),
+        Some(expected) if !e.after_consent_only => check_expected_identity(&state.app_state, &expected),
         _ => Ok(()),
     }
 }
@@ -6515,7 +6522,7 @@ fn recheck_expected_identity(state: &IpcState) -> Result<(), (StatusCode, Json<I
 /// signed or stored.
 fn recheck_expected_identity_after_consent(state: &IpcState) -> Result<(), (StatusCode, Json<IpcError>)> {
     match captured_expected_identity() {
-        Some(expected) => check_expected_identity(state, &expected),
+        Some(expected) => check_expected_identity(&state.app_state, &expected),
         None => Ok(()),
     }
 }
@@ -6577,10 +6584,10 @@ fn expected_identity_from_query(query: &str) -> Option<String> {
 }
 
 fn check_expected_identity(
-    state: &IpcState,
+    app: &AppState,
     expected: &str,
 ) -> Result<(), (StatusCode, Json<IpcError>)> {
-    let Some(active) = active_identity_for_gate(state) else {
+    let Some(active) = active_identity_for_gate(app) else {
         return Err((
             StatusCode::CONFLICT,
             Json(IpcError {
@@ -6608,7 +6615,7 @@ fn check_expected_identity(
 }
 
 async fn identity_gate(
-    State(state): State<Arc<IpcState>>,
+    State(app): State<Arc<AppState>>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, (StatusCode, Json<IpcError>)> {
@@ -6616,9 +6623,9 @@ async fn identity_gate(
     let mut expected = ExpectedIdentity::default();
     // An entitled caller is answered at entry; anyone else after consent.
     let at_entry = |e: &str| -> Result<bool, (StatusCode, Json<IpcError>)> {
-        let entitled = entitled_to_identity_answer(&state, origin.as_deref(), e);
+        let entitled = entitled_to_identity_answer(&app, origin.as_deref(), e);
         if entitled {
-            check_expected_identity(&state, e)?;
+            check_expected_identity(&app, e)?;
         }
         Ok(!entitled)
     };
@@ -6662,7 +6669,7 @@ async fn identity_gate(
     // apps it is, or that leaves out a token its link requires.
     {
         let resolution = {
-            let linked = state.app_state.linked_third_party_apps.lock().unwrap();
+            let linked = app.linked_third_party_apps.lock().unwrap();
             resolve_app(&linked, origin.as_deref(), expected.client_id.as_deref(), expected.link_token.as_deref())
         };
         let for_linked_app = LINKED_APP_ROUTES.contains(&req.uri().path());
@@ -6672,7 +6679,7 @@ async fn identity_gate(
         // the app from throwing a good token away.
         if resolution == AppResolution::InvalidToken {
             if let (Some(o), Some(t)) = (origin.as_deref(), expected.link_token.as_deref()) {
-                if token_known_under_another_identity(&state, o, t) {
+                if token_known_under_another_identity(&app, o, t) {
                     return Err((
                         StatusCode::CONFLICT,
                         Json(IpcError {
@@ -6697,8 +6704,7 @@ async fn identity_gate(
     let mut resp = REQUEST_EXPECTED_IDENTITY.scope(expected, next.run(req)).await;
 
     // Read AFTER the handler so lock/unlock calls report their new state.
-    let identity = state
-        .app_state
+    let identity = app
         .vault_config
         .lock()
         .unwrap()
@@ -6706,7 +6712,7 @@ async fn identity_gate(
         .map(|c| c.agent_pub_key.clone());
     // Only for a caller that may see the identity on /status: the header
     // says the same thing.
-    if let Some(key) = identity.filter(|_| origin_may_see_identity(&state.app_state, origin.as_deref())) {
+    if let Some(key) = identity.filter(|_| origin_may_see_identity(&app, origin.as_deref())) {
         if let Ok(val) = axum::http::HeaderValue::from_str(&key) {
             resp.headers_mut().insert("x-flowsta-vault-identity", val);
         }
@@ -6725,6 +6731,124 @@ fn host_names_this_computer(host: &str) -> bool {
     };
     let h = name.trim_end_matches('.').to_ascii_lowercase();
     h == "localhost" || h == "[::1]" || h.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The gate itself, as the server mounts it, in front of a handler that
+/// reports what the gate handed it.
+#[cfg(test)]
+mod identity_gate_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    const HELD: &str = "uhCAk-the-identity-this-vault-holds";
+    const OTHER: &str = "uhCAk-some-other-identity";
+    const STRANGER: &str = "https://never-seen.example";
+
+    /// A Vault's folder, locked: with `held`, the marker names its identity.
+    fn vault(held: Option<&str>) -> (tempfile::TempDir, Arc<AppState>) {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(key) = held {
+            let marker = crate::paths::active_identity_path(dir.path());
+            std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            std::fs::write(marker, key).unwrap();
+        }
+        let app = Arc::new(AppState::new(dir.path().to_path_buf()));
+        (dir, app)
+    }
+
+    /// What reached the handler: that it ran, whether the identity check
+    /// was left for after consent, the client id, and the body as sent.
+    async fn seen(body: String) -> Json<serde_json::Value> {
+        let e = REQUEST_EXPECTED_IDENTITY.try_with(|e| e.clone()).unwrap_or_default();
+        Json(serde_json::json!({ "ran": true, "expected": e.key, "after_consent_only": e.after_consent_only, "client_id": e.client_id, "body": body }))
+    }
+
+    fn router(app: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/status", get(|| seen(String::new())))
+            .route("/sign", post(seen))
+            .layer(axum::middleware::from_fn_with_state(app, identity_gate))
+    }
+
+    async fn ask(app: &Arc<AppState>, method: &str, uri: &str, origin: Option<&str>, body: &str) -> (u16, serde_json::Value, bool) {
+        let mut req = axum::http::Request::builder().method(method).uri(uri);
+        if let Some(o) = origin {
+            req = req.header("origin", o);
+        }
+        let r = router(app.clone()).oneshot(req.body(axum::body::Body::from(body.to_string())).unwrap()).await.unwrap();
+        let status = r.status().as_u16();
+        let has_identity_header = r.headers().contains_key("x-flowsta-vault-identity");
+        let bytes = axum::body::to_bytes(r.into_body(), 65536).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null), has_identity_header)
+    }
+
+    /// A request that names no identity passes, its body untouched.
+    #[tokio::test]
+    async fn a_request_that_expects_no_identity_passes_through() {
+        let (_dir, app) = vault(Some(HELD));
+        let (status, v, _) = ask(&app, "GET", "/status", None, "").await;
+        assert_eq!((status, v["ran"].as_bool()), (200, Some(true)));
+        assert!(v["expected"].is_null());
+        let sent = r#"{"client_id":"an_app","payload":"kept as sent"}"#;
+        let (status, v, _) = ask(&app, "POST", "/sign", None, sent).await;
+        assert_eq!(status, 200);
+        assert_eq!(v["body"], sent, "the handler reads the body the caller sent");
+        assert_eq!(v["client_id"], "an_app");
+    }
+
+    /// A caller entitled to the answer (a local program here) is refused
+    /// at entry when this Vault holds another identity: the handler never
+    /// runs. In a body and in a query string alike.
+    #[tokio::test]
+    async fn an_entitled_caller_expecting_another_identity_is_refused_at_entry() {
+        let (_dir, app) = vault(Some(HELD));
+        let (status, v, _) = ask(&app, "POST", "/sign", None, &format!(r#"{{"expected_identity":"{OTHER}"}}"#)).await;
+        assert_eq!((status, v["error"].as_str()), (409, Some("identity_mismatch")));
+        assert!(v["ran"].is_null(), "the handler did not run");
+        let (status, v, _) = ask(&app, "GET", &format!("/status?expected_identity={OTHER}"), None, "").await;
+        assert_eq!((status, v["error"].as_str()), (409, Some("identity_mismatch")));
+        // The identity it holds: through, checked at entry.
+        for (method, uri, body) in [("POST", "/sign".to_string(), format!(r#"{{"expected_identity":"{HELD}"}}"#)), ("GET", format!("/status?expected_identity={HELD}"), String::new())] {
+            let (status, v, _) = ask(&app, method, &uri, None, &body).await;
+            assert_eq!((status, v["ran"].as_bool(), v["after_consent_only"].as_bool()), (200, Some(true), Some(false)), "{method} {uri}");
+        }
+    }
+
+    /// A Vault with no identity cannot confirm one: refused, not let through.
+    #[tokio::test]
+    async fn an_expectation_no_identity_can_meet_is_refused() {
+        let (_dir, app) = vault(None);
+        let (status, v, _) = ask(&app, "GET", &format!("/status?expected_identity={HELD}"), None, "").await;
+        assert_eq!((status, v["error"].as_str()), (409, Some("identity_unconfirmed")));
+    }
+
+    /// A website this Vault has no history with is not told at entry
+    /// whether its guess is right: a right and a wrong guess get the same
+    /// answer, and the handler is told the check waits for consent.
+    #[tokio::test]
+    async fn a_strangers_guess_is_not_answered_at_entry() {
+        let (_dir, app) = vault(Some(HELD));
+        let right = ask(&app, "GET", &format!("/status?expected_identity={HELD}"), Some(STRANGER), "").await;
+        let wrong = ask(&app, "GET", &format!("/status?expected_identity={OTHER}"), Some(STRANGER), "").await;
+        assert_eq!(right.0, 200);
+        assert_eq!(wrong.0, 200);
+        assert_eq!(right.1["after_consent_only"], true);
+        assert_eq!(wrong.1["after_consent_only"], true);
+        assert_eq!((right.0, right.2), (wrong.0, wrong.2), "status and headers do not tell the two apart");
+        assert!(!right.2 && !wrong.2, "and no identity header for a stranger");
+        let (status, v, _) = ask(&app, "POST", "/sign", Some(STRANGER), &format!(r#"{{"expected_identity":"{OTHER}"}}"#)).await;
+        assert_eq!((status, v["after_consent_only"].as_bool()), (200, Some(true)));
+    }
+
+    /// A link token this Vault never issued is refused on every route,
+    /// before the handler.
+    #[tokio::test]
+    async fn a_token_this_vault_never_issued_is_refused() {
+        let (_dir, app) = vault(Some(HELD));
+        let (status, v, _) = ask(&app, "GET", "/status?client_id=an_app&link_token=made-up", Some("tauri://localhost"), "").await;
+        assert_eq!((status, v["error"].as_str()), (403, Some("invalid_link_token")));
+        assert!(v["ran"].is_null());
+    }
 }
 
 #[cfg(test)]
@@ -7053,7 +7177,7 @@ pub async fn start_ipc_server(
         // Identity header on every response + the expected_identity gate on
         // every request that carries it.
         .layer(axum::middleware::from_fn_with_state(
-            ipc_state.clone(),
+            ipc_state.app_state.clone(),
             identity_gate,
         ))
         // Only this computer account's own processes get past here.

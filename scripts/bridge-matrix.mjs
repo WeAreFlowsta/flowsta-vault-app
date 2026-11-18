@@ -1190,6 +1190,10 @@ async function switcherLeg() {
     (l.identities || []).length === 1 && /^[0-9a-f]{16}$/.test(keyA || ''), JSON.stringify((l.identities || []).map((x) => [x.key, x.active])));
   record('/dev/status layout: partitioned', (await devStatus()).layout === 'partitioned');
 
+  // An app linked under A alone, from its own origin (for the picker checks below).
+  const ONLY_A = 'https://only-a-matrix.example';
+  await vaultFetch(port, '/dev/devices', { method: 'POST', body: { op: 'connect', client_id: 'matrix_only_a', app_name: 'Matrix Only A', origin: ONLY_A, app_agent_pub_key: 'matrix-only-a-key' } });
+
   // 2. One live vault: adding while UNLOCKED is refused.
   const addUnlocked = await vaultFetch(port, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password: pwB, email: emailB, display_name: 'Matrix B' } });
   record('adding an identity while unlocked is refused (one live vault)', addUnlocked.status === 409 && addUnlocked.data?.error === 'already_set_up', `${addUnlocked.status} ${addUnlocked.data?.error}`);
@@ -1225,12 +1229,39 @@ async function switcherLeg() {
   const lsRight = await linkStatus(X, agentB);
   record('GET link-status with expected_identity = B -> 200', lsRight.status === 200, `${lsRight.status}`);
 
+  // An app linked under B alone, from its own origin (for the picker and
+  // the erased-identity checks below).
+  const ONLY_B = 'https://only-b-matrix.example';
+  await vaultFetch(port, '/dev/devices', { method: 'POST', body: { op: 'connect', client_id: 'matrix_only_b', app_name: 'Matrix Only B', origin: ONLY_B, app_agent_pub_key: 'matrix-only-b-key' } });
+  // (origin null: a local program, no Origin header)
+  const guess = (origin, key) => vaultFetch(port, `/status?expected_identity=${encodeURIComponent(key)}`, { origin });
+  const sameAnswer = (x, y) => x.status === y.status && JSON.stringify({ ...x.data, instance_id: undefined }) === JSON.stringify({ ...y.data, instance_id: undefined });
+
   // 5. Switch to A the picker's way: lock, select, unlock with A's password.
   const selUnlocked = await vaultFetch(port, '/dev/select-identity', { method: 'POST', body: { key: keyA } });
   record('select while unlocked is refused', selUnlocked.status === 409, `${selUnlocked.status} ${selUnlocked.data?.description || ''}`);
   await vaultFetch(port, '/dev/lock', { method: 'POST' });
   const selA = await vaultFetch(port, '/dev/select-identity', { method: 'POST', body: { key: keyA } });
   record('locked: select A', selA.status === 200 && selA.data?.selected?.key === keyA, `${selA.status} ${selA.data?.description || ''}`);
+  // The picker state: A is selected and nothing is unlocked. Until A is
+  // unlocked this Vault still holds B: /status and the identity check say
+  // so alike. Who is entitled to an answer at entry is read from the folder
+  // of the identity the request NAMES, not from the lists now loaded (A's).
+  {
+    const stPick = await status();
+    record('picker: A selected, not unlocked - /status says locked and still names B', stPick.unlocked === false && stPick.active_identity === agentB, JSON.stringify({ unlocked: stPick.unlocked, namesB: stPick.active_identity === agentB, namesA: stPick.active_identity === agentA }));
+    const okB = await guess(null, agentB);
+    const noA = await guess(null, agentA);
+    record('picker: the identity check agrees with /status (expecting B passes, expecting A is refused)', okB.status === 200 && noA.status === 409 && noA.data?.error === 'identity_mismatch', `${okB.status} ${noA.status} ${noA.data?.error}`);
+    const appA = await guess(ONLY_A, agentA);
+    record('picker: an app linked under A, naming A, is told at once that this Vault holds another identity', appA.status === 409 && appA.data?.error === 'identity_mismatch', `${appA.status} ${appA.data?.error}`);
+    const appBnamesA = await guess(ONLY_B, agentA);
+    const appBnamesNobody = await guess(ONLY_B, fakeAgentKey());
+    record('picker: an app with no history under A gets no early answer about A', appBnamesA.status === 200 && sameAnswer(appBnamesA, appBnamesNobody), `${appBnamesA.status} ${appBnamesNobody.status}`);
+    const strangerA = await guess('https://stranger.example', agentA);
+    const strangerB = await guess('https://stranger.example', agentB);
+    record('picker: a site with no history cannot tell which identity is held or selected', strangerA.status === 200 && sameAnswer(strangerA, strangerB) && !strangerA.data?.active_identity && !strangerA.data?.agent_pub_key, `${strangerA.status} ${strangerB.status}`);
+  }
   const wrongPw = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: pwB } });
   record("B's password does not open A", wrongPw.status !== 200 || wrongPw.data?.success !== true, `${wrongPw.status}`);
   const unA = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: pwA } });
@@ -1249,6 +1280,11 @@ async function switcherLeg() {
   record('a different agent Y links under A (many agents to one identity is fine)', lyA.status === 200 && lyA.data?.vault_agent_pub_key === agentA, `${lyA.status} ${lyA.data?.error || ''}`);
   const lsXA = await linkStatus(X);
   record('link lists are per identity: X is not linked under A', lsXA.status === 200 && !(lsXA.data?.linked === true || lsXA.data?.state === 'linked'), `${lsXA.status} ${JSON.stringify(lsXA.data)}`);
+
+  {
+    const told = await guess(ONLY_B, agentB);
+    record('an app linked under B, while A is unlocked and B is still on this device, is told at once', told.status === 409 && told.data?.error === 'identity_mismatch', `${told.status} ${told.data?.error}`);
+  }
 
   // 7. Back to B: the epoch keeps counting; B still holds X.
   await vaultFetch(port, '/dev/lock', { method: 'POST' });
@@ -1289,8 +1325,27 @@ async function switcherLeg() {
   record('remove the selected identity (B): one remains and A is selected, marker and all',
     rm.status === 200 && rm.data?.remaining === 1 && (afterRm.identities || []).length === 1 && afterRm.identities?.[0]?.key === keyA && afterRm.identities?.[0]?.active === true && stRm.active_identity === agentA && stRm.initialized === true && stRm.unlocked === false,
     `${rm.status} remaining=${rm.data?.remaining} ids=${JSON.stringify((afterRm.identities || []).map((x) => [x.key, x.active]))} active=${stRm.active_identity === agentA}`);
+  // B is erased from this device. The app that was linked under B alone
+  // is a caller with no history now: its guess is not answered at entry
+  // (the same answer as for a key nobody holds).
+  {
+    const erased = await guess(ONLY_B, agentB);
+    const nobody = await guess(ONLY_B, fakeAgentKey());
+    record('erased identity: its app is no longer told at entry, and a right guess reads as a wrong one', erased.status === 200 && sameAnswer(erased, nobody), `${erased.status} ${nobody.status}`);
+  }
   const unAgain = await vaultFetch(port, '/dev/unlock-with-password', { method: 'POST', body: { password: pwA } });
   record("A's password opens the remaining identity", unAgain.status === 200 && unAgain.data?.agent_pub_key === agentA, `${unAgain.status}`);
+  // And a request that needs consent is refused after it: the person
+  // allows (the harness does), the Vault holds A, nothing is signed or stored.
+  {
+    const challenge = Buffer.from(`matrix-erased:${randomHash().slice(0, 16)}`, 'utf8').toString('base64');
+    const signed = await vaultFetch(port, '/authenticate', { method: 'POST', origin: ONLY_B, body: { app_name: 'Matrix Only B', reason: 'erased identity', challenge, expected_identity: agentB } });
+    record('erased identity: a sign-in for it is refused after consent, nothing signed', signed.status === 409 && signed.data?.error === 'identity_mismatch' && !signed.data?.signature, `${signed.status} ${JSON.stringify(signed.data).slice(0, 140)}`);
+    const Z = fakeAgentKey();
+    const linkZ = await vaultFetch(port, '/link-identity', { method: 'POST', origin: ONLY_B, body: { app_name: 'Matrix Only B', client_id: SWITCHER_CLIENT_ID, app_agent_pub_key: Z, expected_identity: agentB } });
+    const storedZ = await vaultFetch(port, `/link-status?app_agent_pub_key=${encodeURIComponent(Z)}`, { origin: null });
+    record('erased identity: a link for it is refused after consent, nothing stored', linkZ.status === 409 && linkZ.data?.error === 'identity_mismatch' && !(storedZ.data?.linked === true || storedZ.data?.state === 'linked'), `${linkZ.status} ${linkZ.data?.error} stored=${JSON.stringify(storedZ.data).slice(0, 80)}`);
+  }
   // The lock comes while the unlock's conductor is still starting: that
   // start stops, and the erase leaves nothing behind.
   const rootA = afterRm.identities?.[0]?.root;
@@ -1567,6 +1622,24 @@ async function devicesLeg() {
   await op(a, { op: 'disconnect', client_id: 'matrix_app' });
   await op(a, { op: 'round' });
   record('a Disconnect on A disconnects the app on B', await until(async () => { await op(b, { op: 'round' }); return !((await op(b, { op: 'connections' })).apps || []).includes('matrix_app'); }, 120));
+
+  // 4b. The app's own unlink (`/revoke-identity`, no dialog) on A reaches
+  // B too: the connection goes there, with the email shared with the app.
+  {
+    await op(a, { op: 'connect', client_id: 'matrix_unlinker', app_name: 'Matrix Unlinker', origin: 'https://unlinker-matrix.example', app_agent_pub_key: 'matrix-unlinker-key', give_email_grant: true });
+    await op(b, { op: 'connect', client_id: 'matrix_unlinker', app_name: 'Matrix Unlinker', give_email_grant: true });
+    await op(a, { op: 'round' });
+    await op(b, { op: 'round' });
+    const before = await op(b, { op: 'connections' });
+    const own = await vaultFetch(a, '/revoke-identity', { method: 'POST', origin: 'https://unlinker-matrix.example', body: { app_name: 'Matrix Unlinker', app_agent_pub_key: 'matrix-unlinker-key' } });
+    record("A: an app's own unlink removes its link", own.status === 200 && own.data?.removed === true && !((await op(a, { op: 'connections' })).apps || []).includes('matrix_unlinker'), `${own.status} ${JSON.stringify(own.data)}`);
+    await op(a, { op: 'round' });
+    const reached = await until(async () => { await op(b, { op: 'round' }); return !((await op(b, { op: 'connections' })).apps || []).includes('matrix_unlinker'); }, 180);
+    const after = await op(b, { op: 'connections' });
+    record("B: the app's own unlink on A disconnects it here", (before.apps || []).includes('matrix_unlinker') && reached, JSON.stringify(after.apps));
+    record('B: the email shared with that app stops here too', (before.email_grants || []).includes('matrix_unlinker') && !(after.email_grants || []).includes('matrix_unlinker'), `${JSON.stringify(before.email_grants)} -> ${JSON.stringify(after.email_grants)}`);
+    record('B: its activity says the app was disconnected on another device', ((await vaultFetch(b, '/dev/status')).data?.activity || []).includes('app_unlinked_elsewhere'), JSON.stringify(((await vaultFetch(b, '/dev/status')).data?.activity || []).slice(0, 5)));
+  }
 
   // 5. Locked but still syncing. The app is connected again first (4 above
   // disconnected it on both): its backups are what 5b passes.
@@ -2654,7 +2727,7 @@ async function hardeningLeg() {
 
   // 7. The link token.
   const TOKEN_ORIGIN = 'matrix-token://app';
-  await op({ op: 'connect', client_id: 'matrix_token', app_name: 'Matrix Token', origin: TOKEN_ORIGIN, app_agent_pub_key: 'matrix-token-key', give_link_token: 'matrix-token-value', require_its_token: true });
+  await op({ op: 'connect', client_id: 'matrix_token', app_name: 'Matrix Token', origin: TOKEN_ORIGIN, app_agent_pub_key: 'matrix-token-key', give_link_token: 'matrix-token-value', require_its_token: true, give_email_grant: true });
   const tok = (body) => raw('/app-secret', { method: 'POST', headers: from(TOKEN_ORIGIN), body: { label: 'network', ...body } });
   const none = await tok({});
   record('a link that needs its token is not reachable without it', none.status === 403 && none.data?.error === 'link_token_required', `${none.status} ${JSON.stringify(none.data)}`);
@@ -2679,10 +2752,16 @@ async function hardeningLeg() {
   record('nor can a Flowsta site', byFlowsta.data?.removed === false && (await linkedNow('matrix-first-key')), `${byFlowsta.status} ${JSON.stringify(byFlowsta.data)}`);
   const noToken = await revoke(TOKEN_ORIGIN, { app_agent_pub_key: 'matrix-token-key' });
   record('a link that needs its token is not dropped on its key alone', noToken.data?.removed === false && (await linkedNow('matrix-token-key')), JSON.stringify(noToken.data));
+  const sharedBefore = await op({ op: 'connections' });
+  record('an unlink that was refused leaves the email shared with the app', (sharedBefore.email_grants || []).includes('matrix_token') && 'matrix_token' in (sharedBefore.scopes || {}), JSON.stringify(sharedBefore.email_grants));
   const lineAfterRefusals = await lastLine();
   record('an unlink that removed nothing writes no activity line', lineAfterRefusals.text === lineBefore.text, `${lineBefore.text.slice(0, 120)} | ${lineAfterRefusals.text.slice(0, 120)}`);
   const withToken = await revoke(TOKEN_ORIGIN, { app_agent_pub_key: 'matrix-token-key', link_token: 'matrix-token-value' });
   record('the app drops its own link with its token, and is told so', withToken.status === 200 && withToken.data?.removed === true && !(await linkedNow('matrix-token-key')), JSON.stringify(withToken.data));
+  // The person had shared their email with that app: the unlink ends it,
+  // with the app's permissions, and a refused unlink ended neither.
+  const sharedAfter = await op({ op: 'connections' });
+  record('the email shared with an app stops with its own unlink, and its permissions go', Array.isArray(sharedAfter.email_grants) && !sharedAfter.email_grants.includes('matrix_token') && !('matrix_token' in (sharedAfter.scopes || {})), JSON.stringify({ grants: sharedAfter.email_grants, scopes: Object.keys(sharedAfter.scopes || {}) }));
   const lineAfterUnlink = await lastLine();
   record('the app\'s own unlink is the newest activity line, by the app\'s name', lineAfterUnlink.kind === 'app_unlinked' && /Matrix Token disconnected itself/.test(lineAfterUnlink.text), `${lineAfterUnlink.kind} ${lineAfterUnlink.text.slice(0, 160)}`);
   const gone = await tok({ link_token: 'matrix-token-value' });
@@ -2715,6 +2794,35 @@ async function hardeningLeg() {
     record('real link skipped - set VAULT_MATRIX_APP_CLIENT_ID', true);
   }
 
+  // 9b. Locked and still syncing, two apps on one origin: their backups
+  // stay apart, as they do unlocked. A second app joins the first on the
+  // shared origin before the lock.
+  await op({ op: 'connect', client_id: 'matrix_third', app_name: 'Matrix Third', origin: SHELL, app_agent_pub_key: 'matrix-third-key' });
+  const keptSyncing = await op({ op: 'lock' });
+  const lockedNow = (await raw('/status', { headers: here })).data || {};
+  if (keptSyncing.locked === true && lockedNow.syncing_while_locked === true) {
+    const bk = (path, body) => raw(path, { method: 'POST', headers: from(SHELL), body });
+    const storedLocked = await bk('/backup', { client_id: 'matrix_third', app_name: 'Matrix Third', label: 'locked-two-apps', data: { n: 3 } });
+    const ownLocked = await bk('/backup/retrieve', { client_id: 'matrix_third', label: 'locked-two-apps' });
+    const otherLocked = await bk('/backup/retrieve', { client_id: 'matrix_first', label: 'locked-two-apps' });
+    const unnamedLocked = await bk('/backup/retrieve', { label: 'locked-two-apps' });
+    const listLocked = await raw('/backup/list?client_id=matrix_third', { headers: from(SHELL) });
+    const listOtherLocked = await raw('/backup/list?client_id=matrix_first', { headers: from(SHELL) });
+    const listUnnamedLocked = await raw('/backup/list', { headers: from(SHELL) });
+    const labels = (r) => (r.data?.apps || []).flatMap((x) => (x.backups || x.labels || []).map((y) => y.label || y));
+    const stillLocked = (await raw('/status', { headers: here })).data || {};
+    record('locked and syncing, two apps on one origin: an app stores and reads back its own backup', storedLocked.status === 200 && ownLocked.status === 200, `${storedLocked.status} ${JSON.stringify(storedLocked.data).slice(0, 120)} ${ownLocked.status}`);
+    record('locked and syncing, two apps on one origin: the other app does not read it', otherLocked.status === 404 && otherLocked.data?.error === 'backup_not_found', `${otherLocked.status} ${JSON.stringify(otherLocked.data).slice(0, 120)}`);
+    record('locked and syncing, two apps on one origin: a request that does not say which app is refused', unnamedLocked.status === 403 && unnamedLocked.data?.error === 'app_ambiguous' && listUnnamedLocked.status === 403 && listUnnamedLocked.data?.error === 'app_ambiguous', `${unnamedLocked.status} ${unnamedLocked.data?.error} ${listUnnamedLocked.status} ${listUnnamedLocked.data?.error}`);
+    record('locked and syncing, two apps on one origin: each app lists its own backups only', listLocked.status === 200 && labels(listLocked).includes('locked-two-apps') && listOtherLocked.status === 200 && !labels(listOtherLocked).includes('locked-two-apps'), `${listLocked.status} ${JSON.stringify(listLocked.data).slice(0, 200)} | ${listOtherLocked.status} ${JSON.stringify(labels(listOtherLocked))}`);
+    record('and the Vault stayed locked through all of it', stillLocked.unlocked === false && stillLocked.syncing_while_locked === true, JSON.stringify({ unlocked: stillLocked.unlocked, syncing: stillLocked.syncing_while_locked }));
+    const reopened = await vaultFetch(port, '/dev/unlock', { method: 'POST', body: {} });
+    record('unlocked again after the locked backups', reopened.status === 200 && await until(async () => (await raw('/status', { headers: here })).data?.agent_pub_key === me, 180), `${reopened.status}`);
+  } else {
+    record('locked-and-syncing backup checks skipped - this Vault does not keep syncing when locked', true, JSON.stringify({ keptSyncing, syncing: lockedNow.syncing_while_locked }));
+    if (keptSyncing.locked === true) await vaultFetch(port, '/dev/unlock', { method: 'POST', body: {} });
+  }
+
   // 10. Locked: a caller with no history learns no more than unlocked.
   const locked = await vaultFetch(port, '/dev/lock', { method: 'POST', body: {} });
   if (locked.status === 200) {
@@ -2735,6 +2843,8 @@ async function hardeningLeg() {
   }
 
   // Leave the instance as it was found.
+  await raw('/backup/delete', { method: 'POST', headers: from(SHELL), body: { client_id: 'matrix_third', label: 'locked-two-apps' } });
+  await op({ op: 'disconnect', client_id: 'matrix_third' });
   await revoke(LINKED, { app_agent_pub_key: 'matrix-linked-key' });
   await revoke(SHELL, { app_agent_pub_key: 'matrix-first-key' });
 }
