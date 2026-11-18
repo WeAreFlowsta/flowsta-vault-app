@@ -241,6 +241,14 @@ impl Lane {
                         }
                         Err(e) => log::info!("[devices] a device piece was not used: {}", e),
                     },
+                    // A sibling that is locked and still syncing says it is
+                    // here. Nothing is sealed in it; it counts as contact
+                    // only from a current device of this identity.
+                    "here" => {
+                        if crate::devices::note_heard_here(&state.identity_root(), arrived.from.get_raw_39()) {
+                            crate::devices::heard_from(&arrived.from);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -282,6 +290,13 @@ impl Lane {
     /// Send this device's sealed device record to a sibling.
     pub async fn send_device(&self, to: &AgentPubKey, sealed_record: Vec<u8>, line: Line) -> Result<(), String> {
         self.send(to, Piece { id: "device".into(), kind: "device".into(), seq: 0, total: 1, data: sealed_record }, line).await
+    }
+
+    /// "Here": what a Vault that is locked and still syncing tells its other
+    /// devices, so they show it as on. It carries nothing; a Vault older
+    /// than this message ignores it.
+    pub async fn send_here(&self, to: &AgentPubKey, line: Line) -> Result<(), String> {
+        self.send(to, Piece { id: "here".into(), kind: "here".into(), seq: 0, total: 0, data: Vec::new() }, line).await
     }
 
     async fn send(&self, to: &AgentPubKey, piece: Piece, line: Line) -> Result<(), String> {

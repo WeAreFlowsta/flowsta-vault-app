@@ -658,6 +658,39 @@ static HEARD_AT: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>
 pub fn note_heard(install_id: &str) {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     HEARD_AT.lock().unwrap().get_or_insert_with(Default::default).insert(install_id.to_string(), now);
+    // Its record came with the message, which only an unlocked Vault sends.
+    if let Some(locked) = HEARD_LOCKED.lock().unwrap().as_mut() {
+        locked.remove(install_id);
+    }
+}
+
+/// Devices whose latest message was the short "here" a Vault sends while it
+/// is locked and still syncing (nothing sealed in it: a locked Vault cannot
+/// seal). The row reads "Online (locked)".
+static HEARD_LOCKED: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// A "here" arrived from this agent key. Counted only when the key is a
+/// current device of the identity, by the file this device keeps.
+pub fn note_heard_here(identity_root: &std::path::Path, agent_39: &[u8]) -> bool {
+    let wanted = crate::key_derivation::base64_standard_encode(agent_39);
+    let known: Vec<KnownDevice> = std::fs::read(crate::paths::known_devices_path(identity_root)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let Some(install_id) = install_id_among(&known, &wanted) else { return false };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    HEARD_AT.lock().unwrap().get_or_insert_with(Default::default).insert(install_id.clone(), now);
+    HEARD_LOCKED.lock().unwrap().get_or_insert_with(Default::default).insert(install_id);
+    true
+}
+
+/// The install a conductor key belongs to, when it is a current device.
+fn install_id_among(known: &[KnownDevice], conductor_key: &str) -> Option<String> {
+    if !current_among(known, conductor_key) {
+        return None;
+    }
+    known.iter().find(|k| k.conductor_key == conductor_key).map(|k| k.install_id.clone())
+}
+
+pub fn heard_locked(install_id: &str) -> bool {
+    HEARD_LOCKED.lock().unwrap().as_ref().map(|m| m.contains(install_id)).unwrap_or(false)
 }
 
 pub fn heard_at(install_id: &str) -> Option<u64> {
@@ -1112,7 +1145,7 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
                     Some(_) => heard.is_some(),
                     None => false,
                 },
-                locked: false,
+                locked: heard_locked(&d.install_id),
                 removing: still_removing(&owed, d.removed_at.is_some(), &d.conductor_key),
                 state: device_state(&d, &me, my_generation, mine, now, heard),
                 install_id: d.install_id,
@@ -1561,6 +1594,17 @@ mod tests {
         assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40), None], ..facts() }), None, "one was heard and has not said");
         assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40)], still_arriving: true, ..facts() }), None);
         assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40)], round_complete: false, ..facts() }), None);
+    }
+
+    #[test]
+    fn a_here_message_counts_only_from_a_current_device() {
+        let known = vec![
+            KnownDevice { install_id: "mac".into(), conductor_key: "KEY-A".into(), removed: false },
+            KnownDevice { install_id: "old".into(), conductor_key: "KEY-B".into(), removed: true },
+        ];
+        assert_eq!(install_id_among(&known, "KEY-A").as_deref(), Some("mac"));
+        assert_eq!(install_id_among(&known, "KEY-B"), None, "a removed device");
+        assert_eq!(install_id_among(&known, "KEY-C"), None, "a key this device does not know");
     }
 
     #[test]
