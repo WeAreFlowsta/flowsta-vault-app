@@ -357,6 +357,20 @@ pub fn own_file_matching(identity_root: &Path, client_id: &str, label: &str, sha
     (sha256_hex(&bytes) == sha256).then_some(bytes)
 }
 
+/// The same for a sibling that asked for a backup another device made: a
+/// copy this device holds, whichever device made it. The device that made a
+/// backup can be off, or gone, while a device that holds its copy is on.
+pub fn held_file_matching(identity_root: &Path, client_id: &str, label: &str, sha256: &str) -> Option<Vec<u8>> {
+    if let Some(bytes) = own_file_matching(identity_root, client_id, label, sha256) {
+        return Some(bytes);
+    }
+    let installs = std::fs::read_dir(crate::paths::backup_copies_dir(identity_root)).ok()?;
+    installs.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|id| is_install_id(id)).find_map(|install_id| {
+        let bytes = std::fs::read(copy_path(identity_root, &install_id, client_id, label)).ok()?;
+        (sha256_hex(&bytes) == sha256).then_some(bytes)
+    })
+}
+
 /// One backup an app can be given: where it is and which device wrote it.
 #[derive(Clone, Debug)]
 pub struct Held {
@@ -520,7 +534,7 @@ pub struct RoundOutcome {
     /// Copies still missing (the device that holds them was not reachable).
     pub waiting: usize,
     /// Of those, the copies held by a device that HAS been heard this
-    /// session. Only these hold a joining device's setup open: copies on a
+    /// session, or that a device that is on gave a copy of in this round. Only these hold a joining device's setup open: copies on a
     /// device that has not been heard are shown on the Devices page and
     /// arrive when it is next on.
     pub waiting_from_heard: usize,
@@ -744,7 +758,8 @@ pub async fn locked_round(state: &Arc<crate::commands::AppState>, fetch_all: boo
     if let Ok(lane) = lane.as_ref() {
         say_here(&reach, &root, &me, lane).await;
     }
-    copy_from_others(state, &root, &me, &recorded, &agent_of, lane, fetch_all, outcome).await
+    let others: Vec<Other> = reach.iter().filter(|r| r.install_id != me).filter_map(|r| agent_of(&r.install_id).map(|(agent, generation)| (r.install_id.clone(), agent, generation))).collect();
+    copy_from_others(state, &root, &me, &recorded, &agent_of, &others, lane, fetch_all, outcome).await
 }
 
 /// When this locked Vault last told its other devices it is here.
@@ -836,7 +851,37 @@ pub async fn round(state: &Arc<crate::commands::AppState>, fetch_all: bool) -> R
             })
     };
 
-    copy_from_others(state, &root, &me, &recorded, &agent_of, lane, fetch_all, outcome).await
+    let others: Vec<Other> = devices.iter().filter(|d| d.install_id != me).filter_map(|d| agent_of(&d.install_id).map(|(agent, generation)| (d.install_id.clone(), agent, generation))).collect();
+    copy_from_others(state, &root, &me, &recorded, &agent_of, &others, lane, fetch_all, outcome).await
+}
+
+/// Another device of the identity: its install id, the key its conductor
+/// runs and the line it listens on.
+type Other = (String, holochain_types::prelude::AgentPubKey, String);
+
+/// Copies a device said it does not hold, and when it said so: it is not
+/// asked for them again for a while (it may come to hold them later).
+static NOT_HELD_BY: std::sync::Mutex<Option<std::collections::HashMap<(String, String), std::time::Instant>>> = std::sync::Mutex::new(None);
+const ASK_A_HOLDER_AGAIN_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+fn said_not_held(install_id: &str, sha256: &str) -> bool {
+    NOT_HELD_BY
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&(install_id.to_string(), sha256.to_string())))
+        .map(|at| at.elapsed() < ASK_A_HOLDER_AGAIN_AFTER)
+        .unwrap_or(false)
+}
+
+/// The devices to ask for a copy its maker cannot give now: every other
+/// device heard this session, the maker left out, that has not said it does
+/// not hold it and has not gone unanswered this round.
+fn holders_to_ask<'a>(others: &'a [Other], maker: &str, unanswered: &std::collections::HashSet<String>, heard: &dyn Fn(&Other) -> bool, said_not_held: &dyn Fn(&str) -> bool) -> Vec<&'a Other> {
+    others
+        .iter()
+        .filter(|o| o.0 != maker && ask_again_this_round(unanswered, &o.0) && heard(o) && !said_not_held(&o.0))
+        .collect()
 }
 
 /// Bring this device's copies in line with what the other devices hold:
@@ -849,6 +894,7 @@ async fn copy_from_others(
     me: &str,
     recorded: &[SlotRecord],
     agent_of: &(dyn Fn(&str) -> Option<(holochain_types::prelude::AgentPubKey, String)> + Sync),
+    others: &[Other],
     lane: Result<Arc<crate::backup_lane::Lane>, String>,
     fetch_all: bool,
     mut outcome: RoundOutcome,
@@ -885,6 +931,9 @@ async fn copy_from_others(
     };
     // Devices a fetch got no answer from in this round.
     let mut unanswered: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Devices that are not on whose backups a device that is on gave a copy
+    // of in this round: what is still to come of theirs is on its way too.
+    let mut from_a_holder: std::collections::HashSet<String> = std::collections::HashSet::new();
     for step in steps {
         match step {
             CopyStep::Drop { path } => {
@@ -898,7 +947,7 @@ async fn copy_from_others(
                     note_still(&install_id, slot.size);
                     continue;
                 }
-                let (Ok(lane), Some((from, generation))) = (lane.as_ref(), agent_of(&install_id)) else {
+                let Ok(lane) = lane.as_ref() else {
                     outcome.waiting += 1;
                     note_still(&install_id, slot.size);
                     continue;
@@ -909,40 +958,67 @@ async fn copy_from_others(
                     continue;
                 }
                 let lane: &Arc<crate::backup_lane::Lane> = lane;
-                let heard = crate::devices::was_heard(&from);
-                // A device that did not answer is not asked again this
-                // round: the rest of the round (telling the other devices
-                // about this one, closing this device's setup) waits behind
-                // this step. 11-19: a new device spent its second round
-                // asking a device that was off for each of its copies, 20 s
-                // a copy, and for that half hour told nobody it was there.
-                if !ask_again_this_round(&unanswered, &install_id) {
+                // The device that made the backup first. One that did not
+                // answer is not asked again this round: the rest of the
+                // round (telling the other devices about this one, closing
+                // this device's setup) waits behind this step. 11-19: a new
+                // device spent its second round asking a device that was
+                // off for each of its copies, 20 s a copy, and for that half
+                // hour told nobody it was there.
+                let mut bytes: Option<Vec<u8>> = None;
+                let mut maker_heard = false;
+                if let Some((from, generation)) = agent_of(&install_id).filter(|_| ask_again_this_round(&unanswered, &install_id)) {
+                    let heard = crate::devices::was_heard(&from);
+                    maker_heard = heard;
+                    if !heard && QUIET_SAID.lock().unwrap().get_or_insert_with(Default::default).insert(install_id.clone()) {
+                        let short: String = install_id.chars().take(8).collect();
+                        log::info!("[backups] {}… has not been heard from this session - one short try for a copy of its each round until it is, and the devices that are on are asked for the copies they hold", short);
+                    }
+                    match lane.fetch(&root, &from, lane.line_for(&generation), &client_id, &slot.label, slot.size, &slot.sha256, heard, |_, _| {}).await {
+                        Ok(got) => bytes = Some(got),
+                        Err(e) => {
+                            log::info!("[backups] {}/{} not fetched this time: {}", client_id, slot.label, e);
+                            if e != crate::backup_lane::NO_LONGER_HELD {
+                                unanswered.insert(install_id.clone());
+                            }
+                        }
+                    }
+                }
+                // Then, when its maker is not on, a device that is on and
+                // holds a copy of it (the copy is checked against the
+                // index's SHA-256 whoever sends it).
+                if bytes.is_none() && !maker_heard {
+                    let holders: Vec<Other> = holders_to_ask(others, &install_id, &unanswered, &|o| crate::devices::was_heard(&o.1), &|id| said_not_held(id, &slot.sha256)).into_iter().cloned().collect();
+                    for (holder, from, generation) in holders {
+                        match lane.fetch(&root, &from, lane.line_for(&generation), &client_id, &slot.label, slot.size, &slot.sha256, true, |_, _| {}).await {
+                            Ok(got) => {
+                                bytes = Some(got);
+                                from_a_holder.insert(install_id.clone());
+                                break;
+                            }
+                            Err(e) if e == crate::backup_lane::NO_LONGER_HELD => {
+                                NOT_HELD_BY.lock().unwrap().get_or_insert_with(Default::default).insert((holder.clone(), slot.sha256.clone()), std::time::Instant::now());
+                            }
+                            Err(e) => {
+                                log::info!("[backups] {}/{} not fetched from {}… this time: {}", client_id, slot.label, holder.chars().take(8).collect::<String>(), e);
+                                unanswered.insert(holder.clone());
+                            }
+                        }
+                    }
+                }
+                let Some(bytes) = bytes else {
                     outcome.waiting += 1;
                     note_still(&install_id, slot.size);
                     continue;
-                }
-                if !heard && QUIET_SAID.lock().unwrap().get_or_insert_with(Default::default).insert(install_id.clone()) {
-                    let short: String = install_id.chars().take(8).collect();
-                    log::info!("[backups] {}… has not been heard from this session - one short try for a copy of its each round until it is", short);
-                }
-                match lane.fetch(&root, &from, lane.line_for(&generation), &client_id, &slot.label, slot.size, &slot.sha256, heard, |_, _| {}).await {
-                    Ok(bytes) => match store_copy(&root, &install_id, &client_id, &slot, &bytes) {
-                        Ok(_) => {
-                            budget -= slot.size;
-                            pending = pending.saturating_sub(slot.size);
-                            outcome.fetched += 1;
-                        }
-                        Err(e) => {
-                            log::warn!("[backups] a fetched copy was not kept: {}", e);
-                            outcome.waiting += 1;
-                            note_still(&install_id, slot.size);
-                        }
-                    },
+                };
+                match store_copy(&root, &install_id, &client_id, &slot, &bytes) {
+                    Ok(_) => {
+                        budget -= slot.size;
+                        pending = pending.saturating_sub(slot.size);
+                        outcome.fetched += 1;
+                    }
                     Err(e) => {
-                        log::info!("[backups] {}/{} not fetched this time: {}", client_id, slot.label, e);
-                        if e != crate::backup_lane::NO_LONGER_HELD {
-                            unanswered.insert(install_id.clone());
-                        }
+                        log::warn!("[backups] a fetched copy was not kept: {}", e);
                         outcome.waiting += 1;
                         note_still(&install_id, slot.size);
                     }
@@ -951,7 +1027,7 @@ async fn copy_from_others(
         }
     }
     *COPIES_PROGRESS.lock().unwrap() = Some((state.identity_root(), wanted, pending));
-    outcome.waiting_from_heard = still.iter().filter(|(install_id, _)| crate::devices::heard_at(install_id).is_some()).map(|(_, (backups, _))| *backups as usize).sum();
+    outcome.waiting_from_heard = still.iter().filter(|(install_id, _)| crate::devices::heard_at(install_id).is_some() || from_a_holder.contains(*install_id)).map(|(_, (backups, _))| *backups as usize).sum();
     let still = still.into_iter().map(|(install_id, (backups, bytes))| FetchingFrom { install_id, backups, bytes }).collect();
     *STILL_TO_FETCH.lock().unwrap() = Some((state.identity_root(), still));
     Ok(outcome)
@@ -1010,6 +1086,35 @@ mod tests {
         assert!(!super::ask_again_this_round(&unanswered, "aa"));
         // Another device is still asked.
         assert!(super::ask_again_this_round(&unanswered, "bb"));
+    }
+
+    #[test]
+    fn a_copy_whose_maker_is_off_is_asked_of_the_devices_that_are_on() {
+        let key = |n: u8| holochain_types::prelude::AgentPubKey::from_raw_36(vec![n; 36]);
+        let others: Vec<super::Other> = vec![
+            ("maker".into(), key(1), "0.7".into()),
+            ("on".into(), key(2), "0.7".into()),
+            ("off".into(), key(3), "0.7".into()),
+            ("lacks".into(), key(4), "0.7".into()),
+            ("silent".into(), key(5), "0.7".into()),
+        ];
+        let mut unanswered = std::collections::HashSet::new();
+        unanswered.insert("silent".to_string());
+        let asked = super::holders_to_ask(&others, "maker", &unanswered, &|o| o.0 != "off", &|id| id == "lacks");
+        assert_eq!(asked.iter().map(|o| o.0.as_str()).collect::<Vec<_>>(), vec!["on"]);
+    }
+
+    #[test]
+    fn a_device_serves_a_copy_it_holds_of_another_devices_backup() {
+        let here = tempfile::tempdir().unwrap();
+        let bytes = b"sealed backup".to_vec();
+        let sha = super::sha256_hex(&bytes);
+        let slot = super::SlotInfo { label: "latest".into(), size: bytes.len() as u64, sha256: sha.clone(), created_at: 0 };
+        assert!(super::held_file_matching(here.path(), "app", "latest", &sha).is_none());
+        super::store_copy(here.path(), OTHER, "app", &slot, &bytes).unwrap();
+        assert_eq!(super::held_file_matching(here.path(), "app", "latest", &sha), Some(bytes));
+        // Never a file that is not the one asked for.
+        assert!(super::held_file_matching(here.path(), "app", "latest", &"0".repeat(64)).is_none());
     }
 
     fn listed(entry_type: &str, body: serde_json::Value, updated_at: u64) -> crate::sealed::SealedListItem {

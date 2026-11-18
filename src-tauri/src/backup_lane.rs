@@ -313,7 +313,7 @@ impl Lane {
         let cached = self.serving.lock().unwrap().as_ref().filter(|(sha, _)| *sha == want.sha256).map(|(_, b)| b.clone());
         let bytes = match cached {
             Some(bytes) => Some(bytes),
-            None => crate::backup_sync::own_file_matching(identity_root, &want.client_id, &want.label, &want.sha256).map(|bytes| {
+            None => crate::backup_sync::held_file_matching(identity_root, &want.client_id, &want.label, &want.sha256).map(|bytes| {
                 let bytes = Arc::new(bytes);
                 *self.serving.lock().unwrap() = Some((want.sha256.clone(), bytes.clone()));
                 bytes
