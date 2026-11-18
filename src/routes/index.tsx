@@ -1341,9 +1341,12 @@ export default component$(() => {
                   <Link href="/settings/" class="text-sky-400 hover:text-sky-300">Change it in Settings</Link>
                 </p>
               </Callout>
-            ) : id.pending_reconcile && !id.web_username ? null : (
-              // Not while the account is still to be read: it may hold a
-              // username already, and the banner above says it comes back.
+            ) : (
+              // Shown while the account is still being reattached too: an
+              // identity with no username must always be able to pick one
+              // (hidden for a day on 11-18; the page then said "until you
+              // pick one" with nowhere to pick). A username the account
+              // already has arrives a moment later and the title changes.
               <Callout intent="info" title={id.web_username ? "Change your username" : "Pick your username"}>
                 <p>Your page lives at {web}/yourname. Choose it once; change it anytime.</p>
                 <div class="mt-3 flex items-center gap-2">

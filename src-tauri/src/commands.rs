@@ -2609,6 +2609,9 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
         let parts: Vec<String> = laps.iter().filter(|(_, ms)| *ms >= 1000).map(|(n, ms)| format!("{} {}s", n, ms / 1000)).collect();
         log::info!("[devices] a slow {} round ({}s): {}", if full { "full" } else { "light" }, round_took.as_secs(), parts.join(", "));
     }
+    // A reattach of the account that failed earlier is tried again when
+    // its wait is over (a no-op otherwise).
+    crate::device_identity::retry_reconcile_if_due(devices_state, option_env!("FLOWSTA_API_URL").unwrap_or("https://auth-api.flowsta.com"), devices_app).await;
     // Read at every round while setup is open: "Continue without it" ends
     // it at any round, and a round that is not complete says why it waits.
     {
