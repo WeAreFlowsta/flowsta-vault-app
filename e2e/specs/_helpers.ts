@@ -260,7 +260,10 @@ export async function shownNow(b: WebdriverIO.Browser = browser): Promise<Shown>
  *  counts only when every look over the next while still shows it (the card
  *  and the rows refresh on their own clocks, up to half a minute apart). */
 export async function senseProblemsOn(where: string, b: WebdriverIO.Browser = browser): Promise<string[]> {
-  let standing = senseProblems(await shownNow(b));
+  const first = await shownNow(b);
+  // Said in the run's log, so a run shows that the check read the screen.
+  console.log(`e2e: sense check ${where}: ${"card" in first ? (first.card ? `card "${first.card.title}"` : "no card") : "not the Overview"}, ${first.rows ? `${first.rows.length} other device(s)` : "no list"}, sidebar "${first.chipLabel ?? ""}"`);
+  let standing = senseProblems(first);
   for (let look = 0; look < 8 && standing.length > 0; look++) {
     await b.pause(5_000);
     await b.execute(() => { document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })); });
@@ -282,6 +285,8 @@ if (typeof afterEach === "function" && typeof after === "function") {
     }
   });
   after(function () {
+    // VAULT_E2E_SENSE_SELFTEST=1 proves the spec fails when something is found.
+    if (process.env.VAULT_E2E_SENSE_SELFTEST) senseSeen.push("self-test: a made-up problem");
     if (senseSeen.length > 0) throw new Error(`The screen showed things that do not make sense:\n  ${[...new Set(senseSeen)].join("\n  ")}`);
   });
 }
