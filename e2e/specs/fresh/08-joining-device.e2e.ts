@@ -1,11 +1,14 @@
 // The identity made in 01, restored from its phrase on a second device - and
 // this time the SECOND device's own window is watched (its e2e build serves
-// WebDriver too). What a person sees on a device they just added: the "Your
-// private data is on its way" card from the first moment, honest lines about
-// the other device while nothing has arrived, the card gone as soon as the
-// device has everything, and no question about the email, which comes over
-// with the profile. Both 10-27 findings lived here: a card that never left,
-// and a card that stayed ten minutes after the bars were full.
+// WebDriver too). What a person sees on a device restored from the phrase:
+// the one question only they can answer (is this identity on another device
+// you still have?), then a card that says only what this device knows
+// (looking, the device the things are on, or progress), gone as soon as the
+// device holds what the other one said it holds, and no question about the
+// email, which comes over with the profile. Both 10-27 findings lived here
+// (a card that never left; a card that stayed ten minutes after the bars
+// were full), and the 11-18 one: ten quiet minutes ended setup and the
+// device said it had everything.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { activateSecondWindow, API, byId, click, copyProblemsIn, fill, PASSWORD, PHRASE_FILE, PORT_A, PORT_B, secondWindow, shot, startSecondDevice, stopSecondDevice, vault, COLD_START_MS, timed } from "../_helpers";
@@ -46,7 +49,7 @@ describe("the device being added, in its own window", () => {
     expect(await setupOf(PORT_B)).toEqual({ joined: true, pending: true });
   });
 
-  it("its window says the data is on its way, and asks nothing", async () => {
+  it("its window asks whether the identity is on another device, and Yes starts the wait", async () => {
     b = await secondWindow();
     activateSecondWindow();
     // The window was opened on the welcome screen before the restore; the
@@ -59,13 +62,28 @@ describe("the device being added, in its own window", () => {
       await (await b.$('[data-testid="unlock-submit"]')).click();
       await (await b.$('[data-testid="setup-card"]')).waitForDisplayed({ timeout: 120_000 });
     }
-    await shotB("on-its-way");
-    const card = await (await b.$('[data-testid="setup-card"]')).getText();
-    expect(card).toMatch(/Your private data is on its way/);
-    expect(card).not.toMatch(/No other device has answered/);
+    // The restore went through the test door, so the wizard's question was
+    // not answered: the Overview asks it, once.
+    await b.waitUntil(async () => existsOnB("other-device-yes"), { timeout: 60_000, timeoutMsg: "the card did not ask whether the identity is on another device" });
+    await shotB("asks");
+    const asks = await (await b.$('[data-testid="setup-card"]')).getText();
+    expect(asks).toMatch(/Do you have Flowsta Vault on another device with this identity\?/);
+    expect(asks).toMatch(/Not sure\? Choose Yes\./);
+    expect(await existsOnB("continue-without")).toBe(false);
     expect(await existsOnB("email-callout")).toBe(false);
-    expect(await existsOnB("only-device-note")).toBe(false);
-    await noteB("on its way");
+    await noteB("the question");
+    await (await b.$('[data-testid="other-device-yes"]')).click();
+    await b.waitUntil(async () => !(await existsOnB("other-device-yes")), { timeout: 30_000, timeoutMsg: "the question stayed after Yes" });
+    // Still being set up, by the person's word: no timer ends it.
+    expect(await setupOf(PORT_B)).toEqual({ joined: true, pending: true });
+    if (await existsOnB("setup-card")) {
+      const card = await (await b.$('[data-testid="setup-card"]')).getText();
+      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way/);
+      expect(card).not.toMatch(/No other device has answered|Nothing to do|can stay locked/);
+    }
+    await shotB("after-yes");
+    expect(await existsOnB("email-callout")).toBe(false);
+    await noteB("after yes");
   });
 
   it("while it waits, the other device is named as online or its progress shows - never as offline", async () => {
@@ -79,11 +97,12 @@ describe("the device being added, in its own window", () => {
     while (Date.now() < deadline) {
       if (!(await existsOnB("setup-card"))) break; // already done - fine
       const card = await (await b!.$('[data-testid="setup-card"]')).getText();
-      expect(card).not.toMatch(/Waiting for|a moment ago|offline|unreachable/);
+      expect(card).not.toMatch(/Waiting for|a moment ago|offline|unreachable|No other device has answered|Nothing to do/);
+      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way/);
       if (await existsOnB("setup-progress")) {
         sawProgress = true;
         const progress = await (await b!.$('[data-testid="setup-progress"]')).getText();
-        expect(progress).toMatch(/is online\. Your things are on their way|Records|App backups|Waiting to hear from your other devices/);
+        expect(progress).toMatch(/Records|App backups/);
       }
       await nudgeB();
       await b!.pause(5_000);
