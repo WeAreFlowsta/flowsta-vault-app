@@ -883,6 +883,8 @@ async fn copy_from_others(
         e.0 += 1;
         e.1 += size;
     };
+    // Devices a fetch got no answer from in this round.
+    let mut unanswered: std::collections::HashSet<String> = std::collections::HashSet::new();
     for step in steps {
         match step {
             CopyStep::Drop { path } => {
@@ -908,9 +910,20 @@ async fn copy_from_others(
                 }
                 let lane: &Arc<crate::backup_lane::Lane> = lane;
                 let heard = crate::devices::was_heard(&from);
+                // A device that did not answer is not asked again this
+                // round: the rest of the round (telling the other devices
+                // about this one, closing this device's setup) waits behind
+                // this step. 11-19: a new device spent its second round
+                // asking a device that was off for each of its copies, 20 s
+                // a copy, and for that half hour told nobody it was there.
+                if !ask_again_this_round(&unanswered, &install_id) {
+                    outcome.waiting += 1;
+                    note_still(&install_id, slot.size);
+                    continue;
+                }
                 if !heard && QUIET_SAID.lock().unwrap().get_or_insert_with(Default::default).insert(install_id.clone()) {
                     let short: String = install_id.chars().take(8).collect();
-                    log::info!("[backups] {}… has not been heard from this session - one short try for its copies each round until it is", short);
+                    log::info!("[backups] {}… has not been heard from this session - one short try for a copy of its each round until it is", short);
                 }
                 match lane.fetch(&root, &from, lane.line_for(&generation), &client_id, &slot.label, slot.size, &slot.sha256, heard, |_, _| {}).await {
                     Ok(bytes) => match store_copy(&root, &install_id, &client_id, &slot, &bytes) {
@@ -927,6 +940,9 @@ async fn copy_from_others(
                     },
                     Err(e) => {
                         log::info!("[backups] {}/{} not fetched this time: {}", client_id, slot.label, e);
+                        if e != crate::backup_lane::NO_LONGER_HELD {
+                            unanswered.insert(install_id.clone());
+                        }
                         outcome.waiting += 1;
                         note_still(&install_id, slot.size);
                     }
@@ -939,6 +955,12 @@ async fn copy_from_others(
     let still = still.into_iter().map(|(install_id, (backups, bytes))| FetchingFrom { install_id, backups, bytes }).collect();
     *STILL_TO_FETCH.lock().unwrap() = Some((state.identity_root(), still));
     Ok(outcome)
+}
+
+/// Whether a device is asked for another copy in this round: not once a
+/// fetch from it went unanswered. The next round asks again.
+fn ask_again_this_round(unanswered: &std::collections::HashSet<String>, install_id: &str) -> bool {
+    !unanswered.contains(install_id)
 }
 
 /// Backups still to come from one device, as of the last round.
@@ -980,6 +1002,16 @@ pub fn copies_progress(identity_root: &Path) -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_device_that_did_not_answer_is_not_asked_again_in_the_round() {
+        let mut unanswered = std::collections::HashSet::new();
+        assert!(super::ask_again_this_round(&unanswered, "aa"));
+        unanswered.insert("aa".to_string());
+        assert!(!super::ask_again_this_round(&unanswered, "aa"));
+        // Another device is still asked.
+        assert!(super::ask_again_this_round(&unanswered, "bb"));
+    }
+
     fn listed(entry_type: &str, body: serde_json::Value, updated_at: u64) -> crate::sealed::SealedListItem {
         crate::sealed::SealedListItem { action_hash: String::new(), entry_type: entry_type.into(), created_at: updated_at, body, refs: Vec::new(), id: String::new(), updated_at, device: None }
     }
