@@ -46,6 +46,17 @@ Each build variant leaves ~13 GB in `src-tauri/target`; run
 `scripts/prune-build-dir.sh` after a gate (keeps the last two days' artifacts,
 drops the incremental cache, never the binary).
 
+## Does the screen make sense?
+
+After every test the window is read where the test left it (the Overview
+card, the rows of Settings > Devices, the sidebar's device count) and checked
+against `src/lib/sense.ts`: two things on the screen that cannot both be
+true, or a sentence no person would write. A problem counts only if it is
+still there over several looks; the spec fails at its end and lists them.
+The same rulebook runs in the unit tests over every combination of facts
+(`src/lib/sense.test.ts`). When a person sees something that does not make
+sense, add the check there first, with the screen they saw as its test.
+
 ## Writing a spec
 
 - Select by `data-testid`, never by copy.

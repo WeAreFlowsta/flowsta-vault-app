@@ -11,14 +11,14 @@
 // device said it had everything.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { activateSecondWindow, API, byId, click, copyProblemsIn, fill, PASSWORD, PHRASE_FILE, PORT_A, PORT_B, secondWindow, shot, startSecondDevice, stopSecondDevice, vault, timed } from "../_helpers";
+import { activateSecondWindow, API, byId, click, copyProblemsIn, fill, PASSWORD, PHRASE_FILE, PORT_A, PORT_B, secondWindow, senseProblemsOn, shot, startSecondDevice, stopSecondDevice, vault, timed } from "../_helpers";
 import { SHOTS } from "../../wdio.conf";
 
 const problems: string[] = [];
 let b: WebdriverIO.Browser | null = null;
 let bShot = 0;
 const textOfB = async () => (await b!.execute(() => document.body.innerText)) as string;
-const noteB = async (where: string) => { problems.push(...copyProblemsIn(await textOfB(), where)); };
+const noteB = async (where: string) => { problems.push(...copyProblemsIn(await textOfB(), where), ...(await senseProblemsOn(`second device, ${where}`, b!))); };
 const shotB = (name: string) => b!.saveScreenshot(resolve(SHOTS, `b-${String(++bShot).padStart(2, "0")}-${name}.png`));
 const existsOnB = async (id: string) => (await b!.$(`[data-testid="${id}"]`)).isExisting();
 const nudgeB = () => b!.execute(() => { document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })); });
@@ -80,7 +80,7 @@ describe("the device being added, in its own window", () => {
     expect(await setupOf(PORT_B)).toEqual({ joined: true, pending: true });
     if (await existsOnB("setup-card")) {
       const card = await (await b.$('[data-testid="setup-card"]')).getText();
-      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way/);
+      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way|Your private data is here/);
       expect(card).not.toMatch(/No other device has answered|Nothing to do|can stay locked/);
     }
     await shotB("after-yes");
@@ -100,7 +100,7 @@ describe("the device being added, in its own window", () => {
       if (!(await existsOnB("setup-card"))) break; // already done - fine
       const card = await (await b!.$('[data-testid="setup-card"]')).getText();
       expect(card).not.toMatch(/Waiting for|a moment ago|offline|unreachable|No other device has answered|Nothing to do/);
-      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way/);
+      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way|Your private data is here/);
       if (await existsOnB("setup-progress")) {
         sawProgress = true;
         const progress = await (await b!.$('[data-testid="setup-progress"]')).getText();
@@ -132,13 +132,14 @@ describe("the device being added, in its own window", () => {
     if (!byItself) {
       expect(await setupOf(PORT_B)).toEqual({ joined: true, pending: true });
       const card = await (await b!.$('[data-testid="setup-card"]')).getText();
-      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way/);
+      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way|Your private data is here/);
       expect(card).not.toMatch(/No other device has answered|Nothing to do|can stay locked|has everything/);
       expect(await existsOnB("email-callout")).toBe(false);
       await shotB("still-waiting");
       await noteB("still waiting");
       await b!.waitUntil(async () => { await nudgeB(); return existsOnB("continue-without"); }, { timeout: 6 * 60_000, interval: 5_000, timeoutMsg: "a waiting card never offered Continue without it" });
-      expect(await (await b!.$('[data-testid="continue-hint"]')).getText()).toMatch(/Lost that device\? Remove it in Settings, Devices/);
+      // The line about a lost device shows only while no device has been reached.
+      if (await existsOnB("continue-hint")) expect(await (await b!.$('[data-testid="continue-hint"]')).getText()).toMatch(/Lost that device\? Remove it in Settings, Devices/);
       await (await b!.$('[data-testid="continue-without"]')).click();
       await b!.waitUntil(async () => { await nudgeB(); return (await setupOf(PORT_B)).pending === false; }, { timeout: 5 * 60_000, interval: 5_000, timeoutMsg: "Continue without it did not end setup" });
     }

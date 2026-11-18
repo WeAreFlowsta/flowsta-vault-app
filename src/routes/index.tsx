@@ -16,7 +16,7 @@ import { dedupeLinkedApps } from "~/lib/linked-apps";
 import { ActivityRow } from "~/components/vault/ActivityRow";
 import { sizeText, type DevicesProgress, type DeviceRow } from "~/components/vault/DevicesTab";
 import { backupsTotal } from "~/lib/overview-cards";
-import { arrivingFrom, asksForEmail, cardWords, knownDevices, overviewCard, recordsTarget, CONTINUE_HINT, type OtherDevice } from "~/lib/device-rules";
+import { arrivingFrom, asksForEmail, cardBars, cardWords, knownDevices, overviewCard, CONTINUE_HINT, type OtherDevice } from "~/lib/device-rules";
 import { buildFeed, timeAgo, recentlyRestored, type ActivityLogEntry } from "~/lib/activity";
 
 
@@ -661,6 +661,9 @@ export default component$(() => {
         others,
         arriving,
         quietSecs: lastMoved.value ? Math.floor((now - lastMoved.value.at) / 1000) : null,
+        mine,
+        backupsPending: setupProgress.value?.mine.backups_pending ?? 0,
+        sessionSecs: setupProgress.value?.session_secs ?? null,
         now,
       })
     : null;
@@ -754,7 +757,7 @@ export default component$(() => {
               <>
                 {words.line && (
                   <p class="flex items-center gap-2" data-testid="setup-line">
-                    {(card.kind === "looking" || card.kind === "back") && (
+                    {(card.kind === "looking" || card.kind === "back" || card.kind === "finishing" || (card.kind === "on_device" && card.connecting)) && (
                       <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
                         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
@@ -763,17 +766,14 @@ export default component$(() => {
                     <span>{words.line}</span>
                   </p>
                 )}
-                {(card.kind === "progress" || card.kind === "slow" || card.kind === "back") && (() => {
+                {(() => {
                   // Progress against what the heard devices SAID they hold.
                   const p = setupProgress.value;
                   if (!p) return null;
-                  const target = recordsTarget(others);
-                  const rows: { label: string; done: number; of: number; text: string }[] = [];
-                  if (target !== null && target > 0) rows.push({ label: "Records", done: Math.min(p.mine.records, target), of: target, text: `${Math.min(p.mine.records, target).toLocaleString()} of ${target.toLocaleString()}` });
-                  if (p.mine.backups_wanted > 0) {
-                    const got = p.mine.backups_wanted - p.mine.backups_pending;
-                    rows.push({ label: "App backups", done: got, of: p.mine.backups_wanted, text: `${sizeText(got)} of ${sizeText(p.mine.backups_wanted)}` });
-                  }
+                  const rows = cardBars(card, { mine: p.mine.records, others, backupsWanted: p.mine.backups_wanted, backupsPending: p.mine.backups_pending }).map((b) => ({
+                    ...b,
+                    text: b.label === "Records" ? `${b.done.toLocaleString()} of ${b.of.toLocaleString()}` : `${sizeText(b.done)} of ${sizeText(b.of)}`,
+                  }));
                   if (rows.length === 0) return null;
                   return (
                     <div class="mt-3 space-y-2" data-testid="setup-progress">
@@ -793,7 +793,7 @@ export default component$(() => {
                 })()}
                 {words.canContinue && (
                   <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
-                    <p class="text-xs text-gray-400" data-testid="continue-hint">{CONTINUE_HINT}</p>
+                    {words.lostHint ? <p class="text-xs text-gray-400" data-testid="continue-hint">{CONTINUE_HINT}</p> : <span />}
                     <GlassButton variant="secondary" class="text-sm" testId="continue-without" disabled={continuing.value} onClick$={continueWithout}>Continue without it</GlassButton>
                   </div>
                 )}

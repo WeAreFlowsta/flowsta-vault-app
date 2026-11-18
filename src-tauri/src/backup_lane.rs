@@ -27,6 +27,8 @@ pub const PIECE_BYTES: usize = 512 * 1000;
 /// Pieces asked for at a time.
 pub const WINDOW: u32 = 4;
 const FIRST_WAIT: Duration = Duration::from_secs(20);
+/// A fetch's error when the device answered that it no longer holds the file.
+pub const NO_LONGER_HELD: &str = "the other device no longer holds it";
 const SHORTEST_WAIT: Duration = Duration::from_secs(15);
 const LONGEST_WAIT: Duration = Duration::from_secs(180);
 /// A window that does not arrive is asked for again this many times.
@@ -311,7 +313,7 @@ impl Lane {
         let cached = self.serving.lock().unwrap().as_ref().filter(|(sha, _)| *sha == want.sha256).map(|(_, b)| b.clone());
         let bytes = match cached {
             Some(bytes) => Some(bytes),
-            None => crate::backup_sync::own_file_matching(identity_root, &want.client_id, &want.label, &want.sha256).map(|bytes| {
+            None => crate::backup_sync::held_file_matching(identity_root, &want.client_id, &want.label, &want.sha256).map(|bytes| {
                 let bytes = Arc::new(bytes);
                 *self.serving.lock().unwrap() = Some((want.sha256.clone(), bytes.clone()));
                 bytes
@@ -380,7 +382,7 @@ impl Lane {
                     while (window.len() as u32) < count {
                         let Some(left) = wait.checked_sub(started.elapsed()) else { break };
                         match tokio::time::timeout(left, rx.recv()).await {
-                            Ok(Some(piece)) if piece.kind == "none" => return Err("the other device no longer holds it".to_string()),
+                            Ok(Some(piece)) if piece.kind == "none" => return Err(NO_LONGER_HELD.to_string()),
                             Ok(Some(piece)) if piece.total == total && piece.seq >= next && piece.seq < next + count => {
                                 window.insert(piece.seq, piece.data);
                             }
