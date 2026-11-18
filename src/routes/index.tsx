@@ -936,7 +936,12 @@ export default component$(() => {
           <p class="mb-1 text-sm font-semibold text-sky-200">
             {id?.pending_registration
               ? "Created offline - your identity is active on the Flowsta network"
-              : "Restored offline - your identity is active on the Flowsta network"}
+              : connectionStatus.value === "online"
+                // Flowsta answers now: the account is being read, which
+                // takes a moment. "Restored offline" beside a green
+                // "Online" read as a contradiction (Eric, 11-18).
+                ? "Reattaching your Flowsta account - your identity is active on the Flowsta network"
+                : "Restored offline - your identity is active on the Flowsta network"}
           </p>
           <p class="text-xs text-gray-400">
             {sigCount > 0
@@ -947,7 +952,10 @@ export default component$(() => {
             {" "}
             {id?.pending_registration
               ? "Your Flowsta account attaches automatically when Flowsta is reachable - your email is checked and confirmed then (it isn't reserved until that moment)."
-              : "Your @username, display name, and email reconnect automatically when Flowsta is reachable."}
+              // Only what the account can give back, and only if it has
+              // them: Flowsta keeps a fingerprint of the email, never the
+              // email, so that is asked for again and not promised here.
+              : "Any username, display name and picture on your Flowsta account come back when Flowsta is reachable."}
           </p>
           {id?.registration_conflict && (
             <div class="mt-3 border-t border-sky-800/50 pt-3">
@@ -1333,7 +1341,9 @@ export default component$(() => {
                   <Link href="/settings/" class="text-sky-400 hover:text-sky-300">Change it in Settings</Link>
                 </p>
               </Callout>
-            ) : (
+            ) : id.pending_reconcile && !id.web_username ? null : (
+              // Not while the account is still to be read: it may hold a
+              // username already, and the banner above says it comes back.
               <Callout intent="info" title={id.web_username ? "Change your username" : "Pick your username"}>
                 <p>Your page lives at {web}/yourname. Choose it once; change it anytime.</p>
                 <div class="mt-3 flex items-center gap-2">

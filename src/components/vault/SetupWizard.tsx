@@ -2229,9 +2229,9 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 Restored offline
               </p>
               <p class="text-xs text-gray-400">
-                Your records return as this device syncs. Your username,
-                display name and email reconnect when Flowsta is reachable.
-                Nothing to do.
+                Your records return as this device syncs. Any username, display
+                name and picture on your Flowsta account come back when Flowsta
+                is reachable.
               </p>
             </div>
           )}
