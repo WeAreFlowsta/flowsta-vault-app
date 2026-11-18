@@ -909,6 +909,84 @@ pub async fn announce_to(state: &Arc<AppState>, lane: &crate::backup_lane::Lane,
     }
 }
 
+/// Peers already logged this session as met before their record arrived.
+static PEERS_SAID: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// The agents named in a conductor's agent-info notes for one network
+/// (`space`: the 32-byte core of its DNA hash), as 32-byte keys. Notes that
+/// say an agent has left are skipped.
+pub(crate) fn agents_in_space(notes: &[String], space: &[u8]) -> Vec<Vec<u8>> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let wanted = b64.encode(space);
+    let mut agents: Vec<Vec<u8>> = Vec::new();
+    for raw in notes {
+        let Some(inner) = serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .and_then(|outer| outer.get("agentInfo").and_then(|i| i.as_str()).map(str::to_string))
+            .and_then(|i| serde_json::from_str::<serde_json::Value>(&i).ok())
+        else {
+            continue;
+        };
+        if inner.get("space").and_then(|v| v.as_str()) != Some(wanted.as_str()) || inner.get("isTombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let Some(agent) = inner.get("agent").and_then(|v| v.as_str()).and_then(|a| b64.decode(a).ok()).filter(|a| a.len() == 32) else { continue };
+        if !agents.contains(&agent) {
+            agents.push(agent);
+        }
+    }
+    agents
+}
+
+/// Of the agents met in the private network, the ones to tell about this
+/// device though no record names them: not this device, not on the list
+/// already, and never a key that was removed. Keys as device records carry
+/// them (standard base64 of the 39 bytes).
+pub(crate) fn not_listed(met: Vec<String>, me: &str, listed: &[String], known: &[KnownDevice]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for key in met {
+        if key != me && !listed.contains(&key) && !known.iter().any(|k| k.conductor_key == key && k.removed) && !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    out
+}
+
+/// The peers each running line's conductor has met in the private network
+/// that are not among `siblings`, each with the generation of the line it
+/// was met on. Empty when a conductor does not answer in ten seconds: the
+/// next round asks again.
+async fn peers_not_listed(state: &Arc<AppState>, me: &str, siblings: &[(String, String)]) -> Vec<(String, String)> {
+    use flowsta_hc_lines::Line;
+    let listed: Vec<String> = siblings.iter().map(|(k, _)| k.clone()).collect();
+    let known: Vec<KnownDevice> =
+        std::fs::read(crate::paths::known_devices_path(&state.identity_root())).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in [Line::V07, Line::V06] {
+        let Ok((admin_port, _)) = crate::hc::line_ports(state, line) else { continue };
+        let app_id = if line == Line::V07 { crate::dna::private_v2_app_id_07() } else { crate::dna::private_v2_app_id() };
+        let met = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let admin = flowsta_hc_lines::AdminClient::connect(line, admin_port, &crate::conductor::node_origin()).await.ok()?;
+            let apps = admin.list_apps().await.ok()?;
+            let dna = apps.iter().find(|a| a.app_id == app_id)?.first_cell()?.dna_hash.clone();
+            let space = if dna.len() == 39 { dna[3..35].to_vec() } else { dna };
+            Some(agents_in_space(&admin.agent_info().await.ok()?, &space))
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        let met: Vec<String> = met.into_iter().map(|core| key_text(&holochain_types::prelude::AgentPubKey::from_raw_32(core))).collect();
+        for key in not_listed(met, me, &listed, &known) {
+            if !out.iter().any(|(k, _)| *k == key) {
+                out.push((key, line.generation().to_string()));
+            }
+        }
+    }
+    out
+}
+
 /// Tell the identity's other devices about this one, directly: each minute
 /// for the first quarter hour of a session (a device that just joined, or
 /// one back from a long time off, shows on the others the moment they can
@@ -920,11 +998,24 @@ pub async fn announce_to_siblings(state: &Arc<AppState>) {
     let Ok(me) = own_conductor_key(state) else { return };
     let Ok(devices) = list(state).await else { return };
     // Each sibling with the line it listens on (its record's generation).
-    let siblings: Vec<(String, String)> = devices
+    let mut siblings: Vec<(String, String)> = devices
         .into_iter()
         .filter(|d| d.conductor_key != me && d.removed_at.is_none())
         .map(|d| (d.conductor_key, d.generation))
         .collect();
+    // And every peer the conductor has met in the private network that is
+    // not on the list yet. Only this identity's devices can join that
+    // network (its seed comes from the recovery phrase), so such a peer is
+    // a device whose record has not arrived: a device restored from the
+    // phrase waited minutes for the network to answer its first read before
+    // it knew of any sibling, though the conductors had met long before
+    // (11-18: nine minutes without hearing a device that was on).
+    for (key, generation) in peers_not_listed(state, &me, &siblings).await {
+        if PEERS_SAID.lock().unwrap().get_or_insert_with(Default::default).insert(key.clone()) {
+            log::info!("[devices] a peer in the private network is not on this device's list yet: telling it about this device ({}...)", key.chars().take(8).collect::<String>());
+        }
+        siblings.push((key, generation));
+    }
     if siblings.is_empty() {
         return;
     }
@@ -1343,6 +1434,39 @@ mod tests {
     }
 
     use super::*;
+
+    fn note(space: &[u8], agent: &[u8], tombstone: bool) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let inner = serde_json::json!({ "space": b64.encode(space), "agent": b64.encode(agent), "createdAt": "1", "isTombstone": tombstone, "url": "wss://x" }).to_string();
+        serde_json::json!({ "agentInfo": inner, "signature": "s" }).to_string()
+    }
+
+    #[test]
+    fn the_agents_of_one_network_are_read_from_the_conductors_notes() {
+        let (private, other) = ([7u8; 32], [8u8; 32]);
+        let notes = vec![
+            note(&private, &[1u8; 32], false),
+            note(&private, &[1u8; 32], false),
+            note(&other, &[2u8; 32], false),
+            note(&private, &[3u8; 32], true),
+            note(&private, &[4u8; 31], false),
+            "not a note".to_string(),
+        ];
+        // Once each; not another network's agent, one that has left, or a key of the wrong length.
+        assert_eq!(agents_in_space(&notes, &private), vec![vec![1u8; 32]]);
+        assert!(agents_in_space(&notes, &[9u8; 32]).is_empty());
+    }
+
+    #[test]
+    fn a_peer_met_before_its_record_is_told_unless_it_is_this_device_listed_or_removed() {
+        let known = vec![
+            KnownDevice { install_id: "b".into(), conductor_key: "listed".into(), removed: false },
+            KnownDevice { install_id: "c".into(), conductor_key: "removed".into(), removed: true },
+        ];
+        let met = vec!["me".to_string(), "listed".to_string(), "removed".to_string(), "new".to_string(), "new".to_string()];
+        assert_eq!(not_listed(met, "me", &["listed".to_string()], &known), vec!["new".to_string()]);
+    }
 
     const DAY: u64 = REFRESH_AFTER_MS;
 
