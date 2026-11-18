@@ -380,6 +380,32 @@ async fn answering_or_offline(target: BootstrapTarget, line: Line) -> BootstrapT
     BootstrapTarget { auth_material: None, ..target }
 }
 
+/// Does this device reach the network at all? True when the rendezvous
+/// sends back ANY answer, an error included: a rendezvous in trouble is not
+/// this device being offline, and the Overview must not say it is (on
+/// 2026-11-18 staging's rendezvous answered 500 for an hour while every
+/// device was online). False only when two tries in a row get no answer.
+pub(crate) async fn reaches_rendezvous() -> bool {
+    #[cfg(debug_assertions)]
+    if test_offline_now() {
+        return false;
+    }
+    let target = match supervisor().primary() {
+        Some(Line::V07) => BootstrapTarget::primary_07(),
+        _ => BootstrapTarget::primary(),
+    };
+    let health = format!("{}/health", target.bootstrap_url.trim_end_matches('/'));
+    let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_millis(4000)).build() else {
+        return false;
+    };
+    for _ in 0..2 {
+        if client.get(&health).send().await.is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Whether the primary line's rendezvous answers now (the health watch's
 /// check for a session that started offline).
 pub(crate) async fn primary_rendezvous_answers() -> bool {

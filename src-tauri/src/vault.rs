@@ -52,6 +52,21 @@ pub struct VaultConfig {
     #[serde(default)]
     pub joined_existing: bool,
 
+    /// The person's answer to "is this identity on another device you still
+    /// have?", asked once at a phrase restore. `Some(true)` also for a device
+    /// added by code (the other device just approved it). `None` on an
+    /// install that joined before the question existed: its Overview asks.
+    /// Nothing on the network can answer this: the list of an identity's
+    /// devices lives only on those devices.
+    #[serde(default)]
+    pub has_other_device: Option<bool>,
+
+    /// The person chose "Continue without it" while another device had not
+    /// been heard. This device stopped waiting; nothing was removed, and
+    /// what that device holds still arrives when it is next on.
+    #[serde(default)]
+    pub continued_without: bool,
+
     /// The update time of the newest profile version from ANOTHER device
     /// that has been copied into this config (ms).
     #[serde(default)]
@@ -534,6 +549,8 @@ mod tests {
             device_seed: Some(vec![1u8; 32]),
             conductor_seed: None,
             joined_existing: false,
+            has_other_device: None,
+            continued_without: false,
             profile_applied_at: None,
             recovery_lookup_hash: Some("abcd1234".repeat(8)),
             agent_pub_key_raw_b64: Some("dGVzdA==".to_string()),
@@ -588,6 +605,8 @@ mod tests {
             device_seed: None,
             conductor_seed: None,
             joined_existing: false,
+            has_other_device: None,
+            continued_without: false,
             profile_applied_at: None,
             recovery_lookup_hash: None,
             agent_pub_key_raw_b64: None,

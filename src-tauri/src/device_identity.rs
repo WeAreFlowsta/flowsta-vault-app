@@ -548,7 +548,79 @@ pub(crate) async fn reconcile_account_layer(
                  restore online (or sign in with the Flowsta account) to upgrade it"
             );
         }
-        Err(e) => log::warn!("[reconcile] grant failed: {}", e),
+        Err(e) => {
+            log::warn!("[reconcile] grant failed: {}", e);
+            // A refusal that is not about this identity (a rate limit, a
+            // server error) is tried again later, a few times: without this
+            // the notice stayed until the next start (11-18: two 429s on
+            // staging and "Reattaching your Flowsta account" for the rest
+            // of the session).
+            schedule_reconcile_retry();
+        }
+    }
+}
+
+/// When a failed reattach is tried again, and how many times this session.
+static RECONCILE_RETRY: std::sync::Mutex<(u32, Option<std::time::Instant>)> = std::sync::Mutex::new((0, None));
+/// Waits before each further try: 2, 10 and 30 minutes. Four grants an hour
+/// at the most, well inside the challenge endpoint's 20 per 15 minutes.
+const RECONCILE_RETRY_AFTER_SECS: [u64; 3] = [120, 600, 1800];
+
+/// How long to wait before the next try after `failed` earlier tries this
+/// session, or `None`: enough tries, the next start asks again.
+fn reconcile_retry_wait(failed: u32) -> Option<u64> {
+    RECONCILE_RETRY_AFTER_SECS.get(failed as usize).copied()
+}
+
+fn schedule_reconcile_retry() {
+    let mut retry = RECONCILE_RETRY.lock().unwrap();
+    retry.1 = reconcile_retry_wait(retry.0).map(|secs| std::time::Instant::now() + std::time::Duration::from_secs(secs));
+    retry.0 += 1;
+}
+
+/// Whether a scheduled retry is due now; taking it clears it.
+fn reconcile_retry_due() -> bool {
+    let mut retry = RECONCILE_RETRY.lock().unwrap();
+    match retry.1 {
+        Some(at) if std::time::Instant::now() >= at => {
+            retry.1 = None;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Called from the devices round: a reattach that failed earlier is tried
+/// again when its wait is over. A no-op otherwise.
+pub(crate) async fn retry_reconcile_if_due(state: &Arc<AppState>, api_url: &str, app_handle: &tauri::AppHandle) {
+    if !reconcile_retry_due() {
+        return;
+    }
+    // Reattached meanwhile (the page asks when Flowsta comes back): nothing to do or say.
+    let pending = state.vault_config.lock().unwrap().as_ref().map(|c| c.pending_reconcile || c.pending_registration).unwrap_or(false);
+    if !pending {
+        return;
+    }
+    log::info!("[reconcile] trying again to reattach the account");
+    reconcile_account_layer(state, api_url, app_handle).await;
+}
+
+#[cfg(test)]
+mod reconcile_retry_tests {
+    use super::*;
+
+    /// A failed reattach is tried again after 2, 10 and 30 minutes, then
+    /// not again this session: four grants an hour at the most, where the
+    /// challenge endpoint allows twenty in fifteen minutes.
+    #[test]
+    fn a_failed_reattach_is_tried_again_three_times_with_longer_waits() {
+        assert_eq!(reconcile_retry_wait(0), Some(120));
+        assert_eq!(reconcile_retry_wait(1), Some(600));
+        assert_eq!(reconcile_retry_wait(2), Some(1800));
+        assert_eq!(reconcile_retry_wait(3), None);
+        assert_eq!(reconcile_retry_wait(40), None);
+        let within_an_hour: u64 = RECONCILE_RETRY_AFTER_SECS.iter().sum();
+        assert!(within_an_hour <= 3600 && RECONCILE_RETRY_AFTER_SECS.len() + 1 <= 4);
     }
 }
 

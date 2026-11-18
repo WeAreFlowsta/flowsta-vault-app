@@ -4,7 +4,9 @@
 // `npm run e2e` wipes the scratch data folder and runs the specs.
 // Screenshots land in e2e/shots.
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { request } from "node:https";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { SevereServiceError } from "webdriverio";
 
@@ -116,6 +118,35 @@ function holdIdleLock() {
   } catch { /* not GNOME */ }
 }
 
+/** The suite restores and signs in many times in a few minutes; several runs
+ *  in an evening tripped staging's rate limits and the Vault's reattach of
+ *  the account was refused (429, 2026-11-18). With the staging test key (the
+ *  one the matrix scripts present: VAULT_MATRIX_TEST_KEY or
+ *  ~/.config/flowsta/staging-test-key) staging leaves this address out of its
+ *  limits for two hours. Without a key the limits apply, as for anyone. */
+async function askForRateLimitExemption() {
+  let key = process.env.VAULT_MATRIX_TEST_KEY || "";
+  if (!key) {
+    try { key = readFileSync(resolve(homedir(), ".config/flowsta/staging-test-key"), "utf8").trim(); } catch { /* none */ }
+  }
+  if (!key) { console.log("e2e: no staging test key - staging's rate limits apply"); return; }
+  // The test Vaults may reach the API over IPv4 or IPv6: ask from both.
+  const ask = (family: 4 | 6) => new Promise<{ status: number | null; until: string | null }>((done) => {
+    const req = request("https://auth-api-staging.flowsta.com/api/v1/test/rate-limit-exemption", { method: "POST", family, headers: { "x-flowsta-test-key": key, "content-length": 0 }, timeout: 15_000 }, (res) => {
+      let body = "";
+      res.on("data", (c) => { body += c; });
+      res.on("end", () => { let until: string | null = null; try { until = JSON.parse(body).exempt_until ?? null; } catch { /* not JSON */ } done({ status: res.statusCode ?? null, until }); });
+    });
+    req.on("error", () => done({ status: null, until: null }));
+    req.on("timeout", () => { req.destroy(); done({ status: null, until: null }); });
+    req.end();
+  });
+  for (const family of [4, 6] as const) {
+    const r = await ask(family);
+    console.log(r.status === 200 ? `e2e: IPv${family} left out of staging's rate limits until ${r.until}` : `e2e: IPv${family} no exemption (${r.status ?? "unreachable"}) - the limits apply on that route`);
+  }
+}
+
 export const config: WebdriverIO.Config = {
   runner: "local",
   specs: [`./specs/${process.env.VAULT_E2E_MODE || "fresh"}/**/*.e2e.ts`],
@@ -145,7 +176,8 @@ export const config: WebdriverIO.Config = {
   reporters: ["spec"],
   logLevel: "warn",
   waitforTimeout: 30_000,
-  onPrepare() {
+  async onPrepare() {
+    await askForRateLimitExemption();
     if (screenLocked()) throw new SevereServiceError("e2e: the screen is locked - the app gets no frames while it is. Unlock it and run again.");
     holdIdleLock();
     stopTestApps();

@@ -519,6 +519,11 @@ pub struct RoundOutcome {
     pub dropped: usize,
     /// Copies still missing (the device that holds them was not reachable).
     pub waiting: usize,
+    /// Of those, the copies held by a device that HAS been heard this
+    /// session. Only these hold a joining device's setup open: copies on a
+    /// device that has not been heard are shown on the Devices page and
+    /// arrive when it is next on.
+    pub waiting_from_heard: usize,
 }
 
 impl RoundOutcome {
@@ -736,7 +741,37 @@ pub async fn locked_round(state: &Arc<crate::commands::AppState>, fetch_all: boo
         })
     };
     let lane = lane(state).await;
+    if let Ok(lane) = lane.as_ref() {
+        say_here(&reach, &root, &me, lane).await;
+    }
     copy_from_others(state, &root, &me, &recorded, &agent_of, lane, fetch_all, outcome).await
+}
+
+/// When this locked Vault last told its other devices it is here.
+static HERE_SAID: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+const HERE_EVERY: std::time::Duration = std::time::Duration::from_secs(110);
+
+/// A locked Vault that is still syncing tells the identity's other current
+/// devices it is here, about every two minutes, so they show it as on. Its
+/// device record cannot be rewritten while locked, and nothing reads
+/// presence from the record.
+async fn say_here(reach: &[ReachRecord], root: &Path, me: &str, lane: &Arc<crate::backup_lane::Lane>) {
+    {
+        let mut said = HERE_SAID.lock().unwrap();
+        if said.map(|t| t.elapsed() < HERE_EVERY).unwrap_or(false) {
+            return;
+        }
+        *said = Some(std::time::Instant::now());
+    }
+    for r in reach.iter().filter(|r| r.install_id != me) {
+        let Some(raw) = crate::commands::base64_standard_decode(&r.conductor_key).ok().filter(|raw| raw.len() == 39 && crate::devices::is_current_device(root, raw)) else {
+            continue;
+        };
+        let to = holochain_types::prelude::AgentPubKey::from_raw_39(raw);
+        if let Err(e) = lane.send_here(&to, lane.line_for(&r.generation)).await {
+            log::debug!("[locked] a device was not told this one is here: {}", e.chars().take(120).collect::<String>());
+        }
+    }
 }
 
 /// One round: say what this device holds (always), and copy what the other
@@ -900,6 +935,7 @@ async fn copy_from_others(
         }
     }
     *COPIES_PROGRESS.lock().unwrap() = Some((state.identity_root(), wanted, pending));
+    outcome.waiting_from_heard = still.iter().filter(|(install_id, _)| crate::devices::heard_at(install_id).is_some()).map(|(_, (backups, _))| *backups as usize).sum();
     let still = still.into_iter().map(|(install_id, (backups, bytes))| FetchingFrom { install_id, backups, bytes }).collect();
     *STILL_TO_FETCH.lock().unwrap() = Some((state.identity_root(), still));
     Ok(outcome)

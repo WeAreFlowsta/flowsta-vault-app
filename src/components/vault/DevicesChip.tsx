@@ -6,37 +6,21 @@
 import { component$, useSignal, useVisibleTask$ } from "@builder.io/qwik";
 import { useNavigate } from "@builder.io/qwik-city";
 import { invoke } from "@tauri-apps/api/core";
-import { deviceLine, RECENT_MS } from "~/components/vault/DevicesTab";
+import type { DeviceRow, DevicesProgress } from "~/components/vault/DevicesTab";
+import { chip, knownDevices, type OtherDevice, type RowColor } from "~/lib/device-rules";
 
-type Row = Parameters<typeof deviceLine>[0];
+const DOT: Record<RowColor, string> = { green: "bg-green-400", grey: "bg-gray-500", amber: "bg-amber-400" };
 
-
-/** The chip's text, colour and tooltip for a list of devices. */
-export function devicesSummary(devices: Row[], now = Date.now()): { label: string; color: string; title: string } {
-  const live = devices.filter((d) => d.state !== "removed");
-  const others = live.filter((d) => d.state !== "this_device" && d.state !== "this_device_setting_up");
-  if (others.length === 0) {
-    return { label: "1 device", color: "bg-gray-500", title: "Only on this device" };
-  }
-  // A device being set up - this one or another - is still receiving: the
-  // chip is amber on every device until it has everything (they match).
-  const receiving = live.some((d) => d.state === "this_device_setting_up") || others.some((d) => d.state === "setting_up");
-  const behind = receiving || others.some(
-    (d) => d.state === "not_seen_since" || d.state === "needs_update" || (d.state === "last_synced" && now - (d.at ?? 0) > RECENT_MS),
-  );
-  return {
-    // This device counts before its own record is written.
-    label: `${others.length + 1} devices`,
-    color: behind ? "bg-amber-400" : "bg-green-400",
-    title:
-      (live.some((d) => d.state === "this_device_setting_up") ? "This device - receiving your private data\n" : "") +
-      others.map((d) => `${d.name} - ${deviceLine(d).toLowerCase()}`).join("\n"),
-  };
-}
+/** What the chip needs beside the list: whether this device joined an
+ *  identity that existed, and the person's answer about another device. */
+export interface ChipFacts { joined: boolean; answer: OtherDevice }
 
 export const DevicesChip = component$<{ ready: boolean }>((props) => {
   const nav = useNavigate();
-  const devices = useSignal<Row[] | null>(null);
+  const devices = useSignal<DeviceRow[] | null>(null);
+  const progress = useSignal<DevicesProgress | null>(null);
+  // Null until this device's own facts are read: nothing is said from a guess.
+  const facts = useSignal<ChipFacts | null>(null);
   // What this device already knew before the network came up.
   const known = useSignal(1);
 
@@ -44,7 +28,11 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
   useVisibleTask$(({ cleanup }) => {
     const load = async () => {
       try {
-        devices.value = await invoke<Row[]>("devices_list");
+        // This device's own facts first: they are local and answer at once.
+        const id = await invoke<{ joined_existing?: boolean; has_other_device?: boolean | null } | null>("get_identity").catch(() => null);
+        if (id) facts.value = { joined: !!id.joined_existing, answer: id.has_other_device == null ? null : id.has_other_device ? "yes" : "no" };
+        devices.value = await invoke<DeviceRow[]>("devices_list");
+        progress.value = await invoke<DevicesProgress>("devices_progress").catch(() => null);
       } catch {
         /* locked, or the network is still starting */
       }
@@ -55,7 +43,7 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
     // A change made on this device (remove, approve) or heard from another.
     window.addEventListener("devices-changed-here", load);
     // The Devices tab just loaded the list: show the same one now.
-    const listed = (e: Event) => { devices.value = (e as CustomEvent<Row[]>).detail; };
+    const listed = (e: Event) => { devices.value = (e as CustomEvent<DeviceRow[]>).detail; };
     window.addEventListener("devices-listed", listed);
     let unlisten: (() => void) | null = null;
     import("@tauri-apps/api/event").then(({ listen }) => listen("devices-changed", load).then((u) => { unlisten = u; })).catch(() => {});
@@ -67,14 +55,27 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
     });
   });
 
-  // Drawn from the start, so the panel never changes shape: "1 device"
-  // until the list says otherwise.
-  // Until the list answers, the count is the one this device last saw, in grey.
-  const summary = devices.value && devices.value.length > 0
-    ? devicesSummary(devices.value)
-    : known.value > 1
-      ? { label: `${known.value} devices`, color: "bg-gray-500", title: "Checking your devices" }
-      : devicesSummary([]);
+  // Drawn from the start, so the panel never changes shape. Until the list
+  // answers, the count is the one this device last saw, in grey; "1 device"
+  // is said only when it is known (the rules in ~/lib/device-rules).
+  const list = devices.value;
+  const f = facts.value;
+  const view = !f
+    ? { label: known.value > 1 ? `${known.value} devices` : "Checking devices", color: "grey" as RowColor, title: "Checking your devices" }
+    : list && list.length > 0
+      ? chip({
+          joined: f.joined,
+          answer: f.answer,
+          listRead: true,
+          settingUp: list.some((d) => d.state === "this_device_setting_up"),
+          others: knownDevices(list, progress.value?.siblings ?? []),
+          mine: progress.value?.mine.records ?? 0,
+          now: Date.now(),
+        })
+      : known.value > 1
+        ? { label: `${known.value} devices`, color: "grey" as RowColor, title: "Checking your devices" }
+        : chip({ joined: f.joined, answer: f.answer, listRead: false, settingUp: true, others: [], mine: 0, now: Date.now() });
+  const summary = { label: view.label, color: DOT[view.color], title: view.title };
   // Shown from the first paint ("1 device", grey) and filled in later.
   void props.ready;
   return (

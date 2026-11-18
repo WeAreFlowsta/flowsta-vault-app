@@ -140,6 +140,17 @@ pub fn device_state(device: &DeviceRecord, viewer_install_id: &str, viewer_gener
     }
 }
 
+/// Which side runs the older Vault when two devices are on different
+/// network generations: "it" (the other device) or "this" (this one). The
+/// row then names the device that needs the update, never the wrong one.
+pub fn older_side(device_generation: &str, viewer_generation: &str) -> Option<&'static str> {
+    match device_generation.cmp(viewer_generation) {
+        std::cmp::Ordering::Less => Some("it"),
+        std::cmp::Ordering::Greater => Some("this"),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
 /// Whether a device should write its record again: when something about it
 /// changed, or when the last one is a day old.
 pub fn needs_refresh(existing: Option<&DeviceRecord>, current: &DeviceRecord) -> bool {
@@ -343,7 +354,12 @@ pub fn changes_since(before: Option<&[KnownDevice]>, devices: &[DeviceRecord], m
     let Some(before) = before else {
         return Vec::new();
     };
-    let my_added_at = devices.iter().find(|d| d.install_id == me).map(|d| d.added_at).unwrap_or(0);
+    // Until this device's own record is in its list it cannot tell which
+    // devices were there first, so nothing is news yet: a device being set
+    // up used to say a device that was there before it "was added".
+    let Some(my_added_at) = devices.iter().find(|d| d.install_id == me).map(|d| d.added_at) else {
+        return Vec::new();
+    };
     let mut changes = Vec::new();
     for device in devices.iter().filter(|d| d.install_id != me) {
         let seen = before
@@ -647,6 +663,39 @@ static HEARD_AT: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>
 pub fn note_heard(install_id: &str) {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     HEARD_AT.lock().unwrap().get_or_insert_with(Default::default).insert(install_id.to_string(), now);
+    // Its record came with the message, which only an unlocked Vault sends.
+    if let Some(locked) = HEARD_LOCKED.lock().unwrap().as_mut() {
+        locked.remove(install_id);
+    }
+}
+
+/// Devices whose latest message was the short "here" a Vault sends while it
+/// is locked and still syncing (nothing sealed in it: a locked Vault cannot
+/// seal). The row reads "Online (locked)".
+static HEARD_LOCKED: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// A "here" arrived from this agent key. Counted only when the key is a
+/// current device of the identity, by the file this device keeps.
+pub fn note_heard_here(identity_root: &std::path::Path, agent_39: &[u8]) -> bool {
+    let wanted = crate::key_derivation::base64_standard_encode(agent_39);
+    let known: Vec<KnownDevice> = std::fs::read(crate::paths::known_devices_path(identity_root)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let Some(install_id) = install_id_among(&known, &wanted) else { return false };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    HEARD_AT.lock().unwrap().get_or_insert_with(Default::default).insert(install_id.clone(), now);
+    HEARD_LOCKED.lock().unwrap().get_or_insert_with(Default::default).insert(install_id);
+    true
+}
+
+/// The install a conductor key belongs to, when it is a current device.
+fn install_id_among(known: &[KnownDevice], conductor_key: &str) -> Option<String> {
+    if !current_among(known, conductor_key) {
+        return None;
+    }
+    known.iter().find(|k| k.conductor_key == conductor_key).map(|k| k.install_id.clone())
+}
+
+pub fn heard_locked(install_id: &str) -> bool {
+    HEARD_LOCKED.lock().unwrap().as_ref().map(|m| m.contains(install_id)).unwrap_or(false)
 }
 
 pub fn heard_at(install_id: &str) -> Option<u64> {
@@ -734,16 +783,70 @@ pub async fn still_receiving_records(state: &Arc<AppState>) -> bool {
         .unwrap_or(false)
 }
 
+/// Why a joined device's setup is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupDone {
+    /// The person said this is the identity's only device.
+    SaidOnlyDevice,
+    /// Every device heard this session holds no more than this one.
+    HasWhatHeardDevicesHold,
+    /// The person chose to continue without a device that was not heard.
+    ContinuedWithout,
+}
+
+/// What the rule reads. There is no clock here on purpose: until 1.8.0 a
+/// device that heard nobody for ten minutes wrote its setup-done mark, said
+/// "This device has everything from the other devices" and told them so.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetupFacts {
+    pub has_other_device: Option<bool>,
+    pub continued_without: bool,
+    /// A full round finished with nothing failing.
+    pub round_complete: bool,
+    /// Records held here.
+    pub mine: u64,
+    /// What each device heard directly this session, and not itself being
+    /// set up, said it holds (`None`: heard, and has not said).
+    pub heard_settled: Vec<Option<u64>>,
+    /// Records are still arriving from a device that was heard.
+    pub still_arriving: bool,
+}
+
+/// Setup is done for one of three reasons, and for no other.
+pub fn setup_done(f: &SetupFacts) -> Option<SetupDone> {
+    if f.continued_without {
+        return Some(SetupDone::ContinuedWithout);
+    }
+    if !f.round_complete {
+        return None;
+    }
+    if f.has_other_device == Some(false) {
+        return Some(SetupDone::SaidOnlyDevice);
+    }
+    if f.still_arriving || f.heard_settled.is_empty() {
+        return None;
+    }
+    f.heard_settled
+        .iter()
+        .all(|h| matches!(h, Some(records) if *records <= f.mine))
+        .then_some(SetupDone::HasWhatHeardDevicesHold)
+}
+
+/// What the devices heard this session that are not being set up said they hold.
+pub fn heard_settled_holds() -> Vec<Option<u64>> {
+    SIBLING_HOLDS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|m| m.values().filter(|(h, _)| !h.setting_up).map(|(h, _)| Some(h.records)).collect())
+        .unwrap_or_default()
+}
+
 /// Whether a settled sibling has said what it holds and this device holds
 /// at least that many records. A sibling's count includes its profile
 /// record if it has one, so matched counts mean nothing is left to wait
 /// for: an identity without a profile record no longer keeps its "on its
 /// way" card up for ten minutes after the bars are full (10-27, Linux).
-pub async fn siblings_matched(state: &Arc<AppState>) -> bool {
-    let mine = own_holds(state).await.records;
-    siblings_matched_in(SIBLING_HOLDS.lock().unwrap().as_ref(), mine)
-}
-
 pub fn siblings_matched_in(siblings: Option<&std::collections::HashMap<String, (Holds, u64)>>, mine: u64) -> bool {
     let Some(siblings) = siblings else { return false };
     let settled: Vec<&Holds> = siblings.values().map(|(h, _)| h).filter(|h| !h.setting_up).collect();
@@ -1004,6 +1107,15 @@ pub struct DeviceRow {
     /// the list says "Removing…" until a round has published it.
     #[serde(default)]
     pub removing: bool,
+    /// With `needs_update`: which side runs the older Vault ("it" or "this").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_update_side: Option<&'static str>,
+    /// The two exchange records on the older network until the update.
+    #[serde(default)]
+    pub syncing_on_older: bool,
+    /// It was heard while locked and still syncing.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// The identity's devices, this one first, as this device knows them.
@@ -1019,11 +1131,34 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
     let my_generation = crate::hc::active_line(state).generation();
     let now = now_ms();
     let owed = owed_removals(&state.identity_root());
-    let mut rows: Vec<DeviceRow> = devices_in(&records)
+    // This device, moved to the newer network, still holds and writes the
+    // older one while a device of the identity is on it.
+    // Asked only when a device of the identity is on the older network, and
+    // never for long: the list must not wait on a line that is not there.
+    let devices = devices_in(&records);
+    let some_older = devices.iter().any(|d| d.removed_at.is_none() && d.install_id != me && older_side(&d.generation, my_generation) == Some("it"));
+    let older_attached = some_older
+        && crate::hc::active_line(state) == crate::hc::Line::V07
+        && tokio::time::timeout(std::time::Duration::from_secs(3), crate::sealed::sealed_versions_on(state, crate::hc::Line::V06))
+            .await
+            .map(|r| r.is_ok())
+            .unwrap_or(false);
+    let mut rows: Vec<DeviceRow> = devices
         .into_iter()
         .map(|d| {
             let heard = heard_at(&d.install_id).map(|secs| secs * 1000);
+            let side = if d.removed_at.is_some() || d.install_id == me { None } else { older_side(&d.generation, my_generation) };
             DeviceRow {
+                needs_update_side: side,
+                // The older device is reached on the older network when this
+                // one still holds it; a newer device was heard there when it
+                // was heard at all.
+                syncing_on_older: match side {
+                    Some("it") => older_attached,
+                    Some(_) => heard.is_some(),
+                    None => false,
+                },
+                locked: heard_locked(&d.install_id),
                 removing: still_removing(&owed, d.removed_at.is_some(), &d.conductor_key),
                 state: device_state(&d, &me, my_generation, mine, now, heard),
                 install_id: d.install_id,
@@ -1048,6 +1183,9 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
             heard_at: None,
             state: DeviceState::ThisDeviceSettingUp,
             removing: false,
+            needs_update_side: None,
+            syncing_on_older: false,
+            locked: false,
         });
     }
     rows.sort_by_key(|r| (!matches!(r.state, DeviceState::ThisDevice | DeviceState::ThisDeviceSettingUp), r.state == DeviceState::Removed));
@@ -1358,6 +1496,8 @@ mod tests {
         assert_eq!(changes_since(Some(&before), &[mine.clone(), removed.clone()], "me"), vec![DeviceChange::Removed(removed.clone())]);
         removed.removed_by = Some("me".into());
         assert!(changes_since(Some(&before), &[mine.clone(), removed.clone()], "me").is_empty());
+        // Before this device's own record is in the list, nothing is news.
+        assert!(changes_since(Some(&[]), &[other.clone()], "me").is_empty());
         // Its own record is never news; a device first seen already removed is not either.
         assert!(changes_since(Some(&[]), &[mine.clone(), removed], "me").is_empty());
     }
@@ -1441,6 +1581,58 @@ mod tests {
         assert_eq!(super::records_held(16, Some(18)), 18);
         assert_eq!(super::records_held(16, Some(9)), 16, "the 0.6 cell can lag the 0.7 one");
         assert_eq!(super::records_held(16, None), 16, "no 0.6 line: the active view");
+    }
+
+    fn facts() -> SetupFacts {
+        SetupFacts { has_other_device: Some(true), continued_without: false, round_complete: true, mine: 40, heard_settled: vec![], still_arriving: false }
+    }
+
+    #[test]
+    fn a_device_that_heard_nobody_keeps_waiting_whatever_the_time() {
+        // The rule this replaces finished here ten minutes after the first
+        // complete round. The facts hold no time, so no wait can end it.
+        assert_eq!(setup_done(&facts()), None);
+        assert_eq!(setup_done(&SetupFacts { has_other_device: None, ..facts() }), None);
+    }
+
+    #[test]
+    fn the_person_saying_only_this_device_ends_setup_at_the_first_complete_round() {
+        assert_eq!(setup_done(&SetupFacts { has_other_device: Some(false), ..facts() }), Some(SetupDone::SaidOnlyDevice));
+        assert_eq!(setup_done(&SetupFacts { has_other_device: Some(false), round_complete: false, ..facts() }), None);
+    }
+
+    #[test]
+    fn setup_ends_when_every_device_heard_holds_no_more_than_this_one() {
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40)], ..facts() }), Some(SetupDone::HasWhatHeardDevicesHold));
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(12), Some(40)], ..facts() }), Some(SetupDone::HasWhatHeardDevicesHold));
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(41)], ..facts() }), None, "one holds more");
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40), None], ..facts() }), None, "one was heard and has not said");
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40)], still_arriving: true, ..facts() }), None);
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40)], round_complete: false, ..facts() }), None);
+    }
+
+    #[test]
+    fn a_here_message_counts_only_from_a_current_device() {
+        let known = vec![
+            KnownDevice { install_id: "mac".into(), conductor_key: "KEY-A".into(), removed: false },
+            KnownDevice { install_id: "old".into(), conductor_key: "KEY-B".into(), removed: true },
+        ];
+        assert_eq!(install_id_among(&known, "KEY-A").as_deref(), Some("mac"));
+        assert_eq!(install_id_among(&known, "KEY-B"), None, "a removed device");
+        assert_eq!(install_id_among(&known, "KEY-C"), None, "a key this device does not know");
+    }
+
+    #[test]
+    fn the_row_names_the_side_that_runs_the_older_vault() {
+        assert_eq!(older_side("holochain-0.6", "holochain-0.7"), Some("it"));
+        assert_eq!(older_side("holochain-0.7", "holochain-0.6"), Some("this"));
+        assert_eq!(older_side("holochain-0.7", "holochain-0.7"), None);
+    }
+
+    #[test]
+    fn continuing_without_a_device_ends_setup_at_once() {
+        assert_eq!(setup_done(&SetupFacts { continued_without: true, ..facts() }), Some(SetupDone::ContinuedWithout));
+        assert_eq!(setup_done(&SetupFacts { continued_without: true, round_complete: false, heard_settled: vec![Some(900)], ..facts() }), Some(SetupDone::ContinuedWithout));
     }
 
     #[test]
