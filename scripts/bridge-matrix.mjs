@@ -26,6 +26,8 @@
  *       one identity, the epoch, claims, reset -> restore -> email. Same two fresh instances
  *       as --phase=create (VAULT_MATRIX_PORT required, VAULT_MATRIX_RESTORE_PORT optional).
  *   node scripts/bridge-matrix.mjs --phase=devices   # 1.6.0: one identity on two devices
+ *   node scripts/bridge-matrix.mjs --phase=maker-off-before|maker-off-after  # a device joins while the
+ *       device that made the app backups is off (scripts/matrix-maker-off.sh runs both and stops A between)
  *       add with a code, sync, connections, backups, lock-and-sync, remove, stand down, the phrase
  *       door. Two FRESH instances: VAULT_MATRIX_PORT (A) and VAULT_MATRIX_RESTORE_PORT (B).
  *   node scripts/bridge-matrix.mjs --phase=bulk      # 1.7.0: an identity past one gossip batch - A holds
@@ -2443,6 +2445,86 @@ async function signingV16Leg(stage) {
   record('v1.6: the list reads both writes, still two rows on v1.6', after.length === 2 && after.every(isV16) && after.find((x) => x.file_hash === saved.hashB)?.revoked === true && after.find((x) => x.file_hash === saved.hashA)?.thumbnail === TINY_PNG_2, JSON.stringify(after.map((x) => ({ f: (x.file_hash || '').slice(0, 8), app: x.signing_app_id, revoked: x.revoked, thumb: (x.thumbnail || '').slice(-20) }))));
 }
 
+// ── Maker-off leg (--phase=maker-off-before | maker-off-after) ──────────
+// 11-19, a person's Mac: a device joins while one sibling is on and the
+// device that MADE the app backups is off. The new device asked the one that
+// was off for each backup in turn (20 s a copy); behind that step its round
+// told nobody it was there and could not close its setup, and it never got
+// those backups though the sibling that was on held a copy of each.
+// before: A creates the identity and makes backups, B restores and holds a
+//   copy of each. The script then stops A.
+// after:  C restores beside B alone. It gets A's backups from B, its setup
+//   closes, B hears it as set up, and no round of C's runs long.
+async function makerOffLeg(phase) {
+  console.log(`\n── Maker-off leg (${phase})`);
+  const fs = await import('node:fs');
+  const stateFile = process.env.VAULT_MATRIX_STATE;
+  if (!stateFile) { record('maker-off leg skipped - run it through scripts/matrix-maker-off.sh', true); return; }
+  const op = async (port, body) => (await vaultFetch(port, '/dev/devices', { method: 'POST', body })).data || {};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const until = async (fn, secs) => {
+    const deadline = Date.now() + secs * 1000;
+    while (Date.now() < deadline) { if (await fn().catch(() => false)) return true; await sleep(3000); }
+    return false;
+  };
+  const setupOf = async (port) => (await vaultFetch(port, '/dev/status')).data?.setup || {};
+  const LABELS = ['one', 'two', 'three', 'four', 'five', 'six'];
+  const copiesFrom = async (port, install) => ((await op(port, { op: 'backups', client_id: 'matrix_app' })).held || []).filter((h) => h.from === install && LABELS.includes(h.label) && h.opens_as === `A backup ${h.label}`).length;
+
+  if (phase === 'maker-off-before') {
+    const a = Number(process.env.VAULT_MATRIX_PORT || 0);
+    const b = Number(process.env.VAULT_MATRIX_RESTORE_PORT || 0);
+    const password = `Matrix-off-${randomHash().slice(0, 10)}!`;
+    const created = await vaultFetch(a, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, email: `matrix-maker-off-${Date.now()}@example.com`, display_name: 'Matrix Maker Off' } });
+    record('A: identity created', created.status === 200 && !!created.data?.phrase, `${created.status} ${created.data?.description || ''}`);
+    if (created.status !== 200) return;
+    record('A: its records answer', await until(async () => Array.isArray((await op(a, { op: 'list' })).devices), 240));
+    await op(a, { op: 'write', text: 'from A, the maker' });
+    await op(a, { op: 'connect', client_id: 'matrix_app', app_name: 'Matrix App' });
+    for (const label of LABELS) await op(a, { op: 'backup', client_id: 'matrix_app', label, text: `A backup ${label}` });
+    record('A: a round says what it holds', (await op(a, { op: 'round' })).round === 'done');
+    const installA = (await op(a, { op: 'status' })).install_id;
+    const restored = await vaultFetch(b, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, phrase: created.data.phrase, restore: true } });
+    record('B: restores the identity from the phrase', restored.status === 200 && restored.data?.restored === true, `${restored.status} ${restored.data?.description || ''}`);
+    record("B: A's record arrives", await until(async () => ((await op(b, { op: 'notes' })).notes || []).some((n) => n.text === 'from A, the maker'), 600));
+    record(`B: holds and opens a copy of each of A's ${LABELS.length} backups`, await until(async () => (await copiesFrom(b, installA)) === LABELS.length, 600), `${await copiesFrom(b, installA)} of ${LABELS.length}`);
+    record("B: its setup closes beside A", await until(async () => (await setupOf(b)).pending === false, 600), JSON.stringify(await setupOf(b)));
+    const installB = (await op(b, { op: 'status' })).install_id;
+    fs.writeFileSync(stateFile, JSON.stringify({ phrase: created.data.phrase, password, installA, installB }), { mode: 0o600 });
+    return;
+  }
+
+  // after: A is stopped. B is on; C is fresh.
+  const b = Number(process.env.VAULT_MATRIX_PORT || 0);
+  const c = Number(process.env.VAULT_MATRIX_RESTORE_PORT || 0);
+  const { phrase, password, installA } = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  fs.rmSync(stateFile, { force: true });
+  const t0 = Date.now();
+  const took = () => `${Math.round((Date.now() - t0) / 1000)} s`;
+  const restored = await vaultFetch(c, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, phrase, restore: true } });
+  record('C: restores the identity from the phrase, the maker of the backups off', restored.status === 200 && restored.data?.restored === true, `${restored.status} ${restored.data?.description || ''}`);
+  if (restored.status !== 200) return;
+  record('C: being set up from the moment it joins', (await setupOf(c)).pending === true, JSON.stringify(await setupOf(c)));
+  record("C: the records arrive from B", await until(async () => ((await op(c, { op: 'notes' })).notes || []).some((n) => n.text === 'from A, the maker'), 600), took());
+  const installC = (await op(c, { op: 'status' })).install_id;
+  // The three things that did not happen on 11-19.
+  record('C: its setup closes with the maker off (it kept the notice up for good)', await until(async () => (await setupOf(c)).pending === false, 720), `${took()} ${JSON.stringify(await setupOf(c))}`);
+  const seenByB = async () => ((await op(b, { op: 'list' })).devices || []).find((d) => d.install_id === installC);
+  record('B: hears C and shows it as set up (it showed "Heard 20 min ago, Receiving")', await until(async () => { const d = await seenByB(); return !!d && d.state !== 'setting_up' && typeof d.heard_at === 'number' && Date.now() - d.heard_at < 5 * 60_000; }, 420), `${took()} ${JSON.stringify(await seenByB()).slice(0, 220)}`);
+  record(`C: gets each of A's ${LABELS.length} backups from B, which holds copies (it never got them)`, await until(async () => (await copiesFrom(c, installA)) === LABELS.length, 720), `${took()} ${await copiesFrom(c, installA)} of ${LABELS.length}`);
+  // No round of C's ran long behind a device that was off (the log names
+  // every round over 30 s and what it spent the time on).
+  const logDir = process.env.VAULT_MATRIX_C_DIR || '';
+  const logs = ['xdg/com.flowsta.vault.staging/logs/Flowsta Vault (Staging).log', 'xdg/com.flowsta.vault/logs/Flowsta Vault.log'].map((f) => `${logDir}/${f}`).filter((f) => fs.existsSync(f));
+  const lines = logs.length ? fs.readFileSync(logs[0], 'utf8').split('\n') : [];
+  const slow = lines.filter((l) => /a slow (full|light) round \((\d+)s\)/.test(l)).map((l) => ({ secs: Number(/round \((\d+)s\)/.exec(l)[1]), line: l.slice(l.indexOf('[devices]')) }));
+  const longest = slow.reduce((m, x) => Math.max(m, x.secs), 0);
+  record("C: its log is there to read", lines.length > 0, logs[0] || `none under ${logDir}`);
+  record('C: no round ran over two minutes (one ran for half an hour)', lines.length > 0 && longest <= 120, slow.length ? slow.map((x) => x.line).join(' | ').slice(0, 300) : 'no round over 30 s');
+  const asked = lines.filter((l) => /not fetched this time: the other device has not been heard/.test(l)).length;
+  console.log(`   C asked the device that was off ${asked} time(s) in ${took()}; its longest round ${longest || 'under 30'} s`);
+}
+
 // ── Hardening leg (--phase=hardening) ──────────────────────────────────
 //
 // Who may learn or do what through the local API, on ONE unlocked test
@@ -2685,6 +2767,13 @@ async function hardeningLeg() {
     await bulkLeg();
     const passedB = results.filter((r) => r.ok).length;
     console.log(`\nRESULT: ${passedB}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
+    process.exit(failures ? 1 : 0);
+  }
+  if (PHASE.startsWith('maker-off-')) {
+    await makerOffLeg(PHASE);
+    const passedM = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedM}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
     if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
     process.exit(failures ? 1 : 0);
   }
