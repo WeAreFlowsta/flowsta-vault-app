@@ -519,6 +519,11 @@ pub struct RoundOutcome {
     pub dropped: usize,
     /// Copies still missing (the device that holds them was not reachable).
     pub waiting: usize,
+    /// Of those, the copies held by a device that HAS been heard this
+    /// session. Only these hold a joining device's setup open: copies on a
+    /// device that has not been heard are shown on the Devices page and
+    /// arrive when it is next on.
+    pub waiting_from_heard: usize,
 }
 
 impl RoundOutcome {
@@ -930,6 +935,7 @@ async fn copy_from_others(
         }
     }
     *COPIES_PROGRESS.lock().unwrap() = Some((state.identity_root(), wanted, pending));
+    outcome.waiting_from_heard = still.iter().filter(|(install_id, _)| crate::devices::heard_at(install_id).is_some()).map(|(_, (backups, _))| *backups as usize).sum();
     let still = still.into_iter().map(|(install_id, (backups, bytes))| FetchingFrom { install_id, backups, bytes }).collect();
     *STILL_TO_FETCH.lock().unwrap() = Some((state.identity_root(), still));
     Ok(outcome)

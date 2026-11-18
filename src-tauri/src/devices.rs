@@ -354,7 +354,12 @@ pub fn changes_since(before: Option<&[KnownDevice]>, devices: &[DeviceRecord], m
     let Some(before) = before else {
         return Vec::new();
     };
-    let my_added_at = devices.iter().find(|d| d.install_id == me).map(|d| d.added_at).unwrap_or(0);
+    // Until this device's own record is in its list it cannot tell which
+    // devices were there first, so nothing is news yet: a device being set
+    // up used to say a device that was there before it "was added".
+    let Some(my_added_at) = devices.iter().find(|d| d.install_id == me).map(|d| d.added_at) else {
+        return Vec::new();
+    };
     let mut changes = Vec::new();
     for device in devices.iter().filter(|d| d.install_id != me) {
         let seen = before
@@ -1483,6 +1488,8 @@ mod tests {
         assert_eq!(changes_since(Some(&before), &[mine.clone(), removed.clone()], "me"), vec![DeviceChange::Removed(removed.clone())]);
         removed.removed_by = Some("me".into());
         assert!(changes_since(Some(&before), &[mine.clone(), removed.clone()], "me").is_empty());
+        // Before this device's own record is in the list, nothing is news.
+        assert!(changes_since(Some(&[]), &[other.clone()], "me").is_empty());
         // Its own record is never news; a device first seen already removed is not either.
         assert!(changes_since(Some(&[]), &[mine.clone(), removed], "me").is_empty());
     }

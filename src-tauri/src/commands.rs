@@ -2591,9 +2591,12 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                     );
                     let _ = devices_app.emit("backups-changed", serde_json::json!({}));
                 }
-                // Copies still to come: not everything yet (10-16: "fetched
-                // 43 · still to fetch 2", then "This device has everything").
-                if outcome.waiting > 0 {
+                // Copies still to come from a device that has been heard:
+                // not everything yet (10-16: "fetched 43 · still to fetch
+                // 2", then "This device has everything"). Copies on a
+                // device that has NOT been heard do not hold setup open:
+                // they waited for ever when that device never came back.
+                if outcome.waiting_from_heard > 0 {
                     complete = false;
                 }
             }
@@ -2606,7 +2609,9 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
         let parts: Vec<String> = laps.iter().filter(|(_, ms)| *ms >= 1000).map(|(n, ms)| format!("{} {}s", n, ms / 1000)).collect();
         log::info!("[devices] a slow {} round ({}s): {}", if full { "full" } else { "light" }, round_took.as_secs(), parts.join(", "));
     }
-    if complete {
+    // "Continue without it" ends setup at any round, complete or not.
+    let continued = devices_state.vault_config.lock().unwrap().as_ref().map(|c| c.continued_without).unwrap_or(false);
+    if complete || continued {
         let (joined, profile_seen) = {
             let config = devices_state.vault_config.lock().unwrap();
             let cfg = config.as_ref();
@@ -2632,7 +2637,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
             let facts = crate::devices::SetupFacts {
                 has_other_device,
                 continued_without,
-                round_complete: true,
+                round_complete: complete,
                 mine: crate::devices::own_holds(devices_state).await.records,
                 heard_settled: crate::devices::heard_settled_holds(),
                 still_arriving: crate::devices::still_receiving_records(devices_state).await,

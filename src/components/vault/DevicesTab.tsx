@@ -155,6 +155,8 @@ export const DevicesTab = component$(() => {
   const added = useSignal("");
   // The install id of the device just approved here, until it is listed.
   const addedInstall = useSignal("");
+  const addedName = useSignal("");
+  const stillWaiting = useSignal(false);
   const removing = useSignal<DeviceRow | null>(null);
   // How the account sees this device, and the one-time recovery phrase step.
   const standing = useSignal<Standing>({ device: "unknown", enrollment: null });
@@ -206,7 +208,8 @@ export const DevicesTab = component$(() => {
       if (addedInstall.value && devices.value.some((d) => d.install_id === addedInstall.value && d.state !== "removed")) {
         const name = devices.value.find((d) => d.install_id === addedInstall.value)?.name || "The new device";
         addedInstall.value = "";
-        added.value = `${name} has started and is one of your devices.`;
+        stillWaiting.value = false;
+        added.value = `${name} is listed as one of your devices.`;
         setTimeout(() => { added.value = ""; }, 8_000);
       }
     } catch {
@@ -275,6 +278,12 @@ export const DevicesTab = component$(() => {
       window.dispatchEvent(new Event("devices-changed-here"));
       added.value = device ? `Waiting for ${device.name} to start...` : "";
       addedInstall.value = device?.install_id || "";
+      addedName.value = device?.name || "";
+      stillWaiting.value = false;
+      // Two minutes change the sentence, never the state: the wait goes on
+      // until the device is listed or the person closes the line.
+      const waitingFor = addedInstall.value;
+      setTimeout(() => { if (waitingFor && addedInstall.value === waitingFor) stillWaiting.value = true; }, 120_000);
       adding.value = false;
       code.value = "";
     } catch (e) {
@@ -386,6 +395,12 @@ export const DevicesTab = component$(() => {
               </svg>
             )}
             <span>{added.value}</span>
+          </p>
+        )}
+        {addedInstall.value && stillWaiting.value && (
+          <p class="mb-4 flex flex-wrap items-center gap-3 text-sm text-gray-300" data-testid="device-still-waiting">
+            <span>Still waiting. Check Flowsta Vault is open on {addedName.value || "the new device"}.</span>
+            <PillButton type="button" onClick$={() => { added.value = ""; addedInstall.value = ""; stillWaiting.value = false; }}>Close</PillButton>
           </p>
         )}
         {phraseDone.value && <p class="mb-4 text-sm text-sky-300">{phraseDone.value}</p>}
@@ -564,7 +579,7 @@ export const DevicesTab = component$(() => {
           <div class="mx-4 w-full max-w-md rounded-lg border border-gray-700 bg-gray-800 p-6">
             <h3 class="mb-2 text-lg font-semibold text-white">Remove {removing.value.name}?</h3>
             <p class="mb-6 text-sm text-gray-300">
-              This device will no longer sign in or approve as you, and it stops syncing. Anything already on it stays there.
+              It will no longer sign in or approve as you. It stops syncing the next time it is online. Anything already on it stays there.
             </p>
             <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <GlassButton variant="secondary" disabled={busy.value} onClick$={() => { removing.value = null; }}>Cancel</GlassButton>
