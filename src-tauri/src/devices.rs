@@ -140,6 +140,17 @@ pub fn device_state(device: &DeviceRecord, viewer_install_id: &str, viewer_gener
     }
 }
 
+/// Which side runs the older Vault when two devices are on different
+/// network generations: "it" (the other device) or "this" (this one). The
+/// row then names the device that needs the update, never the wrong one.
+pub fn older_side(device_generation: &str, viewer_generation: &str) -> Option<&'static str> {
+    match device_generation.cmp(viewer_generation) {
+        std::cmp::Ordering::Less => Some("it"),
+        std::cmp::Ordering::Greater => Some("this"),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
 /// Whether a device should write its record again: when something about it
 /// changed, or when the last one is a day old.
 pub fn needs_refresh(existing: Option<&DeviceRecord>, current: &DeviceRecord) -> bool {
@@ -1058,6 +1069,15 @@ pub struct DeviceRow {
     /// the list says "Removing…" until a round has published it.
     #[serde(default)]
     pub removing: bool,
+    /// With `needs_update`: which side runs the older Vault ("it" or "this").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_update_side: Option<&'static str>,
+    /// The two exchange records on the older network until the update.
+    #[serde(default)]
+    pub syncing_on_older: bool,
+    /// It was heard while locked and still syncing.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// The identity's devices, this one first, as this device knows them.
@@ -1073,11 +1093,26 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
     let my_generation = crate::hc::active_line(state).generation();
     let now = now_ms();
     let owed = owed_removals(&state.identity_root());
+    // This device, moved to the newer network, still holds and writes the
+    // older one while a device of the identity is on it.
+    let older_attached = crate::hc::active_line(state) == crate::hc::Line::V07
+        && crate::sealed::sealed_versions_on(state, crate::hc::Line::V06).await.is_ok();
     let mut rows: Vec<DeviceRow> = devices_in(&records)
         .into_iter()
         .map(|d| {
             let heard = heard_at(&d.install_id).map(|secs| secs * 1000);
+            let side = if d.removed_at.is_some() || d.install_id == me { None } else { older_side(&d.generation, my_generation) };
             DeviceRow {
+                needs_update_side: side,
+                // The older device is reached on the older network when this
+                // one still holds it; a newer device was heard there when it
+                // was heard at all.
+                syncing_on_older: match side {
+                    Some("it") => older_attached,
+                    Some(_) => heard.is_some(),
+                    None => false,
+                },
+                locked: false,
                 removing: still_removing(&owed, d.removed_at.is_some(), &d.conductor_key),
                 state: device_state(&d, &me, my_generation, mine, now, heard),
                 install_id: d.install_id,
@@ -1102,6 +1137,9 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
             heard_at: None,
             state: DeviceState::ThisDeviceSettingUp,
             removing: false,
+            needs_update_side: None,
+            syncing_on_older: false,
+            locked: false,
         });
     }
     rows.sort_by_key(|r| (!matches!(r.state, DeviceState::ThisDevice | DeviceState::ThisDeviceSettingUp), r.state == DeviceState::Removed));
@@ -1523,6 +1561,13 @@ mod tests {
         assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40), None], ..facts() }), None, "one was heard and has not said");
         assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40)], still_arriving: true, ..facts() }), None);
         assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40)], round_complete: false, ..facts() }), None);
+    }
+
+    #[test]
+    fn the_row_names_the_side_that_runs_the_older_vault() {
+        assert_eq!(older_side("holochain-0.6", "holochain-0.7"), Some("it"));
+        assert_eq!(older_side("holochain-0.7", "holochain-0.6"), Some("this"));
+        assert_eq!(older_side("holochain-0.7", "holochain-0.7"), None);
     }
 
     #[test]
