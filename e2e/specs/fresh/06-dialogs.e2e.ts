@@ -9,6 +9,9 @@
 //      dialog, one answer, both requests get it (Windows, 2026-10-16).
 //   5. A website's and a desktop app's connect dialogs; a signature asked
 //      for straight after connecting shows its own dialog.
+//   6. Publishing a release: the dialog lists every file, the Holochain
+//      programs and the other downloads the version needs (its `parts`),
+//      each with its hash, before anything is signed.
 import { randomBytes } from "node:crypto";
 import { byId, click, fill, PASSWORD, PORT_A, devOp, vault } from "../_helpers";
 
@@ -204,5 +207,95 @@ describe("approval dialogs", () => {
     expect(warning).toContain("is already connected from yoai://dialog-desktop");
     await click("link-deny");
     expect((await site).status).toBe(403);
+  });
+  it("a release to publish shows its files and the other downloads it needs before it is signed", async function () {
+    this.timeout(180_000);
+    await ensureUnlocked();
+    const RELEASE_CLIENT = "dialog_release_tool";
+    const RELEASE_ORIGIN = "yoai://dialog-release";
+    const sha = (c: string) => c.repeat(64);
+    const manifest = {
+      v: 1, app: "com.example.dialogtest", channel: "beta", sequence: 7,
+      issued_at: "2026-11-19T00:00:00Z", version: "9.9.9-beta.1", from_version: "9.9.8",
+      notes_url: "https://example.com/notes",
+      holochain: { lines: ["holochain-0.7"], changes_line: false },
+      rollout: { percent: 100 },
+      files: [
+        { platform: "darwin-aarch64", kind: "app-tarball", name: "Dialog.Test_aarch64.app.tar.gz", url: "https://example.com/a.tar.gz", size: 123456789, sha256: sha("a") },
+        { platform: "windows-x86_64", kind: "nsis", name: "Dialog.Test_9.9.9_x64-setup.exe", url: "https://example.com/b.exe", size: 65432100, sha256: sha("b") },
+      ],
+      kit: [{ line: "holochain-0.7", target: "x86_64-pc-windows-msvc", sidecar: "dialogtest-holochain-07", sha256: sha("c") }],
+      parts: [
+        { name: "nvidia-engine", target: "x86_64-pc-windows-msvc", version: "b12359", size: 790346417, sha256: sha("d") },
+        { name: "projects-helper", target: "linux-x86_64", version: "0.4.3", size: 73031195, sha256: sha("e") },
+      ],
+    };
+    const ask = () => ipc("/sign-release-manifest", RELEASE_ORIGIN, { manifest });
+    const linked = await devOp(PORT_A, { op: "connect", client_id: RELEASE_CLIENT, app_name: "Dialog release tool", origin: RELEASE_ORIGIN });
+    expect(linked.connected).toBe(true);
+    try {
+      // Denied: nothing is signed.
+      const denied = ask();
+      await browser.waitUntil(() => shown("release-manifest-dialog"), { timeout: 30_000, timeoutMsg: "a release to publish showed no dialog" });
+      const dialog = (await (await byId("release-manifest-dialog")).getText()).replace(/\s+/g, " ");
+      // Who asks, what for, and which release.
+      expect(dialog).toContain("Publish a release");
+      expect(dialog).toContain("Dialog release tool asks you to sign");
+      expect(dialog).toContain("com.example.dialogtest");
+      expect(dialog).toContain("9.9.9-beta.1 (from 9.9.8 or later)");
+      expect(dialog).toContain("beta #7");
+      expect(dialog).toContain("100% of installs");
+      // Every file, with its platform, size and the start of its hash.
+      expect(dialog).toContain("Dialog.Test_aarch64.app.tar.gz");
+      expect(dialog).toMatch(/darwin-aarch64 · app-tarball · 117\.7 MB · a{12}/);
+      expect(dialog).toContain("Dialog.Test_9.9.9_x64-setup.exe");
+      expect(dialog).toMatch(/windows-x86_64 · nsis · 62\.4 MB · b{12}/);
+      // The Holochain programs it carries.
+      expect(dialog).toMatch(/dialogtest-holochain-07 · x86_64-pc-windows-msvc · c{12}/);
+      // The other downloads the version needs: each part, its version, target, size and hash.
+      const parts = (await (await byId("release-sign-parts")).getText()).replace(/\s+/g, " ");
+      expect(parts).toContain("Other downloads this version needs");
+      expect(parts).toMatch(/nvidia-engine b12359 · x86_64-pc-windows-msvc · 753\.7 MB · d{12}/);
+      expect(parts).toMatch(/projects-helper 0\.4\.3 · linux-x86_64 · 69\.6 MB · e{12}/);
+      // The statement that is signed, and the caution.
+      expect(dialog).toMatch(/flowsta-release-manifest:v1:com\.example\.dialogtest:beta:7:[0-9a-f]{64}/);
+      expect(dialog).toContain("Approve only if the app, version, channel and file hashes match");
+      await browser.saveScreenshot(`${process.cwd()}/e2e/shots/release-sign-dialog.png`);
+      await click("release-sign-deny");
+      const no = await denied;
+      expect(no.status).toBe(403);
+      expect(no.data?.error).toBe("user_denied");
+      expect(await shown("release-manifest-dialog")).toBe(false);
+
+      // Approved: signed, and the statement is the one the dialog showed.
+      const approved = ask();
+      await browser.waitUntil(() => shown("release-manifest-dialog"), { timeout: 30_000, timeoutMsg: "the second request showed no dialog" });
+      // The list is longer than its box: signing waits until its end has been in view.
+      const approve = await byId("release-sign-approve");
+      expect(await approve.isEnabled()).toBe(false);
+      expect(await (await byId("release-sign-scroll-first")).getText()).toContain("Scroll to its end to sign");
+      await browser.execute(() => { const el = document.querySelector('[data-testid="release-sign-details"]')!; el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event("scroll")); });
+      await browser.waitUntil(() => approve.isEnabled(), { timeout: 10_000, timeoutMsg: "Sign and publish stayed off after the list was read to its end" });
+      expect(await shown("release-sign-scroll-first")).toBe(false);
+      await browser.saveScreenshot(`${process.cwd()}/e2e/shots/release-sign-dialog-end.png`);
+      const shownStatement = /flowsta-release-manifest:v1:[\w.]+:\w+:\d+:[0-9a-f]{64}/.exec(await (await byId("release-manifest-dialog")).getText())?.[0];
+      await click("release-sign-approve");
+      const yes = await approved;
+      expect(yes.status).toBe(200);
+      expect(typeof yes.data?.signature).toBe("string");
+      expect(yes.data?.statement).toBe(shownStatement);
+
+      // A part named with words that could not be a file name is refused before any dialog.
+      const bad = await ipc("/sign-release-manifest", RELEASE_ORIGIN, { manifest: { ...manifest, parts: [{ ...manifest.parts[0], version: "../b1" }] } });
+      expect(bad.status).toBe(400);
+      expect(bad.data?.error).toBe("bad_manifest");
+      expect(await shown("release-manifest-dialog")).toBe(false);
+      // And a caller that is not a connected app is refused too.
+      const stranger = await ipc("/sign-release-manifest", "https://never-connected.example", { manifest });
+      expect(stranger.status).toBe(403);
+      expect(stranger.data?.error).toBe("not_linked");
+    } finally {
+      await devOp(PORT_A, { op: "disconnect", client_id: RELEASE_CLIENT }).catch(() => null);
+    }
   });
 });
