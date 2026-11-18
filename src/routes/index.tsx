@@ -736,7 +736,11 @@ export default component$(() => {
         </Callout>
       )}
       {identity.value && card && words && (
-        <Callout intent="info" title={words.title} class="mb-6" testId="setup-card">
+        // Keyed by its title: the card is drawn again whenever what it says
+        // changes. Passed as a prop alone, the title stayed at its first
+        // value while the body changed (the UI suite, 11-18: the question
+        // stayed as the title after Yes).
+        <Callout key={`${card.kind}:${words.title}`} intent="info" title={words.title} class="mb-6" testId="setup-card">
           <div data-card={card.kind}>
             {card.kind === "ask" ? (
               <>
