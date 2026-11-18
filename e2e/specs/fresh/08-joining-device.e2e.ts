@@ -74,6 +74,8 @@ describe("the device being added, in its own window", () => {
     await noteB("the question");
     await (await b.$('[data-testid="other-device-yes"]')).click();
     await b.waitUntil(async () => !(await existsOnB("other-device-yes")), { timeout: 30_000, timeoutMsg: "the question stayed after Yes" });
+    // The card's title follows a moment after its body (its own redraw).
+    await b.waitUntil(async () => !(await existsOnB("setup-card")) || !/Do you have Flowsta Vault on another device/.test(await (await b!.$('[data-testid="setup-card"]')).getText()), { timeout: 15_000, timeoutMsg: "the card kept the question as its title after Yes" });
     // Still being set up, by the person's word: no timer ends it.
     expect(await setupOf(PORT_B)).toEqual({ joined: true, pending: true });
     if (await existsOnB("setup-card")) {

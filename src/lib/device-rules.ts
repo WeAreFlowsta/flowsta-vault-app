@@ -206,9 +206,11 @@ export function ownRow(settingUp: boolean): string {
 export function chip(f: { joined: boolean; answer: OtherDevice; listRead: boolean; settingUp: boolean; others: KnownDevice[]; mine: number; now: number }): { label: string; color: RowColor; title: string } {
   const live = f.others.filter((d) => !d.removed);
   if (live.length === 0) {
-    // Only this device is listed. That is a fact only when the list has
-    // been read and either this device never joined or the person said so.
-    const certain = f.listRead && (!f.joined || f.answer === "no" || !f.settingUp);
+    // Only this device is listed. A device that never joined an existing
+    // identity made it: it is the only one until it adds another, list read
+    // or not. One that joined is certain only once the list has been read
+    // and the person said so or setup is done.
+    const certain = !f.joined || (f.listRead && (f.answer === "no" || !f.settingUp));
     return certain
       ? { label: "1 device", color: "grey", title: "Only on this device" }
       : { label: "Checking devices", color: "grey", title: "Looking for your other devices" };

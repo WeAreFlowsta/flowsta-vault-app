@@ -188,7 +188,9 @@ describe("the sidebar chip", () => {
 
   it("a device that joined and has no list yet is checking, never 'only on this device'", () => {
     assert.equal(chip(facts({})).label, "Checking devices");
-    assert.equal(chip(facts({ listRead: false, joined: false })).label, "Checking devices");
+    // A device that made the identity is its only device until it adds one
+    // (the page shows the count it last knew when that is more than one).
+    assert.equal(chip(facts({ listRead: false, joined: false })).label, "1 device");
   });
   it("'1 device' only when that is known", () => {
     assert.deepEqual(chip(facts({ joined: false, settingUp: false })), { label: "1 device", color: "grey", title: "Only on this device" });
@@ -201,6 +203,19 @@ describe("the sidebar chip", () => {
     assert.equal(chip(facts({ settingUp: false, others: [heardNow({ holds: null })] })).color, "grey", "it has not said: not green");
     assert.equal(chip(facts({ settingUp: false, others: [heardNow({ holds: 40 })] })).label, "2 devices");
     assert.match(chip(facts({ others: [heardNow({ holds: 12 })] })).title, /^This device, receiving your private data\nMac: Online /);
+  });
+});
+
+describe("the chip before the list is read", () => {
+  const base = { answer: null as null, settingUp: true, others: [], mine: 0, now: NOW };
+  it("says 1 device at once on a device that made the identity", () => {
+    assert.equal(chip({ ...base, joined: false, listRead: false }).label, "1 device");
+  });
+  it("says Checking devices on a device that joined, until the list is read and setup is done or the person said so", () => {
+    assert.equal(chip({ ...base, joined: true, listRead: false }).label, "Checking devices");
+    assert.equal(chip({ ...base, joined: true, listRead: true }).label, "Checking devices");
+    assert.equal(chip({ ...base, joined: true, listRead: true, answer: "no" }).label, "1 device");
+    assert.equal(chip({ ...base, joined: true, listRead: true, settingUp: false }).label, "1 device");
   });
 });
 

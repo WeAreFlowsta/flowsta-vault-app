@@ -19,7 +19,8 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
   const nav = useNavigate();
   const devices = useSignal<DeviceRow[] | null>(null);
   const progress = useSignal<DevicesProgress | null>(null);
-  const facts = useSignal<ChipFacts>({ joined: false, answer: null });
+  // Null until this device's own facts are read: nothing is said from a guess.
+  const facts = useSignal<ChipFacts | null>(null);
   // What this device already knew before the network came up.
   const known = useSignal(1);
 
@@ -27,10 +28,11 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
   useVisibleTask$(({ cleanup }) => {
     const load = async () => {
       try {
+        // This device's own facts first: they are local and answer at once.
+        const id = await invoke<{ joined_existing?: boolean; has_other_device?: boolean | null } | null>("get_identity").catch(() => null);
+        if (id) facts.value = { joined: !!id.joined_existing, answer: id.has_other_device == null ? null : id.has_other_device ? "yes" : "no" };
         devices.value = await invoke<DeviceRow[]>("devices_list");
         progress.value = await invoke<DevicesProgress>("devices_progress").catch(() => null);
-        const id = await invoke<{ joined_existing?: boolean; has_other_device?: boolean | null } | null>("get_identity").catch(() => null);
-        facts.value = { joined: !!id?.joined_existing, answer: id?.has_other_device == null ? null : id.has_other_device ? "yes" : "no" };
       } catch {
         /* locked, or the network is still starting */
       }
@@ -57,19 +59,22 @@ export const DevicesChip = component$<{ ready: boolean }>((props) => {
   // answers, the count is the one this device last saw, in grey; "1 device"
   // is said only when it is known (the rules in ~/lib/device-rules).
   const list = devices.value;
-  const view = list && list.length > 0
-    ? chip({
-        joined: facts.value.joined,
-        answer: facts.value.answer,
-        listRead: true,
-        settingUp: list.some((d) => d.state === "this_device_setting_up"),
-        others: knownDevices(list, progress.value?.siblings ?? []),
-        mine: progress.value?.mine.records ?? 0,
-        now: Date.now(),
-      })
-    : known.value > 1
-      ? { label: `${known.value} devices`, color: "grey" as RowColor, title: "Checking your devices" }
-      : chip({ joined: facts.value.joined, answer: facts.value.answer, listRead: false, settingUp: true, others: [], mine: 0, now: Date.now() });
+  const f = facts.value;
+  const view = !f
+    ? { label: known.value > 1 ? `${known.value} devices` : "Checking devices", color: "grey" as RowColor, title: "Checking your devices" }
+    : list && list.length > 0
+      ? chip({
+          joined: f.joined,
+          answer: f.answer,
+          listRead: true,
+          settingUp: list.some((d) => d.state === "this_device_setting_up"),
+          others: knownDevices(list, progress.value?.siblings ?? []),
+          mine: progress.value?.mine.records ?? 0,
+          now: Date.now(),
+        })
+      : known.value > 1
+        ? { label: `${known.value} devices`, color: "grey" as RowColor, title: "Checking your devices" }
+        : chip({ joined: f.joined, answer: f.answer, listRead: false, settingUp: true, others: [], mine: 0, now: Date.now() });
   const summary = { label: view.label, color: DOT[view.color], title: view.title };
   // Shown from the first paint ("1 device", grey) and filled in later.
   void props.ready;

@@ -1133,9 +1133,17 @@ pub(crate) async fn devices_list_inner(state: &Arc<AppState>) -> Result<Vec<Devi
     let owed = owed_removals(&state.identity_root());
     // This device, moved to the newer network, still holds and writes the
     // older one while a device of the identity is on it.
-    let older_attached = crate::hc::active_line(state) == crate::hc::Line::V07
-        && crate::sealed::sealed_versions_on(state, crate::hc::Line::V06).await.is_ok();
-    let mut rows: Vec<DeviceRow> = devices_in(&records)
+    // Asked only when a device of the identity is on the older network, and
+    // never for long: the list must not wait on a line that is not there.
+    let devices = devices_in(&records);
+    let some_older = devices.iter().any(|d| d.removed_at.is_none() && d.install_id != me && older_side(&d.generation, my_generation) == Some("it"));
+    let older_attached = some_older
+        && crate::hc::active_line(state) == crate::hc::Line::V07
+        && tokio::time::timeout(std::time::Duration::from_secs(3), crate::sealed::sealed_versions_on(state, crate::hc::Line::V06))
+            .await
+            .map(|r| r.is_ok())
+            .unwrap_or(false);
+    let mut rows: Vec<DeviceRow> = devices
         .into_iter()
         .map(|d| {
             let heard = heard_at(&d.install_id).map(|secs| secs * 1000);
