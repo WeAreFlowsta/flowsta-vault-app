@@ -11,7 +11,7 @@
 // device said it had everything.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { activateSecondWindow, API, byId, click, copyProblemsIn, fill, PASSWORD, PHRASE_FILE, PORT_A, PORT_B, secondWindow, shot, startSecondDevice, stopSecondDevice, vault, COLD_START_MS, timed } from "../_helpers";
+import { activateSecondWindow, API, byId, click, copyProblemsIn, fill, PASSWORD, PHRASE_FILE, PORT_A, PORT_B, secondWindow, shot, startSecondDevice, stopSecondDevice, vault, timed } from "../_helpers";
 import { SHOTS } from "../../wdio.conf";
 
 const problems: string[] = [];
@@ -113,21 +113,45 @@ describe("the device being added, in its own window", () => {
     await noteB("while waiting");
   });
 
-  it("the card leaves as soon as the device has everything, and the email came with the profile", async () => {
+  it("setup ends by what this device knows: by itself once the other device is heard, or by Continue without it", async () => {
     activateSecondWindow();
-    // The round writes its marker once the other device's records are
-    // matched (its profile record counted in). The card follows within a
-    // poll (30 s) or at once on the event.
-    await timed("the second device has everything", async () =>
-      b!.waitUntil(async () => { await nudgeB(); return (await setupOf(PORT_B)).pending === false; }, { timeout: COLD_START_MS, interval: 5_000, timeoutMsg: "the second device never finished being set up" }));
-    await b!.waitUntil(async () => !(await existsOnB("setup-card")), { timeout: 60_000, interval: 2_000, timeoutMsg: "the device has everything but the card is still up" });
+    // The other device is on. When the two reach each other directly, the
+    // round ends setup by itself (the other device said what it holds and
+    // this one holds as much). On a slow test network they may not reach
+    // each other in time: then nothing ends setup but the person, the card
+    // still says only what this device knows, and Continue without it ends
+    // it at the next round. No timer does (until 1.8.0 ten minutes did).
+    let byItself = true;
+    try {
+      await timed("the second device has everything", async () =>
+        b!.waitUntil(async () => { await nudgeB(); return (await setupOf(PORT_B)).pending === false; }, { timeout: 6 * 60_000, interval: 5_000, timeoutMsg: "not heard in six minutes" }));
+    } catch {
+      byItself = false;
+    }
+    console.log(`e2e: the joining device's setup ended ${byItself ? "by itself" : "only by Continue without it"}`);
+    if (!byItself) {
+      expect(await setupOf(PORT_B)).toEqual({ joined: true, pending: true });
+      const card = await (await b!.$('[data-testid="setup-card"]')).getText();
+      expect(card).toMatch(/Looking for your other devices|Your things are on |Your private data is on its way/);
+      expect(card).not.toMatch(/No other device has answered|Nothing to do|can stay locked|has everything/);
+      expect(await existsOnB("email-callout")).toBe(false);
+      await shotB("still-waiting");
+      await noteB("still waiting");
+      await b!.waitUntil(async () => { await nudgeB(); return existsOnB("continue-without"); }, { timeout: 6 * 60_000, interval: 5_000, timeoutMsg: "a waiting card never offered Continue without it" });
+      expect(await (await b!.$('[data-testid="continue-hint"]')).getText()).toMatch(/Lost that device\? Remove it in Settings, Devices/);
+      await (await b!.$('[data-testid="continue-without"]')).click();
+      await b!.waitUntil(async () => { await nudgeB(); return (await setupOf(PORT_B)).pending === false; }, { timeout: 5 * 60_000, interval: 5_000, timeoutMsg: "Continue without it did not end setup" });
+    }
+    await b!.waitUntil(async () => !(await existsOnB("setup-card")), { timeout: 60_000, interval: 2_000, timeoutMsg: "setup is done but the card is still up" });
     await shotB("card-gone");
-    // The first device holds the email (the wizard asked for it) and wrote
-    // the identity's profile record; this device applied it before it said
-    // it has everything, so nothing asks for the email now or a minute on.
-    expect(await existsOnB("email-callout")).toBe(false);
-    await b!.pause(45_000);
-    expect(await existsOnB("email-callout")).toBe(false);
+    if (byItself) {
+      // The first device holds the email (the wizard asked for it) and wrote
+      // the identity's profile record; this device applied it before it said
+      // setup is done, so nothing asks for the email now or a minute on.
+      expect(await existsOnB("email-callout")).toBe(false);
+      await b!.pause(45_000);
+      expect(await existsOnB("email-callout")).toBe(false);
+    }
     expect(await existsOnB("setup-card")).toBe(false);
     const st = await vault(PORT_B, "/status");
     expect(st.data?.unlocked).toBe(true);

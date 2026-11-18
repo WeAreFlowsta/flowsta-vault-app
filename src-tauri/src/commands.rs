@@ -2609,9 +2609,9 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
         let parts: Vec<String> = laps.iter().filter(|(_, ms)| *ms >= 1000).map(|(n, ms)| format!("{} {}s", n, ms / 1000)).collect();
         log::info!("[devices] a slow {} round ({}s): {}", if full { "full" } else { "light" }, round_took.as_secs(), parts.join(", "));
     }
-    // "Continue without it" ends setup at any round, complete or not.
-    let continued = devices_state.vault_config.lock().unwrap().as_ref().map(|c| c.continued_without).unwrap_or(false);
-    if complete || continued {
+    // Read at every round while setup is open: "Continue without it" ends
+    // it at any round, and a round that is not complete says why it waits.
+    {
         let (joined, profile_seen) = {
             let config = devices_state.vault_config.lock().unwrap();
             let cfg = config.as_ref();
@@ -2670,6 +2670,23 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                         crate::devices::announce_to_siblings(devices_state).await;
                     }
                     Err(e) => log::info!("This device's record was not rewritten after setup: {}", e),
+                }
+            } else {
+                // Why setup is still open, said once each time it changes:
+                // without this a device that waits says nothing of why.
+                let why = format!(
+                    "the person's answer {:?}, the round {}, this device holds {} records, devices heard that are not being set up said {:?}, records {}",
+                    facts.has_other_device,
+                    if facts.round_complete { "complete" } else { "not complete" },
+                    facts.mine,
+                    facts.heard_settled,
+                    if facts.still_arriving { "still arriving" } else { "not arriving" }
+                );
+                static SAID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+                let mut said = SAID.lock().unwrap();
+                if said.as_deref() != Some(why.as_str()) {
+                    log::info!("Setup of this device is still open: {}", why);
+                    *said = Some(why);
                 }
             }
         }
