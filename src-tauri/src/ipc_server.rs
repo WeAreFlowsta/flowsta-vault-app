@@ -4940,6 +4940,7 @@ async fn dev_devices_handler(
             "sites": app.approved_apps.lock().unwrap().clone(),
             "apps": app.linked_third_party_apps.lock().unwrap().iter().map(|a| a.client_id.clone()).collect::<Vec<_>>(),
             "scopes": app.linked_app_scopes.lock().unwrap().clone(),
+            "email_grants": app.email_grants.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
             // Connected on another device only: a link here says "you already use this app".
             "elsewhere": crate::connections_sync::known_elsewhere(),
         })),
@@ -4969,8 +4970,15 @@ async fn dev_devices_handler(
                 token_required: body.get("require_its_token").and_then(|v| v.as_bool()).unwrap_or(false),
             });
             app.save_linked_apps();
-            app.linked_app_scopes.lock().unwrap().insert(client_id, vec!["profile".into()]);
+            app.linked_app_scopes.lock().unwrap().insert(client_id.clone(), vec!["profile".into()]);
             app.save_linked_app_scopes();
+            // A harness may have the person share their email with the app,
+            // as the consent screen leaves it (already filed, so nothing is
+            // sent): for driving what an unlink does to the grant.
+            if body.get("give_email_grant").and_then(|v| v.as_bool()).unwrap_or(false) {
+                app.email_grants.lock().unwrap().insert(client_id, crate::commands::EmailGrant { app_name: text("app_name"), granted_at: crate::ipc_server::unix_now() as i64, synced: true });
+                app.save_email_grants();
+            }
             Ok(serde_json::json!({ "connected": true }))
         }
         "disconnect" => {
