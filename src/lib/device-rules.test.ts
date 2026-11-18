@@ -59,7 +59,7 @@ describe("the Overview card", () => {
   it("answer Yes, no device listed: looking, with what to do and the way out", () => {
     const c = overviewCard(facts({}));
     assert.deepEqual(c, { kind: "looking", connecting: false });
-    assert.deepEqual(cardWords(c!), { title: "Looking for your other devices", line: "Open Flowsta Vault on your other device and leave it running.", canContinue: true });
+    assert.deepEqual(cardWords(c!), { title: "Looking for your other devices", line: "Open Flowsta Vault on your other device and leave it running.", canContinue: true, lostHint: true });
   });
   it("in the minutes after a start nobody has been heard yet: it says it is connecting, not to go and open a Vault that may be open", () => {
     // 11-19: a Mac restarted by its update said "Open Flowsta Vault there
@@ -82,7 +82,7 @@ describe("the Overview card", () => {
     // devices on", 431 of 431, beside a device the list called in sync.
     const c = overviewCard(facts({ mine: 431, others: [heardNow({ holds: 431 })], quietSecs: 86_400 }));
     assert.deepEqual(c, { kind: "finishing" });
-    assert.deepEqual(cardWords(c!), { title: "Your private data is here", line: "Finishing setup on this device.", canContinue: false });
+    assert.deepEqual(cardWords(c!), { title: "Your private data is here", line: "Finishing setup on this device.", canContinue: false, lostHint: false });
     assert.deepEqual(overviewCard(facts({ mine: 431, others: [heardNow({ holds: 400 }), device({ name: "Windows PC" })] })), { kind: "finishing" }, "a device that is off does not hold it back");
     assert.deepEqual(overviewCard(facts({ mine: 431, others: [heardNow({ holds: 432 })] })), { kind: "progress" }, "one holds more");
     assert.deepEqual(overviewCard(facts({ mine: 431, others: [heardNow({ holds: null })] })), { kind: "progress" }, "it has not said what it holds");
@@ -198,6 +198,17 @@ describe("a row of Settings, Devices", () => {
     const r = deviceRow(heardNow({ settingUp: true, holds: 12 }), 40, NOW);
     assert.equal(r.sync, "Receiving your private data, 12 of 40");
     assert.equal(r.color, "amber");
+    // All of it counted: it is finishing, not receiving (11-19: "Receiving your private data, 431 of 431").
+    assert.equal(deviceRow(heardNow({ settingUp: true, holds: 431 }), 431, NOW).sync, "Finishing setup");
+  });
+  it("a device that is not online is never said to be exchanging records now", () => {
+    // 11-19: "Heard 20 min ago" beside "Receiving your private data, 431 of 431".
+    const quiet = (o: Partial<KnownDevice>) => deviceRow(device({ heardAt: NOW - 20 * MIN, ...o }), 40, NOW).sync;
+    assert.equal(quiet({ settingUp: true, holds: 40 }), "Setup not finished");
+    assert.equal(quiet({ settingUp: true, holds: 12 }), "Setup not finished, 12 of 40 records");
+    assert.equal(quiet({ holds: 31 }), "Missing 9 records from this device");
+    assert.equal(quiet({ holds: 41 }), "Holds 1 record this device does not have");
+    assert.equal(quiet({ holds: 40 }), "In sync");
   });
   it("the update is named on the side that needs it", () => {
     assert.equal(deviceRow(device({ needsUpdate: "it" }), 40, NOW).presence, "Needs the Vault update to sync");

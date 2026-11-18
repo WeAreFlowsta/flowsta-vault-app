@@ -139,8 +139,14 @@ export function overviewCard(f: CardFacts): Card {
 
 const listed = (names: string[]) => (names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`);
 
-/** The card's words. `canContinue`: the "Continue without it" link shows. */
-export function cardWords(c: NonNullable<Card>): { title: string; line: string; canContinue: boolean } {
+/** The card's words. `canContinue`: the "Continue without it" link shows; `lostHint`: so does the line about a lost device. */
+export function cardWords(c: NonNullable<Card>): { title: string; line: string; canContinue: boolean; lostHint: boolean } {
+  const w = cardWordsOf(c);
+  // The hint about a lost device belongs where no device has been reached.
+  return { ...w, lostHint: w.canContinue && (c.kind === "looking" || c.kind === "on_device") };
+}
+
+function cardWordsOf(c: NonNullable<Card>): { title: string; line: string; canContinue: boolean } {
   switch (c.kind) {
     case "ask":
       return { title: "Do you have Flowsta Vault on another device with this identity?", line: "Not sure? Choose Yes. You can continue without it at any time.", canContinue: false };
@@ -159,6 +165,19 @@ export function cardWords(c: NonNullable<Card>): { title: string; line: string; 
     case "back":
       return { title: `${listed(c.names)} is back`, line: "Your things are arriving.", canContinue: false };
   }
+}
+
+/** The card's progress bars: against what the heard devices SAID they hold, and the app backups this device is to keep (bytes). */
+export function cardBars(c: NonNullable<Card>, f: { mine: number; others: KnownDevice[]; backupsWanted: number; backupsPending: number }): { label: "Records" | "App backups"; done: number; of: number }[] {
+  if (c.kind !== "progress" && c.kind !== "slow" && c.kind !== "back") return [];
+  const bars: { label: "Records" | "App backups"; done: number; of: number }[] = [];
+  const target = recordsTarget(f.others);
+  if (target !== null && target > 0) bars.push({ label: "Records", done: Math.min(f.mine, target), of: target });
+  if (f.backupsWanted > 0) bars.push({ label: "App backups", done: Math.max(0, f.backupsWanted - f.backupsPending), of: f.backupsWanted });
+  // Bars that are all full say nothing of what is still awaited (a device
+  // that is on and has not yet said what it holds): none are drawn.
+  if (bars.every((b) => b.done >= b.of)) return [];
+  return bars;
 }
 
 const CONNECTING_LINE = "Connecting. This can take a few minutes after Flowsta Vault starts.";
@@ -207,14 +226,20 @@ export function deviceRow(d: KnownDevice, mine: number, now: number): { presence
     }
   }
 
+  // What it holds beside this device. Records move only between devices
+  // that are on: for one that is not, the row says how the two stood when
+  // it last said, never that something is arriving now.
+  const on = isOnline(d, now);
+  const records = (n: number) => `${n} ${n === 1 ? "record" : "records"}`;
   let sync: string | null = null;
   if (d.settingUp) {
-    sync = d.holds === null ? "Receiving your private data" : `Receiving your private data, ${Math.min(d.holds, mine)} of ${mine}`;
+    if (on) sync = d.holds === null ? "Receiving your private data" : d.holds >= mine ? "Finishing setup" : `Receiving your private data, ${d.holds} of ${mine}`;
+    else sync = d.holds !== null && d.holds < mine ? `Setup not finished, ${d.holds} of ${records(mine)}` : "Setup not finished";
     color = "amber";
   } else if (d.holds !== null) {
     if (d.holds === mine) sync = "In sync";
-    else if (d.holds < mine) sync = `Getting ${mine - d.holds} records from this device`;
-    else sync = `This device is getting ${d.holds - mine} records from it`;
+    else if (d.holds < mine) sync = on ? `Getting ${records(mine - d.holds)} from this device` : `Missing ${records(mine - d.holds)} from this device`;
+    else sync = on ? `This device is getting ${records(d.holds - mine)} from it` : `Holds ${records(d.holds - mine)} this device does not have`;
   }
   return { presence, sync, color, offerRemove };
 }

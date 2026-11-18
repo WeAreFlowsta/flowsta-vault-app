@@ -4,6 +4,7 @@ import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { remote } from "webdriverio";
 import { SHOTS } from "../wdio.conf";
+import { senseProblems, type Shown } from "../../src/lib/sense";
 
 let step = 0;
 /** A numbered picture of the window as it is now. */
@@ -195,4 +196,92 @@ export async function createIdentityInWizard(name: string, email: string) {
   for (const i of asked) await fill(`[data-testid="verify-word"][data-word="${i}"]`, words[i]);
   await click("create-finish");
   await (await byId("wizard-done")).waitForDisplayed({ timeout: 300_000, timeoutMsg: "the identity was not ready within 5 minutes" });
+}
+
+
+// ── Does what is on the screen make sense? ──────────────────────────────
+// The rulebook is src/lib/sense.ts (the same one the unit sweep runs over
+// every combination of facts). Here it reads the real window: the Overview
+// card, the rows of Settings > Devices and the sidebar's count are drawn
+// from separate reads, so they can disagree where the rules alone cannot.
+
+/** What the window shows of the identity's devices right now. */
+export async function shownNow(b: WebdriverIO.Browser = browser): Promise<Shown> {
+  return (await b.execute(() => {
+    const text = (el: Element | null | undefined) => ((el as HTMLElement | null)?.innerText || "").replace(/\s+/g, " ").trim();
+    const q = (root: ParentNode, id: string) => root.querySelector(`[data-testid="${id}"]`);
+    const out: { card?: unknown; rows?: unknown[]; chipLabel?: string } = {};
+    const chip = q(document, "devices-chip");
+    const cardEl = q(document, "setup-card");
+    // The Overview is the page that can show the card: none there is "no card".
+    if (cardEl) {
+      const line = text(q(cardEl, "setup-line")) || text(q(cardEl, "other-device-hint"));
+      const bars = Array.from(q(cardEl, "setup-progress")?.children || []).map((row) => {
+        const spans = row.querySelectorAll("span");
+        const label = text(spans[0]);
+        const said = text(spans[1]);
+        const m = /^(.*) of (.*)$/.exec(said);
+        const num = (v: string) => Number(v.replace(/[^\d.]/g, ""));
+        // Records are counts; backups are sizes, compared as written.
+        if (m && label === "Records") return { label, done: num(m[1]), of: num(m[2]) };
+        return { label, done: m && m[1] === m[2] ? 1 : 0, of: 1 };
+      });
+      const whole = text(cardEl);
+      const title = line && whole.includes(line) ? whole.slice(0, whole.indexOf(line)).trim() : whole.split(/ (?=Records |App backups )/)[0];
+      out.card = { title, line, bars, canContinue: !!q(cardEl, "continue-without"), lostHint: !!q(cardEl, "continue-hint") };
+    } else if (location.pathname === "/" && chip) {
+      out.card = null;
+    }
+    const SYNC = /(In sync|Finishing setup|Receiving your private data.*|Setup not finished.*|Getting \d.*|Missing \d.*|This device is getting.*|Holds \d.*)$/;
+    const listed = Array.from(document.querySelectorAll("li")).filter((li) => q(li, "device-presence"));
+    if (listed.length > 0) {
+      out.rows = listed
+        .map((li) => ({ name: (li.querySelector("p")?.childNodes[0]?.textContent || "").trim(), presence: text(q(li, "device-presence")), sync: text(q(li, "device-sync")) || null }))
+        .filter((r) => !/^This device/.test(r.presence));
+    } else if (chip) {
+      // No list on this page: the sidebar's tooltip holds the same rows.
+      const lines = (chip.getAttribute("title") || "").split("\n").filter((l) => /^[^:]+: /.test(l));
+      if (lines.length > 0 || /^\d+ devices?$/.test(text(chip))) {
+        out.rows = lines.map((l) => {
+          const name = l.slice(0, l.indexOf(": "));
+          const rest = l.slice(l.indexOf(": ") + 2);
+          const m = SYNC.exec(rest);
+          return { name, presence: m ? rest.slice(0, m.index).trim() : rest, sync: m ? m[1] : null };
+        });
+        if (lines.length === 0 && text(chip) !== "1 device") delete out.rows;
+      }
+    }
+    if (chip) out.chipLabel = text(chip);
+    return out;
+  })) as Shown;
+}
+
+/** What does not make sense on the screen and stays that way: a problem
+ *  counts only when every look over the next while still shows it (the card
+ *  and the rows refresh on their own clocks, up to half a minute apart). */
+export async function senseProblemsOn(where: string, b: WebdriverIO.Browser = browser): Promise<string[]> {
+  let standing = senseProblems(await shownNow(b));
+  for (let look = 0; look < 8 && standing.length > 0; look++) {
+    await b.pause(5_000);
+    await b.execute(() => { document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })); });
+    const now = senseProblems(await shownNow(b));
+    standing = standing.filter((p) => now.includes(p));
+  }
+  return standing.map((p) => `${where}: ${p}`);
+}
+
+// After every test of every spec, the first window is checked where the
+// test left it; the spec fails at its end if anything did not make sense.
+const senseSeen: string[] = [];
+if (typeof afterEach === "function" && typeof after === "function") {
+  afterEach(async function () {
+    try {
+      senseSeen.push(...(await senseProblemsOn(`after "${this.currentTest?.title ?? "a test"}"`)));
+    } catch {
+      /* the window is gone or mid-navigation: nothing to read */
+    }
+  });
+  after(function () {
+    if (senseSeen.length > 0) throw new Error(`The screen showed things that do not make sense:\n  ${[...new Set(senseSeen)].join("\n  ")}`);
+  });
 }
