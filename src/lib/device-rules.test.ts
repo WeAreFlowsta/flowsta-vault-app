@@ -4,7 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  asksForEmail, cardWords, chip, deviceRow, overviewCard, ownRow, setupDone,
+  arrivingFrom, asksForEmail, cardWords, chip, deviceRow, knownDevices, overviewCard, ownRow, recordsTarget, setupDone,
   CONTINUE_HINT, ONLINE_MS, SLOW_SECS,
   type CardFacts, type KnownDevice, type SetupFacts,
 } from "./device-rules";
@@ -201,5 +201,45 @@ describe("the sidebar chip", () => {
     assert.equal(chip(facts({ settingUp: false, others: [heardNow({ holds: null })] })).color, "grey", "it has not said: not green");
     assert.equal(chip(facts({ settingUp: false, others: [heardNow({ holds: 40 })] })).label, "2 devices");
     assert.match(chip(facts({ others: [heardNow({ holds: 12 })] })).title, /^This device, receiving your private data\nMac: Online /);
+  });
+});
+
+describe("from what the backend answers", () => {
+  const list = [
+    { install_id: "me", name: "Linux", state: "this_device_setting_up" },
+    { install_id: "a", name: "Mac", state: "up_to_date", record_at: NOW - DAY, heard_at: NOW - MIN },
+    { install_id: "b", name: "PC", state: "up_to_date", record_at: NOW - DAY },
+    { install_id: "c", name: "Old", state: "removed", removing: true, record_at: NOW - 9 * DAY },
+    { install_id: "d", name: "Tablet", state: "needs_update", needs_update_side: "this" as const, record_at: NOW - DAY },
+  ];
+  const said = [{ install_id: "a", holds: { records: 40, setting_up: false } }];
+  const known = knownDevices(list, said);
+
+  it("leaves this device out and keeps the others by name", () => {
+    assert.deepEqual(known.map((d) => d.name), ["Mac", "PC", "Old", "Tablet"]);
+  });
+  it("takes what a device holds only from what it said", () => {
+    assert.equal(known[0].holds, 40);
+    assert.equal(known[1].holds, null, "the list's own word 'up_to_date' is not a statement of what it holds");
+    assert.equal(deviceRow(known[1], 40, NOW).sync, null);
+  });
+  it("takes contact only from a message heard here", () => {
+    assert.equal(known[0].heardAt, NOW - MIN);
+    assert.equal(known[1].heardAt, null);
+  });
+  it("carries removal and which side needs the update", () => {
+    assert.equal(known[2].removed, "removing");
+    assert.equal(known[3].needsUpdate, "this");
+    assert.equal(knownDevices([{ install_id: "e", name: "X", state: "needs_update" }], [])[0].needsUpdate, "it");
+  });
+  it("says records are arriving only from a device online now that said it holds more", () => {
+    assert.equal(arrivingFrom(known, 12, NOW), true);
+    assert.equal(arrivingFrom(known, 40, NOW), false, "it holds no more than this one");
+    assert.equal(arrivingFrom(known, 12, NOW + ONLINE_MS + MIN), false, "no longer online");
+    assert.equal(arrivingFrom([device({ heardAt: NOW, holds: null })], 12, NOW), false, "it has not said");
+  });
+  it("ends the progress bar at the most any device said, and has no end when none has said", () => {
+    assert.equal(recordsTarget(known), 40);
+    assert.equal(recordsTarget([device()]), null);
   });
 });

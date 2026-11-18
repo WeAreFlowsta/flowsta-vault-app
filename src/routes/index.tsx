@@ -15,7 +15,8 @@ import { normalizeEmail, isValidEmail, emailsMatch, EMAIL_INVALID, EMAIL_MISMATC
 import { dedupeLinkedApps } from "~/lib/linked-apps";
 import { ActivityRow } from "~/components/vault/ActivityRow";
 import { sizeText, type DevicesProgress, type DeviceRow } from "~/components/vault/DevicesTab";
-import { asksForEmail, backupsTotal, setupCard, whereThingsAre, type SiblingSync } from "~/lib/overview-cards";
+import { backupsTotal } from "~/lib/overview-cards";
+import { arrivingFrom, asksForEmail, cardWords, knownDevices, overviewCard, recordsTarget, CONTINUE_HINT, type OtherDevice } from "~/lib/device-rules";
 import { buildFeed, timeAgo, recentlyRestored, type ActivityLogEntry } from "~/lib/activity";
 
 
@@ -31,6 +32,8 @@ interface VaultIdentity {
   profile_picture: string | null;
   web_email: string | null;
   joined_existing?: boolean;
+  /** The person's answer to whether the identity is on another device they still have; null: not asked yet. */
+  has_other_device?: boolean | null;
   /** Flowsta's confirmation of that address; null = not learned yet. */
   email_verified: boolean | null;
   web_username: string | null;
@@ -95,26 +98,43 @@ export default component$(() => {
   // How far it has got: this device's records and the backups it fetches,
   // against what the other devices say they hold.
   const setupProgress = useSignal<DevicesProgress | null>(null);
-  // Which other devices the identity has (its device records), whether
-  // anything from them has arrived, and how long this session has asked.
-  // `joined_existing` is true for every phrase restore, so an identity
-  // restored on its only device said "on its way" for ten minutes with
-  // nothing coming (Eric, staging, 2026-10-23); after ten quiet minutes
-  // the card now says no device has answered.
-  const siblingSync = useSignal<SiblingSync | null>(null);
+  // The identity's devices as this one knows them (names, contact heard
+  // here, what each said it holds), read while this device is being set up
+  // and afterwards too: a device heard later that holds more is said
+  // plainly ("is back"). The card's rules are in ~/lib/device-rules.
   const otherDevices = useSignal<DeviceRow[]>([]);
+  // Whether this device reaches the network; null until the backend says.
+  const reachesNetwork = useSignal<boolean | null>(null);
+  // When the count of records here last moved (ms), for "arriving slowly".
+  const lastMoved = useSignal<{ records: number; at: number } | null>(null);
+  const continuing = useSignal(false);
   const checkSettingUp = $(async () => {
     try {
       settingUp.value = await invoke<boolean>("joined_setup_pending");
       setupKnown.value = true;
-      if (settingUp.value) {
-        setupProgress.value = await invoke<DevicesProgress>("devices_progress").catch(() => null);
-        // Null until the cells answer; the card stays either way.
-        siblingSync.value = await invoke<SiblingSync>("sibling_sync").catch(() => null);
-        otherDevices.value = (await invoke<DeviceRow[]>("devices_list").catch(() => [] as DeviceRow[]))
-          .filter((d) => d.state !== "this_device" && d.state !== "this_device_setting_up" && d.state !== "removed");
+      const progress = await invoke<DevicesProgress>("devices_progress").catch(() => null);
+      setupProgress.value = progress;
+      if (progress && lastMoved.value?.records !== progress.mine.records) {
+        lastMoved.value = { records: progress.mine.records, at: Date.now() };
       }
+      otherDevices.value = await invoke<DeviceRow[]>("devices_list").catch(() => [] as DeviceRow[]);
+      reachesNetwork.value = await invoke<boolean | null>("reaches_network").catch(() => null);
     } catch { /* locked */ }
+  });
+  const answerOtherDevice = $(async (yes: boolean) => {
+    try {
+      await invoke("set_has_other_device", { yes });
+      if (identity.value) identity.value = { ...identity.value, has_other_device: yes };
+      await checkSettingUp();
+    } catch { /* locked: the card stays and asks again */ }
+  });
+  const continueWithout = $(async () => {
+    continuing.value = true;
+    try {
+      await invoke("continue_without_other_device");
+      await checkSettingUp();
+    } catch { /* locked */ }
+    continuing.value = false;
   });
   // Another install of this identity runs as the identity's own key, as
   // this one does (both set up from the phrase before 1.6.0): each keeps
@@ -623,21 +643,29 @@ export default component$(() => {
     stats,
     linkedApps: linkedApps.value,
   }).slice(0, 3);
-  // A device that joined and has heard nothing for ten minutes: the card
-  // says so instead of "on its way". It never says "only device" as a fact,
-  // because a quiet network cannot tell the Vault that; a cold cell's empty
-  // first answer used to be read that way (10-27, Linux restore).
-  // The card and the email callout follow rules kept (and tested) in
-  // ~/lib/overview-cards.
-  const setupView = {
-    joined: !!identity.value?.joined_existing,
-    settingUp: settingUp.value,
-    setupKnown: setupKnown.value,
-    webEmail: identity.value?.web_email ?? null,
-    sync: siblingSync.value,
-  };
-  const card = identity.value?.hosting_model === "device-hosted" ? setupCard(setupView) : null;
-  const longSilence = card === "silence";
+  // What this device knows, and the card that follows from it. No timer
+  // changes the card's state; five quiet minutes change one sentence.
+  const now = Date.now();
+  const answer: OtherDevice = identity.value?.has_other_device == null ? null : identity.value.has_other_device ? "yes" : "no";
+  const joined = !!identity.value?.joined_existing;
+  const others = knownDevices(otherDevices.value, setupProgress.value?.siblings ?? []);
+  const mine = setupProgress.value?.mine.records ?? 0;
+  const arriving = arrivingFrom(others, mine, now);
+  const card = identity.value?.hosting_model === "device-hosted"
+    ? overviewCard({
+        joined,
+        settingUp: settingUp.value,
+        known: setupKnown.value,
+        answer,
+        online: reachesNetwork.value,
+        others,
+        arriving,
+        quietSecs: lastMoved.value ? Math.floor((now - lastMoved.value.at) / 1000) : null,
+        now,
+      })
+    : null;
+  const words = card ? cardWords(card) : null;
+  const emailView = { webEmail: identity.value?.web_email ?? null, joined, settingUp: settingUp.value, known: setupKnown.value };
 
   return (
     <div>
@@ -707,59 +735,67 @@ export default component$(() => {
           Your devices sync whenever they are on with Flowsta Vault running. If your other device asks for the same step, do it there too.
         </Callout>
       )}
-      {identity.value && card && (
-        <Callout intent="info" title={longSilence ? "No other device has answered yet" : "Your private data is on its way"} class="mb-6" testId="setup-card">
-          {longSilence ? (
-            <p data-testid="only-device-note">
-              If this identity is on another device, open Flowsta Vault there (it can stay locked) and your things arrive.
-              If this was your only device, Import Data brings back an export.
-            </p>
-          ) : (
-            <p class="flex items-center gap-2">
-              <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-              </svg>
-              <span>{identity.value.web_email ? "Your profile picture, connections and app backups arrive from your other devices. Nothing to do." : "Your records, connections, email and app backups arrive from your other devices. Nothing to do."}</span>
-            </p>
-          )}
-          {(() => {
-            // Progress, once the other devices have said what they hold.
-            const p = setupProgress.value;
-            if (!p || longSilence) return null;
-            const target = Math.max(0, ...p.siblings.map((s) => s.holds.records));
-            const rows: { label: string; done: number; of: number; text: string }[] = [];
-            if (target > 0) rows.push({ label: "Records", done: Math.min(p.mine.records, target), of: target, text: `${Math.min(p.mine.records, target).toLocaleString()} of ${target.toLocaleString()}` });
-            if (p.mine.backups_wanted > 0) {
-              const got = p.mine.backups_wanted - p.mine.backups_pending;
-              rows.push({ label: "App backups", done: got, of: p.mine.backups_wanted, text: `${sizeText(got)} of ${sizeText(p.mine.backups_wanted)}` });
-            }
-            if (rows.length === 0) {
-              // Nothing has arrived yet: name the device the things are on and
-              // what it is doing, so "waiting" reads as something to act on.
-              // Not `.map(whereThingsAre)`: map passes the index as the
-              // second argument, which was read as "now" - every device
-              // then counted as heard a moment ago (found 10-27).
-              const lines = otherDevices.value.map((d) => whereThingsAre(d));
-              if (lines.length === 0) return <p class="mt-2 text-xs text-gray-400" data-testid="setup-progress">Waiting to hear from your other devices...</p>;
-              return <div class="mt-2 space-y-1 text-xs text-gray-400" data-testid="setup-progress">{lines.map((l) => <p key={l}>{l}</p>)}</div>;
-            }
-            return (
-              <div class="mt-3 space-y-2" data-testid="setup-progress">
-                {rows.map((r) => (
-                  <div key={r.label}>
-                    <div class="flex justify-between text-xs text-gray-300">
-                      <span>{r.label}</span>
-                      <span class="tabular-nums">{r.text}</span>
+      {identity.value && card && words && (
+        <Callout intent="info" title={words.title} class="mb-6" testId="setup-card">
+          <div data-card={card.kind}>
+            {card.kind === "ask" ? (
+              <>
+                <p class="mb-3 text-xs text-gray-400" data-testid="other-device-hint">{words.line}</p>
+                <div class="flex flex-wrap items-center justify-end gap-3">
+                  <GlassButton variant="secondary" class="text-sm" testId="other-device-no" onClick$={() => answerOtherDevice(false)}>No, only here</GlassButton>
+                  <GlassButton variant="primary" class="text-sm" testId="other-device-yes" onClick$={() => answerOtherDevice(true)}>Yes, on another device</GlassButton>
+                </div>
+              </>
+            ) : (
+              <>
+                {words.line && (
+                  <p class="flex items-center gap-2" data-testid="setup-line">
+                    {(card.kind === "looking" || card.kind === "back") && (
+                      <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                      </svg>
+                    )}
+                    <span>{words.line}</span>
+                  </p>
+                )}
+                {(card.kind === "progress" || card.kind === "slow" || card.kind === "back") && (() => {
+                  // Progress against what the heard devices SAID they hold.
+                  const p = setupProgress.value;
+                  if (!p) return null;
+                  const target = recordsTarget(others);
+                  const rows: { label: string; done: number; of: number; text: string }[] = [];
+                  if (target !== null && target > 0) rows.push({ label: "Records", done: Math.min(p.mine.records, target), of: target, text: `${Math.min(p.mine.records, target).toLocaleString()} of ${target.toLocaleString()}` });
+                  if (p.mine.backups_wanted > 0) {
+                    const got = p.mine.backups_wanted - p.mine.backups_pending;
+                    rows.push({ label: "App backups", done: got, of: p.mine.backups_wanted, text: `${sizeText(got)} of ${sizeText(p.mine.backups_wanted)}` });
+                  }
+                  if (rows.length === 0) return null;
+                  return (
+                    <div class="mt-3 space-y-2" data-testid="setup-progress">
+                      {rows.map((r) => (
+                        <div key={r.label}>
+                          <div class="flex justify-between text-xs text-gray-300">
+                            <span>{r.label}</span>
+                            <span class="tabular-nums">{r.text}</span>
+                          </div>
+                          <div class="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-gray-700">
+                            <div class="h-full rounded-full bg-sky-400 transition-all" style={{ width: `${r.of > 0 ? Math.round((r.done / r.of) * 100) : 0}%` }} />
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                    <div class="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-gray-700">
-                      <div class="h-full rounded-full bg-sky-400 transition-all" style={{ width: `${r.of > 0 ? Math.round((r.done / r.of) * 100) : 0}%` }} />
-                    </div>
+                  );
+                })()}
+                {words.canContinue && (
+                  <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+                    <p class="text-xs text-gray-400" data-testid="continue-hint">{CONTINUE_HINT}</p>
+                    <GlassButton variant="secondary" class="text-sm" testId="continue-without" disabled={continuing.value} onClick$={continueWithout}>Continue without it</GlassButton>
                   </div>
-                ))}
-              </div>
-            );
-          })()}
+                )}
+              </>
+            )}
+          </div>
         </Callout>
       )}
       {/* A restored vault holds no email: Flowsta keeps only its hash, so the
@@ -767,7 +803,7 @@ export default component$(() => {
           then no app can be offered the email. A device that joined waits
           for setup first: the other devices' profile record usually brings
           the email with it. */}
-      {identity.value && identity.value.hosting_model === "device-hosted" && asksForEmail(setupView) && (
+      {identity.value && identity.value.hosting_model === "device-hosted" && asksForEmail(emailView) && (
         <Callout intent="info" title="Add the email you registered with" class="mb-6" testId="email-callout">
           <p class="mb-3">
             This Vault doesn't hold your email yet - Flowsta keeps only a fingerprint of it and can't send it back.

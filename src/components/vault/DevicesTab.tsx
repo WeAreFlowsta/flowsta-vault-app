@@ -9,6 +9,8 @@ import { PillButton } from "~/components/ui/PillButton";
 
 declare const __API_URL__: string;
 
+import { deviceRow, isThisDevice, knownDevices, ownRow, type RowColor, type SaidHolds } from "~/lib/device-rules";
+
 export interface DeviceRow {
   install_id: string;
   name: string;
@@ -23,6 +25,12 @@ export interface DeviceRow {
   record_at?: number;
   /** When this Vault last heard it directly this session (ms), if it has. */
   heard_at?: number;
+  /** With `needs_update`: which side runs the older Vault ("this": this device). */
+  needs_update_side?: "it" | "this";
+  /** The two exchange records on the older network until the update. */
+  syncing_on_older?: boolean;
+  /** It was heard while locked and still syncing. */
+  locked?: boolean;
 }
 
 /** What a device holds (devices_progress): its private records and the
@@ -74,16 +82,6 @@ export function sizeText(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1e3))} KB`;
 }
 
-/** How far a device being set up has got, in plain words: its records
- *  against `target` (what the device showing it holds) and the backups it
- *  is fetching. Empty when there is nothing to count yet. */
-export function progressText(h: Holds, target: number): string {
-  const parts: string[] = [];
-  if (target > 0) parts.push(`${Math.min(h.records, target).toLocaleString()} of ${target.toLocaleString()} records`);
-  if (h.backups_wanted > 0) parts.push(`${sizeText(h.backups_wanted - h.backups_pending)} of ${sizeText(h.backups_wanted)} of app backups`);
-  return parts.join(" · ");
-}
-
 /** What this device is still getting from the others, in plain words:
  *  "Getting 1 backup from Erics-MacBook-Air (58 KB)". Empty when nothing is. */
 export function gettingText(fetching: DevicesProgress["fetching"], names: Record<string, string>): string {
@@ -108,46 +106,19 @@ interface NewDevice {
 
 const PLATFORM_NAMES: Record<string, string> = { windows: "Windows", macos: "Mac", linux: "Linux" };
 
-function dayAndTime(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-}
-
-function day(ms: number): string {
-  return new Date(ms).toLocaleDateString(undefined, { day: "numeric", month: "long" });
-}
-
-/** A device that said what it holds this recently is catching up, not behind. */
-export const RECENT_MS = 10 * 60 * 1000;
-export const isCatchingUp = (d: DeviceRow, now = Date.now()) => d.state === "last_synced" && now - (d.at ?? 0) <= RECENT_MS;
-
-/** "heard just now" / "heard 3 min ago" when this Vault heard the device
- *  directly after its record was written: the time on the row is the hello,
- *  and the line says the record is older (10-26: a day-old record read as
- *  "last heard from Oct 25" of a device online right then). */
-function heardNote(d: DeviceRow, now = Date.now()): string {
-  if (!d.heard_at || !d.record_at || d.heard_at <= d.record_at + 60_000) return "";
-  const mins = Math.floor((now - d.heard_at) / 60_000);
-  const ago = mins < 1 ? "just now" : mins < 60 ? `${mins} min ago` : `${Math.floor(mins / 60)} h ago`;
-  return ` - heard ${ago}, its record is from ${dayAndTime(d.record_at)}`;
-}
-
-/** How current a device is, in plain words. */
-export function deviceLine(d: DeviceRow): string {
-  switch (d.state) {
-    case "this_device": return "This device";
-    case "this_device_setting_up": return "This device - being set up";
-    case "up_to_date": return d.at ? (heardNote(d) ? `Up to date${heardNote(d)}` : `Up to date - last seen ${dayAndTime(d.at)}`) : "Up to date";
-    case "setting_up": return "Receiving your private data";
-    // Its newest record is older than this device's: it is behind. (It said
-    // "Has everything up to <when it last checked in>" - the opposite.) A
-    // recent one is catching up with this device, which it names (10-18:
-    // "Syncing a recent change" read as this device fetching from it).
-    case "last_synced": return isCatchingUp(d) ? "Catching up with a change made here" : heardNote(d) ? `Not up to date${heardNote(d)}` : `Not up to date - last heard from ${dayAndTime(d.at ?? 0)}`;
-    case "not_seen_since": return `Not seen since ${day(d.at ?? 0)}`;
-    case "needs_update": return "Needs the Vault update to sync";
-    case "removed": return d.removing ? "Removing…" : "Removed";
+/** One row's words and colour, from the rules in ~/lib/device-rules:
+ *  where the device is (from contact heard here), then whether the two hold
+ *  the same (from what it said). Nothing is read from the list's own state
+ *  word but which row is this device, removal and the update notice. */
+export function rowView(d: DeviceRow, said: SaidHolds[], mine: number, now = Date.now()): { presence: string; sync: string | null; color: RowColor; offerRemove: boolean } {
+  if (isThisDevice(d)) {
+    const settingUp = d.state === "this_device_setting_up";
+    return { presence: ownRow(settingUp), sync: null, color: settingUp ? "amber" : "green", offerRemove: false };
   }
+  return deviceRow(knownDevices([d], said)[0], mine, now);
 }
+
+export const ROW_TEXT: Record<RowColor, string> = { green: "text-green-400", grey: "text-gray-400", amber: "text-amber-300" };
 
 function claimError(e: unknown): string {
   const msg = String(e);
@@ -507,18 +478,23 @@ export const DevicesTab = component$(() => {
                       )}
                     </p>
                   )}
-                  <p class={["text-xs", d.state === "up_to_date" || d.state === "this_device" ? "text-green-400" : d.state === "removed" || d.state === "this_device_setting_up" || isCatchingUp(d) ? "text-gray-400" : "text-amber-300"].join(" ")}>
-                    {deviceLine(d)}
-                  </p>
+                  {(() => {
+                    const v = rowView(d, progress.value?.siblings ?? [], progress.value?.mine.records ?? 0);
+                    return (
+                      <>
+                        <p class={["text-xs", ROW_TEXT[v.color]].join(" ")} data-testid="device-presence">{v.presence}</p>
+                        {v.sync && <p class="text-xs text-gray-400" data-testid="device-sync">{v.sync}</p>}
+                      </>
+                    );
+                  })()}
                   {(d.state === "this_device" || d.state === "this_device_setting_up") && (() => {
                     const names = Object.fromEntries((devices.value ?? []).map((x) => [x.install_id, x.name]));
                     const text = gettingText(progress.value?.fetching, names);
                     return text ? <p class="text-xs text-gray-400" data-testid="device-getting">{text}</p> : null;
                   })()}
                   {d.state === "setting_up" && (() => {
-                    const p = progress.value;
-                    const theirs = p?.siblings.find((s) => s.install_id === d.install_id)?.holds;
-                    const text = theirs && p ? progressText(theirs, p.mine.records) : "";
+                    const theirs = progress.value?.siblings.find((x) => x.install_id === d.install_id)?.holds;
+                    const text = theirs && theirs.backups_wanted > 0 ? `${sizeText(theirs.backups_wanted - theirs.backups_pending)} of ${sizeText(theirs.backups_wanted)} of app backups` : "";
                     return text ? <p class="text-xs text-gray-400" data-testid="device-progress">{text}</p> : null;
                   })()}
                 </div>

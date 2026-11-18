@@ -222,3 +222,58 @@ export function chip(f: { joined: boolean; answer: OtherDevice; listRead: boolea
     title: (f.settingUp ? `${ownRow(true)}\n` : "") + rows.map(({ d, r }) => `${d.name}: ${[r.presence, r.sync].filter(Boolean).join(" ")}`).join("\n"),
   };
 }
+
+// ── From what the backend answers ───────────────────────────────────────
+
+/** A row of `devices_list`, as far as these rules read it. */
+export interface ListedDevice {
+  install_id: string;
+  name: string;
+  state: string;
+  removing?: boolean;
+  record_at?: number;
+  heard_at?: number;
+  needs_update_side?: "it" | "this";
+  syncing_on_older?: boolean;
+  locked?: boolean;
+}
+
+/** What a device said it holds (`devices_progress`). */
+export interface SaidHolds {
+  install_id: string;
+  holds: { records: number; setting_up: boolean };
+}
+
+export const isThisDevice = (d: ListedDevice) => d.state === "this_device" || d.state === "this_device_setting_up";
+
+/** The identity's OTHER devices as these rules know them: the list gives
+ *  names, record dates and contact; what each holds comes only from what it
+ *  said. A device that has said nothing has `holds: null`, whatever the
+ *  list's own state word says. */
+export function knownDevices(list: ListedDevice[], said: SaidHolds[]): KnownDevice[] {
+  return list.filter((d) => !isThisDevice(d)).map((d) => {
+    const s = said.find((x) => x.install_id === d.install_id);
+    return {
+      name: d.name,
+      heardAt: d.heard_at ?? null,
+      recordAt: d.record_at ?? 0,
+      holds: s ? s.holds.records : null,
+      settingUp: s ? s.holds.setting_up : d.state === "setting_up",
+      needsUpdate: d.state === "needs_update" ? d.needs_update_side ?? "it" : null,
+      syncingOnOlder: !!d.syncing_on_older,
+      removed: d.state === "removed" ? (d.removing ? "removing" : "removed") : null,
+      locked: !!d.locked,
+    };
+  });
+}
+
+/** Records are arriving from a device heard in the last five minutes that said it holds more than this one. */
+export function arrivingFrom(others: KnownDevice[], mine: number, now: number): boolean {
+  return others.some((d) => !d.removed && !d.settingUp && isOnline(d, now) && d.holds !== null && d.holds > mine);
+}
+
+/** The most records any heard device said it holds: the progress bar's end. Null when none has said. */
+export function recordsTarget(others: KnownDevice[]): number | null {
+  const said = others.filter((d) => !d.removed && d.holds !== null).map((d) => d.holds as number);
+  return said.length ? Math.max(...said) : null;
+}

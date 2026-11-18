@@ -197,12 +197,19 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
   const restoredFromPhrase = useSignal(false);
   // The first minutes after the phrase: what has arrived from the other devices.
   const siblingSync = useSignal<{ joined: boolean; other_devices: string[]; records_arrived: boolean } | null>(null);
-  const siblingWaitStarted = useSignal(0);
+  // The person's answer to "is this identity on another device you still
+  // have?": only they can know it, so a phrase restore asks. Null: not yet.
+  const otherDevice = useSignal<boolean | null>(null);
+  const answerOtherDevice = $(async (yes: boolean) => {
+    try {
+      await invoke("set_has_other_device", { yes });
+      otherDevice.value = yes;
+    } catch { /* the Overview asks again */ }
+  });
   // eslint-disable-next-line qwik/no-use-visible-task
   useVisibleTask$(({ track, cleanup }) => {
     const on = track(() => step.value === "done" && restoredFromPhrase.value);
     if (!on) return;
-    siblingWaitStarted.value = Date.now();
     const poll = async () => {
       try {
         siblingSync.value = await invoke<{ joined: boolean; other_devices: string[]; records_arrived: boolean }>("sibling_sync");
@@ -2234,34 +2241,47 @@ export const SetupWizard = component$<SetupWizardProps>((props) => {
                 This device is now one of your devices
               </p>
               <p class="text-xs text-gray-400">
-                Your private data arrives from your other device while both are on. Nothing to do.
+                Your private data arrives from your other device while both are on.
               </p>
             </div>
           )}
           {restoredFromPhrase.value && !restoreImportResult.value && (
               <div class="mb-6 rounded-lg border border-sky-800/50 bg-sky-950/30 p-4 text-left">
-                <p class="mb-1 flex items-center gap-2 text-sm font-semibold text-sky-200">
-                  {!(siblingSync.value?.records_arrived) && (
-                    <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-                    </svg>
-                  )}
-                  <span>
-                    {siblingSync.value?.records_arrived
-                      ? "Your things are arriving from your other devices."
-                      : siblingSync.value && siblingSync.value.other_devices.length > 0
-                        ? `Found ${siblingSync.value.other_devices.join(", ")}. Your things are arriving.`
-                        : Date.now() - siblingWaitStarted.value > 150_000
-                          ? "No other device has answered yet."
-                          : "Looking for your other devices..."}
-                  </span>
-                </p>
-                <p class="mb-3 text-sm text-gray-300">
-                  {siblingSync.value?.records_arrived
-                    ? "Your private records, connections and app backups come across by themselves. Nothing to do."
-                    : "Your private data arrives from your other devices when one of them is on. Nothing to do."}
-                </p>
+                {otherDevice.value === null ? (
+                  <div class="mb-3" data-testid="other-device-question">
+                    <p class="mb-1 text-sm font-semibold text-sky-200">Do you have Flowsta Vault on another device with this identity?</p>
+                    <p class="mb-3 text-xs text-gray-400">Not sure? Choose Yes. You can continue without it at any time.</p>
+                    <div class="flex flex-wrap items-center gap-2">
+                      <GlassButton variant="secondary" class="text-sm" testId="other-device-no" onClick$={() => answerOtherDevice(false)}>No, only here</GlassButton>
+                      <GlassButton class="text-sm" testId="other-device-yes" onClick$={() => answerOtherDevice(true)}>Yes, on another device</GlassButton>
+                    </div>
+                  </div>
+                ) : otherDevice.value ? (
+                  (() => {
+                    // "Found" on a device record alone; "arriving" only once records have.
+                    const names = siblingSync.value?.other_devices ?? [];
+                    const arrived = !!siblingSync.value?.records_arrived;
+                    const title = arrived
+                      ? names.length > 0 ? `Your things are arriving from ${names.join(", ")}.` : "Your things are arriving."
+                      : names.length > 0 ? `Found ${names.join(", ")}.` : "Looking for your other devices";
+                    return (
+                      <div class="mb-3" data-testid="other-device-status">
+                        <p class="mb-1 flex items-center gap-2 text-sm font-semibold text-sky-200">
+                          {!arrived && (
+                            <svg class="h-4 w-4 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                            </svg>
+                          )}
+                          <span>{title}</span>
+                        </p>
+                        {!arrived && <p class="text-sm text-gray-300">Open Flowsta Vault on your other device and leave it running.</p>}
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <p class="mb-3 text-sm font-semibold text-sky-200" data-testid="other-device-only">Set up as your only device.</p>
+                )}
                 {!showImportLink.value ? (
                   <button
                     type="button"
