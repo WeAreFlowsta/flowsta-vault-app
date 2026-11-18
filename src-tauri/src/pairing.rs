@@ -675,7 +675,17 @@ fn join_identity(
         state,
     );
     match &result {
-        Ok(_) => state.activity.record("device_joined", "Added this device to your identity", None, None, None),
+        Ok(_) => {
+            // The identity is on another device: the one that just approved
+            // this one. Nobody has to be asked.
+            if let Some(cfg) = state.vault_config.lock().unwrap().as_mut() {
+                cfg.has_other_device = Some(true);
+            }
+            if let Err(e) = crate::commands::persist_config_now(state) {
+                log::warn!("[devices] that this identity is on another device was not saved ({}); the Overview will ask", e);
+            }
+            state.activity.record("device_joined", "Added this device to your identity", None, None, None)
+        }
         Err(_) => crate::device_registry::hold_approval(None),
     }
     result

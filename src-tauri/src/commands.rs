@@ -1199,6 +1199,10 @@ pub(crate) fn setup_vault_from_keys(
         // an identity created here runs its own seed.
         conductor_seed: own_conductor_seed.map(|seed| seed.to_vec()),
         joined_existing: own_conductor_seed.is_some(),
+        // Asked of the person (a phrase restore) or set by the pairing (the
+        // other device approved it): never guessed from the network.
+        has_other_device: None,
+        continued_without: false,
         profile_applied_at: None,
         recovery_lookup_hash: keys.recovery_lookup_hash.clone(),
         agent_pub_key_raw_b64: Some(agent_pub_key_raw_b64),
@@ -1755,6 +1759,42 @@ pub fn can_hand_over(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
     let config = state.vault_config.lock().unwrap();
     let cfg = config.as_ref().ok_or("vault_locked")?;
     Ok(cfg.data_key.is_some() && cfg.backup_key.is_some() && cfg.private_network_seed.is_some())
+}
+
+/// The person's answer to "is this identity on another device you still
+/// have?". Kept on this device only. "No" lets setup end at the next
+/// complete round; "Yes" waits for that device with no deadline.
+#[tauri::command]
+pub fn set_has_other_device(state: State<'_, Arc<AppState>>, yes: bool) -> Result<(), String> {
+    {
+        let mut guard = state.vault_config.lock().unwrap();
+        guard.as_mut().ok_or("vault_locked")?.has_other_device = Some(yes);
+    }
+    persist_config_now(state.inner())?;
+    log::info!("[devices] the person said the identity {} on another device they still have", if yes { "is" } else { "is not" });
+    crate::devices::announce_again();
+    Ok(())
+}
+
+/// "Continue without it": this device stops waiting for a device that has
+/// not been heard. Nothing is removed; what that device holds arrives when
+/// it is next on.
+#[tauri::command]
+pub fn continue_without_other_device(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    {
+        let mut guard = state.vault_config.lock().unwrap();
+        guard.as_mut().ok_or("vault_locked")?.continued_without = true;
+    }
+    persist_config_now(state.inner())?;
+    log::info!("[devices] the person chose to continue without a device that has not been heard");
+    Ok(())
+}
+
+/// Whether this device reaches the network (the rendezvous answers at
+/// all). The Overview says "This device is offline" only on `false`.
+#[tauri::command]
+pub async fn reaches_network() -> bool {
+    crate::conductor::reaches_rendezvous().await
 }
 
 /// A device that joined an identity, before its first full round has
@@ -2577,26 +2617,30 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
         };
         let marker = crate::paths::setup_done_path(&devices_state.identity_root());
         if joined && !marker.exists() {
-            // The other devices' profile (picture included) must have landed
-            // too - gossip can deliver it a pass or two after the rest. A
-            // sibling that said what it holds counts its profile record in,
-            // so matched counts settle it at once; where no sibling has said,
-            // ten minutes after the first otherwise-complete round is enough
-            // waiting (an identity without a profile record).
-            let pending = marker.with_extension("pending");
-            let waited_long_enough = std::fs::metadata(&pending)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .map(|d| d.as_secs() >= 600)
-                .unwrap_or(false);
-            if crate::devices::still_receiving_records(devices_state).await {
-                // Records are still arriving; the backups they list with them.
-            } else if profile_seen || waited_long_enough || crate::devices::siblings_matched(devices_state).await {
-                // Matched counts can include a profile record that arrived
-                // after this round's profile step: apply it now, so the
-                // email and name are here before the device says it has
-                // everything.
+            // Setup ends when this device knows it can: the person said
+            // there is no other device, or every device heard this session
+            // holds no more than this one, or the person chose to continue
+            // without a device that has not been heard. Never on a timer:
+            // until 1.8.0 ten quiet minutes ended it, and the device told
+            // the others it had everything (the `.pending` file was that
+            // timer; one left by an earlier version is removed).
+            let _ = std::fs::remove_file(marker.with_extension("pending"));
+            let (has_other_device, continued_without) = {
+                let config = devices_state.vault_config.lock().unwrap();
+                config.as_ref().map(|c| (c.has_other_device, c.continued_without)).unwrap_or((None, false))
+            };
+            let facts = crate::devices::SetupFacts {
+                has_other_device,
+                continued_without,
+                round_complete: true,
+                mine: crate::devices::own_holds(devices_state).await.records,
+                heard_settled: crate::devices::heard_settled_holds(),
+                still_arriving: crate::devices::still_receiving_records(devices_state).await,
+            };
+            if let Some(why) = crate::devices::setup_done(&facts) {
+                // A profile record can arrive after this round's profile
+                // step: apply it now, so the email and name are here before
+                // the device says setup is done.
                 if !profile_seen {
                     if let Ok(true) = apply_profile_from_other_devices(devices_state).await {
                         log::info!("Profile updated from another device");
@@ -2604,8 +2648,14 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                     }
                 }
                 let _ = std::fs::write(&marker, b"");
-                let _ = std::fs::remove_file(&pending);
-                log::info!("This device has everything from the other devices");
+                log::info!(
+                    "Setup of this device is done: {}",
+                    match why {
+                        crate::devices::SetupDone::SaidOnlyDevice => "the person said it is the identity's only device",
+                        crate::devices::SetupDone::HasWhatHeardDevicesHold => "it holds what every device heard this session holds",
+                        crate::devices::SetupDone::ContinuedWithout => "the person continued without a device that has not been heard",
+                    }
+                );
                 let _ = devices_app.emit("setup-complete", serde_json::json!({}));
                 // The other devices stop showing this one as receiving: its
                 // record says so now, and they hear it directly.
@@ -2616,8 +2666,6 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
                     }
                     Err(e) => log::info!("This device's record was not rewritten after setup: {}", e),
                 }
-            } else if !pending.exists() {
-                let _ = std::fs::write(&pending, b"");
             }
         }
     }
@@ -3280,6 +3328,7 @@ pub fn get_identity(state: State<'_, Arc<AppState>>) -> Result<VaultIdentity, St
         created_at: config.created_at,
         display_name: config.display_name.clone(),
         joined_existing: config.joined_existing,
+        has_other_device: config.has_other_device,
         profile_picture: config.profile_picture.clone(),
         web_email: config.web_email.clone(),
         email_verified: config.email_verified,
@@ -3303,6 +3352,10 @@ pub struct VaultIdentity {
     /// This device was added to an identity that already existed elsewhere.
     #[serde(default)]
     pub joined_existing: bool,
+    /// The person's answer to whether the identity is on another device they
+    /// still have (`null`: not asked yet).
+    #[serde(default)]
+    pub has_other_device: Option<bool>,
     pub profile_picture: Option<String>,
     pub web_email: Option<String>,
     /// Whether Flowsta has confirmed that address (None = not learned yet).

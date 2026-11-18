@@ -734,16 +734,70 @@ pub async fn still_receiving_records(state: &Arc<AppState>) -> bool {
         .unwrap_or(false)
 }
 
+/// Why a joined device's setup is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupDone {
+    /// The person said this is the identity's only device.
+    SaidOnlyDevice,
+    /// Every device heard this session holds no more than this one.
+    HasWhatHeardDevicesHold,
+    /// The person chose to continue without a device that was not heard.
+    ContinuedWithout,
+}
+
+/// What the rule reads. There is no clock here on purpose: until 1.8.0 a
+/// device that heard nobody for ten minutes wrote its setup-done mark, said
+/// "This device has everything from the other devices" and told them so.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetupFacts {
+    pub has_other_device: Option<bool>,
+    pub continued_without: bool,
+    /// A full round finished with nothing failing.
+    pub round_complete: bool,
+    /// Records held here.
+    pub mine: u64,
+    /// What each device heard directly this session, and not itself being
+    /// set up, said it holds (`None`: heard, and has not said).
+    pub heard_settled: Vec<Option<u64>>,
+    /// Records are still arriving from a device that was heard.
+    pub still_arriving: bool,
+}
+
+/// Setup is done for one of three reasons, and for no other.
+pub fn setup_done(f: &SetupFacts) -> Option<SetupDone> {
+    if f.continued_without {
+        return Some(SetupDone::ContinuedWithout);
+    }
+    if !f.round_complete {
+        return None;
+    }
+    if f.has_other_device == Some(false) {
+        return Some(SetupDone::SaidOnlyDevice);
+    }
+    if f.still_arriving || f.heard_settled.is_empty() {
+        return None;
+    }
+    f.heard_settled
+        .iter()
+        .all(|h| matches!(h, Some(records) if *records <= f.mine))
+        .then_some(SetupDone::HasWhatHeardDevicesHold)
+}
+
+/// What the devices heard this session that are not being set up said they hold.
+pub fn heard_settled_holds() -> Vec<Option<u64>> {
+    SIBLING_HOLDS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|m| m.values().filter(|(h, _)| !h.setting_up).map(|(h, _)| Some(h.records)).collect())
+        .unwrap_or_default()
+}
+
 /// Whether a settled sibling has said what it holds and this device holds
 /// at least that many records. A sibling's count includes its profile
 /// record if it has one, so matched counts mean nothing is left to wait
 /// for: an identity without a profile record no longer keeps its "on its
 /// way" card up for ten minutes after the bars are full (10-27, Linux).
-pub async fn siblings_matched(state: &Arc<AppState>) -> bool {
-    let mine = own_holds(state).await.records;
-    siblings_matched_in(SIBLING_HOLDS.lock().unwrap().as_ref(), mine)
-}
-
 pub fn siblings_matched_in(siblings: Option<&std::collections::HashMap<String, (Holds, u64)>>, mine: u64) -> bool {
     let Some(siblings) = siblings else { return false };
     let settled: Vec<&Holds> = siblings.values().map(|(h, _)| h).filter(|h| !h.setting_up).collect();
@@ -1441,6 +1495,40 @@ mod tests {
         assert_eq!(super::records_held(16, Some(18)), 18);
         assert_eq!(super::records_held(16, Some(9)), 16, "the 0.6 cell can lag the 0.7 one");
         assert_eq!(super::records_held(16, None), 16, "no 0.6 line: the active view");
+    }
+
+    fn facts() -> SetupFacts {
+        SetupFacts { has_other_device: Some(true), continued_without: false, round_complete: true, mine: 40, heard_settled: vec![], still_arriving: false }
+    }
+
+    #[test]
+    fn a_device_that_heard_nobody_keeps_waiting_whatever_the_time() {
+        // The rule this replaces finished here ten minutes after the first
+        // complete round. The facts hold no time, so no wait can end it.
+        assert_eq!(setup_done(&facts()), None);
+        assert_eq!(setup_done(&SetupFacts { has_other_device: None, ..facts() }), None);
+    }
+
+    #[test]
+    fn the_person_saying_only_this_device_ends_setup_at_the_first_complete_round() {
+        assert_eq!(setup_done(&SetupFacts { has_other_device: Some(false), ..facts() }), Some(SetupDone::SaidOnlyDevice));
+        assert_eq!(setup_done(&SetupFacts { has_other_device: Some(false), round_complete: false, ..facts() }), None);
+    }
+
+    #[test]
+    fn setup_ends_when_every_device_heard_holds_no_more_than_this_one() {
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40)], ..facts() }), Some(SetupDone::HasWhatHeardDevicesHold));
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(12), Some(40)], ..facts() }), Some(SetupDone::HasWhatHeardDevicesHold));
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(41)], ..facts() }), None, "one holds more");
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40), None], ..facts() }), None, "one was heard and has not said");
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40)], still_arriving: true, ..facts() }), None);
+        assert_eq!(setup_done(&SetupFacts { heard_settled: vec![Some(40)], round_complete: false, ..facts() }), None);
+    }
+
+    #[test]
+    fn continuing_without_a_device_ends_setup_at_once() {
+        assert_eq!(setup_done(&SetupFacts { continued_without: true, ..facts() }), Some(SetupDone::ContinuedWithout));
+        assert_eq!(setup_done(&SetupFacts { continued_without: true, round_complete: false, heard_settled: vec![Some(900)], ..facts() }), Some(SetupDone::ContinuedWithout));
     }
 
     #[test]
