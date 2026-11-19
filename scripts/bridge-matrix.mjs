@@ -26,6 +26,7 @@
  *       one identity, the epoch, claims, reset -> restore -> email. Same two fresh instances
  *       as --phase=create (VAULT_MATRIX_PORT required, VAULT_MATRIX_RESTORE_PORT optional).
  *   node scripts/bridge-matrix.mjs --phase=devices   # 1.6.0: one identity on two devices
+ *   node scripts/bridge-matrix.mjs --phase=restart   # a synced device restarts, then a record crosses each way, timed
  *   node scripts/bridge-matrix.mjs --phase=readd     # a device removed and added back by the phrase ten times, each timed
  *       (MATRIX_PHASE=readd scripts/matrix-devices.sh runs it on two fresh instances)
  *   node scripts/bridge-matrix.mjs --phase=maker-off-before|maker-off-after  # a device joins while the
@@ -2520,6 +2521,77 @@ async function signingV16Leg(stage) {
   record('v1.6: the list reads both writes, still two rows on v1.6', after.length === 2 && after.every(isV16) && after.find((x) => x.file_hash === saved.hashB)?.revoked === true && after.find((x) => x.file_hash === saved.hashA)?.thumbnail === TINY_PNG_2, JSON.stringify(after.map((x) => ({ f: (x.file_hash || '').slice(0, 8), app: x.signing_app_id, revoked: x.revoked, thumb: (x.thumbnail || '').slice(-20) }))));
 }
 
+// ── Restart leg (--phase=restart) ────────────────────────────────────────
+// Two synced devices; one is locked and unlocked (its conductor stops and
+// starts, as after an update), then the other writes a record: how long
+// until the restarted device holds it, and the other way round. Every
+// conductor start has a new network address, and the old one stays in the
+// other device's list for a while. VAULT_MATRIX_RESTART_ROUNDS (5).
+async function restartLeg() {
+  console.log('\n── Restart leg (a synced device restarts, then a record crosses, timed)');
+  const a = Number(process.env.VAULT_MATRIX_PORT || 0);
+  const b = Number(process.env.VAULT_MATRIX_RESTORE_PORT || 0);
+  if (!a || !b) { record('restart leg skipped - set VAULT_MATRIX_PORT and VAULT_MATRIX_RESTORE_PORT to two FRESH test instances', true); return; }
+  const ROUNDS = Number(process.env.VAULT_MATRIX_RESTART_ROUNDS || 5);
+  const LIMIT = Number(process.env.VAULT_MATRIX_RESTART_LIMIT || 600);
+  const op = async (port, body) => (await vaultFetch(port, '/dev/devices', { method: 'POST', body })).data || {};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const timeTo = async (fn, secs, since) => {
+    const deadline = since + secs * 1000;
+    while (Date.now() < deadline) { if (await fn().catch(() => false)) return Math.round((Date.now() - since) / 100) / 10; await sleep(1000); }
+    return null;
+  };
+  const until = async (fn, secs) => (await timeTo(fn, secs, Date.now())) !== null;
+  const has = async (port, text) => ((await op(port, { op: 'notes' })).notes || []).some((n) => n.text === text);
+  const setupOf = async (port) => (await vaultFetch(port, '/dev/status')).data?.setup || {};
+  const password = `Matrix-restart-${randomHash().slice(0, 10)}!`;
+
+  const created = await vaultFetch(a, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, email: `matrix-restart-${Date.now()}@example.com`, display_name: 'Matrix Restart' } });
+  record('A: identity created', created.status === 200 && !!created.data?.phrase, `${created.status} ${created.data?.description || ''}`);
+  if (created.status !== 200) return;
+  record('A: its records answer', await until(async () => Array.isArray((await op(a, { op: 'list' })).devices), 240));
+  await op(a, { op: 'write', text: 'restart: before B' });
+  await op(a, { op: 'round' });
+  const restored = await vaultFetch(b, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password, phrase: created.data.phrase, restore: true } });
+  record('B: restores the identity from the phrase', restored.status === 200 && restored.data?.restored === true, `${restored.status} ${restored.data?.description || ''}`);
+  record("B: A's record arrives and its setup closes", await until(async () => (await has(b, 'restart: before B')) && (await setupOf(b)).pending === false, 600));
+  // Both directions work before any restart: the base to compare with.
+  const base = Date.now();
+  await op(a, { op: 'write', text: 'restart: base A to B' });
+  const baseAB = await timeTo(() => has(b, 'restart: base A to B'), LIMIT, base);
+  const base2 = Date.now();
+  await op(b, { op: 'write', text: 'restart: base B to A' });
+  const baseBA = await timeTo(() => has(a, 'restart: base B to A'), LIMIT, base2);
+  console.log(`   no restart: A to B ${baseAB ?? 'never'} s, B to A ${baseBA ?? 'never'} s`);
+  record('before any restart a record crosses each way', baseAB !== null && baseBA !== null, `A to B ${baseAB} s, B to A ${baseBA} s`);
+
+  const times = [];
+  for (let round = 1; round <= ROUNDS; round++) {
+    // B stops everything and starts again, as a restart for an update does.
+    const locked = await vaultFetch(b, '/dev/lock', { method: 'POST', body: {} });
+    await sleep(3000);
+    const t0 = Date.now();
+    const unlocked = await vaultFetch(b, '/dev/unlock', { method: 'POST', body: {} });
+    if (locked.status !== 200 || unlocked.status !== 200) { record(`round ${round}: B restarts`, false, `${locked.status} ${unlocked.status}`); break; }
+    const ready = await timeTo(async () => (await op(b, { op: 'status' })).conductor?.status === 'ready', 300, t0);
+    // A record written on A the moment B's conductor is ready again.
+    const tA = Date.now();
+    await op(a, { op: 'write', text: `restart ${round}: A to B` });
+    const toB = await timeTo(() => has(b, `restart ${round}: A to B`), LIMIT, tA);
+    // And one written on B.
+    const tB = Date.now();
+    await op(b, { op: 'write', text: `restart ${round}: B to A` });
+    const toA = await timeTo(() => has(a, `restart ${round}: B to A`), LIMIT, tB);
+    times.push({ round, ready, toB, toA });
+    console.log(`   round ${round}: conductor ready ${ready ?? 'never'} s after the restart; then A to B ${toB ?? 'never'} s, B to A ${toA ?? 'never'} s`);
+    record(`round ${round}: after the restart a record crosses each way within ${LIMIT} s`, toB !== null && toA !== null, `ready ${ready} s, A to B ${toB} s, B to A ${toA} s`);
+  }
+  const sorted = (k) => times.map((t) => t[k]).filter((v) => v !== null).sort((x, y) => x - y);
+  const [ab, ba] = [sorted('toB'), sorted('toA')];
+  if (ab.length) console.log(`   A to B after a restart: fastest ${ab[0]} s, median ${ab[Math.floor(ab.length / 2)]} s, slowest ${ab[ab.length - 1]} s; B to A: fastest ${ba[0] ?? '-'} s, median ${ba[Math.floor(ba.length / 2)] ?? '-'} s, slowest ${ba[ba.length - 1] ?? '-'} s`);
+  console.log(`   TIMES ${JSON.stringify({ baseAB, baseBA, times })}`);
+}
+
 // ── Re-add leg (--phase=readd) ───────────────────────────────────────────
 // A device removed and added back by the recovery phrase, ten times, each
 // timed: from the phrase to the first record, to every record, and to its
@@ -2957,6 +3029,13 @@ async function hardeningLeg() {
     await bulkLeg();
     const passedB = results.filter((r) => r.ok).length;
     console.log(`\nRESULT: ${passedB}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
+    process.exit(failures ? 1 : 0);
+  }
+  if (PHASE === 'restart') {
+    await restartLeg();
+    const passedS = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedS}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
     if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
     process.exit(failures ? 1 : 0);
   }
