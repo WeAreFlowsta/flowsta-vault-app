@@ -467,9 +467,18 @@ fn vault_tuning(line: Line) -> NetworkTuning {
     if line == Line::V07 {
         t.db_sync_level = Some("Normal".into());
         t.gossip_max_op_bytes = None;
+        t.connect_timeout_s = Some(CONNECT_TIMEOUT_S);
     }
     t
 }
+
+/// How long the conductor waits to connect to one peer (Kitsune2's own
+/// wait is 60 s). Every conductor start has a new network address, and the
+/// one before it stays in the other devices' lists for a while: after a
+/// restart for an update, each try at the old address held the other
+/// device's sync for the whole wait. A peer that is there answers in under
+/// a second, through the relay too.
+const CONNECT_TIMEOUT_S: u32 = 15;
 
 #[cfg(test)]
 /// Write a line's conductor-config.yaml (flowsta-hc-lines), regenerated on
@@ -1194,7 +1203,8 @@ mod bootstrap_target_tests {
         assert!(cfg.contains("db_sync_level: Normal"));
         assert!(!cfg.contains("db_sync_strategy"));
         // No gossip cap: the conductor the Vault ships does not need one.
-        assert!(cfg.contains("  request_timeout_s: 240\ndb_sync_level: Normal"), "{cfg}");
+        // The connect wait is the only advanced setting.
+        assert!(cfg.contains("  request_timeout_s: 240\n  advanced:\n    irohTransport:\n      connectTimeoutS: 15\ndb_sync_level: Normal"), "{cfg}");
         assert!(!cfg.contains("k2Gossip") && !cfg.contains("maxGossipOpBytes"), "no gossip cap: {cfg}");
         assert!(cfg.contains("base64_auth_material_relay: \"eyJmb28iOiJiYXIifQ==\""));
         assert!(cfg.contains("port: 4458"));
