@@ -1635,7 +1635,9 @@ async function devicesLeg() {
     await op(b, { op: 'round' });
     const before = await op(b, { op: 'connections' });
     const own = await vaultFetch(a, '/revoke-identity', { method: 'POST', origin: 'https://unlinker-matrix.example', body: { app_name: 'Matrix Unlinker', app_agent_pub_key: 'matrix-unlinker-key' } });
-    record("A: an app's own unlink removes its link", own.status === 200 && own.data?.removed === true && !((await op(a, { op: 'connections' })).apps || []).includes('matrix_unlinker'), `${own.status} ${JSON.stringify(own.data)}`);
+    // A Vault from before 1.8.0 (A on a mixed run) answers `success` and has no `removed` field.
+    const saidRemoved = own.data?.removed === true || (process.env.VAULT_MATRIX_MIXED === '1' && own.data?.success === true);
+    record("A: an app's own unlink removes its link", own.status === 200 && saidRemoved && !((await op(a, { op: 'connections' })).apps || []).includes('matrix_unlinker'), `${own.status} ${JSON.stringify(own.data)}`);
     await op(a, { op: 'round' });
     const reached = await until(async () => { await op(b, { op: 'round' }); return !((await op(b, { op: 'connections' })).apps || []).includes('matrix_unlinker'); }, 180);
     const after = await op(b, { op: 'connections' });
