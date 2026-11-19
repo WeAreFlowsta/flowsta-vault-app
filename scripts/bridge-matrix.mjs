@@ -26,6 +26,8 @@
  *       one identity, the epoch, claims, reset -> restore -> email. Same two fresh instances
  *       as --phase=create (VAULT_MATRIX_PORT required, VAULT_MATRIX_RESTORE_PORT optional).
  *   node scripts/bridge-matrix.mjs --phase=devices   # 1.6.0: one identity on two devices
+ *   node scripts/bridge-matrix.mjs --phase=readd     # a device removed and added back by the phrase ten times, each timed
+ *       (MATRIX_PHASE=readd scripts/matrix-devices.sh runs it on two fresh instances)
  *   node scripts/bridge-matrix.mjs --phase=maker-off-before|maker-off-after  # a device joins while the
  *       device that made the app backups is off (scripts/matrix-maker-off.sh runs both and stops A between)
  *       add with a code, sync, connections, backups, lock-and-sync, remove, stand down, the phrase
@@ -2518,6 +2520,84 @@ async function signingV16Leg(stage) {
   record('v1.6: the list reads both writes, still two rows on v1.6', after.length === 2 && after.every(isV16) && after.find((x) => x.file_hash === saved.hashB)?.revoked === true && after.find((x) => x.file_hash === saved.hashA)?.thumbnail === TINY_PNG_2, JSON.stringify(after.map((x) => ({ f: (x.file_hash || '').slice(0, 8), app: x.signing_app_id, revoked: x.revoked, thumb: (x.thumbnail || '').slice(-20) }))));
 }
 
+// ── Re-add leg (--phase=readd) ───────────────────────────────────────────
+// A device removed and added back by the recovery phrase, ten times, each
+// timed: from the phrase to the first record, to every record, and to its
+// setup closing. It passes when every round recovers: the records all come
+// back, setup closes by itself, inside VAULT_MATRIX_READD_LIMIT seconds
+// (600). It also counts the rounds inside the mark we are working toward,
+// VAULT_MATRIX_READD_MARK (120 s for every record): on 2026-11-19 four
+// runs of ten had 4, 9, 4 and 7 rounds inside it. Setting
+// VAULT_MATRIX_READD_STRICT=1 makes a round over the mark a failure.
+// VAULT_MATRIX_READD_ROUNDS (10).
+async function readdLeg() {
+  console.log('\n── Re-add leg (a device removed and added back by the phrase, timed)');
+  const a = Number(process.env.VAULT_MATRIX_PORT || 0);
+  const b = Number(process.env.VAULT_MATRIX_RESTORE_PORT || 0);
+  if (!a || !b) { record('re-add leg skipped - set VAULT_MATRIX_PORT and VAULT_MATRIX_RESTORE_PORT to two FRESH test instances', true); return; }
+  const ROUNDS = Number(process.env.VAULT_MATRIX_READD_ROUNDS || 10);
+  const MARK = Number(process.env.VAULT_MATRIX_READD_MARK || 120);
+  const LIMIT = Number(process.env.VAULT_MATRIX_READD_LIMIT || 600);
+  const STRICT = process.env.VAULT_MATRIX_READD_STRICT === '1';
+  const NOTES = 12;
+  const op = async (port, body) => (await vaultFetch(port, '/dev/devices', { method: 'POST', body })).data || {};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Seconds until `fn` is true, or null when `secs` ran out.
+  const timeTo = async (fn, secs, since) => {
+    const deadline = since + secs * 1000;
+    while (Date.now() < deadline) { if (await fn().catch(() => false)) return Math.round((Date.now() - since) / 100) / 10; await sleep(1000); }
+    return null;
+  };
+  const until = async (fn, secs) => (await timeTo(fn, secs, Date.now())) !== null;
+  const setupOf = async (port) => (await vaultFetch(port, '/dev/status')).data?.setup || {};
+  const notesOn = async (port) => ((await op(port, { op: 'notes' })).notes || []).filter((n) => /^readd note /.test(n.text || '')).length;
+  const pwA = `Matrix-readd-a-${randomHash().slice(0, 10)}!`;
+  const pwB = `Matrix-readd-b-${randomHash().slice(0, 10)}!`;
+
+  const created = await vaultFetch(a, '/dev/setup-identity', { method: 'POST', body: { api_url: API, password: pwA, email: `matrix-readd-${Date.now()}@example.com`, display_name: 'Matrix Readd' } });
+  record('A: identity created', created.status === 200 && !!created.data?.phrase, `${created.status} ${created.data?.description || ''}`);
+  if (created.status !== 200) return;
+  const phrase = created.data.phrase;
+  record('A: its records answer', await until(async () => Array.isArray((await op(a, { op: 'list' })).devices), 240));
+  for (let i = 0; i < NOTES; i++) await op(a, { op: 'write', text: `readd note ${i}` });
+  record(`A: holds its ${NOTES} records`, (await notesOn(a)) === NOTES, `${await notesOn(a)}`);
+  await op(a, { op: 'round' });
+
+  const times = [];
+  for (let round = 1; round <= ROUNDS; round++) {
+    if (round > 1) {
+      // Remove B on A, then clear B's copy (it need not hear of the removal first).
+      const installB = (await op(b, { op: 'status' })).install_id;
+      const removed = await op(a, { op: 'remove', install_id: installB });
+      if (removed.removed !== true) { record(`round ${round}: A removes B`, false, JSON.stringify(removed)); break; }
+      await op(a, { op: 'round' });
+    }
+    if (round > 1 || (await vaultFetch(b, '/status')).data?.initialized !== false) {
+      const reset = await vaultFetch(b, '/dev/reset', { method: 'POST' });
+      if (reset.status !== 200) { record(`round ${round}: B's copy is removed`, false, `${reset.status}`); break; }
+    }
+    const t0 = Date.now();
+    const door = await vaultFetch(b, '/dev/devices', { method: 'POST', body: { op: 'phrase-door', phrase, password: pwB } });
+    if (door.status !== 200) { record(`round ${round}: the phrase adds B`, false, `${door.status} ${JSON.stringify(door.data).slice(0, 160)}`); break; }
+    const first = await timeTo(async () => (await notesOn(b)) > 0, 900, t0);
+    const all = first === null ? null : await timeTo(async () => (await notesOn(b)) === NOTES, 900, t0);
+    const closed = all === null ? null : await timeTo(async () => (await setupOf(b)).pending === false, 900, t0);
+    times.push({ round, first, all, closed });
+    console.log(`   round ${round}: first record ${first ?? 'never'} s, every record ${all ?? 'never'} s, setup closed ${closed ?? 'never'} s`);
+    const within = STRICT ? MARK : LIMIT;
+    record(`round ${round}: every record is back and setup closed within ${within} s of the phrase`, all !== null && closed !== null && all <= within && (STRICT || closed <= LIMIT), `first ${first} s, all ${all} s, setup closed ${closed} s`);
+    // A sees B back before the next removal.
+    await until(async () => { await op(a, { op: 'round' }); const id = (await op(b, { op: 'status' })).install_id; return ((await op(a, { op: 'list' })).devices || []).some((d) => d.install_id === id && d.state !== 'removed'); }, 180);
+  }
+  const done = times.filter((t) => t.all !== null).map((t) => t.all).sort((x, y) => x - y);
+  const closes = times.filter((t) => t.closed !== null).map((t) => t.closed).sort((x, y) => x - y);
+  record(`all ${ROUNDS} rounds ran`, times.length === ROUNDS, `${times.length}`);
+  record('in every round the setup closed by itself', closes.length === times.length && times.length > 0, `${closes.length} of ${times.length}`);
+  console.log(`   inside the ${MARK} s mark: ${done.filter((t) => t <= MARK).length} of ${ROUNDS} rounds`);
+  if (done.length) console.log(`   every record: fastest ${done[0]} s, median ${done[Math.floor(done.length / 2)]} s, slowest ${done[done.length - 1]} s; setup closed: fastest ${closes[0] ?? '-'} s, slowest ${closes[closes.length - 1] ?? '-'} s`);
+  console.log(`   TIMES ${JSON.stringify(times)}`);
+}
+
 // ── Maker-off leg (--phase=maker-off-before | maker-off-after) ──────────
 // 11-19, a person's Mac: a device joins while one sibling is on and the
 // device that MADE the app backups is off. The new device asked the one that
@@ -2877,6 +2957,13 @@ async function hardeningLeg() {
     await bulkLeg();
     const passedB = results.filter((r) => r.ok).length;
     console.log(`\nRESULT: ${passedB}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
+    if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
+    process.exit(failures ? 1 : 0);
+  }
+  if (PHASE === 'readd') {
+    await readdLeg();
+    const passedR = results.filter((r) => r.ok).length;
+    console.log(`\nRESULT: ${passedR}/${results.length} checks passed${failures ? ` — ${failures} FAILED` : ' — ALL GREEN'}`);
     if (failures) for (const r of results.filter((x) => !x.ok)) console.log(`  ✗ ${r.name} ${r.detail}`);
     process.exit(failures ? 1 : 0);
   }

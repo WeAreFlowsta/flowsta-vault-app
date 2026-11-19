@@ -3137,12 +3137,20 @@ pub async fn erase_device(state: State<'_, Arc<AppState>>) -> Result<(), String>
 /// (on Windows) the dir delete would fail on the still-open lair socket /
 /// conductor files.
 fn shutdown_for_erase(state: &Arc<AppState>) {
+    // First, what a conductor start reads (its seed, the passphrase): the
+    // lines take seconds to stop, and a call that found the conductor gone
+    // in those seconds asked the watchdog for a new one. It started on the
+    // identity being erased, with these still in memory, and outlived the
+    // erase: the identity set up next found "a conductor already started",
+    // no key store, and never recovered (11-19, an identity removed and
+    // restored from its phrase in one session).
     *state.kept_conductor.lock().unwrap() = None;
+    *state.vault_config.lock().unwrap() = None;
+    *state.unlock_passphrase.lock().unwrap() = None;
     // A start still coming up (an unlock a moment ago) stops too, and is
     // waited for: it writes into the folders removed next.
     crate::conductor::stop_lines_and_starts();
     *state.conductor_status.lock().unwrap() = ConductorStatus::Stopped;
-    *state.vault_config.lock().unwrap() = None;
     // Nothing signed in by the identity being erased may outlive it.
     *state.grant_token_cache.lock().unwrap() = None;
 }
