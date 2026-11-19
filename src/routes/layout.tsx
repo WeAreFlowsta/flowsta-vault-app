@@ -2057,10 +2057,12 @@ export default component$(() => {
                   {pendingReleaseSign.value.summary.channel} #{pendingReleaseSign.value.summary.sequence}
                 </span>
               </div>
-              <div class="flex justify-between">
-                <span class="text-xs text-gray-500">Holochain</span>
-                <span class="text-gray-200">{pendingReleaseSign.value.summary.lines.join(", ")}</span>
-              </div>
+              {pendingReleaseSign.value.summary.lines.length > 0 && (
+                <div class="flex justify-between">
+                  <span class="text-xs text-gray-500">Holochain</span>
+                  <span class="text-gray-200">{pendingReleaseSign.value.summary.lines.join(", ")}</span>
+                </div>
+              )}
               {pendingReleaseSign.value.summary.changes_line && (
                 <p class="text-xs text-amber-200">This release moves people's data to another Holochain line; its first start says so.</p>
               )}
