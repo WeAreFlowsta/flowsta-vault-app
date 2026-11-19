@@ -887,11 +887,22 @@ pub struct Apps07 {
     pub new: usize,
 }
 
+/// `join_new`: an app installed by this call is enabled, so its cell joins
+/// its network now. A start that installs an app restarts once (Holochain
+/// 0.7.1 keeps the memory of an install until then), and every conductor
+/// start has a network address of its own: an app that joined before that
+/// restart left an address behind that was dead within seconds, and the
+/// identity's other devices spent a minute at a time trying it before they
+/// turned to the live one (a device added back by its phrase, timed
+/// 2026-11-19: 43 s when they tried the live address first, minutes when
+/// not). With `join_new` false the app is installed and left for the start
+/// after the restart, which finds it and enables it.
 pub async fn install_dnas_07(
     admin_port: u16,
     resource_dir: &Path,
     agent_key_raw32: &[u8],
     private_v2_seed: Option<&str>,
+    join_new: bool,
 ) -> Result<Apps07, String> {
     use holochain_types_07::prelude::AgentPubKey;
 
@@ -925,11 +936,15 @@ pub async fn install_dnas_07(
             .install(&InstallRequest { app_id: &app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: None })
             .await
             .map_err(|e| format!("Failed to install {} (0.7): {}", app_id, e))?;
-        admin
-            .enable(&app_id)
-            .await
-            .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
-        log::info!("[0.7] {} installed and enabled", app_id);
+        if join_new {
+            admin
+                .enable(&app_id)
+                .await
+                .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
+            log::info!("[0.7] {} installed and enabled", app_id);
+        } else {
+            log::info!("[0.7] {} installed; it joins its network after this start's one restart", app_id);
+        }
         new += 1;
         installed.push(app_id);
     }
@@ -961,11 +976,15 @@ pub async fn install_dnas_07(
                 .install(&InstallRequest { app_id: &app_id, bundle: &happ_path, agent_key: agent_key.get_raw_39(), network_seed: Some(seed) })
                 .await
                 .map_err(|e| format!("Failed to install {} (0.7): {}", app_id, e))?;
-            admin
-                .enable(&app_id)
-                .await
-                .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
-            log::info!("[0.7] {} installed and enabled", app_id);
+            if join_new {
+                admin
+                    .enable(&app_id)
+                    .await
+                    .map_err(|e| format!("Failed to enable {} (0.7): {}", app_id, e))?;
+                log::info!("[0.7] {} installed and enabled", app_id);
+            } else {
+                log::info!("[0.7] {} installed; it joins its network after this start's one restart", app_id);
+            }
             new += 1;
             installed.push(app_id);
         }
