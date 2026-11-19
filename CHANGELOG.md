@@ -5,6 +5,47 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0-beta10] - 2026-11-20
+
+### Devices
+
+- **A device that is off no longer holds up one being added.** A new
+  device asked the device that made each app backup for its copy and
+  waited on every one, so with that device off it did not tell your
+  other devices about itself and its setup stayed open. It now moves on
+  after the first unanswered ask and tries again later.
+- **App backups come from any of your devices that holds them.** A
+  backup was fetched only from the device that made it. A device that
+  is on and holds a copy now passes it on, so a new device gets the
+  backups of one that is off or gone.
+- **The setup card says what the device knows.** In the first minutes
+  after a start it says it is connecting. When this device holds what
+  your other devices hold it says "Your private data is here. Finishing
+  setup on this device." The Devices page says "Finishing setup",
+  "Setup not finished" or how many records are missing, and no longer
+  says a device that is off is receiving.
+- **Setup on a new device finishes sooner.** A new identity's apps now
+  join their networks once, after the restart that follows their
+  install.
+- **After a restart, changes from your other devices arrive sooner.**
+  A change made on another device could take several minutes to show on
+  a device that had just restarted, an update included. In our tests it
+  now arrives within two minutes, often within seconds.
+
+### Fixed
+
+- **macOS: after a crash or a forced quit, syncing stops with the
+  Vault.** The parts that sync and hold your keys kept running until
+  the next launch. They now end when the Vault does.
+- Removing an identity and restoring one in the same session could
+  leave the new one unable to start until the Vault was quit. Removal
+  now finishes cleanly.
+
+### Publishing
+
+- Signing a release: "Sign and publish" turns on once the whole list
+  of files has been scrolled into view.
+
 ## [1.8.0-beta9] - 2026-11-19
 
 ### Devices
