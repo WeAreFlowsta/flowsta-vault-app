@@ -1106,7 +1106,7 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
             assert!(up, "the 0.7 admin interface");
-            let apps = crate::dna::install_dnas_07(admin_07, &resources, &key_07[..], Some(seed)).await.expect("install the 0.7 apps");
+            let apps = crate::dna::install_dnas_07(admin_07, &resources, &key_07[..], Some(seed), true).await.expect("install the 0.7 apps");
             assert_eq!((apps.ids.len(), apps.new), (4, 4), "identity 1.5, signing 1.5 and 1.6, private 2.1, all new");
             crate::dna::ensure_signing_coordinators_07(admin_07, &resources).await.expect("signing 1.5 coordinator rev");
             crate::dna::setup_app_interface_07(admin_07).await.expect("0.7 app interface")
@@ -1517,7 +1517,7 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
             assert!(up, "the 0.7 admin interface");
-            crate::dna::install_dnas_07(admin_07, &resources, &key_07[..], Some(seed)).await.expect("install the 0.7 apps");
+            crate::dna::install_dnas_07(admin_07, &resources, &key_07[..], Some(seed), true).await.expect("install the 0.7 apps");
             crate::dna::ensure_signing_coordinators_07(admin_07, &resources).await.expect("signing 1.5 coordinator rev");
             crate::dna::setup_app_interface_07(admin_07).await.expect("0.7 app interface")
         };

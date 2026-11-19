@@ -665,6 +665,7 @@ pub async fn start_holochain(
         conductor_tag,
         private_v2_seed,
         since,
+        restart_asked: Default::default(),
     });
     supervisor().start_lines(primary, secondary, hooks).await
 }
@@ -706,6 +707,7 @@ pub fn attach_line_from_state(state: Arc<AppState>, line: Line, resource_dir: Pa
         conductor_tag,
         private_v2_seed,
         since,
+        restart_asked: Default::default(),
     });
     supervisor().attach_line(session, line, hooks);
     Ok(())
@@ -732,6 +734,8 @@ struct VaultLines {
     private_v2_seed: Option<String>,
     /// `starts_ended()` when this start was asked for.
     since: u64,
+    /// This start has asked for its one restart after installing an app.
+    restart_asked: std::sync::atomic::AtomicBool,
 }
 
 impl VaultLines {
@@ -888,7 +892,11 @@ impl VaultLines {
             return Err("the 0.7 key store derived a different key from the same seed".to_string());
         }
         let admin_port = process.admin_port;
-        let apps = match dna::install_dnas_07(admin_port, &self.resource_dir, &pub_key[..], self.private_v2_seed.as_deref()).await {
+        // An app installed now joins its network after the one restart this
+        // start asks for; once that restart has been asked, a new app joins
+        // at once (nothing restarts a second time).
+        let restart_asked = self.restart_asked.load(std::sync::atomic::Ordering::SeqCst);
+        let apps = match dna::install_dnas_07(admin_port, &self.resource_dir, &pub_key[..], self.private_v2_seed.as_deref(), restart_asked).await {
             Ok(apps) => apps,
             Err(e) => return Err(format!("0.7 DNA installation failed: {}", e)),
         };
@@ -901,6 +909,7 @@ impl VaultLines {
         if apps.new > 0 {
             // The cells are waited for after the restart.
             log::info!("[0.7] {} app(s) installed: the line restarts once to give back the memory the install kept", apps.new);
+            self.restart_asked.store(true, std::sync::atomic::Ordering::SeqCst);
             return Ok(Setup { app_port, restart: true });
         }
         // Either role, before the line joins (see `setup_06`).
@@ -1247,6 +1256,7 @@ mod live_line_tests {
             expected_pub_key: key,
             private_v2_seed: None,
             since: starts_ended(),
+            restart_asked: Default::default(),
         };
         let mut p06 = hooks.start(Line::V06, Role::Secondary).await.expect("the 0.6 line");
         assert_eq!(p06.agents[0], key);
