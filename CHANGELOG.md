@@ -5,7 +5,10 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.8.0-beta10] - 2026-11-20
+## [1.8.0-rc.1] - 2026-11-20
+
+Release candidate. It carries the changes of 1.8.0-beta10 under a version
+number that installed betas update to.
 
 ### Devices
 
@@ -45,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Signing a release: "Sign and publish" turns on once the whole list
   of files has been scrolled into view.
+
+## [1.8.0-beta10] - 2026-11-19
+
+Not offered to installed Vaults: the updater compares "beta10" and
+"beta9" as text and read it as older. Its changes are in 1.8.0-rc.1.
 
 ## [1.8.0-beta9] - 2026-11-19
 
