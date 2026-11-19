@@ -5,6 +5,17 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### For developers
+
+- **An app that does not run Holochain can sign its releases.** A release
+  manifest had to carry a `holochain` block. It is now optional, and the
+  signing dialog leaves the Holochain row out when there is none.
+- **A release or node manifest request that nobody answers is a timeout.**
+  It was answered `403 user_denied`, the same as a refusal. It is now
+  `408 timeout`, as on every other request that waits for you.
+
 ## [1.8.0-rc.1] - 2026-11-20
 
 Release candidate. It carries the changes of 1.8.0-beta10 under a version

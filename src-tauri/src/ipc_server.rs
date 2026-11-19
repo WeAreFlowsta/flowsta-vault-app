@@ -6179,9 +6179,14 @@ async fn approve_and_sign_manifest(
         }
         Ok(Err(_)) => false,
         Err(_) => {
+            // Nobody answered in time: said as a timeout, as on every
+            // other dialog route, so a tool can tell it from a refusal.
             let mut pending = state.app_state.pending_manifest_sign.lock().unwrap();
             *pending = None;
-            false
+            return Err((
+                StatusCode::REQUEST_TIMEOUT,
+                Json(IpcError { error: "timeout".into(), description: Some("No response in Flowsta Vault - request timed out. Please try again.".into()) }),
+            ));
         }
     };
     if !approved {
@@ -6284,16 +6289,24 @@ pub(crate) fn release_manifest_statement(manifest: &serde_json::Value) -> Result
         None => None,
         Some(v) => Some(v.as_str().filter(|v| is_version(v)).ok_or("manifest.from_version is not a version")?),
     };
-    let holochain = body.get("holochain").and_then(|h| h.as_object()).ok_or("manifest.holochain missing")?;
-    let lines: Vec<&str> = holochain
-        .get("lines")
-        .and_then(|l| l.as_array())
-        .map(|l| l.iter().filter_map(|x| x.as_str()).collect())
-        .filter(|l: &Vec<&str>| !l.is_empty())
-        .ok_or("manifest.holochain.lines missing")?;
-    let changes_line = match holochain.get("changes_line") {
-        None => false,
-        Some(v) => v.as_bool().ok_or("manifest.holochain.changes_line must be true or false")?,
+    // The Holochain block belongs to apps that run Holochain: an app that
+    // does not leaves it out. A block that is there names at least one line.
+    let (lines, changes_line): (Vec<&str>, bool) = match body.get("holochain") {
+        None => (Vec::new(), false),
+        Some(h) => {
+            let holochain = h.as_object().ok_or("manifest.holochain must be an object")?;
+            let lines: Vec<&str> = holochain
+                .get("lines")
+                .and_then(|l| l.as_array())
+                .map(|l| l.iter().filter_map(|x| x.as_str()).collect())
+                .filter(|l: &Vec<&str>| !l.is_empty())
+                .ok_or("manifest.holochain.lines missing")?;
+            let changes_line = match holochain.get("changes_line") {
+                None => false,
+                Some(v) => v.as_bool().ok_or("manifest.holochain.changes_line must be true or false")?,
+            };
+            (lines, changes_line)
+        }
     };
     let percent = match body.get("rollout") {
         None => 100,
@@ -6406,6 +6419,18 @@ mod release_manifest_tests {
 
     /// The node agent's canonical.mjs over the same body (signature left
     /// out) gave this hash (2026-11-02); the update check must match it.
+    /// An app that does not run Holochain leaves the block out.
+    #[test]
+    fn a_manifest_without_a_holochain_block_is_signed_and_names_no_line() {
+        let mut m = fixture();
+        m.as_object_mut().unwrap().remove("holochain");
+        m.as_object_mut().unwrap().remove("kit");
+        let (statement, summary) = release_manifest_statement(&m).unwrap();
+        assert!(statement.starts_with("flowsta-release-manifest:v1:com.solar.yourowai:stable:12:"));
+        assert_eq!(summary["lines"], serde_json::json!([]));
+        assert_eq!(summary["changes_line"], false);
+    }
+
     #[test]
     fn statement_names_the_app_channel_sequence_and_body_hash() {
         let (statement, summary) = release_manifest_statement(&fixture()).unwrap();
@@ -6461,6 +6486,8 @@ mod release_manifest_tests {
         assert!(refused(&|m| m["rollout"]["percent"] = serde_json::json!(12.5)).contains("manifest.rollout.percent is not a whole number"));
         assert!(refused(&|m| m["files"][0]["size"] = serde_json::json!(1.0)).contains("manifest.files[0].size"));
         assert!(refused(&|m| m["v"] = serde_json::json!(2)).contains("manifest.v"));
+        assert!(refused(&|m| m["holochain"] = serde_json::json!({})).contains("manifest.holochain.lines missing"));
+        assert!(refused(&|m| m["holochain"] = serde_json::json!("holochain-0.7")).contains("manifest.holochain must be an object"));
         assert!(refused(&|m| m["app"] = serde_json::json!("Your Own AI")).contains("manifest.app"));
         assert!(refused(&|m| m["channel"] = serde_json::json!("Stable")).contains("manifest.channel"));
         assert!(refused(&|m| m["sequence"] = serde_json::json!(0)).contains("manifest.sequence"));
