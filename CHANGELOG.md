@@ -5,6 +5,177 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-11-21
+
+**On 1.7.0 or earlier? Install this version yourself, once.** Download the
+file for your system below and install it over your copy. Your identities
+and data stay. From 1.8.0 on, the Vault updates itself.
+
+### Highlights
+
+- **The Vault keeps itself up to date.** A new version downloads in the
+  background and installs when you restart the Vault or quit it. "Restart
+  to update" appears at the top of the window when one is ready, and says
+  what it is doing while it installs. Before anything installs, the Vault
+  checks that Flowsta signed that exact release. Settings → Updates turns
+  it off.
+- **A locked Vault keeps passing your apps' backups between your
+  devices.** With the Vault locked and still syncing, the backups your
+  apps keep in it go on travelling to your other devices, and apps can
+  still back up and read their own backups. "Lock and stop syncing" stops
+  it.
+- **Adding a device finishes when the device has your data.** When you
+  restore an identity, the Vault asks whether it is on another device you
+  still have. If it is, setup stays open until this device holds what
+  your other devices hold, and the page says which device it is waiting
+  for. If that device is off, "Continue without it" ends the wait;
+  nothing is lost, and the rest arrives when the two are next on
+  together.
+- **Two devices set up from the same recovery phrase can now sync.** A
+  device set up from your recovery phrase in an older Flowsta Vault
+  shares one key with your other device, and each keeps its own copy of
+  your private data. Overview now says so on such a device and offers
+  "Set this device up to sync". Your data is kept, and the signatures you
+  made on either device stay listed.
+- **You see who is asking to connect.** The connect dialog leads with a
+  website's address, or with the name a desktop app's maker registered
+  with Flowsta, and says when the app is already connected from somewhere
+  else. Each connected app carries its own connection, so the Vault knows
+  which app a request is from.
+- **The Vault starts with no network, and uses less memory.** Offline,
+  everything on your computer works, and the Vault connects once the
+  network is back. Holochain 0.7.1 holds on to memory until it restarts,
+  so the Vault restarts it once after setting up an identity and again at
+  a quiet moment whenever it passes 1 GB, at most every six hours.
+- **Long histories reach your other devices.** The Vault now runs a
+  Holochain 0.7.1 built from the official source with a small set of
+  fixes (listed at github.com/WeAreFlowsta/holochain-build). With the
+  official 0.7.1 a large amount of data could stop part way between two
+  devices. Nothing changes in your data, and devices on either build
+  keep syncing with each other.
+
+### Devices
+
+- Your devices find each other sooner: devices of one identity tell each
+  other about themselves as soon as they meet on your private network.
+- A device that is off no longer holds up one being added, and app
+  backups come from any of your devices that holds them, not only from
+  the device that made them.
+- The setup card and the Devices page say what the device knows:
+  connecting, "Finishing setup", "Setup not finished", or how many
+  records are missing. A device that is off is no longer said to be
+  receiving.
+- After a restart, an update included, changes from your other devices
+  arrive sooner: in our tests within two minutes, often within seconds.
+- A locked Vault that is still syncing shows as on to your other devices.
+- A device you remove is refused by your other devices from the moment
+  they know, and gets no more of your apps' backups. Settings → Devices
+  says "Removing…" until the removal has reached your identity's public
+  record.
+
+### Connections
+
+- An app disconnects only itself: when you disconnect inside an app, the
+  Vault removes that app's own connection and records it in Activity.
+- Every signature an app asks for shows its own approval, a request made
+  straight after connecting included.
+- A program that asks to connect without saying where it is from is
+  refused before any dialog.
+
+### Sign It
+
+- Your signatures move to the next version of the signing network. Each
+  device copies the signatures it wrote, with their revocations and
+  thumbnails, and each copy carries its original's proof. The new version
+  checks that a revocation or a thumbnail change comes from the person
+  who signed. The Vault reads both versions, so each signature shows
+  once.
+
+### Changed
+
+- Unlocking your Vault no longer adds a record to your history. The Vault
+  signs with your identity's own key and writes nothing at an unlock.
+- Right after an unlock, your records, devices and backups wait for
+  Holochain to finish starting, instead of failing for up to a minute.
+- The previous Holochain version (0.6) stops as soon as nothing of your
+  identity needs it: no device of yours still uses it, and everything on
+  it has been copied across.
+- The Vault keeps a compressed copy of each Holochain version it ships
+  (about 30 MB each), so a later update can leave an older version out of
+  the download while your computer keeps running it.
+- When Holochain keeps stopping, the Vault paces itself: after three
+  restarts within ten minutes it waits a few minutes, and the sidebar
+  says so. If Holochain stops answering while it is still running, the
+  Vault restarts it after three minutes.
+- The Vault's notices appear in one stack at the bottom right.
+
+### Fixed
+
+- macOS: after a crash or a forced quit, the parts that sync and hold
+  your keys end with the Vault. They kept running until the next launch.
+- Windows: after an update the Vault is back on its usual port, so apps
+  find it without a restart of the computer.
+- Windows: when the Vault quits or installs an update, its background
+  services are asked to shut down and given time to finish.
+- Linux: the Vault no longer crashes on computers with NVIDIA graphics
+  when you move between pages, and quitting no longer brings up the
+  desktop's crash report dialog.
+- Linux packages depend on `xdg-utils`, which opening links from other
+  apps needs.
+- Signing in the first minute after unlocking waits for Holochain to
+  finish starting, instead of failing with "The signature was not
+  published".
+- A signature whose thumbnail was changed twice shows the newest.
+- After a restore made while Flowsta could not be reached, the notice
+  says what happens: any username, display name and picture on your
+  Flowsta account come back when Flowsta is reachable, and the Vault
+  tries again by itself after a few minutes.
+- Removing an identity and restoring one in the same session no longer
+  leaves the new one unable to start.
+- Locking the Vault, erasing it, or removing an identity while Holochain
+  is still starting stops that start first.
+- Changing your password several times within a few minutes no longer
+  leaves Holochain stopped.
+- Overview's plan card says it is checking your plan while the Vault is
+  waiting for the answer, not "unavailable offline".
+
+### Security
+
+- An update is checked twice before it installs: the updater's own
+  signature on the file, and Flowsta's signed list naming the version and
+  every file's fingerprint.
+- Every Holochain program in the download is checked against its
+  published SHA-256 fingerprint when the release is built, and each
+  release records those fingerprints as they ship.
+- The Vault answers only requests addressed to this computer
+  (`127.0.0.1` or `localhost`).
+- Which identity the Vault holds is told only to Flowsta's own sites, to
+  sites and apps you have connected, and to programs on your computer.
+
+### For developers
+
+- **The parts that run Holochain are a library.** What starts, watches,
+  restarts and updates Holochain in the Vault now comes from
+  [`flowsta-hc-lines`](https://github.com/WeAreFlowsta/flowsta-hc-lines),
+  open source, for any Holochain desktop app.
+- **Signed releases for your own app.** The Vault signs the list of a
+  release's files as your Flowsta identity ("Publish a release"), after
+  showing you every file, and
+  [`flowsta-update-check`](https://github.com/WeAreFlowsta/flowsta-update-check)
+  checks that signature in your app before an update installs. A manifest
+  can name further downloads (an engine, a helper program), and an app
+  that does not run Holochain can sign too.
+- **A Rust client for the Vault.**
+  [`flowsta-vault-client`](https://github.com/WeAreFlowsta/flowsta-rust-sdk)
+  0.2 does from Rust what `@flowsta/holochain` does from a page.
+- **List where your app connects from**, at dev.flowsta.com. The Vault
+  takes a connection request for your app only from those addresses.
+- **Each install gets a private token when it connects** and presents it
+  on later calls. `@flowsta/holochain` 3.11.0 and `flowsta-vault-client`
+  0.2 do this themselves; apps on older versions keep working as before.
+- `POST /sign` asks the person every time. A release or node manifest
+  request that nobody answers returns `408 timeout`.
+
 ## [1.8.0-rc.2] - 2026-11-20
 
 Release candidate. Two changes for developers who sign their own apps'
