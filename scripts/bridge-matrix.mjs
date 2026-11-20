@@ -2162,7 +2162,16 @@ async function sameKeyLeg() {
 
   // The button: this install takes a key of its own and carries its records.
   const t1 = Date.now();
-  const own = await op(x, { op: 'own-key' });
+  // What the page tells the person while a line is restarting ("still
+  // starting, try again in a minute"): the leg tries again as they would.
+  const askOwnKey = async (inst) => {
+    for (let i = 0; ; i++) {
+      const r = await op(inst, { op: 'own-key' });
+      if (i >= 15 || !/not_ready|already_running/.test(String(r.failed ?? ''))) return { ...r, tries: i + 1 };
+      await new Promise((res) => setTimeout(res, 20_000));
+    }
+  };
+  const own = await askOwnKey(x);
   record(`${nx}: is given a key of its own`, typeof own.carried === 'number' && own.carried > 0, `${JSON.stringify(own).slice(0, 240)} in ${Math.round((Date.now() - t1) / 1000)} s`);
   if (typeof own.carried !== 'number') return;
   record(`${nx}: conductor and cells ready under the new key`, (await waitConductorReady(x, 300)) && (await waitCellsReady(x, 300)) >= 0);
@@ -2197,7 +2206,7 @@ async function sameKeyLeg() {
   const t3 = Date.now();
   record(`${ny}: is told by ${nx} and asks for the same step`, await until(async () => { const st = (await sameKey(y)).status; return st?.elsewhere === true && st?.told_by_other === true; }, 900, 10_000), `${Math.round((Date.now() - t3) / 1000)} s; ${JSON.stringify((await sameKey(y)).status)}`);
   const t4 = Date.now();
-  const ownY = await op(y, { op: 'own-key' });
+  const ownY = await askOwnKey(y);
   record(`${ny}: is given a key of its own`, typeof ownY.carried === 'number' && ownY.carried > 0, `${JSON.stringify(ownY).slice(0, 240)} in ${Math.round((Date.now() - t4) / 1000)} s`);
   if (typeof ownY.carried !== 'number') return;
   record(`${ny}: conductor and cells ready under the new key`, (await waitConductorReady(y, 300)) && (await waitCellsReady(y, 300)) >= 0);
