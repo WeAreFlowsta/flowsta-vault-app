@@ -19,6 +19,11 @@ and data stay. From 1.8.0 on, the Vault updates itself.
   what it is doing while it installs. Before anything installs, the Vault
   checks that Flowsta signed that exact release. Settings → Updates turns
   it off.
+- **A locked Vault keeps passing your apps' backups between your
+  devices.** With the Vault locked and still syncing, the backups your
+  apps keep in it go on travelling to your other devices, and apps can
+  still back up and read their own backups. "Lock and stop syncing" stops
+  it.
 - **Adding a device finishes when the device has your data.** When you
   restore an identity, the Vault asks whether it is on another device you
   still have. If it is, setup stays open until this device holds what
@@ -32,11 +37,6 @@ and data stay. From 1.8.0 on, the Vault updates itself.
   your private data. Overview now says so on such a device and offers
   "Set this device up to sync". Your data is kept, and the signatures you
   made on either device stay listed.
-- **A locked Vault keeps passing your apps' backups between your
-  devices.** With the Vault locked and still syncing, the backups your
-  apps keep in it go on travelling to your other devices, and apps can
-  still back up and read their own backups. "Lock and stop syncing" stops
-  it.
 - **You see who is asking to connect.** The connect dialog leads with a
   website's address, or with the name a desktop app's maker registered
   with Flowsta, and says when the app is already connected from somewhere
