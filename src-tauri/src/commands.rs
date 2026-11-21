@@ -2175,8 +2175,15 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                 && crate::devices::setup_rounds_are_full(pass, FULL_EVERY_PASSES, !crate::devices::heard_settled_holds().is_empty());
             let full = pass % FULL_EVERY_PASSES == 0 || setting_up;
             // Records this install held before it was given a key of its own.
+            // The log says when a round has been in one step for minutes
+            // (`watch_round_steps`): a step that waits on a conductor that
+            // no longer answers would otherwise show as nothing at all.
+            watch_round_steps();
+            round_step("the records carried from before an own key");
             crate::own_key::carry_in_if_owed(&devices_state).await;
+            round_step("word from another install");
             crate::own_key::hear_from_the_other(&devices_state).await;
+            round_step("the start of the round");
             let wait = match devices_round(&devices_state, &devices_app, full).await {
                 DevicesRound::StoodDown => break,
                 DevicesRound::Done => {
@@ -2190,6 +2197,7 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                     // on 0.7 (at most 5 minutes after the unlock); one
                     // nothing wants any more is stopped.
                     {
+                        round_step("after the round: the lines' health and the 0.6 line");
                         let sup = crate::conductor::supervisor();
                         let pending = flowsta_hc_lines::watch::decide(&flowsta_hc_lines::watch::LinesNow::of(sup), &crate::conductor::watch_policy());
                         let (primary_07, has_06) = (sup.primary() == Some(crate::hc::Line::V07), sup.has(crate::hc::Line::V06));
@@ -2236,6 +2244,7 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                     }
                     // What the 0.6 cells hold and the 0.7 cells do not,
                     // carried over (the move, and the catch-up after it).
+                    round_step("after the round: the enrollment key");
                     crate::move_07::schedule_pass(devices_state.clone(), "devices round");
                     // What this device wrote on signing v1.5, carried to v1.6
                     // (its writes go there once nothing is left).
@@ -2260,6 +2269,7 @@ fn spawn_after_ready(devices_state: Arc<AppState>, devices_app: tauri::AppHandle
                     DEVICES_ROUND_RETRY
                 }
             };
+            round_step(ROUND_IDLE);
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
                 // An app saved a backup: let its burst of saves finish, then
@@ -2284,6 +2294,49 @@ pub(crate) fn own_record_due() {
     OWN_WRITE_DUE.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 const DEVICES_ROUND_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// Where the running round is and since when, for the log when one step
+/// has run for minutes (`watch_round_steps`).
+static ROUND_STEP: std::sync::Mutex<(&str, bool, Option<std::time::Instant>)> = std::sync::Mutex::new(("", false, None));
+const ROUND_IDLE: &str = "waiting for the next round";
+fn round_step(name: &'static str) {
+    *ROUND_STEP.lock().unwrap() = (name, false, Some(std::time::Instant::now()));
+}
+/// The step `name` is done: the round is in whatever follows it.
+fn round_step_after(name: &'static str) {
+    *ROUND_STEP.lock().unwrap() = (name, true, Some(std::time::Instant::now()));
+}
+/// Says in the log when the round has been in one step for two minutes, and
+/// again every five: a step that waits on a conductor that no longer
+/// answers used to show as nothing at all.
+fn watch_round_steps() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        tauri::async_runtime::spawn(async {
+            let mut said: Option<(std::time::Instant, u64)> = None;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let (name, _, since) = *ROUND_STEP.lock().unwrap();
+                let Some(since) = since else { continue };
+                if name == ROUND_IDLE || name.is_empty() {
+                    continue;
+                }
+                let secs = since.elapsed().as_secs();
+                let due = match said {
+                    Some((s, at)) if s == since => secs >= at + 300,
+                    _ => secs >= 120,
+                };
+                if due {
+                    log::warn!("[devices] the round has been at {} for {} s", round_step_now(), secs);
+                    said = Some((since, secs));
+                }
+            }
+        });
+    });
+}
+fn round_step_now() -> String {
+    let (name, after, _) = *ROUND_STEP.lock().unwrap();
+    if after { format!("the step after \"{}\"", name) } else { name.to_string() }
+}
 const DEVICES_ROUND_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 /// After an app saves a backup, how long to wait for the rest of its burst.
 const SAVED_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
@@ -2438,6 +2491,7 @@ async fn devices_round(devices_state: &Arc<AppState>, devices_app: &tauri::AppHa
     let mut lap = |name: &'static str| {
         laps.push((name, lap_started.elapsed().as_millis()));
         lap_started = std::time::Instant::now();
+        round_step_after(name);
     };
     {
         // What the other devices hold about the identity's devices, before
