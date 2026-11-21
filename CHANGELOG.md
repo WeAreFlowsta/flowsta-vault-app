@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Flowsta Vault is out. Nothing is downloaded until you switch them on or
   install it yourself.
 
+### Changed
+
+- The notice "Flowsta Vault X is available", with its link to the download
+  page, is gone from Overview and from Settings. The Vault updates itself,
+  and "Restart to update" is the one message about a new version.
+
 ## [1.8.0] - 2026-11-21
 
 **On 1.7.0 or earlier? Install this version yourself, once.** Download the

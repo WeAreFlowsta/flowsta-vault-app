@@ -215,19 +215,6 @@ export default component$(() => {
     const everyHalfMinute = setInterval(() => { if (settingUp.value) checkSettingUp(); checkSameKey(); }, 30_000);
     cleanup(() => { unlisten(); unlistenProfile(); unlistenDevices(); unlistenSetup(); unlistenBackups(); clearInterval(everyHalfMinute); });
   });
-  // Soft update notice: a newer Vault is shipped. Dismissed per version.
-  const vaultUpdate = useSignal<{ current: string; latest: string | null; summary: string | null; download_url: string; update_available: boolean } | null>(null);
-  const updateDismissed = useSignal(true);
-  // eslint-disable-next-line qwik/no-use-visible-task
-  useVisibleTask$(async () => {
-    try {
-      const info = await invoke<{ current: string; latest: string | null; summary: string | null; download_url: string; update_available: boolean }>("check_vault_update", { apiUrl: __API_URL__ });
-      vaultUpdate.value = info;
-      let dismissedFor = "";
-      try { dismissedFor = localStorage.getItem("flowsta_vault_update_dismissed") || ""; } catch { /* no storage */ }
-      updateDismissed.value = !info.update_available || dismissedFor === info.latest;
-    } catch { /* offline or older API - no notice */ }
-  });
   const backupStats = useSignal<BackupStats | null>(null);
   const linkedApps = useSignal<LinkedApp[]>([]);
   // One entry per distinct app (collapses multiple installs/agents of the
@@ -866,24 +853,6 @@ export default component$(() => {
         </Callout>
       )}
 
-      {vaultUpdate.value?.update_available && !updateDismissed.value && (
-        <Callout
-          intent="info"
-          banner
-          title={`Flowsta Vault ${vaultUpdate.value.latest} is available`}
-          actionLabel="Get the update"
-          onAction$={() => open(vaultUpdate.value?.download_url || `${__WEB_URL__}/vault/`)}
-          dismissLabel="Later"
-          dismissible
-          onDismiss$={() => {
-            updateDismissed.value = true;
-            try { localStorage.setItem("flowsta_vault_update_dismissed", vaultUpdate.value?.latest || ""); } catch { /* no storage */ }
-          }}
-        >
-          You're on {vaultUpdate.value.current}. Update from the download page - your identity and data stay as they are.
-          {vaultUpdate.value.summary ? ` Highlights: ${vaultUpdate.value.summary}` : ""}
-        </Callout>
-      )}
       {/* The restore-or-fresh question - the one instruction the product
           never used to give: import your export BEFORE you open your
           apps. While unanswered, the bridge refuses third-party backup
