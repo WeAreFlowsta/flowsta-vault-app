@@ -35,6 +35,27 @@ const CARRY_FILE: &str = "own-key-carry.bin";
 /// folders set aside go `SET_ASIDE_KEPT_FOR` after it.
 const CARRIED_AT_FILE: &str = "own-key-carried-at";
 const SET_ASIDE_KEPT_FOR: u64 = 30 * 24 * 60 * 60;
+/// How long "give this computer its own key" waits for the line and its
+/// cells before it says the Vault is still starting.
+const LINE_WAIT: std::time::Duration = std::time::Duration::from_secs(150);
+const LINE_WAIT_PAUSE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Try `step` until it answers Ok or `within` has passed, pausing between
+/// tries; the last error is the one returned.
+async fn until_ok<T, F, Fut>(within: std::time::Duration, pause: std::time::Duration, mut step: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let started = std::time::Instant::now();
+    loop {
+        match step().await {
+            Ok(v) => return Ok(v),
+            Err(e) if started.elapsed() + pause > within => return Err(e),
+            Err(_) => tokio::time::sleep(pause).await,
+        }
+    }
+}
 /// Conductor folders set aside: `<name>-as-identity-key-<unix secs>`.
 pub(crate) const SET_ASIDE_MARK: &str = "-as-identity-key-";
 
@@ -289,10 +310,19 @@ pub(crate) async fn give_own_key_inner(api_url: &str, mnemonic: Option<String>, 
     };
 
     // 1. What this install holds, read while its conductor still runs.
+    //    The Vault restarts its lines by itself now and then (for memory,
+    //    after an upgrade): a request that lands in those seconds waits for
+    //    the line and its cells, where it used to answer "still starting,
+    //    try again in a minute" (seen in the gate of 11-20).
     let not_ready = |e: String| format!("not_ready: {}", e.chars().take(160).collect::<String>());
-    let records = crate::sealed::sealed_export_records(state).await.map_err(not_ready)?;
-    let mut signing = crate::signing_v16::chain_of(state, &crate::signing_07::signing_app_id(crate::hc::Line::V07), "1.5").await.map_err(not_ready)?;
-    signing.extend(crate::signing_v16::chain_of(state, &crate::signing_v16::app_id(), "1.6").await.map_err(not_ready)?);
+    let (records, signing) = until_ok(LINE_WAIT, LINE_WAIT_PAUSE, || async {
+        let records = crate::sealed::sealed_export_records(state).await?;
+        let mut signing = crate::signing_v16::chain_of(state, &crate::signing_07::signing_app_id(crate::hc::Line::V07), "1.5").await?;
+        signing.extend(crate::signing_v16::chain_of(state, &crate::signing_v16::app_id(), "1.6").await?);
+        Ok::<_, String>((records, signing))
+    })
+    .await
+    .map_err(not_ready)?;
 
     // 2. The account learns the new key first: refused or unreachable,
     //    nothing here has changed.
@@ -522,6 +552,23 @@ async fn carry_in(state: &Arc<AppState>, records: &[serde_json::Value]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_step_that_fails_at_first_is_tried_again_until_it_answers() {
+        let tries = std::sync::atomic::AtomicUsize::new(0);
+        let got = until_ok(std::time::Duration::from_secs(5), std::time::Duration::from_millis(10), || async {
+            if tries.fetch_add(1, Ordering::SeqCst) < 3 { Err("The 0.7 line is not running".to_string()) } else { Ok(7) }
+        })
+        .await;
+        assert_eq!(got, Ok(7));
+        assert_eq!(tries.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn a_step_that_never_answers_gives_its_last_error_when_the_time_is_up() {
+        let got: Result<(), String> = until_ok(std::time::Duration::from_millis(60), std::time::Duration::from_millis(20), || async { Err("not yet".to_string()) }).await;
+        assert_eq!(got, Err("not yet".to_string()));
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fv-own-key-{}-{}", name, std::process::id()));

@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The notice "Flowsta Vault X is available", with its link to the download
   page, is gone from Overview and from Settings. The Vault updates itself,
   and "Restart to update" is the one message about a new version.
+- "Set this device up to sync" waits when the Vault happens to be
+  restarting Holochain at that moment, and carries on by itself. It used
+  to say the Vault was still starting and ask you to try again.
 
 ## [1.8.0] - 2026-11-21
 
