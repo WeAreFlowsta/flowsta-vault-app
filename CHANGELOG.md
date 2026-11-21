@@ -5,6 +5,14 @@ All notable changes to Flowsta Vault are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The notice "Flowsta Vault X is available", with its link to the download
+  page, is gone from Overview and from Settings. The Vault updates itself,
+  and "Restart to update" is the one message about a new version.
+
 ## [1.8.0] - 2026-11-21
 
 **On 1.7.0 or earlier? Install this version yourself, once.** Download the
