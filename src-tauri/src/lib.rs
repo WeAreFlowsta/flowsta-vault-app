@@ -609,7 +609,6 @@ pub fn run() {
             commands::get_contact_preference,
             commands::set_contact_preference,
             commands::set_web_email,
-            commands::check_vault_update,
             commands::get_email_grants,
             commands::get_activity,
             commands::confirm_account_email,
