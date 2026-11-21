@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- With automatic updates switched off, Settings > Updates says when a newer
+  Flowsta Vault is out. Nothing is downloaded until you switch them on or
+  install it yourself.
+
 ### Changed
 
 - The notice "Flowsta Vault X is available", with its link to the download
